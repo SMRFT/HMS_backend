@@ -70,6 +70,5 @@ urlpatterns = [
 
     # path('patient-investigations/<str:ip_no>/', views.get_patient_investigations, name='get_patient_investigations'),
     re_path(r'^patient-investigations/(?P<ip_no>[\w%/-]+)/$', views.get_patient_investigations, name='get_patient_investigations'),
-
-     path("qrsubmit_form/", views.qrsubmit_form, name="qrsubmit_form"),
+    
 ]
