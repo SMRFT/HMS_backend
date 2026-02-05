@@ -670,14 +670,13 @@ class EstimateBilling(AuditModel):
     time = models.CharField(max_length=50)
     uhid = models.CharField(max_length=50)
     ipNumber = models.CharField(max_length=50,blank=True)
+    billType = models.CharField(max_length=100)
+    doctor = models.CharField(max_length=100)    
     salutation = models.CharField(max_length=10)
     firstName = models.CharField(max_length=50)
-    middleName = models.CharField(max_length=50, blank=True, null=True)
-    lastName = models.CharField(max_length=50)
+    lastName = models.CharField(max_length=50,blank=True)
     age = models.IntegerField()
     gender = models.CharField(max_length=10)
-    doctor = models.CharField(max_length=100)
-    billType = models.CharField(max_length=100)
     item = models.JSONField()  # Stores the selected item as a JSON field
     referredBy = models.CharField(max_length=100, blank=True, null=True)
     discountPercent = models.IntegerField()
@@ -686,6 +685,8 @@ class EstimateBilling(AuditModel):
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     finalPrice = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     paymentMethod = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+
 
     def __str__(self):
         return f"Billing for {self.firstName} {self.lastName} ({self.uhid})"
@@ -817,4 +818,5 @@ class Ventor(AuditModel):
     address = models.TextField()
     gst_number = models.CharField(max_length=15, unique=True)
     def __str__(self):
+
         return f"{self.ventor_name} - {self.supplier_type}"
