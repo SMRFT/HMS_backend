@@ -638,7 +638,6 @@ class XRayReport(AuditModel):
 
 
 class Summary(AuditModel):
-    # _id = models.ObjectIdField()  # MongoDB ID field
     date = models.DateTimeField(null=True, blank=True)
     ipNo = models.CharField(max_length=100, blank=True, null=True)
     uhid = models.CharField(max_length=100, blank=True, null=True)
@@ -659,6 +658,8 @@ class Summary(AuditModel):
     fieldsData = models.JSONField(blank=True, null=True)  # To store dynamic field data
     approve = models.BooleanField(default=False)
     approve_time = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
 
     def __str__(self):
         return self.patient or "Summary"
@@ -820,3 +821,4 @@ class Ventor(AuditModel):
     def __str__(self):
 
         return f"{self.ventor_name} - {self.supplier_type}"
+
