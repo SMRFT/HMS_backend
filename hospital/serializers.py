@@ -10,8 +10,24 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
+from .models import PharmacyStock
+class PharmacyStockSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = PharmacyStock
+        fields = '__all__'
 
-
+from .models import HSNCode
+class HSNCodeSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = HSNCode
+        fields = '__all__'
+from .models import Ventor
+class VentorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Ventor
+        fields = ['id', 'ventor_name', 'phone', 'address', 'gst_number']
 from .models import IPPharmacyStock, OPPharmacyStock,Vendor
 
 # IP Pharmacy Stock Serializer
@@ -177,4 +193,12 @@ class OPGRNSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = OPGRN
+        fields = '__all__'
+
+
+from .models import OPPharmacyBill
+class OPPharmacyBillSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = OPPharmacyBill
         fields = '__all__'
