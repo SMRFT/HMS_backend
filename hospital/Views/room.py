@@ -616,14 +616,15 @@ def room_enquiry_view(request):
             floor_map = {}
 
             for room in rooms:
-                room['id'] = str(room['_id'])
+                room_id_obj = room['_id']  # Keep reference before deleting key
+                room['id'] = str(room_id_obj)
                 del room['_id']
                 floor = room.get('floor', 0)
                 floor_map.setdefault(floor, [])
 
                 # Find beds for this room by room ObjectId
                 beds = list(beds_collection.find({
-                    "room_id": room['_id'],
+                    "room_id": room_id_obj,
                     "is_active": True
                 }))
                 

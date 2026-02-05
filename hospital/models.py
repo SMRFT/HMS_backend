@@ -434,6 +434,7 @@ class Patient(AuditModel):
     citizen_id_type = models.CharField(max_length=20, blank=True, null=True)
     citizen_id_no = models.CharField(max_length=50, blank=True, null=True)
     customer_type =models.CharField(max_length=20, blank=True, null=True)
+    salutation = models.CharField(max_length=10, blank=True, null=True)
     firstName = models.CharField(max_length=100)
     lastName = models.CharField(max_length=100)
     dob = models.DateField()
@@ -749,3 +750,71 @@ class Log(AuditModel):
         return f"{self.log_type} - {self.message}"
 
 
+class OPPharmacyBill(AuditModel):
+    patient_name=models.CharField(max_length=200)
+    bill_no = models.CharField(max_length=50)
+    bill_date = models.CharField(max_length=20)
+    op_number = models.CharField(max_length=50)
+    inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    patient_name = models.CharField(max_length=100)
+    doctor = models.CharField(max_length=100)
+    room_no = models.CharField(max_length=20, blank=True, null=True)
+    medicine_name = models.JSONField()
+    net_amount = models.FloatField(default=0)
+
+    def __str__(self):
+        return f"Bill {self.bill_no} - {self.patient_name}"
+
+
+
+class PharmacyStock(AuditModel):
+    invoice_number = models.CharField(max_length=100)
+    invoice_date = models.DateField()
+    supplier_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=15)
+    gst_number = models.CharField(max_length=15)
+    address = models.CharField(max_length=15)
+    medicine_name = models.CharField(max_length=255)
+    batch_number = models.CharField(max_length=100)
+    hsn_code = models.CharField(max_length=100)
+    expiry_date = models.DateField()
+    quantity = models.IntegerField()
+    pack = models.IntegerField()
+    free = models.IntegerField(default=0)
+    purchase_rate = models.DecimalField(max_digits=10, decimal_places=5)
+    purchase_cost = models.DecimalField(max_digits=10, decimal_places=5)
+    mrp = models.DecimalField(max_digits=10, decimal_places=5)
+    discount = models.DecimalField(max_digits=10, decimal_places=5)
+    taxable_amount = models.DecimalField(max_digits=10, decimal_places=5)
+    cgst_rate = models.DecimalField(max_digits=10, decimal_places=5)
+    cgst_amount = models.DecimalField(max_digits=10, decimal_places=5)
+    sgst_rate = models.DecimalField(max_digits=10, decimal_places=5)
+    sgst_amount = models.DecimalField(max_digits=10, decimal_places=5)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=5)
+
+    def __str__(self):
+        return self.medicine_name
+class HSNCode(AuditModel):
+    chapter = models.CharField(max_length=50)
+    hsn_code = models.CharField(max_length=10, unique=True, primary_key=True)
+    description = models.TextField()
+    tax = models.DecimalField(max_digits=5, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.chapter} - {self.hsn_code}"
+
+
+class Ventor(AuditModel):
+    SUPPLIER_TYPE_CHOICES = [
+        ('Supplier', 'Supplier'),
+        ('Manufacturer', 'Manufacturer'),
+        ('Both', 'Both'),
+    ]
+    ventor_name = models.CharField(max_length=100, unique=True)  # Set unique for POST/PATCH
+    supplier_type = models.CharField(max_length=20, choices=SUPPLIER_TYPE_CHOICES, default='Supplier')
+    phone = models.CharField(max_length=15, blank=True, null=True)
+    landline = models.CharField(max_length=15, blank=True, null=True)
+    address = models.TextField()
+    gst_number = models.CharField(max_length=15, unique=True)
+    def __str__(self):
+        return f"{self.ventor_name} - {self.supplier_type}"
