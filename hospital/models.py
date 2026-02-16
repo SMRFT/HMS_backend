@@ -2,18 +2,27 @@ from django.db import models
 from django.utils import timezone
 from django.utils.timezone import now
 from bson import ObjectId
+from decimal import Decimal
+from datetime import datetime
 
-# Base Audit Model
 class AuditModel(models.Model):
     created_by = models.CharField(max_length=100, null=True, blank=True)
-    created_date = models.DateTimeField(default=now)
+    created_date = models.DateTimeField(null=True, blank=True)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
-    lastmodified_date = models.DateTimeField(auto_now=True)
-    # is_active = models.BooleanField(default=True)
+    lastmodified_date = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         abstract = True
 
+    def save(self, *args, **kwargs):
+        now = datetime.utcnow()
+
+        if not self.created_date:
+            self.created_date = now
+
+        self.lastmodified_date = now
+
+        super().save(*args, **kwargs)
 
 # Item Management Model
 # IP Pharmacy Stock Model
@@ -290,99 +299,76 @@ class Admission(AuditModel):
     def __str__(self):
         return f"{self.firstName} {self.lastName} ({self.uhid})"
 
+    def save(self, *args, **kwargs):
+        if not self.ipNumber:
+            # Logic for IP26/00001
+            from datetime import date
+            today = date.today()
+            year_part = today.strftime("%y") # e.g. 26
+            prefix = f"IP{year_part}/"
+            
+            # Find last admission with this prefix
+            last_admission = Admission.objects.filter(ipNumber__startswith=prefix).order_by('-ipNumber').first()
+            
+            if last_admission:
+                try:
+                    last_num = int(last_admission.ipNumber.split('/')[-1])
+                    next_num = last_num + 1
+                except ValueError:
+                    next_num = 1
+            else:
+                next_num = 1
+            
+            self.ipNumber = f"{prefix}{str(next_num).zfill(5)}"
+        
+        super().save(*args, **kwargs)
 
 class Block(AuditModel):
-    block_id = models.CharField(max_length=10, unique=True, blank=True)
+    block_id = models.IntegerField(primary_key=True)
     block_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
-        if not self.block_id:
-            last_block = Block.objects.order_by('id').last()
-            if last_block and last_block.block_id:
-                try:
-                    last_number = int(last_block.block_id.replace("B", ""))
-                    self.block_id = f"B{last_number + 1}"
-                except ValueError:
-                    self.block_id = "B1"
-            else:
-                self.block_id = "B1"
-        super(Block, self).save(*args, **kwargs)
+        if self.block_id is None:
+            last = Block.objects.order_by('-block_id').first()
+            self.block_id = (last.block_id + 1) if last else 1
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.block_name
 
 
 class RoomCategory(AuditModel):
-    ward_name = models.CharField(max_length=100, unique=True)
-    description = models.TextField(blank=True, null=True)
+    room_category_id = models.IntegerField(primary_key=True)
+    name = models.CharField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.room_category_id is None:
+            last = RoomCategory.objects.order_by('-room_category_id').first()
+            self.room_category_id = (last.room_category_id + 1) if last else 1
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return self.ward_name
+        return self.name
 
 
 class Room(AuditModel):
-    NURSING_STATIONS = [
-        ("MICU", "MICU"),
-        ("SICU", "SICU"),
-        ("General", "General"),
-        # Add more as needed or make dynamic
-    ]
-
-    ROOM_TYPES = [
-        ("ICU", "ICU"),
-        ("CCU", "CCU"),
-        ("ICCU", "ICCU"),
-        ("NICU", "NICU"),
-        ("CASUALITY", "CASUALITY"),
-        ("WARD", "WARD"),
-        ("OTHERS", "OTHERS"),
-    ]
-
     room_number = models.CharField(max_length=10, unique=True)
     description = models.TextField(blank=True)
     room_category = models.CharField(max_length=100) # Fetched from RoomCategory
     block = models.CharField(max_length=100) # Fetched from Block
     floor = models.IntegerField()
     phone_extension = models.CharField(max_length=10, blank=True)
-    nursing_station = models.CharField(max_length=50, choices=NURSING_STATIONS, blank=True)
+    nursing_station = models.CharField(max_length=50, blank=True)
     capacity = models.IntegerField(default=1) # Total beds
     admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_type = models.CharField(max_length=20, choices=ROOM_TYPES, default="WARD")
+    room_type = models.CharField(max_length=20, default="WARD")
 
     def __str__(self):
         return self.room_number
-
-
-class Bed(AuditModel):
-    BED_STATUS = [
-        ("Available", "Available"),
-        ("Occupied", "Occupied"),
-        ("Maintenance", "Maintenance"),
-    ]
     
-    bed_number = models.CharField(max_length=20)
-    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name='beds')
-    bed_type = models.CharField(max_length=50, blank=True) # Manual or Electric etc
-    status = models.CharField(max_length=20, choices=BED_STATUS, default="Available")
-    daily_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    is_active = models.BooleanField(default=True)
-
-    def __str__(self):
-        return f"{self.room.room_number} - {self.bed_number}"
-
-
-class Service(AuditModel):
-    service_name = models.CharField(max_length=100)
-    service_code = models.CharField(max_length=20, blank=True)
-    cost = models.DecimalField(max_digits=10, decimal_places=2)
-    department = models.CharField(max_length=100, blank=True)
-    description = models.TextField(blank=True)
-    
-    def __str__(self):
-        return self.service_name
-    
-
 class DischargeDetail(AuditModel):
     uhid_no = models.CharField(max_length=100, blank=True)
     ip_number = models.CharField(max_length=100, blank=True)
@@ -806,6 +792,7 @@ class HSNCode(AuditModel):
         return f"{self.chapter} - {self.hsn_code}"
 
 
+    
 class Ventor(AuditModel):
     SUPPLIER_TYPE_CHOICES = [
         ('Supplier', 'Supplier'),
@@ -819,6 +806,38 @@ class Ventor(AuditModel):
     address = models.TextField()
     gst_number = models.CharField(max_length=15, unique=True)
     def __str__(self):
-
         return f"{self.ventor_name} - {self.supplier_type}"
+
+class RoomServiceDescription(AuditModel):
+    description = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'hospital_roomservice_description'
+
+    def __str__(self):
+        return self.description
+
+
+class RoomKitDescription(AuditModel):
+    name = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+    
+    def __str__(self):
+        return self.name
+
+class RoomKit(models.Model):
+    room = models.ForeignKey('Room', on_delete=models.CASCADE, related_name='kits', null=True, blank=True)
+    # Stores ID of RoomKitDescription
+    kit_item = models.CharField(max_length=50) 
+    priority = models.IntegerField(blank=True, null=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    enable_item = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Kit {self.kit_item} for Room"
+
 

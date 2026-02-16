@@ -45,19 +45,22 @@ urlpatterns = [
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
     path('block/<int:pk>/', room.block_view, name='block_update_delete'),
-    
+
     path('room-category/', room.room_category_view, name='room_category_list_create'),
-    path('room-category/<int:pk>/', room.room_category_view, name='room_category_update_delete'),
+    path('room-category/<str:pk>/', room.room_category_view, name='room_category_update_delete'),
     
     path('room/', room.room_view, name='room_list_create'),
-    path('room/<int:pk>/', room.room_view, name='room_update_delete'),
+    path('room/<str:pk>/', room.room_view, name='room_update_delete'),
     
     path('bed/', room.bed_view, name='bed_list_create'),
-    path('bed/<int:pk>/', room.bed_view, name='bed_update_delete'),
+    path('bed/<str:pk>/', room.bed_view, name='bed_update_delete'),
     
+    path('roomservice-description/', room.roomservice_description_view, name='roomservice_list'),
     path('service/', room.service_view, name='service_list_create'),
-    path('service/<int:pk>/', room.service_view, name='service_update_delete'),
+    path('service/<str:pk>/', room.service_view, name='service_update_delete'),
     
+    path('room-kit-description/', room.room_kit_description_view, name='room_kit_list'),
+
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 

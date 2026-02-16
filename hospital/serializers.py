@@ -105,6 +105,7 @@ class XRayReportSerializer(serializers.ModelSerializer):
 
 from .models import Admission
 class AdmissionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
     class Meta:
         model = Admission
         fields = '__all__'
@@ -138,38 +139,53 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Bed, Service, Room
-
+from .models import Block, RoomCategory, Room, RoomKit, RoomKitDescription
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
         model = Block
-        fields = '__all__'
+        fields = "__all__"
+        read_only_fields = ["block_id"]
 
 
 class RoomCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = RoomCategory
-        fields = '__all__'
+        fields = "__all__"
+        read_only_fields = ["room_category_id"]
 
-
-class BedSerializer(serializers.ModelSerializer):
+class RoomKitDescriptionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
     class Meta:
-        model = Bed
-        fields = '__all__'
+        model = RoomKitDescription
+        fields = "__all__"
 
-
-class ServiceSerializer(serializers.ModelSerializer):
+class RoomKitSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    kit_item_detail = serializers.SerializerMethodField()
     class Meta:
-        model = Service
-        fields = '__all__'
+        model = RoomKit
+        fields = "__all__"
 
+    def get_kit_item_detail(self, obj):
+        try:
+            desc = RoomKitDescription.objects.get(id=obj.kit_item)
+            return RoomKitDescriptionSerializer(desc).data
+        except RoomKitDescription.DoesNotExist:
+            return None
 
 class RoomSerializer(serializers.ModelSerializer):
-    beds = BedSerializer(many=True, read_only=True)
-
+    id = ObjectIdField(read_only=True)
     class Meta:
         model = Room
-        fields = '__all__'
+        fields = "__all__"
+
+
+    def get_description_detail(self, obj):
+        try:
+            desc = RoomServiceDescription.objects.get(id=obj.description)
+            return RoomServiceDescriptionSerializer(desc).data
+        except RoomServiceDescription.DoesNotExist:
+            return None
 
 
 from .models import DischargeDetail
@@ -196,9 +212,17 @@ class OPGRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+
 from .models import OPPharmacyBill
 class OPPharmacyBillSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = OPPharmacyBill
+        fields = '__all__'
+
+from .models import RoomServiceDescription
+class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = RoomServiceDescription
         fields = '__all__'
