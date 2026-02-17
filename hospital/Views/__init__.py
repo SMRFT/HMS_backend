@@ -10,3 +10,4 @@ from . import radiology
 from . import room
 from . import stock
 from . import summary
+from . import dashboard
