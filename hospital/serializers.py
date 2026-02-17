@@ -139,7 +139,7 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Room, RoomKit, RoomKitDescription
+from .models import Block, RoomCategory, Room
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
         model = Block
@@ -153,39 +153,62 @@ class RoomCategorySerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["room_category_id"]
 
-class RoomKitDescriptionSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = RoomKitDescription
-        fields = "__all__"
-
-class RoomKitSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    kit_item_detail = serializers.SerializerMethodField()
-    class Meta:
-        model = RoomKit
-        fields = "__all__"
-
-    def get_kit_item_detail(self, obj):
-        try:
-            desc = RoomKitDescription.objects.get(id=obj.kit_item)
-            return RoomKitDescriptionSerializer(desc).data
-        except RoomKitDescription.DoesNotExist:
-            return None
-
 class RoomSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+    # These fields will be handled as JSON
+    services = serializers.JSONField(required=False, allow_null=True, default=list)
+    beds = serializers.JSONField(required=False, allow_null=True, default=list)
+    room_kits = serializers.JSONField(required=False, allow_null=True, default=list)
+
     class Meta:
         model = Room
-        fields = "__all__"
+        fields = [
+            'room_number',
+            'description',
+            'room_category',
+            'block',
+            'floor',
+            'phone_extension',
+            'nursing_station',
+            'capacity',
+            'admission_fee',
+            'room_advance',
+            'room_type',
+            'room_blocked',
+            'blocked_reason',
+            'is_active',
+            'services',
+            'beds',
+            'room_kits',
+            'created_by',
+            'created_date',
+            'lastmodified_by',
+            'lastmodified_date',
+        ]
+        read_only_fields = ['id', 'created_date', 'lastmodified_date']
 
+    def validate_services(self, value):
+        """Validate services array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Services must be a list")
+        return value
 
-    def get_description_detail(self, obj):
-        try:
-            desc = RoomServiceDescription.objects.get(id=obj.description)
-            return RoomServiceDescriptionSerializer(desc).data
-        except RoomServiceDescription.DoesNotExist:
-            return None
+    def validate_beds(self, value):
+        """Validate beds array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Beds must be a list")
+        return value
+
+    def validate_room_kits(self, value):
+        """Validate room_kits array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Room kits must be a list")
+        return value
 
 
 from .models import DischargeDetail
@@ -197,7 +220,6 @@ class DischargeDetailSerializer(serializers.ModelSerializer):
 
 
 from .models import IPGRN, OPGRN
-
 class IPGRNSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:

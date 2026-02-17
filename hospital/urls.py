@@ -52,14 +52,7 @@ urlpatterns = [
     path('room/', room.room_view, name='room_list_create'),
     path('room/<str:pk>/', room.room_view, name='room_update_delete'),
     
-    path('bed/', room.bed_view, name='bed_list_create'),
-    path('bed/<str:pk>/', room.bed_view, name='bed_update_delete'),
-    
-    path('roomservice-description/', room.roomservice_description_view, name='roomservice_list'),
-    path('service/', room.service_view, name='service_list_create'),
-    path('service/<str:pk>/', room.service_view, name='service_update_delete'),
-    
-    path('room-kit-description/', room.room_kit_description_view, name='room_kit_list'),
+    path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
 
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),

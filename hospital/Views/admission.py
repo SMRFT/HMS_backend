@@ -77,41 +77,59 @@ def get_op_patient_by_uhid(request, uhid):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def search_rooms(request):
+
     try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        db = client.HMS
-        collection = db.hospital_room
-        
         room_number = request.GET.get('room_number')
         room_category = request.GET.get('room_category')
         block = request.GET.get('block')
         floor = request.GET.get('floor')
 
-        # Build MongoDB query
-        query = {"is_active": True}
-        
+        # Start with all rooms
+        rooms = Room.objects.all()
+
+        # Filter only active rooms (Djongo-safe)
+        rooms = [room for room in rooms if room.is_active]
+
+        # Apply filters safely
         if room_number:
-            query["room_number"] = {"$regex": room_number, "$options": "i"}
+            rooms = [
+                room for room in rooms
+                if room_number.lower() in room.room_number.lower()
+            ]
+
         if room_category:
-            query["room_category"] = room_category
+            rooms = [
+                room for room in rooms
+                if room.room_category == room_category
+            ]
+
         if block:
-            query["block"] = block
+            rooms = [
+                room for room in rooms
+                if room.block == block
+            ]
+
         if floor not in (None, ""):
-            query["floor"] = int(floor)
+            try:
+                floor = int(floor)
+                rooms = [
+                    room for room in rooms
+                    if room.floor == floor
+                ]
+            except ValueError:
+                return Response(
+                    {"error": "Floor must be a number"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        rooms = list(collection.find(query))
-        
-        # Convert ObjectId to string
-        for room in rooms:
-            room['id'] = str(room['_id'])
-            del room['_id']
-
-        return Response(rooms, status=status.HTTP_200_OK)
+        serializer = RoomSerializer(rooms, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     except Exception as e:
         import traceback
         print("Error in search_rooms:", e)
         print(traceback.format_exc())
+
         return Response(
             {"error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
