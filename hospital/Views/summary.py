@@ -16,7 +16,7 @@ from django.views.decorators.csrf import csrf_exempt
 from pymongo import MongoClient
 import os, json
 from ..serializers import PharmacyStockSerializer, HSNCodeSerializer, VentorSerializer, Patient,PatientSerializer
-from ..models import CTReport, MRIReport, USGReport, XRayReport
+from ..models import RadiologyReport
 from django.views.decorators.http import require_http_methods
 import logging
 logger = logging.getLogger(__name__)
@@ -89,19 +89,19 @@ def get_patient_investigations(request, ip_no):
     
     try:
         # IMPORTANT CHANGE: Removed the approve=True filter to show all reports
-        ct_reports = CTReport.objects.filter(ipNumber=ip_no).values(
+        ct_reports = RadiologyReport.objects.filter(ipNumber=ip_no).values(
             'investigation', 'impression', 'is_approved'
         )
         
-        mri_reports = MRIReport.objects.filter(ipNumber=ip_no).values(
+        mri_reports = RadiologyReport.objects.filter(ipNumber=ip_no).values(
             'investigation', 'impression', 'is_approved'
         )
         
-        usg_reports = USGReport.objects.filter(ipNumber=ip_no).values(
+        usg_reports = RadiologyReport.objects.filter(ipNumber=ip_no).values(
             'investigation', 'impression', 'is_approved'
         )
         
-        xray_reports = XRayReport.objects.filter(ipNumber=ip_no).values(
+        xray_reports = RadiologyReport.objects.filter(ipNumber=ip_no).values(
             'investigation', 'impression', 'is_approved'
         )
         

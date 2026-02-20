@@ -18,7 +18,6 @@ from .Views import (
 
 urlpatterns = [
     # Admission URLs
-    path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate but consistent
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
     path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
@@ -74,42 +73,14 @@ urlpatterns = [
     path('doctor_detail/<str:first_name>/', views.doctor_detail, name='doctor_detail'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
-    path('investigations/', radiology.get_ct_investigations, name='get_investigations'),
-    # path('investigations/<str:uhid>/<str:subUhid>/', views.get_patient_report, name='get_patient_report'),
 
-    #Investigation Reports (CT):
-    path('investigations/', radiology.get_ct_investigations, name='get_ct_investigations'),
-    path('ct-reports/', radiology.create_ct_report, name='create_ct_report'),   
-    path('ct_reports/', radiology.get_ct_reports, name='get_ct_reports'),  # Fetch all reports
-    path('ct_reports/<str:patientId>/', radiology.get_ct_reports, name='get_ct_report'),  # Fetch specific report by patientId      
-    re_path(r'^ct-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_ct_report, name='approve_ct_report'),     
-    re_path(r'^ct-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_ct_report, name='soft_delete_ct_report'),
-    re_path(r'^ct-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_ct_report_impression, name='edit_ct_report_impression'),     
-    #Investigation Reports (MRI):
-    path('mri_investigations/', radiology.get_mri_investigations, name='get_mri_investigations'),  
-    path('mri-reports/', radiology.create_mri_report, name='create_mri_report'),
-    path('mri_reports/', radiology.get_mri_reports, name='get_mri_reports'),  # Fetch all reports
-    path('mri_reports/<str:patientId>/', radiology.get_mri_reports, name='get_mri_report'),  # Fetch specific report by patientId   
-    re_path(r'^mri-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_mri_report, name='approve_mri_report'),  
-    re_path(r'^mri-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_mri_report, name='soft_delete_mri_report'), 
-    re_path(r'^mri-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_mri_report_impression, name='edit_mri_report_impression'),     
-    #Investigation Reports (USG):
-    path('usg_investigations/', radiology.get_usg_investigations, name='get_usg_investigations'),  
-    path('usg-reports/', radiology.create_usg_report, name='create_usg_report'),
-    path('usg_reports/', radiology.get_usg_reports, name='get_usg_reports'),  # Fetch all reports
-    path('usg_reports/<str:patientId>/', radiology.get_usg_reports, name='get_usg_report'),  # Fetch specific report by patientId   
-    re_path(r'^usg-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_usg_report, name='approve_usg_report'),  
-    re_path(r'^usg-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_usg_report, name='soft_delete_usg_report'),
-    re_path(r'^usg-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_usg_report_impression, name='edit_usg_report_impression'),     
-    #Investigation Reports (X-RAY):
-    path('x_ray_investigations/', radiology.get_x_ray_investigations, name='get_x_ray_investigations'), 
-    path('x_ray-reports/', radiology.create_x_ray_report, name='create_x_ray_report'),
-    path('x_ray_reports/', radiology.get_x_ray_reports, name='get_x_ray_reports'),  # Fetch all reports
-    path('x_ray_reports/<str:investBillNo>/', radiology.get_x_ray_reports, name='get_x_ray_report'),  # Fetch specific report by patientId   
-    re_path(r'^x_ray-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_x_ray_report, name='approve_x_ray_report'),  
-    re_path(r'^x_ray-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_x_ray_report, name='soft_delete_x_ray_report'), 
-    re_path(r'^x_ray-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_x_ray_report_impression, name='edit_x_ray_report_impression'),     
-
+    #Radiology Reports :
+    path('investigations/', radiology.get_investigations, name='get_investigations'),
+    path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),     
+    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),     
+    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),     
+   
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
     path('summaries/create/', summary.create_summary, name='create_summary'),   
@@ -128,7 +99,9 @@ urlpatterns = [
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
-    path('lab-tests/', departmentBilling.get_lab_tests, name='get-lab-tests'), 
+    path('packages/', departmentBilling.get_packages, name='get_packages'),
+    path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
+    path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
     path('investBilling/', departmentBilling.invest_billing_create, name='invest-billing-create'),
     path('investBillingGet/', departmentBilling.billing_report_view, name='billing_report_view'),
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
