@@ -24,245 +24,177 @@ class AuditModel(models.Model):
 
         super().save(*args, **kwargs)
 
-# Item Management Model
-# IP Pharmacy Stock Model
-class IPPharmacyStock(AuditModel):
-    ip_stock_id = models.CharField(max_length=10, unique=True)
-    medicine_name = models.CharField(max_length=255)
-    batch_number = models.CharField(max_length=100)
-    hsn_code = models.CharField(max_length=100, null=True, blank=True)
-    expiry_date = models.DateField(null=True, blank=True)
-    purchase_rate = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    purchase_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    mrp = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    cgst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
-    cgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    sgst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
-    sgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    total_quantity = models.IntegerField(default=0)
+class HSNCode(AuditModel):
+    chapter = models.CharField(max_length=50)
+    hsn_code = models.CharField(max_length=10, unique=True, primary_key=True)
+    description = models.TextField()
+    tax = models.DecimalField(max_digits=5, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.chapter} - {self.hsn_code}"
+
+class PharmacyItem(AuditModel):
+    item_id = models.IntegerField(primary_key=True)
+    item_first_name = models.CharField(max_length=200)
+    item_last_name = models.CharField(max_length=200, blank=True)
+    group = models.CharField(max_length=50)
+    category = models.CharField(max_length=50)
+    classification = models.CharField(max_length=100)
+    hsn = models.CharField(max_length=50, blank=True)
+    dosage = models.CharField(max_length=20,blank=True)
+    shelf_no = models.CharField(max_length=50, blank=True)
+    rack_no = models.CharField(max_length=50, blank=True)
+    high_risk = models.BooleanField(default=False)
+    look_alike = models.BooleanField(default=False)
+    sound_alike = models.BooleanField(default=False)
+    reorder_level = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
-        if not self.ip_stock_id:
-            try:
-                stocks = IPPharmacyStock.objects.all()
-                max_id = 0
-                for s in stocks:
-                    if s.ip_stock_id and str(s.ip_stock_id).isdigit():
-                        max_id = max(max_id, int(s.ip_stock_id))
-                self.ip_stock_id = str(max_id + 1)
-            except Exception:
-                self.ip_stock_id = "1"
+        if self.item_id is None:
+            last = PharmacyItem.objects.order_by("-item_id").first()
+            self.item_id = (last.item_id + 1) if last else 1
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.medicine_name} ({self.ip_stock_id})"
+        return f"{self.item_first_name} {self.item_last_name}"
 
-
-# OP Pharmacy Stock Model
-class OPPharmacyStock(AuditModel):
-    op_stock_id = models.CharField(max_length=10, unique=True)
-    medicine_name = models.CharField(max_length=255)
-    batch_number = models.CharField(max_length=100)
-    hsn_code = models.CharField(max_length=100, null=True, blank=True)
-    expiry_date = models.DateField(null=True, blank=True)
-    purchase_rate = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    purchase_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    mrp = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    cgst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
-    cgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    sgst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
-    sgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    total_quantity = models.IntegerField(default=0)
-
-    def save(self, *args, **kwargs):
-        if not self.op_stock_id:
-            try:
-                stocks = OPPharmacyStock.objects.all()
-                max_id = 0
-                for s in stocks:
-                    if s.op_stock_id and str(s.op_stock_id).isdigit():
-                        max_id = max(max_id, int(s.op_stock_id))
-                self.op_stock_id = str(max_id + 1)
-            except Exception:
-                self.op_stock_id = "1"
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.medicine_name} ({self.op_stock_id})"
-
-
-# Vendor/Supplier Model
 class Vendor(AuditModel):
-    VENDOR_TYPE_CHOICES = [
-        ('SUPPLIER', 'Supplier'),
-        ('MANUFACTURER', 'Manufacturer'),
-        ('BOTH', 'Both'),
-    ]
-
-    vendor_id = models.CharField(max_length=10, unique=True, primary_key=True)
-    vendor_type = models.CharField(max_length=20, choices=VENDOR_TYPE_CHOICES)
-    name = models.CharField(max_length=255)
-    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
-    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
-    city = models.CharField(max_length=100, null=True, blank=True)
-    state = models.CharField(max_length=100, null=True, blank=True)
-    pincode = models.CharField(max_length=10, null=True, blank=True)
-    
-    # Contact Information
-    contact_person = models.CharField(max_length=255, null=True, blank=True)
-    phone = models.CharField(max_length=20, null=True, blank=True)
-    email = models.EmailField(max_length=255, null=True, blank=True)
-    url = models.URLField(max_length=255, null=True, blank=True)
-    
-    # Additional Fields
-    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
-    gstin = models.CharField(max_length=20, null=True, blank=True)
-    payment = models.CharField(max_length=50, null=True, blank=True)
-    terms = models.TextField(null=True, blank=True)
-    credit_period = models.CharField(max_length=20, null=True, blank=True)
-    export_data_code = models.CharField(max_length=100, null=True, blank=True)
-    tds_percent = models.CharField(max_length=10, null=True, blank=True)
-    igst_supplier = models.BooleanField(default=False)
-    blacklisted_supplier = models.BooleanField(default=False)
-    account_on_hold = models.BooleanField(default=False)
-    reason_for_holding = models.TextField(null=True, blank=True)
+    vendor_id = models.CharField(primary_key=True,max_length=10)
+    supplier_type = models.CharField(max_length=20)
+    name = models.CharField(max_length=200)
+    address_line1 = models.CharField(max_length=300)
+    address_line2 = models.CharField(max_length=300, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    pincode = models.CharField(max_length=10, blank=True)
+    contact_person = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    gstin = models.CharField(max_length=20, blank=True)
+    payment_terms = models.CharField(max_length=20, blank=True)
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
         if not self.vendor_id:
-            try:
-                # Get all vendor IDs, find the max numerical one
-                vendors = Vendor.objects.all()
-                max_id = 0
-                for v in vendors:
-                    if v.vendor_id and str(v.vendor_id).isdigit():
-                        max_id = max(max_id, int(v.vendor_id))
-                self.vendor_id = str(max_id + 1)
-            except Exception:
-                self.vendor_id = "1"
+            last = Vendor.objects.all()
+            max_id = 0
+            for v in last:
+                if v.vendor_id and v.vendor_id.isdigit():
+                    max_id = max(max_id, int(v.vendor_id))
+            self.vendor_id = str(max_id + 1)
+
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.vendor_id})"
+        return self.name
 
 
-# IP GRN Model
-class IPGRN(AuditModel):
-    grn_number = models.CharField(max_length=50, unique=True)
-    vendor_id = models.CharField(max_length=50) # References Vendor.vendor_id
-    date = models.DateField()
-    invoice_no = models.CharField(max_length=50)
+# GRN Model
+class GRN(AuditModel):
+
+    grn_id = models.IntegerField(primary_key=True)
+
+    # Header fields
+    purchase_category = models.CharField(max_length=50)
+    vendor_id = models.IntegerField()
+    vendor_name = models.CharField(max_length=200, blank=True, default="")
+    supplier_address = models.CharField(max_length=400, blank=True, default="")
+    contact_person = models.CharField(max_length=150, blank=True, default="")
+    phone = models.CharField(max_length=20, blank=True, default="")
+
+    invoice_no = models.CharField(max_length=100)
     invoice_date = models.DateField()
-    credit_period = models.CharField(max_length=100, null=True, blank=True)
-    due_date = models.DateField(null=True, blank=True)
-    payment_mode = models.CharField(max_length=50, null=True, blank=True)
-    purchase_category = models.CharField(max_length=50, default="IP PHARMACY")
-    
-    # Financial Summary
-    taxable_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    non_taxable_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    tax_paid_to_supplier = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    cgst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    sgst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    igst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    cess = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    central_sales_tax = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    local_tax = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    round_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    total_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    net_invoice_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    total_discount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    tax_on_free_items = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    quotation_rate = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    courier_transport_charge = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    
-    # JSON Fields (Stored as Text/JSON in MongoDB)
-    items = models.TextField() # Array of item objects
-    payment_status = models.TextField(null=True, blank=True) # Array of payment tracking
-    total_amount_paid = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    remarks = models.TextField(null=True, blank=True)
+    date = models.DateField()
+    payment_mode = models.CharField(max_length=20)
+
+    # Items stored as JSON string
+    items = models.TextField(default="[]")
+
+    # Financial summary
+    taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    non_taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tax_paid_to_supplier = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     def save(self, *args, **kwargs):
-        if not self.grn_number:
-            try:
-                # Logic for 2526/000001
-                from datetime import date
-                year_part = date.today().strftime("%y")
-                next_year = str(int(year_part) + 1)
-                prefix = f"{year_part}{next_year}/"
-                
-                last_grn = IPGRN.objects.filter(grn_number__startswith=prefix).order_by('-grn_number').first()
-                if last_grn:
-                    last_num = int(last_grn.grn_number.split('/')[-1])
-                    self.grn_number = f"{prefix}{str(last_num + 1).zfill(6)}"
-                else:
-                    self.grn_number = f"{prefix}000001"
-            except Exception:
-                self.grn_number = "GRN-IP-1"
+        if self.grn_id is None:
+            last = GRN.objects.order_by("-grn_id").first()
+            self.grn_id = (last.grn_id + 1) if last else 1
+        if not self.grn_id:
+            self.grn_id = f"GRN{str(self.grn_id).zfill(6)}"
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.grn_number} - {self.invoice_no}"
-
-
-# OP GRN Model
-class OPGRN(AuditModel):
-    grn_number = models.CharField(max_length=50, unique=True)
-    vendor_id = models.CharField(max_length=50)
-    date = models.DateField()
-    invoice_no = models.CharField(max_length=50)
-    invoice_date = models.DateField()
-    credit_period = models.CharField(max_length=100, null=True, blank=True)
-    due_date = models.DateField(null=True, blank=True)
-    payment_mode = models.CharField(max_length=50, null=True, blank=True)
-    purchase_category = models.CharField(max_length=50, default="OP PHARMACY")
+        return self.grn_id
     
-    # Financial Summary
-    taxable_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    non_taxable_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    tax_paid_to_supplier = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    cgst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    sgst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    igst = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    cess = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    central_sales_tax = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    local_tax = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    round_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    total_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    net_invoice_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    total_discount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    tax_on_free_items = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    quotation_rate = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    courier_transport_charge = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    
-    # JSON Fields
-    items = models.TextField()
-    payment_status = models.TextField(null=True, blank=True)
-    total_amount_paid = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    remarks = models.TextField(null=True, blank=True)
+class Block(AuditModel):
+    block_id = models.IntegerField(primary_key=True)
+    block_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
-        if not self.grn_number:
-            try:
-                from datetime import date
-                year_part = date.today().strftime("%y")
-                next_year = str(int(year_part) + 1)
-                prefix = f"{year_part}{next_year}/"
-                
-                last_grn = OPGRN.objects.filter(grn_number__startswith=prefix).order_by('-grn_number').first()
-                if last_grn:
-                    last_num = int(last_grn.grn_number.split('/')[-1])
-                    self.grn_number = f"{prefix}{str(last_num + 1).zfill(6)}"
-                else:
-                    self.grn_number = f"{prefix}000001"
-            except Exception:
-                self.grn_number = "GRN-OP-1"
+        if self.block_id is None:
+            last = Block.objects.order_by('-block_id').first()
+            self.block_id = (last.block_id + 1) if last else 1
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.grn_number} - {self.invoice_no}"
+        return self.block_name
 
+class RoomCategory(AuditModel):
+    room_category_id = models.IntegerField(primary_key=True)
+    name = models.CharField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.room_category_id is None:
+            last = RoomCategory.objects.order_by('-room_category_id').first()
+            self.room_category_id = (last.room_category_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+class Room(AuditModel):
+    room_number = models.CharField(max_length=10, primary_key=True)
+    description = models.TextField(blank=True)
+    room_category = models.CharField(max_length=100)         
+    block = models.CharField(max_length=100)                 
+    floor = models.IntegerField()
+    room_type = models.CharField(max_length=20)
+    phone_extension = models.CharField(max_length=10, blank=True)
+    nursing_station = models.CharField(max_length=50, blank=True)
+    capacity = models.IntegerField(default=1)                
+    occupancy = models.IntegerField(default=0)               
+    admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    room_status = models.CharField(max_length=20)
+    room_blocked = models.BooleanField(default=False)
+    blocked_reason = models.TextField(blank=True)
+    include_in_final_bill = models.BooleanField(default=True)
+    enable_luxury_tax = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    services = models.JSONField(default=list, blank=True)
+    beds = models.JSONField(default=list, blank=True)
+    room_kits = models.JSONField(default=list, blank=True)
+
+    def __str__(self):
+        return self.room_number
+
+    def save(self, *args, **kwargs):
+        # Ensure JSON fields are lists if not set
+        if self.services is None:
+            self.services = []
+        if self.beds is None:
+            self.beds = []
+        if self.room_kits is None:
+            self.room_kits = []
+        super().save(*args, **kwargs)
 
 class Admission(AuditModel):
     uhid = models.CharField(max_length=20)
@@ -323,72 +255,6 @@ class Admission(AuditModel):
         
         super().save(*args, **kwargs)
 
-class Block(AuditModel):
-    block_id = models.IntegerField(primary_key=True)
-    block_name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
-
-    def save(self, *args, **kwargs):
-        if self.block_id is None:
-            last = Block.objects.order_by('-block_id').first()
-            self.block_id = (last.block_id + 1) if last else 1
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.block_name
-
-
-class RoomCategory(AuditModel):
-    room_category_id = models.IntegerField(primary_key=True)
-    name = models.CharField(max_length=100, unique=True)
-    is_active = models.BooleanField(default=True)
-
-    def save(self, *args, **kwargs):
-        if self.room_category_id is None:
-            last = RoomCategory.objects.order_by('-room_category_id').first()
-            self.room_category_id = (last.room_category_id + 1) if last else 1
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.name
-
-
-class Room(AuditModel):
-    room_number = models.CharField(max_length=10, primary_key=True)
-    description = models.TextField(blank=True, default="")
-    room_category = models.CharField(max_length=100)         
-    block = models.CharField(max_length=100)                 
-    floor = models.IntegerField()
-    room_type = models.CharField(max_length=20)
-    phone_extension = models.CharField(max_length=10, blank=True, default="")
-    nursing_station = models.CharField(max_length=50, blank=True, default="")
-    capacity = models.IntegerField(default=1)                
-    occupancy = models.IntegerField(default=0)               
-    admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_status = models.CharField(max_length=20)
-    room_blocked = models.BooleanField(default=False)
-    blocked_reason = models.TextField(blank=True, default="")
-    include_in_final_bill = models.BooleanField(default=True)
-    enable_luxury_tax = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    services = models.JSONField(default=list, blank=True)
-    beds = models.JSONField(default=list, blank=True)
-    room_kits = models.JSONField(default=list, blank=True)
-
-    def __str__(self):
-        return self.room_number
-
-    def save(self, *args, **kwargs):
-        # Ensure JSON fields are lists if not set
-        if self.services is None:
-            self.services = []
-        if self.beds is None:
-            self.beds = []
-        if self.room_kits is None:
-            self.room_kits = []
-        super().save(*args, **kwargs)
-    
 class DischargeDetail(AuditModel):
     uhid_no = models.CharField(max_length=100, blank=True)
     ip_number = models.CharField(max_length=100, blank=True)
@@ -772,92 +638,3 @@ class OPPharmacyBill(AuditModel):
 
     def __str__(self):
         return f"Bill {self.bill_no} - {self.patient_name}"
-
-
-
-class PharmacyStock(AuditModel):
-    invoice_number = models.CharField(max_length=100)
-    invoice_date = models.DateField()
-    supplier_name = models.CharField(max_length=255)
-    phone_number = models.CharField(max_length=15)
-    gst_number = models.CharField(max_length=15)
-    address = models.CharField(max_length=15)
-    medicine_name = models.CharField(max_length=255)
-    batch_number = models.CharField(max_length=100)
-    hsn_code = models.CharField(max_length=100)
-    expiry_date = models.DateField()
-    quantity = models.IntegerField()
-    pack = models.IntegerField()
-    free = models.IntegerField(default=0)
-    purchase_rate = models.DecimalField(max_digits=10, decimal_places=5)
-    purchase_cost = models.DecimalField(max_digits=10, decimal_places=5)
-    mrp = models.DecimalField(max_digits=10, decimal_places=5)
-    discount = models.DecimalField(max_digits=10, decimal_places=5)
-    taxable_amount = models.DecimalField(max_digits=10, decimal_places=5)
-    cgst_rate = models.DecimalField(max_digits=10, decimal_places=5)
-    cgst_amount = models.DecimalField(max_digits=10, decimal_places=5)
-    sgst_rate = models.DecimalField(max_digits=10, decimal_places=5)
-    sgst_amount = models.DecimalField(max_digits=10, decimal_places=5)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=5)
-
-    def __str__(self):
-        return self.medicine_name
-class HSNCode(AuditModel):
-    chapter = models.CharField(max_length=50)
-    hsn_code = models.CharField(max_length=10, unique=True, primary_key=True)
-    description = models.TextField()
-    tax = models.DecimalField(max_digits=5, decimal_places=2)
-
-    def __str__(self):
-        return f"{self.chapter} - {self.hsn_code}"
-
-
-    
-class Ventor(AuditModel):
-    SUPPLIER_TYPE_CHOICES = [
-        ('Supplier', 'Supplier'),
-        ('Manufacturer', 'Manufacturer'),
-        ('Both', 'Both'),
-    ]
-    ventor_name = models.CharField(max_length=100, unique=True)  # Set unique for POST/PATCH
-    supplier_type = models.CharField(max_length=20, choices=SUPPLIER_TYPE_CHOICES, default='Supplier')
-    phone = models.CharField(max_length=15, blank=True, null=True)
-    landline = models.CharField(max_length=15, blank=True, null=True)
-    address = models.TextField()
-    gst_number = models.CharField(max_length=15, unique=True)
-    def __str__(self):
-        return f"{self.ventor_name} - {self.supplier_type}"
-
-class RoomServiceDescription(AuditModel):
-    description = models.CharField(max_length=255)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        db_table = 'hospital_roomservice_description'
-
-    def __str__(self):
-        return self.description
-
-
-class RoomKitDescription(AuditModel):
-    name = models.CharField(max_length=255)
-    is_active = models.BooleanField(default=True)
-    
-    def __str__(self):
-        return self.name
-
-class RoomKit(models.Model):
-    room = models.ForeignKey('Room', on_delete=models.CASCADE, related_name='kits', null=True, blank=True)
-    # Stores ID of RoomKitDescription
-    kit_item = models.CharField(max_length=50) 
-    priority = models.IntegerField(blank=True, null=True)
-    amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
-    enable_item = models.BooleanField(default=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"Kit {self.kit_item} for Room"
-
-

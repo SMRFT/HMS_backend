@@ -10,132 +10,36 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
-from .models import PharmacyStock
-class PharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = PharmacyStock
-        fields = '__all__'
-
+        
 from .models import HSNCode
 class HSNCodeSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = HSNCode
         fields = '__all__'
-from .models import Ventor
-class VentorSerializer(serializers.ModelSerializer):
+
+        
+from .models import PharmacyItem
+class PharmacyItemSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Ventor
-        fields = ['id', 'ventor_name', 'phone', 'address', 'gst_number']
-from .models import IPPharmacyStock, OPPharmacyStock,Vendor
-
-# IP Pharmacy Stock Serializer
-class IPPharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
-    class Meta:
-        model = IPPharmacyStock
-        fields = '__all__'
+        model = PharmacyItem
+        fields = "__all__"
+        read_only_fields = ["item_id"]
 
 
-# OP Pharmacy Stock Serializer
-class OPPharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
-    class Meta:
-        model = OPPharmacyStock
-        fields = '__all__'
-
-
-# Vendor Serializer
+from .models import Vendor
 class VendorSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
     class Meta:
         model = Vendor
-        fields = '__all__'
+        fields = "__all__"
+        read_only_fields = ["vendor_id"]
 
 
-from .models import Patient
-class PatientSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    uhid = serializers.CharField(read_only=True)
-    class Meta:
-        model = Patient
-        fields = '__all__'
-
-
-from .models import Doctor
-class DoctorSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(read_only=True)
-
-    class Meta:
-        model = Doctor
-        fields = '__all__'
-
-
-from .models import CTReport
-class CTReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CTReport
-        fields = ['age', 'date', 'gender', 'impression', 'investigation', 'patientId', 'patientName', 'approve','approve_time']
-
-
-from .models import MRIReport
-class MRIReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MRIReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import USGReport
-class USGReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = USGReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import XRayReport
-class XRayReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = XRayReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import Admission
-class AdmissionSerializer(serializers.ModelSerializer):
+from .models import GRN
+class GRNSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
-        model = Admission
-        fields = '__all__'
-
-
-from .models import Summary
-class SummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Summary
-        fields = '__all__'
-
-
-from .models import EstimateBilling
-class EstimateBillingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = EstimateBilling
-        fields = '__all__'
-
-
-from .models import InvestBilling
-class InvestBillingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InvestBilling
-        fields = '__all__'
-
-
-from .models import ReferenceDoctor
-class ReferenceDoctorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ReferenceDoctor
+        model = GRN
         fields = '__all__'
 
 
@@ -209,6 +113,14 @@ class RoomSerializer(serializers.ModelSerializer):
         if not isinstance(value, list):
             raise serializers.ValidationError("Room kits must be a list")
         return value
+    
+
+from .models import Admission
+class AdmissionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = Admission
+        fields = '__all__'
 
 
 from .models import DischargeDetail
@@ -219,20 +131,78 @@ class DischargeDetailSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import IPGRN, OPGRN
-class IPGRNSerializer(serializers.ModelSerializer):
+from .models import Patient
+class PatientSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+    uhid = serializers.CharField(read_only=True)
     class Meta:
-        model = IPGRN
+        model = Patient
         fields = '__all__'
 
 
-class OPGRNSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+from .models import Doctor
+class DoctorSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+
     class Meta:
-        model = OPGRN
+        model = Doctor
         fields = '__all__'
 
+
+from .models import CTReport
+class CTReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CTReport
+        fields = ['age', 'date', 'gender', 'impression', 'investigation', 'patientId', 'patientName', 'approve','approve_time']
+
+
+from .models import MRIReport
+class MRIReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MRIReport
+        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
+
+
+from .models import USGReport
+class USGReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = USGReport
+        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
+
+
+from .models import XRayReport
+class XRayReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = XRayReport
+        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
+
+
+from .models import Summary
+class SummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Summary
+        fields = '__all__'
+
+
+from .models import EstimateBilling
+class EstimateBillingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EstimateBilling
+        fields = '__all__'
+
+
+from .models import InvestBilling
+class InvestBillingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvestBilling
+        fields = '__all__'
+
+
+from .models import ReferenceDoctor
+class ReferenceDoctorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReferenceDoctor
+        fields = '__all__'
 
 
 from .models import OPPharmacyBill
@@ -240,11 +210,4 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = OPPharmacyBill
-        fields = '__all__'
-
-from .models import RoomServiceDescription
-class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = RoomServiceDescription
         fields = '__all__'
