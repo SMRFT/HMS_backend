@@ -51,8 +51,8 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 'ipNumber': admission.ipNumber,
                 'uhid': admission.uhid,
                 'roomNo': admission.roomNo,
-                'admissionDate': admission.admissionDate,
-                'admissionTime': admission.time if hasattr(admission, 'time') else None,
+                'admissionDate': admission.admissionDate.strftime("%Y-%m-%d") if admission.admissionDate else None,
+                'admissionTime': admission.admissionDate.strftime("%H:%M") if admission.admissionDate else None,
                 'admittingDoctor': admission.admittingDoctor,
                 
                 # From Patient model
@@ -162,11 +162,11 @@ def estimate_billing_list(request):
             if bill_type:
                 bill_type_doc = billtype_collection.find_one(
                     {"bill_type": int(bill_type)},
-                    {"_id": 0, "bill_name": 1, "BillTypeNo": 1}
+                    {"_id": 0, "bill_name": 1, "billTypeNo": 1}
                 )
                 if bill_type_doc:
                     estimate["bill_name"] = bill_type_doc.get("bill_name", "")
-                    estimate["billTypeNo"] = bill_type_doc.get("BillTypeNo", "")
+                    estimate["billTypeNo"] = bill_type_doc.get("billTypeNo", "")
                 else:
                     estimate["bill_name"] = ""
                     estimate["billTypeNo"] = ""
@@ -196,7 +196,7 @@ def get_bill_types(request):
                 "_id": 0,
                 "bill_type": 1,
                 "bill_name": 1,
-                "BillTypeNo": 1,
+                "billTypeNo": 1,
                 "department_code": 1,
                 "is_allowDiscount": 1,
             }
@@ -299,7 +299,7 @@ def get_package_items(request):
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_investigation_items(request):
-    """Fetch investigation items based on BillTypeNo and bill_type from hospital_investigationprice collection
+    """Fetch investigation items based on billTypeNo and bill_type from hospital_investigationprice collection
     Special case: When billTypeNo="LAB01", fetch lab tests from Diagnostics database"""
     try:
         bill_type_no = request.GET.get('billTypeNo')
@@ -380,9 +380,9 @@ def get_investigation_items(request):
         db = client['HMS']
         collection = db['hospital_investigationprice']
 
-        # Fetch items for the specific BillTypeNo (using string comparison)
+        # Fetch items for the specific billTypeNo (using string comparison)
         investigation_data = collection.find_one(
-            {"BillTypeNo": bill_type_no},
+            {"billTypeNo": bill_type_no},
             {"_id": 0, "Items": 1, "BillType": 1}
         )
         
@@ -612,12 +612,12 @@ def billing_report_view(request):
                     try:
                         bill_type_doc = bill_type_collection.find_one(
                             {"bill_type": int(bill_type)},       # ✅ query by numeric bill_type field
-                            {"_id": 0, "bill_name": 1, "BillTypeNo": 1}
+                            {"_id": 0, "bill_name": 1, "billTypeNo": 1}
                         )
                         if bill_type_doc:
                             bill_type_cache[bill_type] = {
                                 "bill_name": bill_type_doc.get("bill_name", ""),
-                                "billTypeNo": bill_type_doc.get("BillTypeNo", ""),
+                                "billTypeNo": bill_type_doc.get("billTypeNo", ""),
                             }
                         else:
                             bill_type_cache[bill_type] = {"bill_name": "", "billTypeNo": ""}

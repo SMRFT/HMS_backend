@@ -258,14 +258,7 @@ class OPGRN(AuditModel):
 class Admission(AuditModel):
     uhid = models.CharField(max_length=20)
     ipNumber = models.CharField(max_length=20)
-    salutation = models.CharField(max_length=10, blank=True)
-    firstName = models.CharField(max_length=50)
-    middleName = models.CharField(max_length=50, blank=True)
-    lastName = models.CharField(max_length=50)
-    age = models.IntegerField()
-    gender = models.CharField(max_length=10)
-    admissionDate = models.DateField()
-    time = models.TimeField()
+    admissionDate = models.DateTimeField()
     customerType = models.CharField(max_length=20, default='General')
     admittingDoctor = models.CharField(max_length=100)
     consultingDoctor = models.CharField(max_length=100, blank=True)
@@ -579,31 +572,31 @@ class Doctor(AuditModel):
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
     investBillNo = models.CharField(max_length=50, blank=True)
-    impression = models.TextField()
+    billTypeNo = models.TextField()    
+    itemName = models.TextField()
+    impression = models.TextField()    
     is_approved = models.BooleanField(default=False)
     approved_date = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)   # ✅ add this
 
     def __str__(self):
-        return f"CT Report - {self.investBillNo} ({self.uhid})"
+        return f"Radiology Report - {self.investBillNo} ({self.uhid})"
 
 
 class Summary(AuditModel):
-    date = models.DateTimeField(null=True, blank=True)
+    date = models.DateField(null=True, blank=True)
     ipNo = models.CharField(max_length=100, blank=True, null=True)
     uhid = models.CharField(max_length=100, blank=True, null=True)
-    patient = models.CharField(max_length=100, blank=True, null=True)
-    doa = models.CharField(max_length=100, blank=True, null=True)
-    dod = models.CharField(max_length=100, blank=True, null=True)
-    roomNo = models.CharField(max_length=100, blank=True, null=True)
-    age = models.CharField(max_length=100, blank=True, null=True)
-    surgeryDate = models.CharField(max_length=100, blank=True, null=True)
-    nextReviewDate = models.CharField(max_length=100, blank=True, null=True)
+    doa = models.DateField(null=True, blank=True)
+    dod = models.DateField(null=True, blank=True)
+    dodTime = models.TimeField(null=True, blank=True)
+    doaTime = models.TimeField(null=True, blank=True)
+    roomNo = models.CharField(max_length=100, blank=True, null=True)   
+    surgeryDate = models.DateField(null=True, blank=True)
+    nextReviewDate = models.DateField(null=True, blank=True)
     doctor = models.CharField(max_length=100, blank=True, null=True)
-    gender = models.CharField(max_length=20, blank=True, null=True)
     summaryType = models.CharField(max_length=100, blank=True, null=True)
     heading = models.CharField(max_length=200, blank=True, null=True)
-    address = models.TextField(blank=True, null=True)
     diseaseCode = models.CharField(max_length=100, blank=True, null=True)
     disease = models.CharField(max_length=200, blank=True, null=True)
     fieldsData = models.JSONField(blank=True, null=True)  # To store dynamic field data
