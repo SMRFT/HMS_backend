@@ -117,7 +117,11 @@ CORS_ALLOW_HEADERS = [
     "Content-Type",
     "Branch-Code"
 ]
+WHO_ICD_CLIENT_ID = os.getenv("WHO_ICD_CLIENT_ID")
+WHO_ICD_CLIENT_SECRET = os.getenv("WHO_ICD_CLIENT_SECRET")
 
+WHO_TOKEN_URL = "https://icdaccessmanagement.who.int/connect/token"
+WHO_BASE_URL = "https://id.who.int/icd/release/11/2023-01/mms"
 # Internationalization
 # https://docs.djangoproject.com/en/3.2/topics/i18n/
 
