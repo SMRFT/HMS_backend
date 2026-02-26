@@ -15,6 +15,7 @@ from .Views import (
     stock,
     summary,
     dashboard,
+    insurance_provider,
 )
 
 urlpatterns = [
@@ -161,4 +162,8 @@ urlpatterns = [
     path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
     path('registration-bills/', views.registration_bills, name='registration_bills'),
     re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    
+    # Insurance Provider URLs
+    path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
+    path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
 ]

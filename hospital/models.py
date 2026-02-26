@@ -429,6 +429,8 @@ class Patient(AuditModel):
         ('Family', 'Family'),
     )
 
+    company_code = models.CharField(max_length=100, blank=True, null=True)
+
     BLOOD_GROUP_CHOICES = (
         ('A+', 'A+'),
         ('A-', 'A-'),
@@ -823,3 +825,27 @@ class Ventor(AuditModel):
     gst_number = models.CharField(max_length=15, unique=True)
     def __str__(self):
         return f"{self.ventor_name} - {self.supplier_type}"
+
+class InsuranceProvider(AuditModel):
+    company_name = models.CharField(max_length=255)
+    company_code = models.CharField(max_length=100,primary_key=True)
+    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
+    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
+    address_line_3 = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=20, null=True, blank=True)
+    gstin = models.CharField(max_length=50, null=True, blank=True)
+    contact_person = models.CharField(max_length=100, null=True, blank=True)
+    phone = models.CharField(max_length=20, null=True, blank=True)
+    mobile = models.CharField(max_length=20, null=True, blank=True)
+    email = models.EmailField(null=True, blank=True)
+    credit_limit = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    insurance_print_format = models.CharField(max_length=100, null=True, blank=True)
+    claim_pre_authorization_template = models.FileField(upload_to='insurance_templates/', null=True, blank=True)
+    blocked = models.BooleanField(default=False)
+    blocking_reason = models.TextField(null=True, blank=True)
+    enable_service_tax = models.BooleanField(default=False)
+
+    def __str__(self):
+        return self.company_name

@@ -604,6 +604,16 @@ def patient_visit_list(request):
             
             full_name = f"{bill.patient.salutation or ''} {bill.patient.firstName or ''} {bill.patient.lastName or ''}".strip()
             
+            # Formatting address safely
+            address_parts = [
+                bill.patient.permanent_address,
+                bill.patient.area,
+                bill.patient.city,
+                bill.patient.state,
+                bill.patient.zipcode
+            ]
+            full_address = " ".join([p for p in address_parts if p]).strip()
+
             data.append({
                 "uhid": bill.patient.uhid,
                 "patientName": full_name,
@@ -611,10 +621,17 @@ def patient_visit_list(request):
                 "gender": bill.patient.gender,
                 "mobile": bill.patient.mobilePhone,
                 "doctor": bill.doctor_id, 
+                "doctorName": bill.patient.doctorName or '',
+                "spouseName": bill.patient.spouse_name or '',
+                "address": full_address,
                 "visitType": visit_type,
-                "billAmount": str(bill.total_fees),
+                "billNumber": bill.bill_number,
+                "registrationFee": str(bill.registration_fee or 0),
+                "consultingFee": str(bill.consulting_fee or 0),
+                "billAmount": str(bill.total_fees or 0),
                 "paymentStatus": bill.payment_status,
-                "date": bill.billed_date.strftime("%d-%m-%Y %H:%M")
+                "paymentMethod": bill.payment_method or 'Cash',
+                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p")
             })
             
         return Response(data)
