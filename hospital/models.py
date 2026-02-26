@@ -643,7 +643,6 @@ class XRayReport(AuditModel):
 
 
 class Summary(AuditModel):
-    # _id = models.ObjectIdField()  # MongoDB ID field
     date = models.DateTimeField(null=True, blank=True)
     ipNo = models.CharField(max_length=100, blank=True, null=True)
     uhid = models.CharField(max_length=100, blank=True, null=True)
@@ -666,6 +665,7 @@ class Summary(AuditModel):
     approve_time = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
+
     def __str__(self):
         return self.patient or "Summary"
     
@@ -676,14 +676,13 @@ class EstimateBilling(AuditModel):
     time = models.CharField(max_length=50)
     uhid = models.CharField(max_length=50)
     ipNumber = models.CharField(max_length=50,blank=True)
+    billType = models.CharField(max_length=100)
+    doctor = models.CharField(max_length=100)    
     salutation = models.CharField(max_length=10)
     firstName = models.CharField(max_length=50)
-    middleName = models.CharField(max_length=50, blank=True, null=True)
-    lastName = models.CharField(max_length=50)
+    lastName = models.CharField(max_length=50,blank=True)
     age = models.IntegerField()
     gender = models.CharField(max_length=10)
-    doctor = models.CharField(max_length=100)
-    billType = models.CharField(max_length=100)
     item = models.JSONField()  # Stores the selected item as a JSON field
     referredBy = models.CharField(max_length=100, blank=True, null=True)
     discountPercent = models.IntegerField()
@@ -693,6 +692,7 @@ class EstimateBilling(AuditModel):
     finalPrice = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     paymentMethod = models.CharField(max_length=50)
     is_active = models.BooleanField(default=True)
+
 
     def __str__(self):
         return f"Billing for {self.firstName} {self.lastName} ({self.uhid})"
@@ -824,28 +824,6 @@ class Ventor(AuditModel):
     address = models.TextField()
     gst_number = models.CharField(max_length=15, unique=True)
     def __str__(self):
+
         return f"{self.ventor_name} - {self.supplier_type}"
 
-class InsuranceProvider(AuditModel):
-    company_name = models.CharField(max_length=255)
-    company_code = models.CharField(max_length=100,primary_key=True)
-    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
-    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
-    address_line_3 = models.CharField(max_length=255, null=True, blank=True)
-    city = models.CharField(max_length=100, null=True, blank=True)
-    state = models.CharField(max_length=100, null=True, blank=True)
-    pincode = models.CharField(max_length=20, null=True, blank=True)
-    gstin = models.CharField(max_length=50, null=True, blank=True)
-    contact_person = models.CharField(max_length=100, null=True, blank=True)
-    phone = models.CharField(max_length=20, null=True, blank=True)
-    mobile = models.CharField(max_length=20, null=True, blank=True)
-    email = models.EmailField(null=True, blank=True)
-    credit_limit = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    insurance_print_format = models.CharField(max_length=100, null=True, blank=True)
-    claim_pre_authorization_template = models.FileField(upload_to='insurance_templates/', null=True, blank=True)
-    blocked = models.BooleanField(default=False)
-    blocking_reason = models.TextField(null=True, blank=True)
-    enable_service_tax = models.BooleanField(default=False)
-
-    def __str__(self):
-        return self.company_name
