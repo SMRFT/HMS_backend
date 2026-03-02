@@ -21,7 +21,7 @@ from pyauth.auth import HasRoleAndDataPermission
 logger = logging.getLogger(__name__)
 
 
-# ==================== VENDOR VIEWS ====================
+#VENDOR VIEWS
 from ..models import Vendor
 from ..serializers import VendorSerializer
 
@@ -31,7 +31,7 @@ def vendor_view(request, pk=None):
 
     user_id = request.headers.get("auth-user-id", "system")
 
-    # ── GET ──────────────────────────────────────────────────────────────────
+    # ── GET ──
     if request.method == "GET":
         if pk:
             try:
@@ -52,7 +52,7 @@ def vendor_view(request, pk=None):
         serializer = VendorSerializer(vendors, many=True)
         return Response(serializer.data)
 
-    # ── POST ─────────────────────────────────────────────────────────────────
+    # ── POST ──
     if request.method == "POST":
         serializer = VendorSerializer(data=request.data)
         if serializer.is_valid():
@@ -60,7 +60,7 @@ def vendor_view(request, pk=None):
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
-    # ── PUT ──────────────────────────────────────────────────────────────────
+    # ── PUT ──
     if request.method == "PUT":
         if not pk:
             return Response({"error": "Vendor ID required"}, status=400)
@@ -79,7 +79,7 @@ def vendor_view(request, pk=None):
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ───────────────────────────────────────────────────────────────
+    # ── DELETE ──
     if request.method == "DELETE":
         if not pk:
             return Response({"error": "Vendor ID required"}, status=400)
@@ -97,6 +97,7 @@ def vendor_view(request, pk=None):
         vendor.save()
         return Response({"message": "Deleted successfully"}, status=200)
 
+#PHARMACY STOCK VIEWS
 
 from ..models import PharmacyItem
 from ..serializers import PharmacyItemSerializer
@@ -107,7 +108,7 @@ def pharmacy_item_view(request, pk=None):
 
     user_id = request.headers.get("auth-user-id", "system")
 
-    # ── GET ──────────────────────────────────────────────────────────────────
+    # ── GET ──
     if request.method == "GET":
         if pk:
             try:
@@ -128,7 +129,7 @@ def pharmacy_item_view(request, pk=None):
         serializer = PharmacyItemSerializer(items, many=True)
         return Response(serializer.data)
 
-    # ── POST ─────────────────────────────────────────────────────────────────
+    # ── POST ──
     if request.method == "POST":
         serializer = PharmacyItemSerializer(data=request.data)
         if serializer.is_valid():
@@ -136,7 +137,7 @@ def pharmacy_item_view(request, pk=None):
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
-    # ── PUT ──────────────────────────────────────────────────────────────────
+    # ── PUT ──
     if request.method == "PUT":
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
@@ -155,7 +156,7 @@ def pharmacy_item_view(request, pk=None):
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ───────────────────────────────────────────────────────────────
+    # ── DELETE ──
     if request.method == "DELETE":
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
@@ -174,94 +175,93 @@ def pharmacy_item_view(request, pk=None):
         return Response({"message": "Deleted successfully"}, status=200)
     
 
+#GRN VIEWS
+
 from ..models import GRN
 from ..serializers import GRNSerializer
 
-@api_view(['GET', 'POST', 'PATCH', 'DELETE'])
-@permission_classes([HasRoleAndDataPermission])
+@api_view(["GET", "POST", "PUT", "DELETE"])
 @csrf_exempt
 def grn_view(request, pk=None):
-    try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        db = client.HMS
-        collection = db.hospital_grn
 
-        if request.method == 'POST':
-            data = request.data.copy()
-            employee_id = request.data.get('auth-user-id', 'system')
-            
-            # Complex fields as strings if they are objects/arrays
-            if isinstance(data.get('items'), (list, dict)):
-                data['items'] = json.dumps(data['items'])
-            if isinstance(data.get('payment_status'), (list, dict)):
-                data['payment_status'] = json.dumps(data['payment_status'])
-            
-            data["created_by"] = employee_id
-            data["lastmodified_by"] = employee_id
-            data["is_active"] = True
+    user_id = request.headers.get("auth-user-id", "system")
 
-            serializer = GRNSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        elif request.method == 'GET':
-            if pk:
-                try:
-                    doc = collection.find_one({"_id": ObjectId(pk), "is_active": True})
-                    if not doc:
-                        doc = collection.find_one({"grn_number": pk, "is_active": True})
-                    
-                    if not doc:
-                        return Response({"error": "GRN not found"}, status=status.HTTP_404_NOT_FOUND)
-                    
-                    doc['id'] = str(doc['_id'])
-                    del doc['_id']
-                    return Response(doc)
-                except Exception as e:
-                    return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            else:
-                grns = list(collection.find({"is_active": True}).sort("created_date", -1))
-                for grn in grns:
-                    grn['id'] = str(grn['_id'])
-                    del grn['_id']
-                return Response(grns)
-
-        elif request.method == 'PATCH':
-            if not pk:
-                return Response({"error": "ID required"}, status=status.HTTP_400_BAD_REQUEST)
-            
+    # ── GET ──
+    if request.method == "GET":
+        if pk:
             try:
-                grn = GRN.objects.get(pk=pk)
-                data = request.data.copy()
-                
-                if isinstance(data.get('items'), (list, dict)):
-                    data['items'] = json.dumps(data['items'])
-                if isinstance(data.get('payment_status'), (list, dict)):
-                    data['payment_status'] = json.dumps(data['payment_status'])
-                
-                data["lastmodified_by"] = request.data.get('auth-user-id', 'system')
-                
-                serializer = GRNSerializer(grn, data=data, partial=True)
-                if serializer.is_valid():
-                    serializer.save()
-                    return Response(serializer.data)
-                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                grn = GRN.objects.get(grn_id=pk)
+                if not grn.is_active:
+                    return Response({"error": "GRN not found"}, status=404)
             except GRN.DoesNotExist:
-                return Response({"error": "GRN not found"}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"error": "GRN not found"}, status=404)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid GRN ID"}, status=400)
 
-        elif request.method == 'DELETE':
-            if not pk:
-                return Response({"error": "ID required"}, status=status.HTTP_400_BAD_REQUEST)
-            
-            result = collection.update_one({"_id": ObjectId(pk)}, {"$set": {"is_active": False}})
-            if result.matched_count == 0:
-                result = collection.update_one({"grn_number": pk}, {"$set": {"is_active": False}})
-                
-            if result.matched_count == 0:
-                return Response({"error": "GRN not found"}, status=status.HTTP_404_NOT_FOUND)
-            return Response({"message": "GRN deleted successfully"}, status=status.HTTP_200_OK)
+            serializer = GRNSerializer(grn)
+            return Response(serializer.data)
 
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # List – filter in Python to avoid Djongo boolean filter bug
+        all_grns = GRN.objects.all().order_by("-grn_id")
+        grns = [g for g in all_grns if g.is_active]
+        serializer = GRNSerializer(grns, many=True)
+        return Response(serializer.data)
+
+    # ── POST ──
+    if request.method == "POST":
+        data = request.data.copy()
+
+        # Serialize list/dict fields to JSON strings
+        if isinstance(data.get("items"), (list, dict)):
+            data["items"] = json.dumps(data["items"])
+        if isinstance(data.get("payment_status"), (list, dict)):
+            data["payment_status"] = json.dumps(data["payment_status"])
+
+        serializer = GRNSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+    # ── PUT ──
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "GRN ID required"}, status=400)
+        try:
+            grn = GRN.objects.get(grn_id=pk)
+            if not grn.is_active:
+                return Response({"error": "GRN not found"}, status=404)
+        except GRN.DoesNotExist:
+            return Response({"error": "GRN not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid GRN ID"}, status=400)
+
+        data = request.data.copy()
+        if isinstance(data.get("items"), (list, dict)):
+            data["items"] = json.dumps(data["items"])
+        if isinstance(data.get("payment_status"), (list, dict)):
+            data["payment_status"] = json.dumps(data["payment_status"])
+
+        serializer = GRNSerializer(grn, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save(lastmodified_by=user_id)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+
+    # ── DELETE ──
+    if request.method == "DELETE":
+        if not pk:
+            return Response({"error": "GRN ID required"}, status=400)
+        try:
+            grn = GRN.objects.get(grn_id=pk)
+            if not grn.is_active:
+                return Response({"error": "GRN not found"}, status=404)
+        except GRN.DoesNotExist:
+            return Response({"error": "GRN not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid GRN ID"}, status=400)
+
+        grn.is_active = False
+        grn.lastmodified_by = user_id
+        grn.save()
+        return Response({"message": "GRN deleted successfully"}, status=200)

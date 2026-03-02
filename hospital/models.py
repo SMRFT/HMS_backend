@@ -92,21 +92,44 @@ class Vendor(AuditModel):
 
 # GRN Model
 class GRN(AuditModel):
+    PURCHASE_CATEGORY_CHOICES = [
+        ("MEDICINE_PURCHASE", "Medicine Purchase"),
+        ("MEDICINE_PURCHASE_IP", "Medicine Purchase (IP)"),
+        ("OPENING_STOCK_DRUG", "Opening Stock (Drug)"),
+    ]
+
+    PAYMENT_MODE_CHOICES = [
+        ("CHEQUE", "Cheque"),
+        ("CASH", "Cash"),
+        ("DD", "DD"),
+    ]
+
+    TYPE_CHOICES = [
+        ("INVOICE", "Invoice"),
+        ("PACKING_SLIP", "Packing Slip"),
+    ]
 
     grn_id = models.IntegerField(primary_key=True)
+    grn_number = models.CharField(max_length=50, unique=True, blank=True)
 
     # Header fields
-    purchase_category = models.CharField(max_length=50)
+    purchase_category = models.CharField(max_length=50, choices=PURCHASE_CATEGORY_CHOICES)
     vendor_id = models.IntegerField()
     vendor_name = models.CharField(max_length=200, blank=True, default="")
     supplier_address = models.CharField(max_length=400, blank=True, default="")
     contact_person = models.CharField(max_length=150, blank=True, default="")
     phone = models.CharField(max_length=20, blank=True, default="")
 
+    # Invoice fields
+    grn_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="INVOICE")
     invoice_no = models.CharField(max_length=100)
     invoice_date = models.DateField()
     date = models.DateField()
-    payment_mode = models.CharField(max_length=20)
+    credit_period = models.CharField(max_length=50, blank=True, default="")
+    due_date = models.DateField(null=True, blank=True)
+    reference = models.CharField(max_length=100, blank=True, default="")
+    purchase_order = models.CharField(max_length=100, blank=True, default="")
+    payment_mode = models.CharField(max_length=20, choices=PAYMENT_MODE_CHOICES, default="CHEQUE")
 
     # Items stored as JSON string
     items = models.TextField(default="[]")
@@ -116,21 +139,29 @@ class GRN(AuditModel):
     non_taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     sgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     tax_paid_to_supplier = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    net_invoice_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Payment status stored as JSON string
+    payment_status = models.TextField(default="[]")
+
+    remarks = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
         if self.grn_id is None:
             last = GRN.objects.order_by("-grn_id").first()
             self.grn_id = (last.grn_id + 1) if last else 1
-        if not self.grn_id:
-            self.grn_id = f"GRN{str(self.grn_id).zfill(6)}"
+        if not self.grn_number:
+            self.grn_number = f"GRN{str(self.grn_id).zfill(6)}"
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return self.grn_id
+        return self.grn_number
     
 class Block(AuditModel):
     block_id = models.IntegerField(primary_key=True)
