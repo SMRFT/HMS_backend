@@ -167,3 +167,5 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
     class Meta:
         model = OPPharmacyBill
         fields = '__all__'
+
+

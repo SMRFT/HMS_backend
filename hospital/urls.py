@@ -1,6 +1,5 @@
 from django.urls import path, re_path
 from . import views
-from . import Views
 from .Views import (
     admission,
     departmentBilling,
@@ -9,11 +8,12 @@ from .Views import (
     grn,
     ICD11,
     inventory,
+    package_crud,
     pharmacy,
     radiology,
     room,
     stock,
-    summary,
+    summary,package_crud, investigation_price, billType
 )
 
 urlpatterns = [
@@ -117,4 +117,30 @@ urlpatterns = [
 
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+
+
+    #Package Master:
+    path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
+    path('lab-items/',  package_crud.get_lab_items,    name='get_lab_items'),
+    path('departments/',  package_crud.get_departments,    name='get_departments'),
+    path('packages_crud/',  package_crud.get_packages,    name='get_packages'),
+    path('packages/create/',  package_crud.create_package,  name='create_package'),
+    path('packages/<int:package_no>/', package_crud.get_package,     name='get_package'),
+    path('packages/<int:package_no>/update/', package_crud.update_package, name='update_package'),
+    path('packages/<int:package_no>/delete/', package_crud.delete_package, name='delete_package'),
+
+    #Investigation Price Master:
+    path('investigation-prices_get/', investigation_price.get_investigation_prices),
+    path('investigation-prices/create/', investigation_price.create_investigation_price),
+    path('investigation-prices/<str:bill_type_no>/update/',investigation_price.update_investigation_price),
+    path('investigation-prices/<str:bill_type_no>/delete/',investigation_price.delete_investigation_price),
+    
+    #Bil Type Master:
+    path('bill-types_get/', billType.get_bill_types),
+    path('bill-types/create/', billType.create_bill_type),
+    path('bill-types/<str:bill_type_no>/update/', billType.update_bill_type),
+    path('bill-types/<str:bill_type_no>/delete/', billType.delete_bill_type),
+    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
+    
+
 ]

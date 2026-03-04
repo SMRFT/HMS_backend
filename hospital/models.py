@@ -733,4 +733,6 @@ class Ventor(AuditModel):
     def __str__(self):
 
         return f"{self.ventor_name} - {self.supplier_type}"
+    
+
 
