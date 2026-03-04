@@ -399,10 +399,6 @@ def get_all_employees(request):
         print(f"Error fetching employees: {e}")
         return Response({"error": str(e)}, status=500)
 
-
-
-
-
 from .models import Billing
 from .serializers import BillingSerializer
 from decimal import Decimal
@@ -753,3 +749,47 @@ def consume_qr_registration(request):
         return Response({"message": "Consumed"})
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+@api_view(['GET'])
+def get_sidebar_mapping(request):
+    """
+    Fetches the dynamic sidebar mapping structure from MongoDB.
+    """
+    try:
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        client = MongoClient(mongo_host)
+        db = client['HMS']
+        collection = db['frontendendpagemapping']
+        
+        # Fetch all mappings
+        sidebar_data = list(collection.find({}, {'_id': 0}).sort('order', 1)) 
+        client.close()
+        
+        return JsonResponse(sidebar_data, safe=False, status=200)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+@api_view(['POST'])
+def update_sidebar_mapping(request):
+    """
+    Updates the dynamic sidebar mapping structure in MongoDB.
+    """
+    try:
+        updated_mapping = request.data.get('mapping', [])
+        if not isinstance(updated_mapping, list):
+            return JsonResponse({"error": "Invalid data format. Expected a list."}, status=400)
+            
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        client = MongoClient(mongo_host)
+        db = client['HMS']
+        collection = db['frontendendpagemapping']
+        
+        # Clear existing mappings and insert the new ones
+        collection.delete_many({})
+        if updated_mapping:
+            collection.insert_many(updated_mapping)
+            
+        client.close()
+        return JsonResponse({"message": "Sidebar mapping updated successfully."}, status=200)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
