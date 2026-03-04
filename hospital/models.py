@@ -230,61 +230,35 @@ class Room(AuditModel):
 class Admission(AuditModel):
     uhid = models.CharField(max_length=20)
     ipNumber = models.CharField(max_length=20)
-    salutation = models.CharField(max_length=10, blank=True)
-    firstName = models.CharField(max_length=50)
-    middleName = models.CharField(max_length=50, blank=True)
-    lastName = models.CharField(max_length=50)
-    age = models.IntegerField()
-    gender = models.CharField(max_length=10)
     admissionDate = models.DateField()
     time = models.TimeField()
-    customerType = models.CharField(max_length=20, default='General')
+
     admittingDoctor = models.CharField(max_length=100)
-    consultingDoctor = models.CharField(max_length=100, blank=True)
+    consultingDoctor = models.CharField(max_length=100, blank=True, null=True)
+
+    packageName = models.CharField(max_length=100)
+
     roomNo = models.CharField(max_length=10)
     bedNo = models.CharField(max_length=10)
-    extensionNumber = models.CharField(max_length=10, blank=True)
-    callRelease = models.CharField(max_length=10, default='Local')
-    nursingStation = models.CharField(max_length=50, blank=True)
-    presentComplaints = models.TextField(blank=True)
-    reasonForAdmission = models.TextField(blank=True)
-    admissionFee = models.DecimalField(max_digits=10, decimal_places=2)
-    creditLimit = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    mlcType = models.CharField(max_length=20, blank=True)
-    mlcRemarks = models.TextField(blank=True)
-    uploadMLCDoc = models.FileField(upload_to='mlc_docs/', blank=True, null=True)
-    passAlertToAuthority = models.BooleanField(default=False)
-    birthTime = models.CharField(max_length=10, blank=True, null=True)
-    weight = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
-    mothersUHIDNo = models.CharField(max_length=20, blank=True)
-    pediatricianResponsible = models.CharField(max_length=100, blank=True)
+
+    roomShitingDetails = models.JSONField(blank=True, null=True)
+    reasonForAdmission = models.TextField(blank=True, null=True)
+    advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
+    ip_advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
+    creditLimit = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
+
+    mlc_type = models.CharField(max_length=50, blank=True, null=True)
+    mlc_doc = models.CharField(max_length=100, blank=True, null=True)
+    mlc_remarks = models.TextField(blank=True, null=True)
+
+    is_advanceActive = models.BooleanField(default=True)
+    refunded_Amount = models.CharField(max_length=100, blank=True, null=True) 
+    is_admissionActive = models.BooleanField(default=True)
+    is_roomCleaned = models.BooleanField(default=True)
+    is_roomActive = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.firstName} {self.lastName} ({self.uhid})"
-
-    def save(self, *args, **kwargs):
-        if not self.ipNumber:
-            # Logic for IP26/00001
-            from datetime import date
-            today = date.today()
-            year_part = today.strftime("%y") # e.g. 26
-            prefix = f"IP{year_part}/"
-            
-            # Find last admission with this prefix
-            last_admission = Admission.objects.filter(ipNumber__startswith=prefix).order_by('-ipNumber').first()
-            
-            if last_admission:
-                try:
-                    last_num = int(last_admission.ipNumber.split('/')[-1])
-                    next_num = last_num + 1
-                except ValueError:
-                    next_num = 1
-            else:
-                next_num = 1
-            
-            self.ipNumber = f"{prefix}{str(next_num).zfill(5)}"
-        
-        super().save(*args, **kwargs)
+        return f"{self.uhid} {self.ipNumber}"
 
 class DischargeDetail(AuditModel):
     uhid_no = models.CharField(max_length=100, blank=True)
