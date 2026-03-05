@@ -191,13 +191,6 @@ class EstimateBillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import InvestBilling
-class InvestBillingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InvestBilling
-        fields = '__all__'
-
-
 from .models import ReferenceDoctor
 class ReferenceDoctorSerializer(serializers.ModelSerializer):
     class Meta:
@@ -210,4 +203,20 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = OPPharmacyBill
+        fields = '__all__'
+
+from .models import Billing
+class BillingSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.firstName', read_only=True)
+    patient_uhid = serializers.CharField(source='patient.uhid', read_only=True)
+    
+    class Meta:
+        model = Billing
+        fields = '__all__'
+
+from .models import InsuranceProvider
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
         fields = '__all__'
