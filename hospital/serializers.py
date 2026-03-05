@@ -75,34 +75,6 @@ class DoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import CTReport
-class CTReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CTReport
-        fields = ['age', 'date', 'gender', 'impression', 'investigation', 'patientId', 'patientName', 'approve','approve_time']
-
-
-from .models import MRIReport
-class MRIReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MRIReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import USGReport
-class USGReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = USGReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import XRayReport
-class XRayReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = XRayReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
 from .models import Admission
 class AdmissionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -121,13 +93,6 @@ from .models import EstimateBilling
 class EstimateBillingSerializer(serializers.ModelSerializer):
     class Meta:
         model = EstimateBilling
-        fields = '__all__'
-
-
-from .models import InvestBilling
-class InvestBillingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InvestBilling
         fields = '__all__'
 
 
