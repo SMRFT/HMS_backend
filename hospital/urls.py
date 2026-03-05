@@ -5,7 +5,6 @@ from .Views import (
     departmentBilling,
     discharge,
     doctormaster,
-    grn,
     ICD11,
     inventory,
     package_crud,
@@ -13,7 +12,7 @@ from .Views import (
     radiology,
     room,
     stock,
-    summary,package_crud, investigation_price, billType
+    summary,package_crud, investigation_price, billType,
     summary,
     dashboard,
     insurance_provider,
@@ -28,38 +27,30 @@ urlpatterns = [
     re_path(r'^get_op_patient_by_uhid/(?P<uhid>[\w%/-]+)/$', admission.get_op_patient_by_uhid, name='get_op_patient_by_uhid'),
     path('search-rooms/', admission.search_rooms, name='search-rooms'), 
 
-    # Pharmacy Stock URLs
-    path('ip-pharmacy-stock/', stock.ip_pharmacy_stock_view, name='ip_pharmacy_stock_list'),
-    path('ip-pharmacy-stock/<str:pk>/', stock.ip_pharmacy_stock_view, name='ip_pharmacy_stock_detail'),
-    path('op-pharmacy-stock/', stock.op_pharmacy_stock_view, name='op_pharmacy_stock_list'),
-    path('op-pharmacy-stock/<str:pk>/', stock.op_pharmacy_stock_view, name='op_pharmacy_stock_detail'),
+    # Vendor URLs
+    path("vendors/", inventory.vendor_view, name="vendor-list"),
+    path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
+
+    # Stock URLs
+    path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
+    path("pharmacy-items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
 
     # GRN URLs
-    path('ip-grn/', grn.ip_grn_view, name='ip_grn_list'),
-    path('ip-grn/<str:pk>/', grn.ip_grn_view, name='ip_grn_detail'),
-    path('op-grn/', grn.op_grn_view, name='op_grn_list'),
-    path('op-grn/<str:pk>/', grn.op_grn_view, name='op_grn_detail'),
-
-    # Vendor URLs
-    path('vendor/', inventory.vendor_view, name='vendor_list'),
-    path('vendor/<str:vendor_id>/', inventory.vendor_view, name='vendor_detail'),
+    path('grn/', inventory.grn_view, name='grn_list'),
+    path('grn/<str:pk>/', inventory.grn_view, name='grn_detail'),
     
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
     path('block/<int:pk>/', room.block_view, name='block_update_delete'),
-    
+
     path('room-category/', room.room_category_view, name='room_category_list_create'),
-    path('room-category/<int:pk>/', room.room_category_view, name='room_category_update_delete'),
+    path('room-category/<str:pk>/', room.room_category_view, name='room_category_update_delete'),
     
     path('room/', room.room_view, name='room_list_create'),
-    path('room/<int:pk>/', room.room_view, name='room_update_delete'),
+    path('room/<str:pk>/', room.room_view, name='room_update_delete'),
     
-    path('bed/', room.bed_view, name='bed_list_create'),
-    path('bed/<int:pk>/', room.bed_view, name='bed_update_delete'),
-    
-    path('service/', room.service_view, name='service_list_create'),
-    path('service/<int:pk>/', room.service_view, name='service_update_delete'),
-    
+    path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
+
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 

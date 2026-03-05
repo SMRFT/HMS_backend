@@ -14,124 +14,254 @@ import os
 from rest_framework.decorators import api_view, permission_classes
 from django.views.decorators.csrf import csrf_exempt
 
-from ..models import Vendor
-from ..serializers import VendorSerializer
-
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission
 
 # Logger setup
 logger = logging.getLogger(__name__)
 
-# Removed Item views
 
+#VENDOR VIEWS
+from ..models import Vendor
+from ..serializers import VendorSerializer
 
-def get_next_vendor_id(collection):
-    last_vendor = collection.aggregate([
-        {
-            "$match": {
-                "vendor_id": {"$exists": True, "$ne": None}
-            }
-        },
-        {
-            "$addFields": {
-                "vendor_id_int": {"$toInt": "$vendor_id"}
-            }
-        },
-        {
-            "$sort": {"vendor_id_int": -1}
-        },
-        {
-            "$limit": 1
-        }
-    ])
-
-    last_vendor = list(last_vendor)
-
-    if not last_vendor:
-        return "1"
-
-    return str(last_vendor[0]["vendor_id_int"] + 1)
-
-
-
-# ==================== VENDOR VIEWS ====================
-@api_view(['GET', 'POST', 'PATCH', 'DELETE'])
-@permission_classes([HasRoleAndDataPermission])
+@api_view(["GET", "POST", "PUT", "DELETE"])
 @csrf_exempt
-def vendor_view(request, vendor_id=None):
-    try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        db = client.HMS
-        collection = db.hospital_vendor
-        collection.update_many({"is_active": {"$exists": False}}, {"$set": {"is_active": True}})
+def vendor_view(request, pk=None):
 
-        if request.method == 'POST':
-            employee_id = request.data.get('auth-user-id', 'system')
+    user_id = request.headers.get("auth-user-id", "system")
 
-            next_vendor_id = get_next_vendor_id(collection)
+    # ── GET ──
+    if request.method == "GET":
+        if pk:
+            try:
+                vendor = Vendor.objects.get(vendor_id=pk)
+                if not vendor.is_active:
+                    return Response({"error": "Vendor not found"}, status=404)
+            except Vendor.DoesNotExist:
+                return Response({"error": "Vendor not found"}, status=404)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid Vendor ID"}, status=400)
 
-            data = request.data.copy()
-            data["vendor_id"] = next_vendor_id
-            data["created_by"] = employee_id
-            data["created_date"] = datetime.now()
-            data["lastmodified_by"] = employee_id
-            data["lastmodified_date"] = datetime.now()
-            data["is_active"] = True
+            serializer = VendorSerializer(vendor)
+            return Response(serializer.data)
 
-            serializer = VendorSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
+        # List – filter in Python to avoid Djongo boolean filter bug
+        all_vendors = Vendor.objects.all().order_by("vendor_id")
+        vendors = [v for v in all_vendors if v.is_active]
+        serializer = VendorSerializer(vendors, many=True)
+        return Response(serializer.data)
 
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # ── POST ──
+    if request.method == "POST":
+        serializer = VendorSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
 
+    # ── PUT ──
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "Vendor ID required"}, status=400)
+        try:
+            vendor = Vendor.objects.get(vendor_id=pk)
+            if not vendor.is_active:
+                return Response({"error": "Vendor not found"}, status=404)
+        except Vendor.DoesNotExist:
+            return Response({"error": "Vendor not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Vendor ID"}, status=400)
 
-        elif request.method == 'GET':
-            if vendor_id:
-                try:
-                    doc = collection.find_one({"_id": ObjectId(vendor_id), "is_active": True})
-                    if not doc:
-                        doc = collection.find_one({"vendor_id": vendor_id, "is_active": True})
-                    
-                    if not doc:
-                        return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
-                    
-                    doc['id'] = str(doc['_id'])
-                    del doc['_id']
-                    return Response(doc)
-                except Exception as e:
-                    return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            else:
-                vendors = list(collection.find({"is_active": True}))
-                for vendor in vendors:
-                    vendor['id'] = str(vendor['_id'])
-                    del vendor['_id']
-                return Response(vendors)
+        serializer = VendorSerializer(vendor, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save(lastmodified_by=user_id)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
 
-        elif request.method == 'PATCH':
-            if not vendor_id:
-                return Response({"error": "vendor_id required"}, status=status.HTTP_400_BAD_REQUEST)
-            employee_id = request.data.get('auth-user-id')
-            update_data = request.data.copy()
-            update_data["lastmodified_by"] = employee_id
-            update_data["lastmodified_date"] = datetime.now()
-            result = collection.update_one({"_id": ObjectId(vendor_id)}, {"$set": update_data})
-            if result.matched_count == 0:
-                return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
-            updated = collection.find_one({"_id": ObjectId(vendor_id)})
-            updated["id"] = str(updated["_id"])
-            del updated["_id"]
-            return Response(updated)
+    # ── DELETE ──
+    if request.method == "DELETE":
+        if not pk:
+            return Response({"error": "Vendor ID required"}, status=400)
+        try:
+            vendor = Vendor.objects.get(vendor_id=pk)
+            if not vendor.is_active:
+                return Response({"error": "Vendor not found"}, status=404)
+        except Vendor.DoesNotExist:
+            return Response({"error": "Vendor not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Vendor ID"}, status=400)
 
-        elif request.method == 'DELETE':
-            if not vendor_id:
-                return Response({"error": "vendor_id required"}, status=status.HTTP_400_BAD_REQUEST)
-            result = collection.update_one({"_id": ObjectId(vendor_id)}, {"$set": {"is_active": False}})
-            if result.matched_count == 0:
-                return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
-            return Response({"message": "Vendor deleted successfully"}, status=status.HTTP_200_OK)
+        vendor.is_active = False
+        vendor.lastmodified_by = user_id
+        vendor.save()
+        return Response({"message": "Deleted successfully"}, status=200)
 
-    except Exception as e:
-        logger.error(f"Error in vendor_view: {e}")
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+#PHARMACY STOCK VIEWS
+
+from ..models import PharmacyItem
+from ..serializers import PharmacyItemSerializer
+
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@csrf_exempt
+def pharmacy_item_view(request, pk=None):
+
+    user_id = request.headers.get("auth-user-id", "system")
+
+    # ── GET ──
+    if request.method == "GET":
+        if pk:
+            try:
+                item = PharmacyItem.objects.get(item_id=pk)
+                if not item.is_active:
+                    return Response({"error": "Item not found"}, status=404)
+            except PharmacyItem.DoesNotExist:
+                return Response({"error": "Item not found"}, status=404)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid Item ID"}, status=400)
+
+            serializer = PharmacyItemSerializer(item)
+            return Response(serializer.data)
+
+        # List – filter in Python to avoid Djongo boolean filter bug
+        all_items = PharmacyItem.objects.all().order_by("item_id")
+        items = [i for i in all_items if i.is_active]
+        serializer = PharmacyItemSerializer(items, many=True)
+        return Response(serializer.data)
+
+    # ── POST ──
+    if request.method == "POST":
+        serializer = PharmacyItemSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+    # ── PUT ──
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "Item ID required"}, status=400)
+        try:
+            item = PharmacyItem.objects.get(item_id=pk)
+            if not item.is_active:
+                return Response({"error": "Item not found"}, status=404)
+        except PharmacyItem.DoesNotExist:
+            return Response({"error": "Item not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Item ID"}, status=400)
+
+        serializer = PharmacyItemSerializer(item, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save(lastmodified_by=user_id)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+
+    # ── DELETE ──
+    if request.method == "DELETE":
+        if not pk:
+            return Response({"error": "Item ID required"}, status=400)
+        try:
+            item = PharmacyItem.objects.get(item_id=pk)
+            if not item.is_active:
+                return Response({"error": "Item not found"}, status=404)
+        except PharmacyItem.DoesNotExist:
+            return Response({"error": "Item not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Item ID"}, status=400)
+
+        item.is_active = False
+        item.lastmodified_by = user_id
+        item.save()
+        return Response({"message": "Deleted successfully"}, status=200)
+    
+
+#GRN VIEWS
+
+from ..models import GRN
+from ..serializers import GRNSerializer
+
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@csrf_exempt
+def grn_view(request, pk=None):
+
+    user_id = request.headers.get("auth-user-id", "system")
+
+    # ── GET ──
+    if request.method == "GET":
+        if pk:
+            try:
+                grn = GRN.objects.get(grn_id=pk)
+                if not grn.is_active:
+                    return Response({"error": "GRN not found"}, status=404)
+            except GRN.DoesNotExist:
+                return Response({"error": "GRN not found"}, status=404)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid GRN ID"}, status=400)
+
+            serializer = GRNSerializer(grn)
+            return Response(serializer.data)
+
+        # List – filter in Python to avoid Djongo boolean filter bug
+        all_grns = GRN.objects.all().order_by("-grn_id")
+        grns = [g for g in all_grns if g.is_active]
+        serializer = GRNSerializer(grns, many=True)
+        return Response(serializer.data)
+
+    # ── POST ──
+    if request.method == "POST":
+        data = request.data.copy()
+
+        # Serialize list/dict fields to JSON strings
+        if isinstance(data.get("items"), (list, dict)):
+            data["items"] = json.dumps(data["items"])
+        if isinstance(data.get("payment_status"), (list, dict)):
+            data["payment_status"] = json.dumps(data["payment_status"])
+
+        serializer = GRNSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+    # ── PUT ──
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "GRN ID required"}, status=400)
+        try:
+            grn = GRN.objects.get(grn_id=pk)
+            if not grn.is_active:
+                return Response({"error": "GRN not found"}, status=404)
+        except GRN.DoesNotExist:
+            return Response({"error": "GRN not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid GRN ID"}, status=400)
+
+        data = request.data.copy()
+        if isinstance(data.get("items"), (list, dict)):
+            data["items"] = json.dumps(data["items"])
+        if isinstance(data.get("payment_status"), (list, dict)):
+            data["payment_status"] = json.dumps(data["payment_status"])
+
+        serializer = GRNSerializer(grn, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save(lastmodified_by=user_id)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+
+    # ── DELETE ──
+    if request.method == "DELETE":
+        if not pk:
+            return Response({"error": "GRN ID required"}, status=400)
+        try:
+            grn = GRN.objects.get(grn_id=pk)
+            if not grn.is_active:
+                return Response({"error": "GRN not found"}, status=404)
+        except GRN.DoesNotExist:
+            return Response({"error": "GRN not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid GRN ID"}, status=400)
+
+        grn.is_active = False
+        grn.lastmodified_by = user_id
+        grn.save()
+        return Response({"message": "GRN deleted successfully"}, status=200)
