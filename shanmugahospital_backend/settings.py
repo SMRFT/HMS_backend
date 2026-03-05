@@ -29,7 +29,7 @@ SECRET_KEY = 'django-insecure-4vrkav1_!gyd3g)8bw6+a=4#&4y9ake$s08601jt3=5q+fh%ns
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["127.0.0.1"]
 
 
 # Application definition
@@ -122,7 +122,11 @@ CORS_ALLOW_HEADERS = [
     "Content-Type",
     "Branch-Code"
 ]
+WHO_ICD_CLIENT_ID = os.getenv("WHO_ICD_CLIENT_ID")
+WHO_ICD_CLIENT_SECRET = os.getenv("WHO_ICD_CLIENT_SECRET")
 
+WHO_TOKEN_URL = "https://icdaccessmanagement.who.int/connect/token"
+WHO_BASE_URL = "https://id.who.int/icd/release/11/2023-01/mms"
 # Internationalization
 # https://docs.djangoproject.com/en/3.2/topics/i18n/
 

@@ -14,6 +14,9 @@ from .Views import (
     room,
     stock,
     summary,package_crud, investigation_price, billType
+    summary,
+    dashboard,
+    insurance_provider,
 )
 
 urlpatterns = [
@@ -68,6 +71,13 @@ urlpatterns = [
     path('patients/register/', views.patientCreateView, name='patient-register'),
     path('create/', views.patientCreateView, name='patient-list'),
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
+    path('patient-registration-stats/', views.patient_registration_stats, name='patient_registration_stats'),
+    path('patient-visit-list/', views.patient_visit_list, name='patient_visit_list'),
+    path('generate-qr-session/', views.generate_qr_session, name='generate_qr_session'),
+    path('submit-qr-registration/', views.submit_qr_registration, name='submit_qr_registration'),
+    path('check-qr-status/', views.check_qr_status, name='check_qr_status'),
+    path('get-pending-qr-registrations/', views.get_pending_qr_registrations, name='get_pending_qr_registrations'),
+    path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('doctors/', views.doctor_view, name='doctor_view'),
     path('doctor_list/', views.doctor_list, name='doctor_list'),
     path('doctor_detail/<str:first_name>/', views.doctor_detail, name='doctor_detail'),
@@ -143,4 +153,19 @@ urlpatterns = [
     path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
     
 
+    # Dashboard URLs
+    path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
+
+    # User Permissions (Dynamic Table)
+    path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),
+    path('update-user-permissions/', views.update_user_permissions, name='update_user_permissions'),
+    path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
+    path('registration-bills/', views.registration_bills, name='registration_bills'),
+    re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
+    path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
+    
+    # Insurance Provider URLs
+    path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
+    path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
 ]
