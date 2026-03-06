@@ -230,32 +230,27 @@ class Room(AuditModel):
 class Admission(AuditModel):
     uhid = models.CharField(max_length=20)
     ipNumber = models.CharField(max_length=20)
-    admissionDate = models.DateField()
-    time = models.TimeField()
-
+    admissionDateTime= models.DateTimeField()
     admittingDoctor = models.CharField(max_length=100)
     consultingDoctor = models.CharField(max_length=100, blank=True, null=True)
-
     packageName = models.CharField(max_length=100)
-
     roomNo = models.CharField(max_length=10)
     bedNo = models.CharField(max_length=10)
-
     roomShitingDetails = models.JSONField(blank=True, null=True)
     reasonForAdmission = models.TextField(blank=True, null=True)
     advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
     ip_advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
     creditLimit = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
-
     mlc_type = models.CharField(max_length=50, blank=True, null=True)
     mlc_doc = models.CharField(max_length=100, blank=True, null=True)
     mlc_remarks = models.TextField(blank=True, null=True)
-
-    is_advanceActive = models.BooleanField(default=True)
+    is_advanceActive = models.BooleanField(default=False)
     refunded_Amount = models.CharField(max_length=100, blank=True, null=True) 
     is_admissionActive = models.BooleanField(default=True)
-    is_roomCleaned = models.BooleanField(default=True)
-    is_roomActive = models.BooleanField(default=True)
+    is_roomCleaned = models.BooleanField(default=False)
+    is_roomActive = models.BooleanField(default=False)
+    is_discharged = models.BooleanField(default=False)
+    ipserial_number = models.CharField(max_length=50)
 
     def __str__(self):
         return f"{self.uhid} {self.ipNumber}"

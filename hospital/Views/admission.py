@@ -19,6 +19,11 @@ def _get_db():
     return client.HMS
 
 
+def _get_global_db():
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+    return client['Global']
+
+
 def _serialize_doc(doc):
     """Convert a MongoDB document to a JSON-serializable dict."""
     doc = dict(doc)
@@ -32,6 +37,55 @@ def _serialize_doc(doc):
     return doc
 
 
+def _enrich_admission(adm, patient_cache=None, doctor_cache=None):
+    """
+    Enrich a serialized admission doc with:
+      - patient fields (name, age, gender, phone, address) from hospital_patient
+      - admittingDoctorName / consultingDoctorName from Global.backend_diagnostics_profile
+    """
+    db = _get_db()
+    global_db = _get_global_db()
+
+    uhid = adm.get('uhid')
+    if uhid:
+        patient = (patient_cache or {}).get(uhid)
+        if patient is None:
+            patient = db.hospital_patient.find_one({"uhid": uhid}) or {}
+        adm['salutation']         = patient.get('salutation', '')
+        adm['firstName']          = patient.get('firstName', '')
+        adm['middleName']         = patient.get('middleName', '')
+        adm['lastName']           = patient.get('lastName', '')
+        adm['age']                = patient.get('age', '')
+        adm['gender']             = patient.get('gender', '')
+        adm['phone']              = patient.get('phone', '')
+        adm['permanent_address']  = patient.get('permanent_address', '')
+        adm['area']               = patient.get('area', '')
+        adm['zipcode']            = patient.get('zipcode', '')
+        adm['city']               = patient.get('city', '')
+        adm['state']              = patient.get('state', '')
+        adm['customerType']       = patient.get('customerType', '')
+        adm['insuranceCompany']   = patient.get('insuranceCompany', '')
+        adm['privilegedCustomerId'] = patient.get('privilegedCustomerId', '')
+
+    diagnostics = global_db['backend_diagnostics_profile']
+
+    admitting_id = adm.get('admittingDoctor')
+    if admitting_id:
+        doc = (doctor_cache or {}).get(str(admitting_id))
+        if doc is None:
+            doc = diagnostics.find_one({"employeeId": admitting_id}) or {}
+        adm['admittingDoctorName'] = doc.get('employeeName', admitting_id)
+
+    consulting_id = adm.get('consultingDoctor')
+    if consulting_id:
+        doc = (doctor_cache or {}).get(str(consulting_id))
+        if doc is None:
+            doc = diagnostics.find_one({"employeeId": consulting_id}) or {}
+        adm['consultingDoctorName'] = doc.get('employeeName', consulting_id)
+
+    return adm
+
+
 # ─── IP Number (auto-generated) ───────────────────────────────────────────────
 
 @api_view(['GET'])
@@ -42,9 +96,9 @@ def get_next_ip_number(request):
     current_month = datetime.now().month
 
     if current_month < 4:
-        banking_year = current_year - 2001   # Jan-Mar → previous FY
+        banking_year = current_year - 2001
     else:
-        banking_year = current_year - 2000   # Apr-Dec → current FY
+        banking_year = current_year - 2000
 
     new_prefix = f"S{banking_year:03d}"
 
@@ -70,11 +124,6 @@ def get_next_ip_number(request):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_op_patient_by_uhid(request, uhid):
-    """
-    Returns: salutation, firstName, middleName, lastName, customerType,
-             insuranceCompany, privilegedCustomerId, age, gender, phone,
-             permanent_address, area, zipcode, city, state
-    """
     try:
         db = _get_db()
         patient = db.hospital_patient.find_one({"uhid": uhid})
@@ -85,16 +134,12 @@ def get_op_patient_by_uhid(request, uhid):
         return Response({"error": str(e)}, status=500)
 
 
-# ─── OP Patient Search (partial UHID, min 4 chars) ────────────────────────────
+# ─── OP Patient Search ────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def search_op_patients(request):
-    """
-    GET /op-patient-search/?uhid=1234
-    Returns patients whose UHID contains the given string (min 4 chars).
-    """
     try:
         uhid_query = request.GET.get('uhid', '').strip()
         if len(uhid_query) < 4:
@@ -120,15 +165,11 @@ def search_op_patients(request):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def search_rooms(request):
-    """
-    GET /search-rooms/?room_number=&room_category=&block=&floor=
-    Only returns rooms where is_active=True.
-    """
     try:
-        room_number = request.GET.get('room_number')
+        room_number   = request.GET.get('room_number')
         room_category = request.GET.get('room_category')
-        block = request.GET.get('block')
-        floor = request.GET.get('floor')
+        block         = request.GET.get('block')
+        floor         = request.GET.get('floor')
 
         rooms = [room for room in Room.objects.all() if room.is_active]
 
@@ -143,31 +184,23 @@ def search_rooms(request):
                 floor = int(floor)
                 rooms = [r for r in rooms if r.floor == floor]
             except ValueError:
-                return Response(
-                    {"error": "Floor must be a number"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({"error": "Floor must be a number"}, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = RoomSerializer(rooms, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     except Exception as e:
         import traceback
-        print("Error in search_rooms:", e)
         print(traceback.format_exc())
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# ─── Room Beds (by room_number) ───────────────────────────────────────────────
+# ─── Room Beds ────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_room_beds(request, room_number):
-    """
-    GET /room-beds/<room_number>/
-    Returns the list of beds for the given active room.
-    """
     try:
         room = Room.objects.filter(room_number=room_number, is_active=True).first()
         if not room:
@@ -185,42 +218,67 @@ def get_room_beds(request, room_number):
 @csrf_exempt
 def admission_view(request):
     """
-    GET  /admission/         – list active admissions (optionally filter by ip_number)
-    POST /admission/         – create new admission (ipNumber auto-generated)
+    GET  /admission/   – list active admissions (enriched with patient + doctor names)
+    POST /admission/   – create new admission (stores only model fields)
     """
     try:
         db = _get_db()
         collection = db.hospital_admission
 
+        # ── GET ────────────────────────────────────────────────────────────────
         if request.method == 'GET':
-            query = {"is_active": True}
+            query = {"is_admissionActive": True}
 
             ip_filter = request.GET.get('ip_number', '').strip()
             if ip_filter:
-                # Support both partial search (min 4 chars) and exact match (e.g. S025/500001)
                 if '/' in ip_filter:
-                    # Exact or near-exact IP Number lookup from Admission model
                     query["ipNumber"] = {"$regex": f"^{ip_filter}", "$options": "i"}
                 elif len(ip_filter) < 4:
-                    return JsonResponse(
-                        {"error": "ip_number filter must be at least 4 characters"},
-                        status=400
-                    )
+                    return JsonResponse({"error": "ip_number filter must be at least 4 characters"}, status=400)
                 else:
                     query["ipNumber"] = {"$regex": ip_filter, "$options": "i"}
 
-            admissions = [_serialize_doc(a) for a in collection.find(query)]
-            return JsonResponse(admissions, safe=False)
+            raw_admissions = list(collection.find(query))
+            admissions = [_serialize_doc(a) for a in raw_admissions]
 
+            # Bulk-fetch patients and doctors to minimise DB round-trips
+            uhids = list({a['uhid'] for a in admissions if a.get('uhid')})
+            doctor_ids = list({
+                a.get('admittingDoctor') for a in admissions if a.get('admittingDoctor')
+            } | {
+                a.get('consultingDoctor') for a in admissions if a.get('consultingDoctor')
+            })
+
+            global_db   = _get_global_db()
+            patient_cache = {
+                p['uhid']: p
+                for p in db.hospital_patient.find({"uhid": {"$in": uhids}})
+                if 'uhid' in p
+            }
+            doctor_cache = {
+                str(d['employeeId']): d
+                for d in global_db['backend_diagnostics_profile'].find(
+                    {"employeeId": {"$in": doctor_ids}}
+                )
+                if 'employeeId' in d
+            }
+
+            enriched = [
+                _enrich_admission(a, patient_cache=patient_cache, doctor_cache=doctor_cache)
+                for a in admissions
+            ]
+            return JsonResponse(enriched, safe=False)
+
+        # ── POST ───────────────────────────────────────────────────────────────
         elif request.method == 'POST':
             data = dict(request.data)
             data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in data.items()}
 
             # ── Auto-generate IP Number ──────────────────────────────────────
-            current_year = datetime.now().year
+            current_year  = datetime.now().year
             current_month = datetime.now().month
-            banking_year = (current_year - 2001) if current_month < 4 else (current_year - 2000)
-            new_prefix = f"S{banking_year:03d}"
+            banking_year  = (current_year - 2001) if current_month < 4 else (current_year - 2000)
+            new_prefix    = f"S{banking_year:03d}"
 
             latest_admission = Admission.objects.order_by('-ipNumber').first()
             if latest_admission:
@@ -235,12 +293,25 @@ def admission_view(request):
 
             data['ipNumber'] = f"{new_prefix}/{next_number:06d}"
 
-            # ── Strip fields not in model ────────────────────────────────────
+            # ── Parse admissionDateTime ──────────────────────────────────────
+            admission_dt_raw = data.get('admissionDateTime')
+            if admission_dt_raw:
+                try:
+                    # Accept ISO format from frontend
+                    admission_dt = datetime.fromisoformat(
+                        admission_dt_raw.replace('Z', '+00:00')
+                    )
+                except Exception:
+                    admission_dt = datetime.now()
+            else:
+                admission_dt = datetime.now()
+            data['admissionDateTime'] = admission_dt
+
+            # ── Only store fields that are in the Admission model ────────────
             allowed_fields = {
-                'uhid', 'ipNumber', 'admissionDate', 'time',
-                'salutation', 'firstName', 'middleName', 'lastName',
-                'customerType', 'insuranceCompany', 'privilegedCustomerId',
-                'admittingDoctor', 'consultingDoctor',
+                'uhid', 'ipNumber', 'admissionDateTime',
+                'admittingDoctor',   # stored as employeeId
+                'consultingDoctor',  # stored as employeeId
                 'roomNo', 'bedNo',
                 'reasonForAdmission', 'packageName',
                 'mlc_type', 'mlc_doc', 'mlc_remarks',
@@ -249,21 +320,18 @@ def admission_view(request):
             }
             data = {k: v for k, v in data.items() if k in allowed_fields}
 
-            # ── Boolean defaults ─────────────────────────────────────────────
+            # ── Defaults ─────────────────────────────────────────────────────
             for bool_field in ('is_advanceActive', 'is_admissionActive', 'is_roomCleaned', 'is_roomActive'):
                 data.setdefault(bool_field, False)
-
-            # ── Null defaults ────────────────────────────────────────────────
             for null_field in ('roomShitingDetails', 'advance', 'ip_advance', 'creditLimit'):
                 data.setdefault(null_field, None)
 
             employee_id = request.headers.get('auth-user-id', 'system')
             data.update({
-                'created_by': employee_id,
-                'lastmodified_by': employee_id,
-                'is_active': True,
-                'created_date': datetime.now(),
-                'lastmodified_date': datetime.now(),
+                'created_by':         employee_id,
+                'lastmodified_by':    employee_id,
+                'created_date':       datetime.now(),
+                'lastmodified_date':  datetime.now(),
             })
 
             result = collection.insert_one(data)
@@ -273,10 +341,10 @@ def admission_view(request):
                 if isinstance(v, datetime):
                     data[k] = v.isoformat()
 
-            return JsonResponse(
-                {'message': 'Admission created successfully!', 'data': data},
-                status=201
-            )
+            # Enrich for immediate frontend use (print slip)
+            data = _enrich_admission(data)
+
+            return JsonResponse({'message': 'Admission created successfully!', 'data': data}, status=201)
 
     except Exception as e:
         import traceback
@@ -290,24 +358,28 @@ def admission_view(request):
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
-def admission_detail(request, admission_id):
+def admission_detail(request, id):
     """
-    GET    /admission/<id>/   – fetch one admission
+    GET    /admission/<id>/   – fetch one admission (enriched)
     PUT    /admission/<id>/   – update admission
-    DELETE /admission/<id>/   – soft-delete / cancel (sets is_active=False)
+    DELETE /admission/<id>/   – soft-delete / cancel
     """
+
     try:
         db = _get_db()
         collection = db.hospital_admission
 
         admission = None
+
+        # Try finding using MongoDB ObjectId
         try:
-            admission = collection.find_one({"_id": ObjectId(admission_id)})
+            admission = collection.find_one({"_id": ObjectId(id)})
         except Exception:
             pass
 
+        # If not found, try using UHID
         if not admission:
-            admission = collection.find_one({"uhid": admission_id, "is_active": True})
+            admission = collection.find_one({"uhid": id, "is_admissionActive": True})
 
         if not admission:
             return JsonResponse({'error': 'Admission not found'}, status=404)
@@ -315,29 +387,46 @@ def admission_detail(request, admission_id):
         object_id = admission['_id']
         admission = _serialize_doc(admission)
 
+        # ───────────────────────── GET ─────────────────────────
         if request.method == 'GET':
-            return JsonResponse(admission)
+            return JsonResponse(_enrich_admission(admission))
 
+        # ───────────────────────── PUT ─────────────────────────
         elif request.method == 'PUT':
+
             update_data = dict(request.data)
+
             update_data = {
                 k: v[0] if isinstance(v, list) and len(v) == 1 else v
                 for k, v in update_data.items()
             }
 
-            # Strip fields not in model
             allowed_fields = {
-                'admissionDate', 'time',
-                'salutation', 'firstName', 'middleName', 'lastName',
-                'customerType', 'insuranceCompany', 'privilegedCustomerId',
-                'admittingDoctor', 'consultingDoctor',
-                'roomNo', 'bedNo',
-                'reasonForAdmission', 'packageName',
-                'mlc_type', 'mlc_doc', 'mlc_remarks',
+                'admissionDateTime',
+                'admittingDoctor',
+                'consultingDoctor',
+                'roomNo',
+                'bedNo',
+                'reasonForAdmission',
+                'packageName',
+                'mlc_type',
+                'mlc_doc',
+                'mlc_remarks',
             }
+
             update_data = {k: v for k, v in update_data.items() if k in allowed_fields}
 
+            # Parse datetime
+            if 'admissionDateTime' in update_data:
+                try:
+                    update_data['admissionDateTime'] = datetime.fromisoformat(
+                        update_data['admissionDateTime'].replace('Z', '+00:00')
+                    )
+                except Exception:
+                    update_data.pop('admissionDateTime', None)
+
             employee_id = request.headers.get('auth-user-id', 'system')
+
             update_data['lastmodified_by'] = employee_id
             update_data['lastmodified_date'] = datetime.now()
 
@@ -351,27 +440,34 @@ def admission_detail(request, admission_id):
 
             return JsonResponse({'message': 'Admission updated successfully!'}, status=200)
 
+        # ───────────────────────── DELETE ─────────────────────────
         elif request.method == 'DELETE':
+
             employee_id = request.headers.get('auth-user-id', 'system')
 
             cancel_data = {}
+
             try:
                 cancel_data = dict(request.data)
+
                 cancel_data = {
                     k: v[0] if isinstance(v, list) and len(v) == 1 else v
                     for k, v in cancel_data.items()
                 }
+
             except Exception:
                 pass
 
             result = collection.update_one(
                 {"_id": object_id},
-                {"$set": {
-                    "is_active": False,
-                    "cancelled_by": employee_id,
-                    "cancelled_date": datetime.now(),
-                    "cancellation_reason": cancel_data.get('cancellationReason', ''),
-                }}
+                {
+                    "$set": {
+                        "is_admissionActive": False,
+                        "cancelled_by": employee_id,
+                        "cancelled_date": datetime.now(),
+                        "cancellation_reason": cancel_data.get('cancellationReason', ''),
+                    }
+                }
             )
 
             if result.matched_count == 0:
@@ -381,6 +477,8 @@ def admission_detail(request, admission_id):
 
     except Exception as e:
         import traceback
+
         print("Error in admission_detail:", e)
         print(traceback.format_exc())
+
         return JsonResponse({'error': str(e)}, status=500)
