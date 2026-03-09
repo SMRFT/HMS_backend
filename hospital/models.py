@@ -6,6 +6,9 @@ from decimal import Decimal
 from datetime import datetime
 
 class AuditModel(models.Model):
+    hospital_code = models.CharField(max_length=100, null=True, blank=True)
+    branch_code = models.CharField(max_length=100, null=True, blank=True)
+    department_code = models.CharField(max_length=100, null=True, blank=True)
     created_by = models.CharField(max_length=100, null=True, blank=True)
     created_date = models.DateTimeField(null=True, blank=True)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
@@ -28,27 +31,33 @@ class HSNCode(AuditModel):
     chapter = models.CharField(max_length=50)
     hsn_code = models.CharField(max_length=10, unique=True, primary_key=True)
     description = models.TextField()
-    tax = models.DecimalField(max_digits=5, decimal_places=2)
 
     def __str__(self):
         return f"{self.chapter} - {self.hsn_code}"
 
 class PharmacyItem(AuditModel):
     item_id = models.IntegerField(primary_key=True)
-    item_first_name = models.CharField(max_length=200)
+    item_name = models.CharField(max_length=200)
     item_last_name = models.CharField(max_length=200, blank=True)
-    group = models.CharField(max_length=50)
     category = models.CharField(max_length=50)
-    classification = models.CharField(max_length=100)
     hsn = models.CharField(max_length=50, blank=True)
-    dosage = models.CharField(max_length=20,blank=True)
-    shelf_no = models.CharField(max_length=50, blank=True)
-    rack_no = models.CharField(max_length=50, blank=True)
     high_risk = models.BooleanField(default=False)
     look_alike = models.BooleanField(default=False)
     sound_alike = models.BooleanField(default=False)
     reorder_level = models.IntegerField(default=0)
+    IP_shelf_no = models.CharField(max_length=50, blank=True)
+    IP_rack_no = models.CharField(max_length=50, blank=True)
+    OP_shelf_no = models.CharField(max_length=50, blank=True)
+    OP_rack_no = models.CharField(max_length=50, blank=True)
+    G_shelf_no = models.CharField(max_length=50, blank=True)
+    G_rack_no = models.CharField(max_length=50, blank=True)
+    IP_available = models.BooleanField(default=True)
+    OP_available = models.BooleanField(default=True)
+    G_available = models.BooleanField(default=True)
+    is_blocked = models.BooleanField(default=True)
+    blocked_reason = models.CharField(max_length=50, blank=True)
     is_active = models.BooleanField(default=True)
+
 
     def save(self, *args, **kwargs):
         if self.item_id is None:
@@ -57,7 +66,7 @@ class PharmacyItem(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.item_first_name} {self.item_last_name}"
+        return f"{self.item_id} {self.item_name}"
 
 class Vendor(AuditModel):
     vendor_id = models.CharField(primary_key=True,max_length=10)
@@ -227,33 +236,49 @@ class Room(AuditModel):
             self.room_kits = []
         super().save(*args, **kwargs)
 
+
 class Admission(AuditModel):
-    uhid = models.CharField(max_length=20)
-    ipNumber = models.CharField(max_length=20)
-    admissionDateTime= models.DateTimeField()
-    admittingDoctor = models.CharField(max_length=100)
-    consultingDoctor = models.CharField(max_length=100, blank=True, null=True)
-    packageName = models.CharField(max_length=100)
-    roomNo = models.CharField(max_length=10)
-    bedNo = models.CharField(max_length=10)
-    roomShitingDetails = models.JSONField(blank=True, null=True)
-    reasonForAdmission = models.TextField(blank=True, null=True)
-    advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
-    ip_advance = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
-    creditLimit = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
-    mlc_type = models.CharField(max_length=50, blank=True, null=True)
-    mlc_doc = models.CharField(max_length=100, blank=True, null=True)
-    mlc_remarks = models.TextField(blank=True, null=True)
-    is_advanceActive = models.BooleanField(default=False)
-    refunded_Amount = models.CharField(max_length=100, blank=True, null=True) 
-    is_admissionActive = models.BooleanField(default=True)
-    is_roomCleaned = models.BooleanField(default=False)
-    is_roomActive = models.BooleanField(default=False)
-    is_discharged = models.BooleanField(default=False)
-    ipserial_number = models.CharField(max_length=50)
+    uhid                = models.CharField(max_length=20)
+    ipNumber            = models.CharField(max_length=20, unique=True)
+    ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
+    admissionDateTime   = models.DateTimeField()
+    admittingDoctor     = models.CharField(max_length=100)               # stores employeeId
+    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  # stores employeeId
+    packageName         = models.CharField(max_length=100, blank=True, null=True)
+    roomNo              = models.CharField(max_length=10)
+    bedNo               = models.CharField(max_length=10)
+    roomShitingDetails  = models.JSONField(blank=True, null=True)
+    reasonForAdmission  = models.TextField(blank=True, null=True)
+
+    # ── Advance / Finance ───────────────────────────────────────────────────
+    advance             = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    ip_advance          = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    total_advance       = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    creditLimit         = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    refunded_Amount     = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+
+    # Stores each advance payment as a list of objects:
+    # [{ bill_number, amount, payment_mode, remarks, paid_date, type, created_by }]
+    advance_payments    = models.JSONField(blank=True, null=True, default=list)
+
+    # ── MLC ────────────────────────────────────────────────────────────────
+    mlc_type            = models.CharField(max_length=50, blank=True, null=True)
+    mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
+    mlc_remarks         = models.TextField(blank=True, null=True)
+
+    # ── Flags ──────────────────────────────────────────────────────────────
+    is_advanceActive    = models.BooleanField(default=False)
+    is_admissionActive  = models.BooleanField(default=True)
+    is_roomCleaned      = models.BooleanField(default=False)
+    is_roomActive       = models.BooleanField(default=False)
+    is_discharged       = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-admissionDateTime']
 
     def __str__(self):
-        return f"{self.uhid} {self.ipNumber}"
+        return f"{self.uhid} | {self.ipNumber}"
+
 
 class DischargeDetail(AuditModel):
     uhid_no = models.CharField(max_length=100, blank=True)
