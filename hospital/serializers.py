@@ -11,12 +11,12 @@ class ObjectIdField(serializers.Field):
         except:
             return data
         
-from .models import HSNCode
-class HSNCodeSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+from .models import PharmacyCategory
+class PharmacyCategorySerializer(serializers.ModelSerializer):
     class Meta:
-        model = HSNCode
-        fields = '__all__'
+        model = PharmacyCategory
+        fields = "__all__"
+        read_only_fields = ["category_id"]
 
         
 from .models import PharmacyItem

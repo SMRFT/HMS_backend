@@ -31,6 +31,10 @@ urlpatterns = [
     path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
     path("pharmacy-items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
 
+    # Pharmacy Category URLs
+    path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),
+    path("pharmacy-category/<int:pk>/", inventory.pharmacycategory_view, name="pharmacy-category-detail"),
+
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     path('grn/<str:pk>/', inventory.grn_view, name='grn_detail'),

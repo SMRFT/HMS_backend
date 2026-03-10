@@ -6,9 +6,9 @@ from decimal import Decimal
 from datetime import datetime
 
 class AuditModel(models.Model):
-    hospital_code = models.CharField(max_length=100, null=True, blank=True)
-    branch_code = models.CharField(max_length=100, null=True, blank=True)
-    department_code = models.CharField(max_length=100, null=True, blank=True)
+    hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
+    # branch_code = models.CharField(max_length=100, null=True, blank=True)
+    # department_code = models.CharField(max_length=100, null=True, blank=True)
     created_by = models.CharField(max_length=100, null=True, blank=True)
     created_date = models.DateTimeField(null=True, blank=True)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
@@ -27,13 +27,20 @@ class AuditModel(models.Model):
 
         super().save(*args, **kwargs)
 
-class HSNCode(AuditModel):
-    chapter = models.CharField(max_length=50)
-    hsn_code = models.CharField(max_length=10, unique=True, primary_key=True)
-    description = models.TextField()
+
+class PharmacyCategory(AuditModel):
+    category_id = models.IntegerField(primary_key=True)
+    category_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.category_id is None:
+            last = PharmacyCategory.objects.order_by('-category_id').first()
+            self.category_id = (last.category_id + 1) if last else 1
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.chapter} - {self.hsn_code}"
+        return self.category_name
 
 class PharmacyItem(AuditModel):
     item_id = models.IntegerField(primary_key=True)
@@ -51,18 +58,31 @@ class PharmacyItem(AuditModel):
     OP_rack_no = models.CharField(max_length=50, blank=True)
     G_shelf_no = models.CharField(max_length=50, blank=True)
     G_rack_no = models.CharField(max_length=50, blank=True)
-    IP_available = models.BooleanField(default=True)
-    OP_available = models.BooleanField(default=True)
-    G_available = models.BooleanField(default=True)
-    is_blocked = models.BooleanField(default=True)
+    IP_available = models.BooleanField(default=False)
+    OP_available = models.BooleanField(default=False)
+    G_available = models.BooleanField(default=False)
+    is_blocked = models.BooleanField(default=False)
     blocked_reason = models.CharField(max_length=50, blank=True)
     is_active = models.BooleanField(default=True)
 
-
     def save(self, *args, **kwargs):
+
+        # Auto generate item_id
         if self.item_id is None:
             last = PharmacyItem.objects.order_by("-item_id").first()
             self.item_id = (last.item_id + 1) if last else 1
+
+        # Auto generate HSN
+        if not self.hsn:
+            last_item = PharmacyItem.objects.exclude(hsn="").order_by("-hsn").first()
+
+            if last_item and last_item.hsn.isdigit():
+                next_hsn = int(last_item.hsn) + 1
+            else:
+                next_hsn = 1
+
+            self.hsn = str(next_hsn).zfill(5)  # 00001 format
+
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -100,73 +120,94 @@ class Vendor(AuditModel):
 
 
 # GRN Model
+from django.db import models
+
+
 class GRN(AuditModel):
-    PURCHASE_CATEGORY_CHOICES = [
-        ("MEDICINE_PURCHASE", "Medicine Purchase"),
-        ("MEDICINE_PURCHASE_IP", "Medicine Purchase (IP)"),
-        ("OPENING_STOCK_DRUG", "Opening Stock (Drug)"),
-    ]
+    grn_number          = models.CharField(max_length=50, unique=True, blank=True)
+    date                = models.DateTimeField()
+    purchase_category   = models.CharField(max_length=50)
+    vendor_id           = models.IntegerField()
+    grn_type            = models.CharField(max_length=20, default="INVOICE")
+    invoice_no          = models.CharField(max_length=100)
+    invoice_date        = models.DateTimeField()
+    payment_mode        = models.CharField(max_length=20)
+    items               = models.TextField(default="[]")
+    taxable_amount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    non_taxable_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    igst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tax_paid_to_supplier= models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_discount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    net_invoice_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payment_status      = models.TextField(default="[]")
+    remarks             = models.TextField(blank=True, default="")
+    status              = models.CharField(max_length=50, default="Draft")
 
-    PAYMENT_MODE_CHOICES = [
-        ("CHEQUE", "Cheque"),
-        ("CASH", "Cash"),
-        ("DD", "DD"),
-    ]
+    # ── GRN number prefix mapping ──────────────────────────────────────────────
+    #   MEDICINE_PURCHASE    → OP  (e.g. OP/2526/00001)
+    #   MEDICINE_PURCHASE_IP → IP  (e.g. IP/2526/00001)
+    #   OPENING_STOCK_DRUG   → OSD (e.g. OSD/2526/00001)
+    CATEGORY_PREFIX = {
+        "MEDICINE_PURCHASE":    "OP",
+        "MEDICINE_PURCHASE_IP": "IP",
+        "OPENING_STOCK_DRUG":   "OSD",
+    }
 
-    TYPE_CHOICES = [
-        ("INVOICE", "Invoice"),
-        ("PACKING_SLIP", "Packing Slip"),
-    ]
+    @staticmethod
+    def _financial_year_suffix():
+        """
+        Returns a 4-digit financial year string.
+        e.g. April 2025 – March 2026  →  '2526'
+             April 2026 – March 2027  →  '2627'
+        """
+        from datetime import date
+        today = date.today()
+        if today.month >= 4:          # April or later → FY starts this year
+            start = today.year
+        else:                          # Jan–Mar → FY started previous year
+            start = today.year - 1
+        end = start + 1
+        return f"{str(start)[-2:]}{str(end)[-2:]}"   # '2526'
 
-    grn_id = models.IntegerField(primary_key=True)
-    grn_number = models.CharField(max_length=50, unique=True, blank=True)
+    def _next_grn_number(self):
+        """
+        Find the highest sequence number for the same prefix + FY,
+        then increment by 1 and return the full GRN number string.
 
-    # Header fields
-    purchase_category = models.CharField(max_length=50, choices=PURCHASE_CATEGORY_CHOICES)
-    vendor_id = models.IntegerField()
-    vendor_name = models.CharField(max_length=200, blank=True, default="")
-    supplier_address = models.CharField(max_length=400, blank=True, default="")
-    contact_person = models.CharField(max_length=150, blank=True, default="")
-    phone = models.CharField(max_length=20, blank=True, default="")
+        Format:  <PREFIX>/<FY>/<SEQ5>
+        Example: OP/2526/00007
+        """
+        prefix = self.CATEGORY_PREFIX.get(self.purchase_category, "GRN")
+        fy     = self._financial_year_suffix()
+        base   = f"{prefix}/{fy}/"          # e.g. "OP/2526/"
 
-    # Invoice fields
-    grn_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="INVOICE")
-    invoice_no = models.CharField(max_length=100)
-    invoice_date = models.DateField()
-    date = models.DateField()
-    credit_period = models.CharField(max_length=50, blank=True, default="")
-    due_date = models.DateField(null=True, blank=True)
-    reference = models.CharField(max_length=100, blank=True, default="")
-    purchase_order = models.CharField(max_length=100, blank=True, default="")
-    payment_mode = models.CharField(max_length=20, choices=PAYMENT_MODE_CHOICES, default="CHEQUE")
+        # Fetch all GRN numbers that start with this base
+        existing = (
+            GRN.objects
+            .filter(grn_number__startswith=base)
+            .values_list("grn_number", flat=True)
+        )
 
-    # Items stored as JSON string
-    items = models.TextField(default="[]")
+        max_seq = 0
+        for grn_no in existing:
+            try:
+                seq = int(grn_no.split("/")[-1])   # last segment is the 5-digit seq
+                if seq > max_seq:
+                    max_seq = seq
+            except (ValueError, IndexError):
+                pass
 
-    # Financial summary
-    taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    non_taxable_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    cgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    sgst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    igst = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    tax_paid_to_supplier = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    round_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    net_invoice_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    # Payment status stored as JSON string
-    payment_status = models.TextField(default="[]")
-
-    remarks = models.TextField(blank=True, default="")
-    is_active = models.BooleanField(default=True)
+        next_seq = max_seq + 1
+        return f"{base}{str(next_seq).zfill(5)}"   # e.g. "OP/2526/00007"
 
     def save(self, *args, **kwargs):
-        if self.grn_id is None:
-            last = GRN.objects.order_by("-grn_id").first()
-            self.grn_id = (last.grn_id + 1) if last else 1
+        # Auto-generate GRN number only on first save (create)
         if not self.grn_number:
-            self.grn_number = f"GRN{str(self.grn_id).zfill(6)}"
+            self.grn_number = self._next_grn_number()
         super().save(*args, **kwargs)
 
     def __str__(self):
