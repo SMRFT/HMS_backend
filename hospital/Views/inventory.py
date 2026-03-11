@@ -259,6 +259,24 @@ from ..serializers import GRNSerializer
 @api_view(["GET", "POST", "PUT"])
 @csrf_exempt
 def grn_view(request, pk=None):
+    """
+    GRN lifecycle:
+    ─────────────────────────────────────────────────────────────────────────
+    POST  (status="Draft")
+        • draft_number  is generated immediately  → e.g. DRAFT/2526/00001
+        • grn_number    is left BLANK             → ""
+        • purchase_category can be changed freely while Draft
+
+    PUT   (status still "Draft")
+        • draft_number  is preserved as-is
+        • grn_number    stays BLANK
+        • purchase_category change is allowed (no number regeneration needed)
+
+    PUT   (status changes to "Confirmed")
+        • grn_number    is generated NOW using the final purchase_category
+        • draft_number  is preserved for audit trail
+    ─────────────────────────────────────────────────────────────────────────
+    """
 
     user_id = request.headers.get("auth-user-id", "system")
 
@@ -276,7 +294,7 @@ def grn_view(request, pk=None):
         serializer = GRNSerializer(grns, many=True)
         return Response(serializer.data)
 
-    # ───────── POST ─────────
+    # ───────── POST (create Draft) ─────────
     if request.method == "POST":
         data = request.data.copy()
 
@@ -285,13 +303,18 @@ def grn_view(request, pk=None):
         if isinstance(data.get("payment_status"), (list, dict)):
             data["payment_status"] = json.dumps(data["payment_status"])
 
+        # Force status to Draft on create; grn_number must be blank.
+        # draft_number is generated inside GRN.save() automatically.
+        data["status"] = "Draft"
+        data["grn_number"] = ""          # never set on Draft creation
+
         serializer = GRNSerializer(data=data)
         if serializer.is_valid():
             serializer.save(created_by=user_id, lastmodified_by=user_id)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
-    # ───────── PUT ─────────
+    # ───────── PUT (update) ─────────
     if request.method == "PUT":
         if not pk:
             return Response({"error": "GRN ID required"}, status=400)
@@ -312,15 +335,27 @@ def grn_view(request, pk=None):
         if isinstance(data.get("payment_status"), (list, dict)):
             data["payment_status"] = json.dumps(data["payment_status"])
 
-        # ── Regenerate grn_number when purchase_category changes ──────────────
-        new_category = data.get("purchase_category", grn.purchase_category)
-        if new_category != grn.purchase_category:
-            # Clear grn_number so model.save() auto-generates the correct one
-            grn.purchase_category = new_category   # set before calling helper
+        incoming_status = data.get("status", grn.status)
+
+        if grn.status == "Draft" and incoming_status == "Confirmed":
+            # ── Draft → Confirmed: generate the real GRN number now ──────────
+            # Use the incoming category (may have changed while in Draft)
+            new_category = data.get("purchase_category", grn.purchase_category)
+            grn.purchase_category = new_category        # set before helper call
             data["grn_number"] = grn._next_grn_number()
+            # draft_number stays untouched (preserved by not sending it)
+            data.setdefault("draft_number", grn.draft_number)
+
+        elif grn.status == "Draft":
+            # ── Still Draft: category may change freely, numbers untouched ───
+            # grn_number must remain blank; draft_number must not change.
+            data["grn_number"] = ""                     # keep blank
+            data["draft_number"] = grn.draft_number     # lock draft_number
+
         else:
-            # Category unchanged — preserve existing grn_number (never overwrite)
-            data["grn_number"] = grn.grn_number
+            # ── Already Confirmed: preserve both numbers, no regeneration ─────
+            data["grn_number"]  = grn.grn_number
+            data["draft_number"] = grn.draft_number
 
         serializer = GRNSerializer(grn, data=data, partial=True)
         if serializer.is_valid():

@@ -120,11 +120,16 @@ class Vendor(AuditModel):
 
 
 # GRN Model
-from django.db import models
-
-
 class GRN(AuditModel):
-    grn_number          = models.CharField(max_length=50, unique=True, blank=True)
+    CATEGORY_PREFIX = {
+        "MEDICINE_PURCHASE":    "OP",
+        "MEDICINE_PURCHASE_IP": "IP",
+        "OPENING_STOCK_DRUG":   "OSD",
+    }
+
+    draft_number        = models.CharField(max_length=50, unique=True, blank=True, default="")
+    grn_number          = models.CharField(max_length=50, unique=True, blank=True, default="")
+
     date                = models.DateTimeField()
     purchase_category   = models.CharField(max_length=50)
     vendor_id           = models.IntegerField()
@@ -147,15 +152,7 @@ class GRN(AuditModel):
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
 
-    # ── GRN number prefix mapping ──────────────────────────────────────────────
-    #   MEDICINE_PURCHASE    → OP  (e.g. OP/2526/00001)
-    #   MEDICINE_PURCHASE_IP → IP  (e.g. IP/2526/00001)
-    #   OPENING_STOCK_DRUG   → OSD (e.g. OSD/2526/00001)
-    CATEGORY_PREFIX = {
-        "MEDICINE_PURCHASE":    "OP",
-        "MEDICINE_PURCHASE_IP": "IP",
-        "OPENING_STOCK_DRUG":   "OSD",
-    }
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _financial_year_suffix():
@@ -166,52 +163,71 @@ class GRN(AuditModel):
         """
         from datetime import date
         today = date.today()
-        if today.month >= 4:          # April or later → FY starts this year
-            start = today.year
-        else:                          # Jan–Mar → FY started previous year
-            start = today.year - 1
-        end = start + 1
-        return f"{str(start)[-2:]}{str(end)[-2:]}"   # '2526'
+        start = today.year if today.month >= 4 else today.year - 1
+        end   = start + 1
+        return f"{str(start)[-2:]}{str(end)[-2:]}"   # e.g. '2526'
 
-    def _next_grn_number(self):
+    @classmethod
+    def _next_sequence(cls, prefix):
         """
-        Find the highest sequence number for the same prefix + FY,
-        then increment by 1 and return the full GRN number string.
+        Find the highest sequence number for records whose draft_number or
+        grn_number starts with `prefix`, then return the next full number string.
 
-        Format:  <PREFIX>/<FY>/<SEQ5>
-        Example: OP/2526/00007
+        `prefix` examples: "DRAFT/2526/"  |  "OP/2526/"  |  "IP/2526/"
         """
-        prefix = self.CATEGORY_PREFIX.get(self.purchase_category, "GRN")
-        fy     = self._financial_year_suffix()
-        base   = f"{prefix}/{fy}/"          # e.g. "OP/2526/"
-
-        # Fetch all GRN numbers that start with this base
-        existing = (
-            GRN.objects
-            .filter(grn_number__startswith=base)
+        # Search both columns so gaps in one don't reset the other
+        from itertools import chain
+        existing_draft = (
+            cls.objects
+            .filter(draft_number__startswith=prefix)
+            .values_list("draft_number", flat=True)
+        )
+        existing_grn = (
+            cls.objects
+            .filter(grn_number__startswith=prefix)
             .values_list("grn_number", flat=True)
         )
-
         max_seq = 0
-        for grn_no in existing:
+        for number in chain(existing_draft, existing_grn):
             try:
-                seq = int(grn_no.split("/")[-1])   # last segment is the 5-digit seq
+                seq = int(number.split("/")[-1])
                 if seq > max_seq:
                     max_seq = seq
             except (ValueError, IndexError):
                 pass
+        return f"{prefix}{str(max_seq + 1).zfill(5)}"
 
-        next_seq = max_seq + 1
-        return f"{base}{str(next_seq).zfill(5)}"   # e.g. "OP/2526/00007"
+    def _next_draft_number(self):
+        """Generate the next DRAFT/<FY>/<SEQ5> number."""
+        fy     = self._financial_year_suffix()
+        prefix = f"DRAFT/{fy}/"
+        return self._next_sequence(prefix)
+
+    def _next_grn_number(self):
+        """
+        Generate the next <PREFIX>/<FY>/<SEQ5> number using the record's
+        current purchase_category.  Call this only when confirming.
+
+        Example: OP/2526/00007
+        """
+        prefix_code = self.CATEGORY_PREFIX.get(self.purchase_category, "GRN")
+        fy          = self._financial_year_suffix()
+        prefix      = f"{prefix_code}/{fy}/"
+        return self._next_sequence(prefix)
+
+    # ── Save override ─────────────────────────────────────────────────────────
 
     def save(self, *args, **kwargs):
-        # Auto-generate GRN number only on first save (create)
-        if not self.grn_number:
-            self.grn_number = self._next_grn_number()
+        # On first create: assign draft_number; grn_number stays blank.
+        if not self.pk and not self.draft_number:
+            self.draft_number = self._next_draft_number()
+
+        # grn_number is NEVER auto-assigned here.
+        # It is set explicitly in grn_view (PUT) when status → "Confirmed".
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return self.grn_number
+        return self.grn_number or self.draft_number
     
 class Block(AuditModel):
     block_id = models.IntegerField(primary_key=True)
