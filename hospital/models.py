@@ -87,6 +87,33 @@ class PharmacyItem(AuditModel):
 
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
+    
+
+class PharmacyStock(AuditModel):
+    stock_id                 = models.AutoField(primary_key=True)
+    department_code          = models.CharField(max_length=20)
+    item_id                  = models.IntegerField()
+    batch_number             = models.CharField(max_length=50)        # changed: batch can be alphanumeric
+    expiry_date              = models.DateField(null=True, blank=True)
+    mrp                      = models.DecimalField(max_digits=10, decimal_places=2)
+    grn_number               = models.CharField(max_length=50)
+    total_stock              = models.IntegerField()
+    sold_quantity            = models.IntegerField(default=0)
+    transferred_out_quantity = models.IntegerField(default=0)
+    stock_type               = models.CharField(max_length=50, default="grn")
+    stock_ref_id             = models.IntegerField(default=0)         # changed: default=0, not null
+    grn_return_quantity      = models.IntegerField(default=0)
+    grn_return_ref_id        = models.IntegerField(null=True, blank=True)
+    blocked_quantity         = models.IntegerField(default=0)
+    sales_return_quantity    = models.IntegerField(default=0)
+    sales_return_ref_id      = models.IntegerField(null=True, blank=True)
+    CGST_Percentage          = models.DecimalField(max_digits=5,  decimal_places=2, default=0)
+    SGST_Percentage          = models.DecimalField(max_digits=5,  decimal_places=2, default=0)
+    CGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    SGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    def __str__(self):
+        return f"{self.grn_number} | {self.item_id} | batch:{self.batch_number}"
 
 class Vendor(AuditModel):
     vendor_id = models.CharField(primary_key=True,max_length=10)
@@ -127,8 +154,8 @@ class GRN(AuditModel):
         "OPENING_STOCK_DRUG":   "OSD",
     }
 
-    draft_number        = models.CharField(max_length=50, unique=True, blank=True, default="")
-    grn_number          = models.CharField(max_length=50, unique=True, blank=True, default="")
+    draft_number        = models.CharField(max_length=50, primary_key=True)
+    grn_number          = models.CharField(max_length=50, unique=True, blank=True)
 
     date                = models.DateTimeField()
     purchase_category   = models.CharField(max_length=50)
@@ -145,86 +172,12 @@ class GRN(AuditModel):
     igst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     tax_paid_to_supplier= models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_discount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    round_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    round_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0, blank=True, null=True)
     total_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     net_invoice_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_status      = models.TextField(default="[]")
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _financial_year_suffix():
-        """
-        Returns a 4-digit financial year string.
-        e.g. April 2025 – March 2026  →  '2526'
-             April 2026 – March 2027  →  '2627'
-        """
-        from datetime import date
-        today = date.today()
-        start = today.year if today.month >= 4 else today.year - 1
-        end   = start + 1
-        return f"{str(start)[-2:]}{str(end)[-2:]}"   # e.g. '2526'
-
-    @classmethod
-    def _next_sequence(cls, prefix):
-        """
-        Find the highest sequence number for records whose draft_number or
-        grn_number starts with `prefix`, then return the next full number string.
-
-        `prefix` examples: "DRAFT/2526/"  |  "OP/2526/"  |  "IP/2526/"
-        """
-        # Search both columns so gaps in one don't reset the other
-        from itertools import chain
-        existing_draft = (
-            cls.objects
-            .filter(draft_number__startswith=prefix)
-            .values_list("draft_number", flat=True)
-        )
-        existing_grn = (
-            cls.objects
-            .filter(grn_number__startswith=prefix)
-            .values_list("grn_number", flat=True)
-        )
-        max_seq = 0
-        for number in chain(existing_draft, existing_grn):
-            try:
-                seq = int(number.split("/")[-1])
-                if seq > max_seq:
-                    max_seq = seq
-            except (ValueError, IndexError):
-                pass
-        return f"{prefix}{str(max_seq + 1).zfill(5)}"
-
-    def _next_draft_number(self):
-        """Generate the next DRAFT/<FY>/<SEQ5> number."""
-        fy     = self._financial_year_suffix()
-        prefix = f"DRAFT/{fy}/"
-        return self._next_sequence(prefix)
-
-    def _next_grn_number(self):
-        """
-        Generate the next <PREFIX>/<FY>/<SEQ5> number using the record's
-        current purchase_category.  Call this only when confirming.
-
-        Example: OP/2526/00007
-        """
-        prefix_code = self.CATEGORY_PREFIX.get(self.purchase_category, "GRN")
-        fy          = self._financial_year_suffix()
-        prefix      = f"{prefix_code}/{fy}/"
-        return self._next_sequence(prefix)
-
-    # ── Save override ─────────────────────────────────────────────────────────
-
-    def save(self, *args, **kwargs):
-        # On first create: assign draft_number; grn_number stays blank.
-        if not self.pk and not self.draft_number:
-            self.draft_number = self._next_draft_number()
-
-        # grn_number is NEVER auto-assigned here.
-        # It is set explicitly in grn_view (PUT) when status → "Confirmed".
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.grn_number or self.draft_number

@@ -37,8 +37,8 @@ urlpatterns = [
 
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
-    path('grn/<str:pk>/', inventory.grn_view, name='grn_detail'),
-    
+    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+        
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
     path('block/<int:pk>/', room.block_view, name='block_update_delete'),
