@@ -239,9 +239,9 @@ from ..models import GRN
 from ..serializers import GRNSerializer
 
 GRN_CATEGORY_PREFIX = {
-    "MEDICINE_PURCHASE":    "GRN/OP",
-    "MEDICINE_PURCHASE_IP": "GRN/IP",
-    "OPENING_STOCK_DRUG":   "GRN/OS",
+    "MEDICINE_PURCHASE":    "OP",
+    "MEDICINE_PURCHASE_IP": "IP",
+    "OPENING_STOCK_DRUG":   "DP",
 }
 
 def _current_fin_year():
@@ -392,9 +392,9 @@ def grn_view(request, pk=None):
             from ..models import PharmacyStock
 
             DEPT_CODE_MAP = {
-                "MEDICINE_PURCHASE":    "PHARMACY_OP",
-                "MEDICINE_PURCHASE_IP": "PHARMACY_IP",
-                "OPENING_STOCK_DRUG":   "PHARMACY_OS",
+                "MEDICINE_PURCHASE":    "OP001",
+                "MEDICINE_PURCHASE_IP": "IP001",
+                "OPENING_STOCK_DRUG":   "DP001",
             }
             department_code = DEPT_CODE_MAP.get(saved.purchase_category, "PHARMACY")
             assigned_grn_no = saved.grn_number

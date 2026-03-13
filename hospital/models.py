@@ -93,15 +93,15 @@ class PharmacyStock(AuditModel):
     stock_id                 = models.AutoField(primary_key=True)
     department_code          = models.CharField(max_length=20)
     item_id                  = models.IntegerField()
-    batch_number             = models.CharField(max_length=50)        # changed: batch can be alphanumeric
-    expiry_date              = models.DateField(null=True, blank=True)
+    batch_number             = models.CharField(max_length=50)       
+    expiry_date              = models.CharField(max_length=50)
     mrp                      = models.DecimalField(max_digits=10, decimal_places=2)
     grn_number               = models.CharField(max_length=50)
     total_stock              = models.IntegerField()
     sold_quantity            = models.IntegerField(default=0)
     transferred_out_quantity = models.IntegerField(default=0)
     stock_type               = models.CharField(max_length=50, default="grn")
-    stock_ref_id             = models.IntegerField(default=0)         # changed: default=0, not null
+    stock_ref_id             = models.IntegerField(default=0)        
     grn_return_quantity      = models.IntegerField(default=0)
     grn_return_ref_id        = models.IntegerField(null=True, blank=True)
     blocked_quantity         = models.IntegerField(default=0)
