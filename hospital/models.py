@@ -1,7 +1,6 @@
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.utils.timezone import now
-from bson import ObjectId
 
 # Base Audit Model
 class AuditModel(models.Model):
@@ -12,6 +11,9 @@ class AuditModel(models.Model):
     created_date = models.DateTimeField(default=now)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
     lastmodified_date = models.DateTimeField(auto_now=True)
+    branch_code = models.CharField(max_length=100, null=True, blank=True)
+    department_code = models.CharField(max_length=100, null=True, blank=True)
+    hospital_code = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         abstract = True
@@ -340,9 +342,6 @@ class DischargeDetail(AuditModel):
         return f"{self.uhid_no} - {self.status}"
 
 
-from django.db import models
-from django.utils.timezone import now
-
 class Patient(AuditModel):
     GENDER_CHOICES = (
         ('Male', 'Male'),
@@ -449,8 +448,6 @@ class Patient(AuditModel):
     def __str__(self):
         return f"{self.firstName} {self.lastName}" if self.firstName else "Unnamed Patient"
 
-
-
 class Billing(AuditModel):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
     registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -518,6 +515,7 @@ class Doctor(AuditModel):
 
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
+    slot_DateTime = models.DateTimeField()
     investBillNo = models.CharField(max_length=50, blank=True)
     billTypeNo = models.TextField()    
     itemName = models.TextField()
@@ -627,7 +625,6 @@ class OPPharmacyBill(AuditModel):
         return f"Bill {self.bill_no} - {self.patient_name}"
 
     
-
 class InsuranceProvider(AuditModel):
     company_name = models.CharField(max_length=255)
     company_code = models.CharField(max_length=100,primary_key=True)
@@ -651,3 +648,160 @@ class InsuranceProvider(AuditModel):
 
     def __str__(self):
         return self.company_name
+
+
+class VelavanInvoice(AuditModel):
+    # GRN number
+    grn_number = models.CharField(max_length=50, unique=True, blank=True)
+    # Vendor fields
+    vendor_id = models.CharField(max_length=255, blank=True, null=True) 
+    # Invoice / Date fields
+    date = models.DateField()
+    invoice_no = models.CharField(max_length=100)
+    invoice_date = models.DateField()
+    payment_mode = models.CharField(max_length=50, blank=True, null=True)
+
+    # Patient / Surgery details (hospital-specific)
+    ip_number = models.CharField(max_length=100, blank=True, null=True)
+    patient_name = models.CharField(max_length=255, blank=True, null=True)
+    surgeon_name = models.CharField(max_length=255, blank=True, null=True)
+
+    # Items stored as JSON
+    items = models.JSONField(default=list, blank=True)
+
+    # Summary fields
+    non_taxable_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    taxable_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    tax_paid_to_supplier = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    local_tax = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    remarks = models.TextField(blank=True, null=True)
+    cgst = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    sgst = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    igst = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    cess = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    central_sales_tax = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    round_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    total_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    total_discount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    net_invoice_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    quotation_rate = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+
+    class Meta:
+        ordering = ['-created_date']
+
+    def __str__(self):
+        return f"{self.grn_number} - {self.vendor_id}"
+
+    @staticmethod
+    def get_financial_year_prefix():
+        today = timezone.now().date()
+        if today.month >= 4:
+            return f"{today.year % 100}{(today.year + 1) % 100}"
+        else:
+            return f"{(today.year - 1) % 100}{today.year % 100}"
+
+    @staticmethod
+    def generate_grn_number():
+        with transaction.atomic():
+            current_fy_prefix = VelavanInvoice.get_financial_year_prefix()
+            prefix = f"V{current_fy_prefix}"  # → "V2526"
+            
+            last_record = VelavanInvoice.objects.filter(
+                grn_number__startswith=f"{prefix}/"
+            ).order_by('-grn_number').first()
+
+            if last_record:
+                last_sequence = int(last_record.grn_number.split('/')[1])
+                next_sequence = last_sequence + 1
+            else:
+                next_sequence = 1
+
+            return f"{prefix}/{next_sequence:05d}"  # 5 digits → V2526/00001
+
+    def save(self, *args, **kwargs):
+        if not self.pk and not self.grn_number:
+            self.grn_number = self.generate_grn_number()
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
+
+
+class VelavanVendors(AuditModel):
+    vendor_id = models.CharField(max_length=50, unique=True, blank=True, null=True)
+    name = models.CharField(max_length=255)
+    addressLine1 = models.CharField(max_length=255)
+    addressLine2 = models.CharField(max_length=255, blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    state = models.CharField(max_length=100, blank=True, null=True)
+    pincode = models.CharField(max_length=20, blank=True, null=True)
+    contactPerson = models.CharField(max_length=255, blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    kgstTinNumber = models.CharField(max_length=50, blank=True, null=True)
+    gstin = models.CharField(max_length=50)
+    payment = models.CharField(max_length=50, blank=True, null=True)
+    tdsPercent = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    class Meta:
+        db_table = 'hospital_velavan_vendors'
+
+    def __str__(self):
+        return self.name
+
+    def generate_vendor_id(self):
+        """Generate auto-incrementing vendor_id starting from 1"""
+        with transaction.atomic():
+            try:
+                # Get all vendors and find the maximum numeric vendor_id
+                all_vendors = VelavanVendors.objects.filter(vendor_id__isnull=False).values_list('vendor_id', flat=True)
+                
+                max_id = 0
+                for vendor_id in all_vendors:
+                    try:
+                        numeric_id = int(vendor_id)
+                        if numeric_id > max_id:
+                            max_id = numeric_id
+                    except (ValueError, TypeError):
+                        continue
+                
+                new_id = max_id + 1
+                
+                # Ensure uniqueness
+                while VelavanVendors.objects.filter(vendor_id=str(new_id)).exists():
+                    new_id += 1
+                
+                return str(new_id)
+                
+            except Exception as e:
+                # Fallback: return "1" if there's any issue
+                return "1"
+
+    def save(self, *args, **kwargs):
+        try:
+            # Generate vendor_id if it's a new record and vendor_id is not provided
+            if not self.pk and not self.vendor_id:
+                self.vendor_id = self.generate_vendor_id()
+            
+            if self.pk:  # If updating existing record
+                self.lastmodified_date = timezone.now()
+            
+            super().save(*args, **kwargs)
+            
+        except Exception as e:
+            # Log the specific error for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error saving vendor: {str(e)}")
+            raise e  # Re-raise the exception
+
+
+
+class VelavanItems(AuditModel):
+    itemName = models.CharField(max_length=255)
+    hsn = models.CharField(max_length=20, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'hospital_velavan_items'
+    def __str__(self):
+        return self.itemName

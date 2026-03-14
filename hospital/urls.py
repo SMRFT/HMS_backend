@@ -11,13 +11,8 @@ from .Views import (
     pharmacy,
     radiology,
     room,
-    summary,package_crud, investigation_price, billType,
-    summary,
-    dashboard,
-    advanced_dashboard,
-    doctor_dashboard,
-    insurance_provider,
-    NursingStation
+    stock,
+    summary,package_crud, investigation_price, billType, velavan
 )
 
 urlpatterns = [
@@ -25,8 +20,6 @@ urlpatterns = [
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
     path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
-    re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', admission.get_op_patient_by_uhid, name='op-patient-detail-by-uhid'),
-    re_path(r'^get_op_patient_by_uhid/(?P<uhid>[\w%/-]+)/$', admission.get_op_patient_by_uhid, name='get_op_patient_by_uhid'),
     path('search-rooms/', admission.search_rooms, name='search-rooms'), 
 
     # Vendor URLs
@@ -83,7 +76,8 @@ urlpatterns = [
 
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),
-    path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),     
+    path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),  
+    re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
     re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),     
@@ -149,22 +143,44 @@ urlpatterns = [
     path('packages_crud/',  package_crud.get_packages,    name='get_packages'),
     path('packages/create/',  package_crud.create_package,  name='create_package'),
     path('packages/<int:package_no>/', package_crud.get_package,     name='get_package'),
-    path('packages/<int:package_no>/update/', package_crud.update_package, name='update_package'),
-    path('packages/<int:package_no>/delete/', package_crud.delete_package, name='delete_package'),
+    path('packages/update/<int:package_no>/', package_crud.update_package, name='update_package'),
+    path('packages/delete/<int:package_no>/', package_crud.delete_package, name='delete_package'),
 
     #Investigation Price Master:
     path('investigation-prices_get/', investigation_price.get_investigation_prices),
     path('investigation-prices/create/', investigation_price.create_investigation_price),
-    path('investigation-prices/<str:bill_type_no>/update/',investigation_price.update_investigation_price),
-    path('investigation-prices/<str:bill_type_no>/delete/',investigation_price.delete_investigation_price),
+    path('investigation-prices/update/<str:bill_type_no>/',investigation_price.update_investigation_price),
+    path('investigation-prices/delete/<str:bill_type_no>/',investigation_price.delete_investigation_price),
     
     #Bil Type Master:
     path('bill-types_get/', billType.get_bill_types),
     path('bill-types/create/', billType.create_bill_type),
-    path('bill-types/<str:bill_type_no>/update/', billType.update_bill_type),
-    path('bill-types/<str:bill_type_no>/delete/', billType.delete_bill_type),
+    path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type),
+    path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type),
     path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
     
+    #Reports:
+    path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
+
+    #Velavan Items:    
+    path('velavan_items/list/', velavan.list_items, name='list_items'),
+    path('velavan_get_items/', velavan.velavan_get_items, name='velavan_get_items'),
+    path('velavan_create_item/', velavan.velavan_create_item, name='velavan_create_item'),
+    path('velavan_update_item/<str:item_id>/', velavan.velavan_update_item, name='velavan_update_item'),
+    path('velavan_delete_item/<str:item_id>/', velavan.velavan_delete_item, name='velavan_delete_item'),
+    
+    #Velavan Vendor:    
+    path('velavan_vendors/list/', velavan.list_vendors, name='list_vendors'),
+    path('velavan_get_vendors/', velavan.velavan_get_vendors, name='velavan_get_vendors'),
+    path('velavan_create_vendor/', velavan.velavan_create_vendor, name='velavan_create_vendor'),
+    path("velavan_update_vendor/<str:vendor_id>/", velavan.velavan_update_vendor, name="velavan_update_vendor"),
+    path("velavan_delete_vendor/<str:vendor_id>/", velavan.velavan_delete_vendor, name="velavan_delete_vendor"),
+
+    #Velavan Invoice:
+    path('velavan/invoices/', velavan.create_velavan_in, name='create_velavan_in'),
+    path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
+    path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
+    path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),   
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
