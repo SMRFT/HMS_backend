@@ -154,8 +154,14 @@ def create_summary(request):
             )
 
         created_by = request.data.get('auth-user-id', "system")
+        branch_code = request.data.get('auth-branch-code', "system")
+        department_code = request.data.get('auth-department-code', "system")
+        hospital_code = request.data.get('auth-hospital-code', "system")
 
-        instance = serializer.save(
+        instance = serializer.save(            
+            branch_code=branch_code,
+            department_code=department_code,
+            hospital_code=hospital_code,
             created_by=created_by,
             created_date=datetime.utcnow()
         )

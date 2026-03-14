@@ -1,4 +1,5 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from pyauth.auth import HasRoleAndDataPermission
 from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
@@ -34,19 +35,20 @@ def get_next_bill_type(collection):
 # ═══════════════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
 def get_bill_types(request):
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_billtype']
 
-        query = {}
+        # Always exclude soft-deleted records
+        query = {'deleted_at': {'$exists': False}}
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
                 {'bill_name':      {'$regex': search, '$options': 'i'}},
                 {'billTypeNo':     {'$regex': search, '$options': 'i'}},
-                {'billing_outlet': {'$regex': search, '$options': 'i'}},
             ]
 
         records = [serialize_doc(r) for r in collection.find(query).sort('bill_name', 1)]
@@ -61,6 +63,7 @@ def get_bill_types(request):
 
 
 @api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
 def create_bill_type(request):
     """
     Create a new bill type.
@@ -73,6 +76,9 @@ def create_bill_type(request):
         client, db = get_hms_db()
         collection = db['hospital_billtype']
         data = request.data
+        created_by = request.data.get('auth-user-id', "system")
+        branch_code = request.data.get('auth-branch-code', "system")
+        hospital_code = request.data.get('auth-hospital-code', "system")
 
         if not data.get('bill_name'):
             return Response({'error': 'Bill Name is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -89,7 +95,6 @@ def create_bill_type(request):
         doc = {
             'bill_type':         auto_bill_type,
             'bill_name':         str(data.get('bill_name', '')).strip(),
-            'billing_outlet':    str(data.get('billing_outlet', '')).strip(),
             'payment_mode':      str(data.get('payment_mode', 'both')),
             'centralCash':       bool(data.get('centralCash', False)),
             'is_allowAdvance':   bool(data.get('is_allowAdvance', False)),
@@ -105,6 +110,9 @@ def create_bill_type(request):
             'billTypeNo':        bill_type_no,
             'accounts_head':     str(data.get('accounts_head', '')).strip(),
             'created_at':        datetime.utcnow(),
+            'created_by':        created_by,
+            'branch_code':       branch_code,
+            'hospital_code':     hospital_code,
         }
 
         result = collection.insert_one(doc)
@@ -126,33 +134,35 @@ def create_bill_type(request):
 
 
 @api_view(['PATCH'])
-def update_bill_type(request, bill_type_no):
-    """Update bill type fields. bill_type integer is immutable. billTypeNo can be updated."""
+@permission_classes([HasRoleAndDataPermission])
+def update_bill_type(request, bill_type_int):
+    """Update bill type fields. Identified by bill_type integer (immutable unique key)."""
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_billtype']
         data = request.data
+        lastmodified_by = request.data.get('auth-user-id', "system")
 
         allowed_keys = [
-            'bill_name', 'billing_outlet', 'payment_mode',
+            'bill_name', 'payment_mode',
             'centralCash', 'is_allowAdvance', 'is_active', 'is_allowDiscount',
             'sales_return', 'GST_export', 'IP_billType', 'ward_request',
             'med_wise_discount', 'med_dispatch', 'department_code', 'accounts_head',
-            'billTypeNo',   # allowed to update
+            'billTypeNo',
         ]
 
         update_fields = {k: data[k] for k in allowed_keys if k in data}
 
-        # If billTypeNo is being changed, normalise it (no uniqueness check — billTypeNo is non-unique)
         new_bill_type_no = update_fields.get('billTypeNo', '').strip().upper()
         if new_bill_type_no:
             update_fields['billTypeNo'] = new_bill_type_no
 
-        update_fields['last_modified'] = datetime.utcnow()
+        update_fields['lastmodified_date'] = datetime.utcnow()
+        update_fields['lastmodified_by'] = lastmodified_by
 
         result = collection.update_one(
-            {'billTypeNo': bill_type_no},
+            {'bill_type': int(bill_type_int)},
             {'$set': update_fields}
         )
 
@@ -170,16 +180,18 @@ def update_bill_type(request, bill_type_no):
 
 
 @api_view(['PATCH'])
-def delete_bill_type(request, bill_type_no):
-    """Soft delete."""
+@permission_classes([HasRoleAndDataPermission])
+def delete_bill_type(request, bill_type_int):
+    """Soft delete. Identified by bill_type integer."""
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_billtype']
+        deleted_by = request.data.get('auth-user-id', "system")
 
         result = collection.update_one(
-            {'billTypeNo': bill_type_no},
-            {'$set': {'is_active': False, 'deleted_at': datetime.utcnow()}}
+            {'bill_type': int(bill_type_int)},
+            {'$set': {'is_active': False, 'deleted_at': datetime.utcnow(), 'deleted_by': deleted_by}}
         )
 
         if result.matched_count == 0:
@@ -196,6 +208,7 @@ def delete_bill_type(request, bill_type_no):
 
 
 @api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
 def patch_bill_type_prices(request):
     """
     Called after creating or editing a Bill Type.
@@ -215,6 +228,7 @@ def patch_bill_type_prices(request):
     try:
         client, db = get_hms_db()
         collection = db['hospital_investigationprice']
+        lastmodified_by = request.data.get('auth-user-id', "system")
 
         bill_type         = str(request.data.get('bill_type', '')).strip()
         prices            = request.data.get('prices', {})
@@ -232,7 +246,7 @@ def patch_bill_type_prices(request):
                     item.pop(bill_type, None)   # remove e.g. "57" key entirely
                 collection.update_one(
                     {'billTypeNo': old_inv_cat_no},
-                    {'$set': {'Items': old_items, 'last_modified': datetime.utcnow()}}
+                    {'$set': {'Items': old_items, 'last_modified_date': datetime.utcnow(), 'lastmodified_by': lastmodified_by}}
                 )
 
         # ── Step 2: Patch new prices into the new category ──

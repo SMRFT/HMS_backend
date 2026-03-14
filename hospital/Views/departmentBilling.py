@@ -1,7 +1,7 @@
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
-from ..models import Patient,EstimateBilling,Admission
+from ..models import Patient,EstimateBilling,Admission, InsuranceProvider
 from ..serializers import PatientSerializer,EstimateBillingSerializer
 from rest_framework import status
 from pymongo import MongoClient  
@@ -29,33 +29,47 @@ def op_patient_detail_by_uhid(request, uhid):
     try:
         patient = Patient.objects.get(uhid=uhid)
         serializer = PatientSerializer(patient)
-        return Response(serializer.data)
+        data = dict(serializer.data)  # ← convert to mutable dict
+
+        if data.get('company_code'):
+            try:
+                insurance = InsuranceProvider.objects.get(company_code=data['company_code'].strip())
+                data['company_name'] = insurance.company_name
+            except InsuranceProvider.DoesNotExist:
+                data['company_name'] = None
+        else:
+            data['company_name'] = None
+
+        return Response(data)
     except Patient.DoesNotExist:
         return Response({"error": "Patient not found"}, status=404)
 
-  
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def ip_patient_detail_by_ipNumber(request, ipNumber):
     try:
-        # Get admission details
         admission = Admission.objects.get(ipNumber=ipNumber)
-        
-        # Get patient details using UHID from admission
+
         try:
             patient = Patient.objects.get(uhid=admission.uhid)
-            
-            # Combine data from both models
+
+            # Fetch company name if company_code exists
+            company_name = None
+            if patient.company_code:
+                try:
+                    insurance = InsuranceProvider.objects.get(company_code=patient.company_code)
+                    company_name = insurance.company_name
+                except InsuranceProvider.DoesNotExist:
+                    pass
+
             response_data = {
-                # From Admission model
                 'ipNumber': admission.ipNumber,
                 'uhid': admission.uhid,
                 'roomNo': admission.roomNo,
-                'admissionDate': admission.admissionDate.strftime("%Y-%m-%d") if admission.admissionDate else None,
-                'admissionTime': admission.admissionDate.strftime("%H:%M") if admission.admissionDate else None,
+                'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
+                'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
                 'admittingDoctor': admission.admittingDoctor,
-                
-                # From Patient model
                 'salutation': patient.salutation if hasattr(patient, 'salutation') else '',
                 'firstName': patient.firstName,
                 'lastName': patient.lastName,
@@ -64,23 +78,21 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 'area': patient.area,
                 'city': patient.city,
                 'state': patient.state,
+                # Company fields
+                'customer_type': patient.customer_type,
+                'company_code': patient.company_code,
+                'company_name': company_name,
             }
-            
+
             return Response(response_data, status=status.HTTP_200_OK)
-            
+
         except Patient.DoesNotExist:
-            return Response({
-                "error": "Patient not found for the given UHID"
-            }, status=status.HTTP_404_NOT_FOUND)
-            
+            return Response({"error": "Patient not found for the given UHID"}, status=status.HTTP_404_NOT_FOUND)
+
     except Admission.DoesNotExist:
-        return Response({
-            "error": "Admission record not found for the given IP Number"
-        }, status=status.HTTP_404_NOT_FOUND)
+        return Response({"error": "Admission record not found for the given IP Number"}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
-        return Response({
-            "error": f"An error occurred: {str(e)}"
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)  
+        return Response({"error": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
  
 @csrf_exempt
@@ -89,6 +101,9 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
 def estimate_billing_create(request):
     if request.method == 'POST':
         current_user = request.data.get('auth-user-id', 'system')
+        branch_code = request.data.get('auth-branch-code', 'system')
+        department_code = request.data.get('auth-department-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
 
         with transaction.atomic():
             last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
@@ -111,6 +126,8 @@ def estimate_billing_create(request):
             request_data['EstBillNo'] = formatted_bill_no
             request_data['EstBillDate'] = timezone.now()   # ← server time
             request_data['created_by'] = current_user      # ← from auth header
+            request_data['branch_code'] = branch_code      # ← from auth header
+            request_data['department_code'] = department_code      # ← from auth header
 
             serializer = EstimateBillingSerializer(data=request_data)
             if serializer.is_valid():
@@ -123,60 +140,173 @@ def estimate_billing_create(request):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def estimate_billing_list(request):
-    try:
-        estimates = EstimateBilling.objects.all().order_by('-id')
+    """
+    Returns active estimate bills with all filters applied server-side.
 
-        active_estimates = [
-            e for e in estimates
-            if e.is_active not in [False, 0, "false", "False", None]
-        ]
+    Query params:
+      fromDate    : YYYY-MM-DD
+      toDate      : YYYY-MM-DD
+      billType    : numeric bill_type id  (e.g. 10)
+      doctor      : exact doctor name
+      uhid        : partial/prefix match
+      patientType : "IP" | "OP"  (blank = ALL)
+    """
+
+    def serialize_val(val):
+        """Make a single value JSON-safe."""
+        if isinstance(val, Decimal128):
+            return float(val.to_decimal())
+        if isinstance(val, ObjectId):
+            return str(val)
+        if isinstance(val, datetime):
+            return val.isoformat()
+        return val
+
+    def serialize_doc(doc):
+        if isinstance(doc, dict):
+            return {k: serialize_doc(v) for k, v in doc.items()}
+        if isinstance(doc, list):
+            return [serialize_doc(i) for i in doc]
+        return serialize_val(doc)
+
+    try:
+        # ── Read query params ──────────────────────────────────────────────────
+        from_date_str  = request.GET.get('fromDate', '').strip()
+        to_date_str    = request.GET.get('toDate', '').strip()
+        bill_type_param = request.GET.get('billType', '').strip()
+        doctor_param   = request.GET.get('doctor', '').strip()
+        uhid_param     = request.GET.get('uhid', '').strip()
+        patient_type   = request.GET.get('patientType', '').strip()
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
-        patient_collection = db['hospital_patient']
-        billtype_collection = db['hospital_billtype']  # ✅ Add this
+        estimate_collection = db['hospital_estimatebilling']
+        patient_collection  = db['hospital_patient']
+        billtype_collection = db['hospital_billtype']
 
-        serializer = EstimateBillingSerializer(active_estimates, many=True)
-        estimate_data = serializer.data
+        # ── Build MongoDB query directly (skip ORM entirely) ──────────────────
+        query = {"is_active": {"$nin": [False, 0, "false", "False"]}}
 
-        for estimate in estimate_data:
-            # Enrich patient details
-            uhid = estimate.get("uhid")
-            if uhid:
-                patient = patient_collection.find_one({"uhid": uhid})
-                if patient:
-                    estimate["salutation"] = patient.get("salutation", "")
-                    estimate["firstName"] = patient.get("firstName", "")
-                    estimate["lastName"] = patient.get("lastName", "")
-                    estimate["age"] = patient.get("age", "")
-                    estimate["gender"] = patient.get("gender", "")
-                else:
-                    estimate["salutation"] = ""
-                    estimate["firstName"] = ""
-                    estimate["lastName"] = ""
-                    estimate["age"] = ""
-                    estimate["gender"] = ""
-
-            # ✅ Enrich bill_name from hospital_billtype
-            bill_type = estimate.get("bill_type")
-            if bill_type:
-                bill_type_doc = billtype_collection.find_one(
-                    {"bill_type": int(bill_type)},
-                    {"_id": 0, "bill_name": 1, "billTypeNo": 1}
+        # Date filter on EstBillDate
+        if from_date_str and to_date_str:
+            try:
+                start = datetime.strptime(from_date_str, "%Y-%m-%d")
+                end   = datetime.strptime(to_date_str,   "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59, microsecond=999999
                 )
-                if bill_type_doc:
-                    estimate["bill_name"] = bill_type_doc.get("bill_name", "")
-                    estimate["billTypeNo"] = bill_type_doc.get("billTypeNo", "")
-                else:
-                    estimate["bill_name"] = ""
-                    estimate["billTypeNo"] = ""
+                query["EstBillDate"] = {"$gte": start, "$lte": end}
+            except ValueError:
+                client.close()
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status=400,
+                )
+
+        # Bill type filter — match both int and string variants because
+        # Django serializers may store bill_type as "10" (str) or 10 (int)
+        # depending on the model field type. Use $in to cover both.
+        if bill_type_param:
+            try:
+                int_val = int(bill_type_param)
+                query["bill_type"] = {"$in": [int_val, str(int_val)]}
+            except (ValueError, TypeError):
+                query["bill_type"] = {"$in": [bill_type_param]}
+
+        # Doctor filter — exact match
+        if doctor_param:
+            query["doctor"] = doctor_param
+
+        # UHID filter — partial / case-insensitive
+        if uhid_param:
+            query["uhid"] = {"$regex": uhid_param, "$options": "i"}
+
+        # Patient type filter — IP has non-empty ipNumber, OP does not
+        if patient_type == "IP":
+            query["ipNumber"] = {"$exists": True, "$ne": "", "$nin": [None]}
+        elif patient_type == "OP":
+            query["$or"] = [
+                {"ipNumber": {"$exists": False}},
+                {"ipNumber": ""},
+                {"ipNumber": None},
+            ]
+
+        data = list(estimate_collection.find(query).sort("_id", -1))
+
+        # ── Batch-cache patient details (avoid N+1) ────────────────────────────
+        uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
+        patient_cache = {}
+        if uhids:
+            patients = patient_collection.find(
+                {"uhid": {"$in": list(uhids)}},
+                {"_id": 0, "uhid": 1, "salutation": 1,
+                 "firstName": 1, "lastName": 1, "age": 1, "gender": 1},
+            )
+            for p in patients:
+                patient_cache[p["uhid"]] = p
+
+        # ── Batch-cache bill type names ────────────────────────────────────────
+        # bill_type may be stored as int OR string in hospital_estimatebilling
+        # depending on Django serializer. Normalise everything to int for lookup.
+        bill_type_ids = set()
+        for doc in data:
+            bt = doc.get("bill_type")
+            if bt is not None and bt != "":
+                try:
+                    bill_type_ids.add(int(bt))
+                except (ValueError, TypeError):
+                    pass
+
+        bill_type_cache = {}  # keyed by int
+        if bill_type_ids:
+            bt_docs = billtype_collection.find(
+                {"bill_type": {"$in": list(bill_type_ids)}},
+                {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1},
+            )
+            for bt in bt_docs:
+                bill_type_cache[int(bt["bill_type"])] = {
+                    "bill_name":  bt.get("bill_name", ""),
+                    "billTypeNo": bt.get("billTypeNo", ""),
+                }
+
+        # ── Enrich each document ───────────────────────────────────────────────
+        result = []
+        for doc in data:
+            # Patient info
+            uhid    = doc.get("uhid", "")
+            patient = patient_cache.get(uhid, {})
+            doc["salutation"] = patient.get("salutation", "")
+            doc["firstName"]  = patient.get("firstName", "")
+            doc["lastName"]   = patient.get("lastName", "")
+            doc["age"]        = patient.get("age", "")
+            doc["gender"]     = patient.get("gender", "")
+
+            # Bill type name
+            try:
+                bt_key = int(doc.get("bill_type", 0))
+            except (ValueError, TypeError):
+                bt_key = 0
+            bt_info = bill_type_cache.get(bt_key, {})
+            doc["bill_name"]  = bt_info.get("bill_name", "")
+            doc["billTypeNo"] = bt_info.get("billTypeNo", "")
+
+            # Parse item JSON string if needed
+            if isinstance(doc.get("item"), str):
+                try:
+                    doc["item"] = json.loads(doc["item"])
+                except json.JSONDecodeError:
+                    doc["item"] = []
+
+            result.append(serialize_doc(doc))
 
         client.close()
 
-        return Response(estimate_data)
+        return Response(result)
 
     except Exception as e:
-        return Response({"error": "Failed to fetch estimate billing list", "details": str(e)}, status=500)
+        return Response(
+            {"error": "Failed to fetch estimate billing list", "details": str(e)},
+            status=500,
+        )
 
 
 @api_view(["GET"])
@@ -426,6 +556,9 @@ def invest_billing_create(request):
 
     try:
         current_user = request.data.get('auth-user-id', "system")
+        branch_code = request.data.get('auth-branch-code', 'system')
+        department_code = request.data.get('auth-department-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
 
         data = {k: v for k, v in request.data.items()
                 if not k.startswith('auth-')}
@@ -491,8 +624,17 @@ def invest_billing_create(request):
                     status=drf_status.HTTP_404_NOT_FOUND
                 )
 
+            # ── editRemarks is required for every edit ────────────────────────
+            edit_remarks = data.get("editRemarks", "").strip()
+            if not edit_remarks:
+                return Response(
+                    {"error": "editRemarks is required when editing a bill."},
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
+
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
+            data["editRemarks"] = edit_remarks   # store flat on the document
             data.pop("investBillNo", None)
 
             invest_collection.update_one(
@@ -505,6 +647,7 @@ def invest_billing_create(request):
                  "investBillNo": existing_invest_bill_no},
                 status=drf_status.HTTP_200_OK
             )
+
 
         # ───────────────── CREATE ──────────────────────────────
 
@@ -532,6 +675,9 @@ def invest_billing_create(request):
         # Stamp fields
         data["investBillNo"] = invest_bill_no
         data["created_by"] = current_user
+        data["branch_code"] = branch_code
+        data["department_code"] = department_code
+        data["hospital_code"] = hospital_code
         data["created_date"] = timezone.now()
         data["lastmodified_by"] = None
         data["lastmodified_date"] = timezone.now()
@@ -586,32 +732,66 @@ def billing_report_view(request):
 
         query = {"is_active": True}
 
+        # ── Date filter ────────────────────────────────────────────────────────
         start_date = request.GET.get('start_date')
         end_date = request.GET.get('end_date')
 
         if start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
-                end = datetime.strptime(end_date, "%Y-%m-%d")
-                query["EstBillDate"] = {"$gte": start, "$lte": end}
+                end = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59, microsecond=999999
+                )
+                query["investBillDate"] = {"$gte": start, "$lte": end}
             except ValueError:
                 return JsonResponse({"error": "Invalid date format. Use YYYY-MM-DD."}, status=400)
 
+        # ── Bill type filter ───────────────────────────────────────────────────
+        bill_type_param = request.GET.get('billType')
+        if bill_type_param:
+            try:
+                query["bill_type"] = int(bill_type_param)
+            except (ValueError, TypeError):
+                query["bill_type"] = bill_type_param
+
+        # ── Doctor filter ──────────────────────────────────────────────────────
+        doctor_param = request.GET.get('doctor')
+        if doctor_param:
+            query["doctor"] = doctor_param
+
+        # ── UHID filter (partial / prefix match) ──────────────────────────────
+        uhid_param = request.GET.get('uhid')
+        if uhid_param:
+            query["uhid"] = {"$regex": uhid_param, "$options": "i"}
+
+        # ── Patient type filter (IP / OP) ──────────────────────────────────────
+        patient_type_param = request.GET.get('patientType')
+        if patient_type_param == 'IP':
+            # IP patients have a non-empty ipNumber
+            query["ipNumber"] = {"$exists": True, "$ne": "", "$nin": [None]}
+        elif patient_type_param == 'OP':
+            # OP patients have no ipNumber or it is blank/null
+            query["$or"] = [
+                {"ipNumber": {"$exists": False}},
+                {"ipNumber": ""},
+                {"ipNumber": None},
+            ]
+
         data = list(collection.find(query))
 
-        # ✅ Cache bill types to avoid repeated DB calls
+        # ── Cache bill types to avoid repeated DB calls ────────────────────────
         bill_type_cache = {}
 
         result = []
         for doc in data:
 
-            # ✅ Resolve bill_name using bill_type as integer (same as estimate_billing_list)
+            # Resolve bill_name using bill_type as integer
             bill_type = doc.get("bill_type")
             if bill_type:
                 if bill_type not in bill_type_cache:
                     try:
                         bill_type_doc = bill_type_collection.find_one(
-                            {"bill_type": int(bill_type)},       # ✅ query by numeric bill_type field
+                            {"bill_type": int(bill_type)},
                             {"_id": 0, "bill_name": 1, "billTypeNo": 1}
                         )
                         if bill_type_doc:
@@ -650,12 +830,11 @@ def billing_report_view(request):
                 else:
                     doc["salutation"] = doc["firstName"] = doc["lastName"] = doc["age"] = doc["gender"] = ""
 
-            # Serialize all MongoDB types recursively
             result.append(serialize_doc(doc))
 
         client.close()
 
-        result.sort(key=lambda x: x.get("EstBillDate", ""), reverse=True)
+        result.sort(key=lambda x: x.get("investBillDate", ""), reverse=True)
 
         return JsonResponse(result, safe=False)
 
@@ -668,25 +847,28 @@ def billing_report_view(request):
 @permission_classes([HasRoleAndDataPermission])
 def delete_bill_view(request):
     try:
-        bill_id = request.data.get('billId')
-        bill_type = request.data.get('billType')
-        employeeId = request.data.get('auth-user-id', "system")
+        investBillNo  = request.data.get('investBillNo')
+        delete_remarks = request.data.get('deleteRemarks', '').strip()
+        employeeId    = request.data.get('auth-user-id', 'system')
 
-        if not bill_id or not bill_type:
-            return JsonResponse({'error': 'Missing billId or billType'}, status=400)
+        if not investBillNo:
+            return JsonResponse({'error': 'Missing investBillNo'}, status=400)
+
+        if not delete_remarks:
+            return JsonResponse({'error': 'deleteRemarks is required'}, status=400)
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
-        collection = db[bill_type]
+        collection = db['hospital_investbilling']
 
-        # Soft delete: set is_active to False
         result = collection.update_one(
-            {"_id": ObjectId(bill_id)},
+            {"investBillNo": investBillNo, "is_active": True},
             {
                 "$set": {
-                    "is_active": False,
-                    "deletedBy": employeeId,
-                    "deletedAt": datetime.now()
+                    "is_active":     False,
+                    "deletedBy":     employeeId,
+                    "deletedAt":     datetime.now(),
+                    "deleteRemarks": delete_remarks,   # ← stored on the document
                 }
             }
         )
@@ -694,9 +876,158 @@ def delete_bill_view(request):
         client.close()
 
         if result.matched_count == 0:
-            return JsonResponse({'error': 'Bill not found'}, status=404)
+            return JsonResponse({'error': 'Bill not found or already deleted'}, status=404)
 
-        return JsonResponse({'message': 'Bill marked as inactive successfully'}, status=200)
+        return JsonResponse({'message': 'Bill deleted successfully'}, status=200)
 
     except Exception as e:
-        return JsonResponse({'error': 'Failed to update bill', 'details': str(e)}, status=500)
+        return JsonResponse({'error': 'Failed to delete bill', 'details': str(e)}, status=500)
+    
+    
+    
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def dept_budr_view(request):
+    """
+    Returns Deleted or Edited bills for the Department Bill Update/Delete Report.
+
+    Query params:
+      report_type : "deleted" | "edited"   (required)
+      start_date  : YYYY-MM-DD
+      end_date    : YYYY-MM-DD
+    """
+
+    def serialize_doc(doc):
+        if isinstance(doc, dict):
+            return {k: serialize_doc(v) for k, v in doc.items()}
+        elif isinstance(doc, list):
+            return [serialize_doc(i) for i in doc]
+        elif isinstance(doc, Decimal128):
+            return float(doc.to_decimal())
+        elif isinstance(doc, ObjectId):
+            return str(doc)
+        elif isinstance(doc, datetime):
+            return doc.isoformat()
+        return doc
+
+    try:
+        report_type = request.GET.get('report_type', '').strip().lower()
+        if report_type not in ('deleted', 'edited'):
+            return JsonResponse(
+                {"error": "report_type must be 'deleted' or 'edited'"},
+                status=400,
+            )
+
+        start_date = request.GET.get('start_date')
+        end_date   = request.GET.get('end_date')
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+
+        # HMS db — billing data
+        hms_db               = client['HMS']
+        collection           = hms_db['hospital_investbilling']
+        bill_type_collection = hms_db['hospital_billtype']
+
+        # Global db — employee profiles for name resolution
+        global_db            = client['Global']
+        profile_collection   = global_db['backend_diagnostics_profile']
+
+        # ── Build query ────────────────────────────────────────────────────────
+        if report_type == 'deleted':
+            query = {
+                "is_active": False,
+                "deletedAt": {"$exists": True},
+            }
+            date_field      = "deletedAt"
+            actor_id_field  = "deletedBy"       # employeeId stored here
+            actor_name_out  = "deletedByName"   # resolved name written here
+        else:
+            query = {
+                "is_active": True,
+                "lastmodified_by": {"$ne": None, "$exists": True},
+                "editRemarks": {"$exists": True},
+            }
+            date_field      = "lastmodified_date"
+            actor_id_field  = "lastmodified_by"
+            actor_name_out  = "lastmodified_by_name"
+
+        # ── Date filter ────────────────────────────────────────────────────────
+        if start_date and end_date:
+            try:
+                start = datetime.strptime(start_date, "%Y-%m-%d")
+                end   = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                    hour=23, minute=59, second=59, microsecond=999999
+                )
+                query[date_field] = {"$gte": start, "$lte": end}
+            except ValueError:
+                client.close()
+                return JsonResponse(
+                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status=400,
+                )
+
+        data = list(collection.find(query))
+
+        # ── Collect unique employee IDs to resolve in one batch ────────────────
+        # Avoids N separate DB calls — fetch all needed profiles at once.
+        actor_ids = {
+            str(doc.get(actor_id_field, "")).strip()
+            for doc in data
+            if doc.get(actor_id_field)
+        }
+
+        employee_cache = {}  # { "60002": "Najma", ... }
+        if actor_ids:
+            profiles = profile_collection.find(
+                {"employeeId": {"$in": list(actor_ids)}},
+                {"_id": 0, "employeeId": 1, "employeeName": 1},
+            )
+            for p in profiles:
+                employee_cache[str(p.get("employeeId", "")).strip()] = p.get("employeeName", "")
+
+        # ── Cache bill type names ──────────────────────────────────────────────
+        bill_type_cache = {}
+
+        result = []
+        for doc in data:
+            # Resolve bill type name
+            bill_type = doc.get("bill_type")
+            if bill_type:
+                if bill_type not in bill_type_cache:
+                    try:
+                        bt_doc = bill_type_collection.find_one(
+                            {"bill_type": int(bill_type)},
+                            {"_id": 0, "bill_name": 1, "billTypeNo": 1},
+                        )
+                        bill_type_cache[bill_type] = {
+                            "bill_name":  bt_doc.get("bill_name", "")  if bt_doc else "",
+                            "billTypeNo": bt_doc.get("billTypeNo", "") if bt_doc else "",
+                        }
+                    except (ValueError, TypeError):
+                        bill_type_cache[bill_type] = {"bill_name": "", "billTypeNo": ""}
+
+                doc["bill_name"]  = bill_type_cache[bill_type]["bill_name"]
+                doc["billTypeNo"] = bill_type_cache[bill_type]["billTypeNo"]
+            else:
+                doc["bill_name"]  = ""
+                doc["billTypeNo"] = ""
+
+            # Resolve actor name from employee cache
+            actor_id = str(doc.get(actor_id_field, "")).strip()
+            doc[actor_name_out] = employee_cache.get(actor_id, actor_id or "")
+            # ^ falls back to the raw ID if no profile found, never returns blank
+
+            result.append(serialize_doc(doc))
+
+        client.close()
+
+        result.sort(key=lambda x: x.get(date_field, ""), reverse=True)
+
+        return JsonResponse(result, safe=False)
+
+    except Exception as e:
+        return JsonResponse(
+            {"error": "Failed to fetch report", "details": str(e)},
+            status=500,
+        )
+    
