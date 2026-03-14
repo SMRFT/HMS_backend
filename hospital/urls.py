@@ -7,15 +7,21 @@ from .Views import (
     doctormaster,
     ICD11,
     inventory,
+    package_crud,
     pharmacy,
     radiology,
     room,
+    summary,package_crud, investigation_price, billType,
     summary,
+    dashboard,
+    advanced_dashboard,
+    doctor_dashboard,
+    insurance_provider,
+    NursingStation
 )
 
 urlpatterns = [
     # Admission URLs
-    path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate but consistent
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
     path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
@@ -62,49 +68,29 @@ urlpatterns = [
     path('patients/register/', views.patientCreateView, name='patient-register'),
     path('create/', views.patientCreateView, name='patient-list'),
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
+    path('patient-registration-stats/', views.patient_registration_stats, name='patient_registration_stats'),
+    path('patient-visit-list/', views.patient_visit_list, name='patient_visit_list'),
+    path('generate-qr-session/', views.generate_qr_session, name='generate_qr_session'),
+    path('submit-qr-registration/', views.submit_qr_registration, name='submit_qr_registration'),
+    path('check-qr-status/', views.check_qr_status, name='check_qr_status'),
+    path('get-pending-qr-registrations/', views.get_pending_qr_registrations, name='get_pending_qr_registrations'),
+    path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('doctors/', views.doctor_view, name='doctor_view'),
     path('doctor_list/', views.doctor_list, name='doctor_list'),
     path('doctor_detail/<str:first_name>/', views.doctor_detail, name='doctor_detail'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
-    path('investigations/', radiology.get_ct_investigations, name='get_investigations'),
-    # path('investigations/<str:uhid>/<str:subUhid>/', views.get_patient_report, name='get_patient_report'),
 
-    #Investigation Reports (CT):
-    path('investigations/', radiology.get_ct_investigations, name='get_ct_investigations'),
-    path('ct-reports/', radiology.create_ct_report, name='create_ct_report'),   
-    path('ct_reports/', radiology.get_ct_reports, name='get_ct_reports'),  # Fetch all reports
-    path('ct_reports/<str:patientId>/', radiology.get_ct_reports, name='get_ct_report'),  # Fetch specific report by patientId      
-    re_path(r'^ct-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_ct_report, name='approve_ct_report'),     
-    re_path(r'^ct-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_ct_report, name='soft_delete_ct_report'),
-    re_path(r'^ct-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_ct_report_impression, name='edit_ct_report_impression'),     
-    #Investigation Reports (MRI):
-    path('mri_investigations/', radiology.get_mri_investigations, name='get_mri_investigations'),  
-    path('mri-reports/', radiology.create_mri_report, name='create_mri_report'),
-    path('mri_reports/', radiology.get_mri_reports, name='get_mri_reports'),  # Fetch all reports
-    path('mri_reports/<str:patientId>/', radiology.get_mri_reports, name='get_mri_report'),  # Fetch specific report by patientId   
-    re_path(r'^mri-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_mri_report, name='approve_mri_report'),  
-    re_path(r'^mri-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_mri_report, name='soft_delete_mri_report'), 
-    re_path(r'^mri-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_mri_report_impression, name='edit_mri_report_impression'),     
-    #Investigation Reports (USG):
-    path('usg_investigations/', radiology.get_usg_investigations, name='get_usg_investigations'),  
-    path('usg-reports/', radiology.create_usg_report, name='create_usg_report'),
-    path('usg_reports/', radiology.get_usg_reports, name='get_usg_reports'),  # Fetch all reports
-    path('usg_reports/<str:patientId>/', radiology.get_usg_reports, name='get_usg_report'),  # Fetch specific report by patientId   
-    re_path(r'^usg-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_usg_report, name='approve_usg_report'),  
-    re_path(r'^usg-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_usg_report, name='soft_delete_usg_report'),
-    re_path(r'^usg-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_usg_report_impression, name='edit_usg_report_impression'),     
-    #Investigation Reports (X-RAY):
-    path('x_ray_investigations/', radiology.get_x_ray_investigations, name='get_x_ray_investigations'), 
-    path('x_ray-reports/', radiology.create_x_ray_report, name='create_x_ray_report'),
-    path('x_ray_reports/', radiology.get_x_ray_reports, name='get_x_ray_reports'),  # Fetch all reports
-    path('x_ray_reports/<str:investBillNo>/', radiology.get_x_ray_reports, name='get_x_ray_report'),  # Fetch specific report by patientId   
-    re_path(r'^x_ray-reports/approve/(?P<investBillNo>.+)/$', radiology.approve_x_ray_report, name='approve_x_ray_report'),  
-    re_path(r'^x_ray-reports/delete/(?P<investBillNo>.+)/$', radiology.soft_delete_x_ray_report, name='soft_delete_x_ray_report'), 
-    re_path(r'^x_ray-reports/edit/(?P<investBillNo>.+)/$', radiology.edit_x_ray_report_impression, name='edit_x_ray_report_impression'),     
-
+    #Radiology Reports :
+    path('investigations/', radiology.get_investigations, name='get_investigations'),
+    path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),     
+    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
+    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),     
+    
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
+    path('summary-type/', summary.summary_type, name='summary_type'),
     path('summaries/create/', summary.create_summary, name='create_summary'),   
     re_path(r'^approve-summary/(?P<ip_no>.+)/$', summary.approve_summary, name='approve_summary'),
     re_path(r'^delete-summary/(?P<ip_no>.+)/$', summary.delete_summary, name='delete_summary'),
@@ -121,7 +107,9 @@ urlpatterns = [
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
-    path('lab-tests/', departmentBilling.get_lab_tests, name='get-lab-tests'), 
+    path('packages/', departmentBilling.get_packages, name='get_packages'),
+    path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
+    path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
     path('investBilling/', departmentBilling.invest_billing_create, name='invest-billing-create'),
     path('investBillingGet/', departmentBilling.billing_report_view, name='billing_report_view'),
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
@@ -129,11 +117,70 @@ urlpatterns = [
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
     
     #Doctor Master:
-    path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate
+    path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
     path('doctor_schedule/<str:employee_id>/', doctormaster.doctor_schedule_detail, name='doctor_schedule_detail'),
     path('doctor_schedule_upsert/<str:employee_id>/', doctormaster.doctor_schedule_upsert, name='doctor_schedule_upsert'),
 
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+
+    path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
+    path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
+    path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),
+    path("get_lab_ward_requests/", NursingStation.get_lab_ward_requests, name="get_lab_ward_requests"),
+    path("save_lab_ward_request/", NursingStation.save_lab_ward_request, name="save_lab_ward_request"),
+    path("cancel_lab_ward_request/", NursingStation.cancel_lab_ward_request, name="cancel_lab_ward_request"),
+    path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
+    path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
+    path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
+    path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
+    path("get_radiology_ward_requests/", NursingStation.get_radiology_ward_requests, name="get_radiology_ward_requests"),
+    path("save_radiology_ward_request/", NursingStation.save_radiology_ward_request, name="save_radiology_ward_request"),
+    path("cancel_radiology_ward_request/", NursingStation.cancel_radiology_ward_request, name="cancel_radiology_ward_request"),
+    path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
+    
+    #Package Master:
+    path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
+    path('lab-items/',  package_crud.get_lab_items,    name='get_lab_items'),
+    path('departments/',  package_crud.get_departments,    name='get_departments'),
+    path('packages_crud/',  package_crud.get_packages,    name='get_packages'),
+    path('packages/create/',  package_crud.create_package,  name='create_package'),
+    path('packages/<int:package_no>/', package_crud.get_package,     name='get_package'),
+    path('packages/<int:package_no>/update/', package_crud.update_package, name='update_package'),
+    path('packages/<int:package_no>/delete/', package_crud.delete_package, name='delete_package'),
+
+    #Investigation Price Master:
+    path('investigation-prices_get/', investigation_price.get_investigation_prices),
+    path('investigation-prices/create/', investigation_price.create_investigation_price),
+    path('investigation-prices/<str:bill_type_no>/update/',investigation_price.update_investigation_price),
+    path('investigation-prices/<str:bill_type_no>/delete/',investigation_price.delete_investigation_price),
+    
+    #Bil Type Master:
+    path('bill-types_get/', billType.get_bill_types),
+    path('bill-types/create/', billType.create_bill_type),
+    path('bill-types/<str:bill_type_no>/update/', billType.update_bill_type),
+    path('bill-types/<str:bill_type_no>/delete/', billType.delete_bill_type),
+    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
+    
+
+    # Dashboard URLs
+    path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
+    path('advanced-dashboard/stats/', advanced_dashboard.advanced_dashboard_stats, name='advanced_dashboard_stats'),
+    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+
+    # User Permissions (Dynamic Table)
+    path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),
+    path('update-user-permissions/', views.update_user_permissions, name='update_user_permissions'),
+    path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
+    path('registration-bills/', views.registration_bills, name='registration_bills'),
+    re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
+    path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
+    
+    # Insurance Provider URLs
+    path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
+    path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
 ]

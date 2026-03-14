@@ -125,11 +125,22 @@ class RoomSerializer(serializers.ModelSerializer):
     
 
 from .models import Admission
+from .models import Admission, Patient
+
 class AdmissionSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+
+    patient_details = serializers.SerializerMethodField()
+
     class Meta:
         model = Admission
-        fields = '__all__'
+        fields = "__all__"
+
+    def get_patient_details(self, obj):
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+
+        if patient:
+            return PatientSerializer(patient).data
+        return None 
 
 
 from .models import DischargeDetail
@@ -158,32 +169,6 @@ class DoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import CTReport
-class CTReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CTReport
-        fields = ['age', 'date', 'gender', 'impression', 'investigation', 'patientId', 'patientName', 'approve','approve_time']
-
-
-from .models import MRIReport
-class MRIReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = MRIReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import USGReport
-class USGReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = USGReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
-
-
-from .models import XRayReport
-class XRayReportSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = XRayReport
-        fields = ['patientId', 'patientName', 'age', 'gender', 'investigation', 'impression', 'approve', 'approve_time']
 
 
 from .models import Summary
@@ -200,13 +185,6 @@ class EstimateBillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import InvestBilling
-class InvestBillingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InvestBilling
-        fields = '__all__'
-
-
 from .models import ReferenceDoctor
 class ReferenceDoctorSerializer(serializers.ModelSerializer):
     class Meta:
@@ -219,4 +197,20 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = OPPharmacyBill
+        fields = '__all__'
+
+from .models import Billing
+class BillingSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.firstName', read_only=True)
+    patient_uhid = serializers.CharField(source='patient.uhid', read_only=True)
+    
+    class Meta:
+        model = Billing
+        fields = '__all__'
+
+from .models import InsuranceProvider
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
         fields = '__all__'
