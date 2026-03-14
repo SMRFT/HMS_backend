@@ -11,7 +11,12 @@ class ObjectIdField(serializers.Field):
         except:
             return data
         
-
+from .models import PharmacyCategory
+class PharmacyCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PharmacyCategory
+        fields = "__all__"
+        read_only_fields = ["category_id"]
 
         
 from .models import PharmacyItem
@@ -28,6 +33,15 @@ class VendorSerializer(serializers.ModelSerializer):
         model = Vendor
         fields = "__all__"
         read_only_fields = ["vendor_id"]
+
+
+from .models import PharmacyStock
+class PharmacyStockSerializer(serializers.ModelSerializer):
+    stock_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model  = PharmacyStock
+        fields = "__all__"
 
 
 from .models import GRN

@@ -15,6 +15,8 @@ from rest_framework.decorators import api_view, permission_classes
 from django.views.decorators.csrf import csrf_exempt
 from pymongo import MongoClient
 import os, json
+from ..serializers import  Patient,PatientSerializer
+from ..models import CTReport, MRIReport, USGReport, XRayReport
 from ..serializers import   PatientSerializer
 from ..serializers import   VendorSerializer
 from ..models import RadiologyReport
