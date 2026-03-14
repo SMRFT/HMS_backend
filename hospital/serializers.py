@@ -10,50 +10,144 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
-from .models import PharmacyStock
-class PharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+        
+from .models import PharmacyCategory
+class PharmacyCategorySerializer(serializers.ModelSerializer):
     class Meta:
-        model = PharmacyStock
-        fields = '__all__'
+        model = PharmacyCategory
+        fields = "__all__"
+        read_only_fields = ["category_id"]
 
-from .models import HSNCode
-class HSNCodeSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+        
+from .models import PharmacyItem
+class PharmacyItemSerializer(serializers.ModelSerializer):
     class Meta:
-        model = HSNCode
-        fields = '__all__'
-from .models import Ventor
-class VentorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Ventor
-        fields = ['id', 'ventor_name', 'phone', 'address', 'gst_number']
-from .models import IPPharmacyStock, OPPharmacyStock,Vendor
-
-# IP Pharmacy Stock Serializer
-class IPPharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
-    class Meta:
-        model = IPPharmacyStock
-        fields = '__all__'
+        model = PharmacyItem
+        fields = "__all__"
+        read_only_fields = ["item_id"]
 
 
-# OP Pharmacy Stock Serializer
-class OPPharmacyStockSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
-    class Meta:
-        model = OPPharmacyStock
-        fields = '__all__'
-
-
-# Vendor Serializer
+from .models import Vendor
 class VendorSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-
     class Meta:
         model = Vendor
+        fields = "__all__"
+        read_only_fields = ["vendor_id"]
+
+
+from .models import PharmacyStock
+class PharmacyStockSerializer(serializers.ModelSerializer):
+    stock_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model  = PharmacyStock
+        fields = "__all__"
+
+
+from .models import GRN
+class GRNSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = GRN
+        fields = '__all__'
+
+
+from .models import Block, RoomCategory, Room
+class BlockSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Block
+        fields = "__all__"
+        read_only_fields = ["block_id"]
+
+
+class RoomCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoomCategory
+        fields = "__all__"
+        read_only_fields = ["room_category_id"]
+
+class RoomSerializer(serializers.ModelSerializer):
+    # These fields will be handled as JSON
+    services = serializers.JSONField(required=False, allow_null=True, default=list)
+    beds = serializers.JSONField(required=False, allow_null=True, default=list)
+    room_kits = serializers.JSONField(required=False, allow_null=True, default=list)
+
+    class Meta:
+        model = Room
+        fields = [
+            'room_number',
+            'description',
+            'room_category',
+            'block',
+            'floor',
+            'phone_extension',
+            'nursing_station',
+            'capacity',
+            'admission_fee',
+            'room_advance',
+            'room_type',
+            'room_blocked',
+            'blocked_reason',
+            'is_active',
+            'services',
+            'beds',
+            'room_kits',
+            'created_by',
+            'created_date',
+            'lastmodified_by',
+            'lastmodified_date',
+        ]
+        read_only_fields = ['id', 'created_date', 'lastmodified_date']
+
+    def validate_services(self, value):
+        """Validate services array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Services must be a list")
+        return value
+
+    def validate_beds(self, value):
+        """Validate beds array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Beds must be a list")
+        return value
+
+    def validate_room_kits(self, value):
+        """Validate room_kits array"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Room kits must be a list")
+        return value
+    
+
+from .models import Admission
+from .models import Admission, Patient
+
+class AdmissionSerializer(serializers.ModelSerializer):
+
+    patient_details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Admission
+        fields = "__all__"
+
+    def get_patient_details(self, obj):
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+
+        if patient:
+            return PatientSerializer(patient).data
+        return None 
+
+
+from .models import DischargeDetail
+class DischargeDetailSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = DischargeDetail
         fields = '__all__'
 
 
@@ -75,11 +169,6 @@ class DoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Admission
-class AdmissionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Admission
-        fields = '__all__'
 
 
 from .models import Summary
@@ -103,64 +192,6 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Bed, Service, Room
-
-class BlockSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Block
-        fields = '__all__'
-
-
-class RoomCategorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = RoomCategory
-        fields = '__all__'
-
-
-class BedSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Bed
-        fields = '__all__'
-
-
-class ServiceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Service
-        fields = '__all__'
-
-
-class RoomSerializer(serializers.ModelSerializer):
-    beds = BedSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Room
-        fields = '__all__'
-
-
-from .models import DischargeDetail
-class DischargeDetailSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = DischargeDetail
-        fields = '__all__'
-
-
-from .models import IPGRN, OPGRN
-
-class IPGRNSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = IPGRN
-        fields = '__all__'
-
-
-class OPGRNSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = OPGRN
-        fields = '__all__'
-
-
 from .models import OPPharmacyBill
 class OPPharmacyBillSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
@@ -168,4 +199,18 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
         model = OPPharmacyBill
         fields = '__all__'
 
+from .models import Billing
+class BillingSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source='patient.firstName', read_only=True)
+    patient_uhid = serializers.CharField(source='patient.uhid', read_only=True)
+    
+    class Meta:
+        model = Billing
+        fields = '__all__'
 
+from .models import InsuranceProvider
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
+        fields = '__all__'

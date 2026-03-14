@@ -73,7 +73,11 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'shanmugahospital_backend.wsgi.application'
 
+WHO_ICD_CLIENT_ID = os.getenv("WHO_ICD_CLIENT_ID")
+WHO_ICD_CLIENT_SECRET = os.getenv("WHO_ICD_CLIENT_SECRET")
 
+WHO_TOKEN_URL = "https://icdaccessmanagement.who.int/connect/token"
+WHO_BASE_URL = "https://id.who.int/icd/release/11/2023-01/mms"
 
 # Database
 # https://docs.djangoproject.com/en/3.2/ref/settings/#databases
