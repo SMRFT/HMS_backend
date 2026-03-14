@@ -9,3 +9,6 @@ from . import radiology
 from . import room
 from . import summary
 from . import dashboard
+from . import advanced_dashboard
+from . import NursingStation
+

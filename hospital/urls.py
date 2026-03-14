@@ -11,11 +11,13 @@ from .Views import (
     pharmacy,
     radiology,
     room,
-    stock,
     summary,package_crud, investigation_price, billType,
     summary,
     dashboard,
+    advanced_dashboard,
+    doctor_dashboard,
     insurance_provider,
+    NursingStation
 )
 
 urlpatterns = [
@@ -119,7 +121,23 @@ urlpatterns = [
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
 
-
+    path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
+    path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
+    path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),
+    path("get_lab_ward_requests/", NursingStation.get_lab_ward_requests, name="get_lab_ward_requests"),
+    path("save_lab_ward_request/", NursingStation.save_lab_ward_request, name="save_lab_ward_request"),
+    path("cancel_lab_ward_request/", NursingStation.cancel_lab_ward_request, name="cancel_lab_ward_request"),
+    path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
+    path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
+    path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
+    path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
+    path("get_radiology_ward_requests/", NursingStation.get_radiology_ward_requests, name="get_radiology_ward_requests"),
+    path("save_radiology_ward_request/", NursingStation.save_radiology_ward_request, name="save_radiology_ward_request"),
+    path("cancel_radiology_ward_request/", NursingStation.cancel_radiology_ward_request, name="cancel_radiology_ward_request"),
+    path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
+    
     #Package Master:
     path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
     path('lab-items/',  package_crud.get_lab_items,    name='get_lab_items'),
@@ -146,6 +164,8 @@ urlpatterns = [
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
+    path('advanced-dashboard/stats/', advanced_dashboard.advanced_dashboard_stats, name='advanced_dashboard_stats'),
+    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
 
     # User Permissions (Dynamic Table)
     path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),
