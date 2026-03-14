@@ -90,7 +90,7 @@ class PharmacyItem(AuditModel):
     
 
 class PharmacyStock(AuditModel):
-    stock_id                 = models.AutoField(primary_key=True)
+    stock_id                 = models.IntegerField(primary_key=True)
     department_code          = models.CharField(max_length=20)
     item_id                  = models.IntegerField()
     batch_number             = models.CharField(max_length=50)       
@@ -112,8 +112,18 @@ class PharmacyStock(AuditModel):
     CGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     SGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
+    
+    def save(self, *args, **kwargs):
+
+        # Auto generate stock_id
+        if self.stock_id is None:
+            last = PharmacyStock.objects.order_by("-stock_id").first()
+            self.stock_id = (last.stock_id + 1) if last else 1
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f"{self.grn_number} | {self.item_id} | batch:{self.batch_number}"
+        return f"{self.item_id} {self.stock_id}"
 
 class Vendor(AuditModel):
     vendor_id = models.CharField(primary_key=True,max_length=10)

@@ -37,11 +37,10 @@ class VendorSerializer(serializers.ModelSerializer):
 
 from .models import PharmacyStock
 class PharmacyStockSerializer(serializers.ModelSerializer):
-    stock_id = serializers.IntegerField(read_only=True)
-
     class Meta:
-        model  = PharmacyStock
+        model = PharmacyStock
         fields = "__all__"
+        read_only_fields = ["stock_id"]
 
 
 from .models import GRN
