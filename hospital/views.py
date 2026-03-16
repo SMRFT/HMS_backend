@@ -18,9 +18,69 @@ from pyauth.auth import HasRoleAndDataPermission
 import os
 from dotenv import load_dotenv
 load_dotenv()
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def op_patient_detail_by_uhid(request, uhid):
+    try:
+        patient = Patient.objects.get(uhid=uhid)
+        serializer = PatientSerializer(patient)
+        return Response(serializer.data)
+    except Patient.DoesNotExist:
+        return Response({"error": "Patient not found"}, status=404)
+
+  
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def ip_patient_detail_by_ipNumber(request, ipNumber):
+    try:
+        # Get admission details
+        admission = Admission.objects.get(ipNumber=ipNumber)
+        
+        # Get patient details using UHID from admission
+        try:
+            patient = Patient.objects.get(uhid=admission.uhid)
+            
+            # Combine data from both models
+            response_data = {
+                # From Admission model
+                'ipNumber': admission.ipNumber,
+                'uhid': admission.uhid,
+                'roomNo': admission.roomNo,
+                'admissionDate': admission.admissionDate,
+                'admissionTime': admission.time if hasattr(admission, 'time') else None,
+                'admittingDoctor': admission.admittingDoctor,
+                
+                # From Patient model
+                'salutation': patient.salutation if hasattr(patient, 'salutation') else '',
+                'firstName': patient.firstName,
+                'lastName': patient.lastName,
+                'age': patient.age,
+                'gender': patient.gender,
+                'area': patient.area,
+                'city': patient.city,
+                'state': patient.state,
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Patient.DoesNotExist:
+            return Response({
+                "error": "Patient not found for the given UHID"
+            }, status=status.HTTP_404_NOT_FOUND)
+            
+    except Admission.DoesNotExist:
+        return Response({
+            "error": "Admission record not found for the given IP Number"
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            "error": f"An error occurred: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)  
+    
     
 from .models import Billing
-
 from .serializers import PatientSerializer
 @api_view(['GET', 'POST'])
 @csrf_exempt

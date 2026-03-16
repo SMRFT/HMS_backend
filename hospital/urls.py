@@ -14,6 +14,9 @@ from .Views import (
 )
 
 urlpatterns = [
+    re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', views.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
+    re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', views.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
+
     # Admission URLs
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate but consistent
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
@@ -55,6 +58,11 @@ urlpatterns = [
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 
     #Discharge URLs
+    path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),
+    path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
+    path("discharge-billing/<int:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
+    path("discharge-billing/<int:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
+    path("discharge-detail/",discharge.discharge_detail_view,name="discharge-detail",),
     path('search-admissions/', discharge.search_discharge_patient, name='search-admissions'),
     path('discharge/', discharge.discharge_detail_view, name='discharge-create'),
 
@@ -118,8 +126,6 @@ urlpatterns = [
     path("icd11/entity/<str:entity_id>/", ICD11.icd11_detail),
 
     #Investigation Billing:
-    re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
-    re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
     path('lab-tests/', departmentBilling.get_lab_tests, name='get-lab-tests'), 
     path('investBilling/', departmentBilling.invest_billing_create, name='invest-billing-create'),

@@ -90,40 +90,58 @@ class PharmacyItem(AuditModel):
     
 
 class PharmacyStock(AuditModel):
-    stock_id                 = models.IntegerField(primary_key=True)
-    department_code          = models.CharField(max_length=20)
-    item_id                  = models.IntegerField()
-    batch_number             = models.CharField(max_length=50)       
-    expiry_date              = models.CharField(max_length=50)
-    mrp                      = models.DecimalField(max_digits=10, decimal_places=2)
-    grn_number               = models.CharField(max_length=50)
-    total_stock              = models.IntegerField()
-    sold_quantity            = models.IntegerField(default=0)
-    transferred_out_quantity = models.IntegerField(default=0)
-    stock_type               = models.CharField(max_length=50, default="grn")
-    stock_ref_id             = models.IntegerField(default=0)        
-    grn_return_quantity      = models.IntegerField(default=0)
-    grn_return_ref_id        = models.IntegerField(null=True, blank=True)
-    blocked_quantity         = models.IntegerField(default=0)
-    sales_return_quantity    = models.IntegerField(default=0)
-    sales_return_ref_id      = models.IntegerField(null=True, blank=True)
-    CGST_Percentage          = models.DecimalField(max_digits=5,  decimal_places=2, default=0)
-    SGST_Percentage          = models.DecimalField(max_digits=5,  decimal_places=2, default=0)
-    CGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    SGST_Amt                 = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    
+    stock_id = models.IntegerField(primary_key=True)
+
+    department_code = models.CharField(max_length=20)
+    item_id = models.IntegerField()
+    batch_number = models.CharField(max_length=50)
+
+    expiry_date = models.DateField(null=True, blank=True)
+
+    mrp = models.DecimalField(max_digits=10, decimal_places=2)
+
+    grn_number = models.CharField(max_length=50)
+
+    total_stock = models.IntegerField()
+
+    sold_quantity = models.IntegerField(default=0)
+    transferred_out_quantity = models.IntegerField(default=0)
+
+    stock_type = models.CharField(max_length=50, default="grn")
+    stock_ref_id = models.IntegerField(default=0)
+
+    grn_return_quantity = models.IntegerField(default=0)
+    grn_return_ref_id = models.IntegerField(null=True, blank=True)
+
+    blocked_quantity = models.IntegerField(default=0)
+
+    sales_return_quantity = models.IntegerField(default=0)
+    sales_return_ref_id = models.IntegerField(null=True, blank=True)
+
+    CGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    SGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+
+    CGST_Amt = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    SGST_Amt = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+
     def save(self, *args, **kwargs):
 
-        # Auto generate stock_id
-        if self.stock_id is None:
-            last = PharmacyStock.objects.order_by("-stock_id").first()
-            self.stock_id = (last.stock_id + 1) if last else 1
+        if not self.stock_id:
+
+            while True:
+                last = PharmacyStock.objects.order_by("-stock_id").first()
+                next_id = (last.stock_id + 1) if last else 1
+
+                if not PharmacyStock.objects.filter(stock_id=next_id).exists():
+                    self.stock_id = next_id
+                    break
 
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.item_id} {self.stock_id}"
+        return f"{self.stock_id} - {self.item_id}"
 
 class Vendor(AuditModel):
     vendor_id = models.CharField(primary_key=True,max_length=10)
@@ -233,7 +251,7 @@ class Room(AuditModel):
     occupancy = models.IntegerField(default=0)               
     admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_status = models.CharField(max_length=20)
+    room_status = models.CharField(max_length=20, default="Available")
     room_blocked = models.BooleanField(default=False)
     blocked_reason = models.TextField(blank=True)
     include_in_final_bill = models.BooleanField(default=True)
@@ -261,7 +279,7 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=20, unique=True)
     ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
-    admissionDateTime   = models.DateTimeField()
+    admissionDateTime = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)               # stores employeeId
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  # stores employeeId
     packageName         = models.CharField(max_length=100, blank=True, null=True)
@@ -299,6 +317,52 @@ class Admission(AuditModel):
     def __str__(self):
         return f"{self.uhid} | {self.ipNumber}"
 
+class DischargeBilling(AuditModel):
+    # ── Identity ──────────────────────────────────────────────────────────────
+    status          = models.CharField(max_length=20, db_index=True)
+    estimate_number = models.CharField(max_length=60, blank=True, null=True, unique=True)
+    bill_no         = models.CharField(max_length=60, blank=True, null=True, unique=True)
+
+    # ── Patient Reference (no FK — same pattern as investbilling) ─────────────
+    uhid            = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    ip_number       = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+
+    # ── Bill Date (auto today from backend) ───────────────────────────────────
+    bill_date       = models.DateField(default=timezone.now)
+
+    # ── Items stored as JSON array ────────────────────────────────────────────
+    # Each item: { investigation_id, itemName, category, quantity, rate, discount, amount, doctor, doctor_fee, item_description }
+    items           = models.JSONField(default=list)
+
+    # ── Financial Summary ─────────────────────────────────────────────────────
+    total_amount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)   # gross before discount
+    advance_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    sales_return      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    medicines_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    taxable_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    non_tax_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    gst_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    room_tax          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    discount_percent  = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_amount   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    disc_reason       = models.CharField(max_length=300, blank=True, null=True)
+    item_disc         = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_disc        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    net_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)   
+
+    remarks           = models.TextField(blank=True, null=True)
+
+    # ── Estimate→Bill traceability ────────────────────────────────────────────
+    converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
+    is_active         = models.BooleanField(default=True)
+
+    def __str__(self):
+        ref = self.bill_no if self.status == "Billed" else self.estimate_number
+        return f"{self.uhid or self.ip_number} | {ref} | {self.status}"
 
 class DischargeDetail(AuditModel):
     uhid_no = models.CharField(max_length=100, blank=True)
