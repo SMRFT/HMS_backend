@@ -214,3 +214,4 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
     class Meta:
         model = InsuranceProvider
         fields = '__all__'
+

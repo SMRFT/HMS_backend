@@ -11,4 +11,4 @@ from . import summary
 from . import dashboard
 from . import advanced_dashboard
 from . import NursingStation
-
+from . import Stores

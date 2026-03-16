@@ -18,6 +18,7 @@ from .Views import (
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan
 )
+from .Views.Stores import stores
 
 urlpatterns = [
     # Admission URLs
@@ -203,4 +204,20 @@ urlpatterns = [
     # Insurance Provider URLs
     path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
     path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
+
+    # Stores URLs
+    path('item-master/', stores.item_master_list_create, name='item_master_list_create'),
+    path('item-master/<str:pk>/', stores.item_master_detail, name='item_master_detail'),
+    
+    path('department-master/', stores.department_list_create, name='department_list_create'),
+    path('department-master/<str:pk>/', stores.department_detail, name='department_detail'),
+    
+    path('group-master/', stores.group_list_create, name='group_list_create'),
+    path('group-master/<str:pk>/', stores.group_detail, name='group_detail'),
+    
+    path('category-master/', stores.category_list_create, name='category_list_create'),
+    path('category-master/<str:pk>/', stores.category_detail, name='category_detail'),
+    
+    path('group-type-master/', stores.group_type_list_create, name='group_type_list_create'),
+    path('group-type-master/<str:pk>/', stores.group_type_detail, name='group_type_detail'),
 ]
