@@ -36,7 +36,7 @@ def advanced_dashboard_stats(request):
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-        today_ip = Admission.objects.filter(admissionDate__range=(today_start, today_end)).count()
+        today_ip = Admission.objects.filter(admissionDateTime__range=(today_start, today_end)).count()
         today_visits = Billing.objects.filter(billed_date__range=(today_start, today_end)).count()
         today_op = max(0, today_visits - today_ip)
 
@@ -60,7 +60,7 @@ def advanced_dashboard_stats(request):
         month_start = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
         month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999)
 
-        admissions = list(Admission.objects.filter(admissionDate__range=(month_start, month_end)))
+        admissions = list(Admission.objects.filter(admissionDateTime__range=(month_start, month_end)))
         billings = list(Billing.objects.filter(billed_date__range=(month_start, month_end)))
         grns = list(GRN.objects.filter(created_date__range=(month_start, month_end)))
 
@@ -69,7 +69,7 @@ def advanced_dashboard_stats(request):
             day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
             # OP/IP
-            day_admissions = [a for a in admissions if day_start <= a.admissionDate <= day_end]
+            day_admissions = [a for a in admissions if day_start <= a.admissionDateTime <= day_end]
             day_billings = [b for b in billings if day_start <= b.billed_date <= day_end]
             
             d_ip = len(day_admissions)
@@ -106,7 +106,7 @@ def advanced_dashboard_stats(request):
         # 4. Doctor-wise OP/IP (Today)
         doctor_stats = {}
         # IP from admissions
-        today_admissions = [a for a in admissions if today_start <= a.admissionDate <= today_end]
+        today_admissions = [a for a in admissions if today_start <= a.admissionDateTime <= today_end]
         for a in today_admissions:
             doc = a.consultingDoctor or a.admittingDoctor or "Unknown"
             if not doc.strip(): doc = "Unknown"
