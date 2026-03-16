@@ -11,7 +11,11 @@ from .Views import (
     pharmacy,
     radiology,
     room,
-    stock,
+    NursingStation,
+    dashboard,
+    advanced_dashboard,
+    doctor_dashboard,
+    insurance_provider,
     summary,package_crud, investigation_price, billType, velavan
 )
 

@@ -27,8 +27,66 @@ class AuditModel(models.Model):
         self.lastmodified_date = now
 
         super().save(*args, **kwargs)
+class TempPatientRegistration(models.Model):
+    session_id = models.CharField(max_length=100, unique=True)
+    data = models.TextField() # Storing JSON data as string
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_consumed = models.BooleanField(default=False)
 
+    def __str__(self):
+        return f"Temp Reg: {self.session_id}"
+class Vendor(AuditModel):
+    VENDOR_TYPE_CHOICES = [
+        ('SUPPLIER', 'Supplier'),
+        ('MANUFACTURER', 'Manufacturer'),
+        ('BOTH', 'Both'),
+    ]
 
+    vendor_id = models.CharField(max_length=10, unique=True, primary_key=True)
+    vendor_type = models.CharField(max_length=20, choices=VENDOR_TYPE_CHOICES)
+    name = models.CharField(max_length=255)
+    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
+    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=10, null=True, blank=True)
+    
+    # Contact Information
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    phone = models.CharField(max_length=20, null=True, blank=True)
+    email = models.EmailField(max_length=255, null=True, blank=True)
+    url = models.URLField(max_length=255, null=True, blank=True)
+    
+    # Additional Fields
+    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
+    gstin = models.CharField(max_length=20, null=True, blank=True)
+    payment = models.CharField(max_length=50, null=True, blank=True)
+    terms = models.TextField(null=True, blank=True)
+    credit_period = models.CharField(max_length=20, null=True, blank=True)
+    export_data_code = models.CharField(max_length=100, null=True, blank=True)
+    tds_percent = models.CharField(max_length=10, null=True, blank=True)
+    igst_supplier = models.BooleanField(default=False)
+    blacklisted_supplier = models.BooleanField(default=False)
+    account_on_hold = models.BooleanField(default=False)
+    reason_for_holding = models.TextField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if not self.vendor_id:
+            try:
+                # Get all vendor IDs, find the max numerical one
+                vendors = Vendor.objects.all()
+                max_id = 0
+                for v in vendors:
+                    if v.vendor_id and str(v.vendor_id).isdigit():
+                        max_id = max(max_id, int(v.vendor_id))
+                self.vendor_id = str(max_id + 1)
+            except Exception:
+                self.vendor_id = "1"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.vendor_id})"
 class PharmacyCategory(AuditModel):
     category_id = models.IntegerField(primary_key=True)
     category_name = models.CharField(max_length=100)
