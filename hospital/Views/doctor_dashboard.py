@@ -57,7 +57,7 @@ def doctor_dashboard_stats(request):
         total_ip = Admission.objects.filter(consultingDoctor=selected_doctor_name).count() + Admission.objects.filter(admittingDoctor=selected_doctor_name).count()
 
         monthly_billings = list(Billing.objects.filter(doctor_id=selected_doctor_name, billed_date__range=(month_start, month_end)))
-        monthly_admissions = list(Admission.objects.filter(admissionDate__range=(month_start, month_end)))
+        monthly_admissions = list(Admission.objects.filter(admissionDateTime__range=(month_start, month_end)))
         
         # Filter admissions for this doctor
         doctor_monthly_admissions = [a for a in monthly_admissions if a.consultingDoctor == selected_doctor_name or a.admittingDoctor == selected_doctor_name]
@@ -66,7 +66,7 @@ def doctor_dashboard_stats(request):
         total_income = sum([float(str(b.consulting_fee or b.total_fees or 0)) for b in monthly_billings])
         
         today_op = len([b for b in monthly_billings if today_start <= b.billed_date <= today_end])
-        today_ip = len([a for a in doctor_monthly_admissions if today_start <= a.admissionDate <= today_end])
+        today_ip = len([a for a in doctor_monthly_admissions if today_start <= a.admissionDateTime <= today_end])
 
         kpis = {
             "total_op": total_op,
@@ -83,7 +83,7 @@ def doctor_dashboard_stats(request):
             day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
             
             d_op = len([b for b in monthly_billings if day_start <= b.billed_date <= day_end])
-            d_ip = len([a for a in doctor_monthly_admissions if day_start <= a.admissionDate <= day_end])
+            d_ip = len([a for a in doctor_monthly_admissions if day_start <= a.admissionDateTime <= day_end])
             d_income = sum([float(str(b.consulting_fee or b.total_fees or 0)) for b in monthly_billings if day_start <= b.billed_date <= day_end])
 
             monthly_trend.append({

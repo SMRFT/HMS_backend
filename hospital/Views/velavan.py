@@ -1,0 +1,1051 @@
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.utils.decorators import method_decorator
+from django.core.paginator import Paginator
+import json
+from ..models import VelavanInvoice,VelavanVendors,VelavanItems
+from django.utils import timezone
+from django.utils.dateparse import parse_date
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from pyauth.auth import HasRoleAndDataPermission
+from pymongo import MongoClient
+from django.conf import settings
+import logging
+from decimal import Decimal
+from bson.decimal128 import Decimal128
+import os
+from dotenv import load_dotenv
+logger = logging.getLogger(__name__)
+import certifi
+import re
+from datetime import datetime
+import traceback
+from bson.objectid import ObjectId
+from datetime import date, datetime
+from django.shortcuts import get_object_or_404
+
+
+
+client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+db = client['HMS']
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def list_vendors(request):
+    try:
+        vendors_collection = db['hospital_velavan_vendors']
+
+        # 2️⃣ Ensure all documents have `is_active`
+        vendors_collection.update_many(
+            {"is_active": {"$exists": False}},
+            {"$set": {"is_active": True}}
+        )
+
+        # 3️⃣ Fetch only active vendors
+        def convert_decimal128(obj):
+            if isinstance(obj, list):
+                return [convert_decimal128(o) for o in obj]
+            elif isinstance(obj, dict):
+                return {k: convert_decimal128(v) for k, v in obj.items()}
+            elif isinstance(obj, Decimal128):
+                return float(obj.to_decimal())  # or str(obj.to_decimal())
+            else:
+                return obj
+
+        vendors = list(vendors_collection.find({"is_active": True}))
+        active_vendors = convert_decimal128(vendors)
+
+        # 4️⃣ Convert ObjectId to string
+        for vendor in active_vendors:
+            vendor["id"] = str(vendor["_id"])
+            del vendor["_id"]
+
+        return Response(active_vendors, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"error": "Server error occurred", "details": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_get_vendors(request):
+    try:
+        vendors_collection = db["hospital_velavan_vendors"]
+        # Fetch vendors where is_active is True or not set
+        vendors_cursor = vendors_collection.find({
+            "$or": [
+                {"is_active": True},
+                {"is_active": {"$exists": False}}
+            ]
+        })
+
+        vendors = []
+        for vendor in vendors_cursor:
+            vendor_data = {}
+            for key, value in vendor.items():
+                if isinstance(value, ObjectId):
+                    vendor_data[key] = str(value)
+                elif isinstance(value, Decimal128):
+                    vendor_data[key] = float(value.to_decimal())
+                elif isinstance(value, datetime):
+                    vendor_data[key] = value.isoformat()
+                else:
+                    vendor_data[key] = value
+            vendors.append(vendor_data)
+
+        return Response({"status": "success", "data": vendors}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_create_vendor(request):
+    try:
+        data = request.data
+        name = data.get("name")
+        gstin = data.get("gstin")
+
+        user_id = data.get('auth-user-id', 'system')
+        branch_code = data.get('auth-branch-code', 'system')
+        department_code = data.get('auth-department-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'system')
+
+        if not name:
+            return Response(
+                {"success": False, "message": "Vendor Name is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not gstin:
+            return Response(
+                {"success": False, "message": "GSTIN is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check if vendor already exists
+        vendors_collection = db["hospital_velavan_vendors"]
+        existing = vendors_collection.find_one({
+            "name": name,
+            "gstin": gstin,
+            "is_active": True
+        })
+
+        if existing:
+            return Response(
+                {"success": False, "message": "Vendor with same name and GSTIN already exists"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Generate auto-increment vendor_id
+        all_vendor_ids = vendors_collection.distinct("vendor_id")
+        max_id = 0
+        for vid in all_vendor_ids:
+            try:
+                numeric_id = int(vid)
+                if numeric_id > max_id:
+                    max_id = numeric_id
+            except (ValueError, TypeError):
+                continue
+        new_vendor_id = str(max_id + 1)
+
+        now = datetime.now()
+        vendor_doc = {
+            "vendor_id":        new_vendor_id,
+            "name":             name,
+            "addressLine1":     data.get("addressLine1", ""),
+            "addressLine2":     data.get("addressLine2", ""),
+            "city":             data.get("city", ""),
+            "state":            data.get("state", ""),
+            "pincode":          data.get("pincode", ""),
+            "contactPerson":    data.get("contactPerson", ""),
+            "phone":            data.get("phone", ""),
+            "email":            data.get("email", ""),
+            "kgstTinNumber":    data.get("kgstTinNumber", ""),
+            "gstin":            gstin,
+            "payment":          data.get("payment", ""),
+            "tdsPercent":       data.get("tdsPercent", None),
+            "is_active":        True,
+            "created_by":       user_id,
+            "created_date":     now,
+            "lastmodified_by":  user_id,
+            "lastmodified_date": now,
+            "branch_code":      branch_code,
+            "department_code":  department_code,
+            "hospital_code":    hospital_code,
+        }
+
+        result = vendors_collection.insert_one(vendor_doc)
+
+        return Response(
+            {
+                "success": True,
+                "message": "Vendor created successfully",
+                "data": {
+                    "id": str(result.inserted_id),
+                    "vendor_id": new_vendor_id,
+                    "name": name,
+                    "gstin": gstin,
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_update_vendor(request, vendor_id):
+    try:
+        vendors_collection = db["hospital_velavan_vendors"]
+
+        data = request.data.copy()
+
+        # Remove _id and auth fields
+        fields_to_remove = ["_id"]
+        auth_fields = [key for key in data.keys() if key.startswith("auth-")]
+        fields_to_remove.extend(auth_fields)
+        for field in fields_to_remove:
+            data.pop(field, None)
+
+        data["lastmodified_by"] = request.data.get("auth-user-id")
+        data["lastmodified_date"] = datetime.now()
+
+        result = vendors_collection.update_one(
+            {"_id": ObjectId(vendor_id)},
+            {"$set": data}
+        )
+
+        if result.matched_count == 0:
+            return Response(
+                {"status": "error", "message": "Vendor not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        updated_vendor = vendors_collection.find_one({"_id": ObjectId(vendor_id)})
+
+        for key, value in updated_vendor.items():
+            if isinstance(value, ObjectId):
+                updated_vendor[key] = str(value)
+            elif isinstance(value, Decimal128):
+                updated_vendor[key] = float(value.to_decimal())
+            elif isinstance(value, datetime):
+                updated_vendor[key] = value.isoformat()
+
+        return Response(
+            {"status": "success", "data": updated_vendor},
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_delete_vendor(request, vendor_id):
+    try:
+        vendors_collection = db["hospital_velavan_vendors"]
+
+        result = vendors_collection.update_one(
+            {"_id": ObjectId(vendor_id)},
+            {"$set": {
+                "is_active": False,
+                "deleted_by": request.data.get("auth-user-id"),
+                "deleted_date": datetime.now()
+            }}
+        )
+
+        if result.matched_count == 0:
+            return Response(
+                {"status": "error", "message": "Vendor not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        return Response(
+            {"status": "success", "message": "Vendor deleted successfully"},
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def list_items(request):
+    try:                 # MongoDB database object
+        items_collection = db["hospital_velavan_items"]     # MongoDB collection object
+
+        # 2️⃣ Ensure all documents have is_active
+        items_collection.update_many(
+            {"is_active": {"$exists": False}},
+            {"$set": {"is_active": True}}
+        )
+
+        # 3️⃣ Fetch only active items
+        active_items = list(items_collection.find(
+            {"is_active": True},
+            {"_id": 1, "itemName": 1, "hsn": 1}
+        ))
+
+        # 4️⃣ Convert ObjectId to string for JSON
+        for item in active_items:
+            item["id"] = str(item["_id"])
+            del item["_id"]
+
+        return Response(active_items, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # Catch all exceptions and return details
+        return Response(
+            {"error": "Server error occurred", "details": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_get_items(request):
+ 
+    items = db['hospital_velavan_items'].find(
+        {"is_active": True},
+        {"_id": 1, "itemName": 1, "hsn": 1}
+    )
+ 
+    data = [
+        {
+            "id": str(item["_id"]),
+            "itemName": item.get("itemName", ""),
+            "hsn": item.get("hsn", ""),
+        }
+        for item in items
+    ]
+ 
+    client.close()
+    return Response({"status": "success", "data": data}, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_create_item(request):
+    try:
+        item_name = request.data.get("itemName")
+        hsn = request.data.get("hsn")
+        data = request.data
+        user_id = data.get('auth-user-id', 'system')
+        branch_code = data.get('auth-branch-code', 'system')
+        department_code = data.get('auth-department-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'system')
+        
+
+        if not item_name:
+            return Response(
+                {"success": False, "message": "Item Name is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ✅ Check if item already exists
+        existing_item = VelavanItems.objects.filter(
+            itemName=item_name,
+            hsn=hsn,
+            is_active=True
+        ).first()
+
+        if existing_item:
+            return Response(
+                {
+                    "success": False,
+                    "message": "Item with same name and HSN already exists"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+        # ✅ Create new item
+        item = VelavanItems.objects.create(
+            itemName=item_name,
+            hsn=hsn,
+            created_by=user_id,
+            branch_code=branch_code,
+            department_code=department_code,
+            hospital_code=hospital_code
+        )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Item created successfully",
+                "data": {
+                    "id": str(item.id),
+                    "itemName": item.itemName,
+                    "hsn": item.hsn
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(["PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_update_item(request, item_id):
+    try:       
+        items_collection = db["hospital_velavan_items"]
+        
+        # Get only the business data, exclude auth fields
+        data = request.data.copy()
+        
+        # Remove _id and all auth-related fields
+        fields_to_remove = ["_id"]
+        auth_fields = [key for key in data.keys() if key.startswith("auth-")]
+        fields_to_remove.extend(auth_fields)
+        
+        for field in fields_to_remove:
+            data.pop(field, None)
+        
+        # Add audit fields directly
+        data["lastmodified_by"] = request.data.get("auth-user-id")
+        data["lastmodified_date"] = datetime.now()
+
+        result = items_collection.update_one(
+            {"_id": ObjectId(item_id)}, 
+            {"$set": data}
+        )
+        
+        if result.matched_count == 0:
+            return Response(
+                {"status": "error", "message": "Item not found"}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        updated_item = items_collection.find_one({"_id": ObjectId(item_id)})
+        
+        # Convert MongoDB types to JSON-serializable types
+        for key, value in updated_item.items():
+            if isinstance(value, ObjectId):
+                updated_item[key] = str(value)
+            elif isinstance(value, Decimal128):
+                updated_item[key] = float(value.to_decimal())
+            elif isinstance(value, datetime):
+                updated_item[key] = value.isoformat()
+
+        return Response(
+            {"status": "success", "data": updated_item}, 
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def velavan_delete_item(request, item_id):
+    try:
+        items_collection = db["hospital_velavan_items"]
+
+        result = items_collection.update_one(
+            {"_id": ObjectId(item_id)},
+            {"$set": {
+                "is_active": False,
+                "lastmodified_by": request.data.get("auth-user-id"),
+                "lastmodified_date": datetime.now()
+            }}
+        )
+
+        if result.matched_count == 0:
+            return Response(
+                {"status": "error", "message": "Item not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        return Response(
+            {"status": "success", "message": "Item deleted successfully"},
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def create_velavan_in(request):
+    """
+    Create a new VelavanInvoice record with auto-generated GRN number.
+    Stores directly via model — no serializer.
+    """
+    try:
+        data = request.data
+        summary = data.get('summary', {})
+
+        def to_decimal(val, default=0):
+            try:
+                return float(val) if val not in (None, '') else default
+            except (ValueError, TypeError):
+                return default
+
+        def to_date(val):
+            if not val:
+                return None
+            if isinstance(val, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', val):
+                return val
+            try:
+                return datetime.strptime(val, '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                return None
+
+        def sanitize_value(v):
+            """Convert any non-JSON-serializable value to a safe primitive."""
+            # Handle ObjectId (bson) — this is the root cause
+            try:
+                from bson import ObjectId as BsonObjectId
+                if isinstance(v, BsonObjectId):
+                    return str(v)
+            except ImportError:
+                pass
+            # Handle Decimal
+            if isinstance(v, Decimal):
+                return float(v)
+            # Handle date/datetime
+            from datetime import date, datetime as dt
+            if isinstance(v, (date, dt)):
+                return v.isoformat()
+            # Recursively sanitize dicts and lists
+            if isinstance(v, dict):
+                return {k2: sanitize_value(v2) for k2, v2 in v.items()}
+            if isinstance(v, list):
+                return [sanitize_value(i) for i in v]
+            # Final fallback — test if serializable, else stringify
+            try:
+                json.dumps(v)
+                return v
+            except (TypeError, ValueError):
+                return str(v)
+
+        def sanitize_items(items):
+            """Clean every item dict — remove no fields, just sanitize values."""
+            return [
+                {k: sanitize_value(v) for k, v in item.items()}
+                for item in items
+            ]
+
+        employee_id = data.get('auth-user-id') or 'Anonymous'
+        total_amount = to_decimal(summary.get('totalAmount'))
+        clean_items = sanitize_items(data.get('items', []))
+
+        invoice = VelavanInvoice(
+            # Vendor
+            vendor_id               = data.get('vendor_id') or '',
+            # Invoice / Dates
+            date                    = to_date(data.get('date')),
+            invoice_no              = data.get('invoiceNo') or '',
+            invoice_date            = to_date(data.get('invoiceDate')),
+            payment_mode            = data.get('paymentMode') or '',
+            # Patient
+            ip_number               = data.get('ipNumber') or '',
+            patient_name            = data.get('patientName') or '',
+            surgeon_name            = data.get('surgeonName') or '',
+            # Items — sanitized
+            items                   = clean_items,
+            # Summary
+            non_taxable_amount      = to_decimal(summary.get('nonTaxableAmount')),
+            taxable_amount          = to_decimal(summary.get('taxableAmount')),
+            tax_paid_to_supplier    = to_decimal(summary.get('taxPaidToSupplier')),
+            local_tax               = to_decimal(summary.get('localTax')),
+            remarks                 = summary.get('remarks') or '',
+            cgst                    = to_decimal(summary.get('cgst')),
+            sgst                    = to_decimal(summary.get('sgst')),
+            igst                    = to_decimal(summary.get('igst')),
+            cess                    = to_decimal(summary.get('cess')),
+            central_sales_tax       = to_decimal(summary.get('centralSalesTax')),
+            round_amount            = to_decimal(summary.get('roundAmount')),
+            total_amount            = total_amount,
+            total_discount          = to_decimal(summary.get('totalDiscount')),
+            net_invoice_amount      = to_decimal(summary.get('netInvoiceAmount')),
+            quotation_rate          = to_decimal(summary.get('quotationRate')),
+            # Audit
+            created_by              = employee_id,
+        )
+
+        invoice.save()
+
+        # ── invoice.pk is a MongoDB ObjectId — must stringify it ──────────────
+        return JsonResponse({
+            'success':    True,
+            'status':     'success',
+            'message':    'VelavanInvoice created successfully',
+            'grn_number': str(invoice.grn_number),
+            'id':         str(invoice.pk),   # <-- ObjectId → str
+        }, status=201)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'status':  'error',
+            'message': str(e),
+        }, status=500)
+    
+
+def convert_decimal128_to_float(value):
+    """Convert Decimal128 or other numeric types to float safely"""
+    if value is None:
+        return 0.0
+    
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+    elif isinstance(value, Decimal):
+        return float(value)
+    elif isinstance(value, (int, float)):
+        return float(value)
+    elif isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    else:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+    
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def list_velavan_invoices(request):
+    """
+    Get list of VelavanInvoice records with pagination,
+    filtered by date range (from_date / to_date query params).
+    """
+    try:
+        logger.debug(f"Request headers: {request.headers}")
+        logger.debug(f"Request user: {request.user}, Query params: {request.GET}")
+
+        # ── Date filter params ────────────────────────────────────────
+        from_date_str = request.GET.get('from_date', None)
+        to_date_str   = request.GET.get('to_date', None)
+
+        # Build queryset ordered by created_date
+        queryset = VelavanInvoice.objects.all().order_by('-created_date')
+
+        # Apply date filters at DB level for efficiency
+        if from_date_str:
+            try:
+                from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
+                queryset = queryset.filter(invoice_date__gte=from_date)
+            except ValueError:
+                logger.warning(f"Invalid from_date format: {from_date_str}, skipping filter")
+
+        if to_date_str:
+            try:
+                # Include the full to_date day by going to end of day
+                to_date = datetime.strptime(to_date_str, '%Y-%m-%d').replace(
+                    hour=23, minute=59, second=59, microsecond=999999
+                )
+                queryset = queryset.filter(invoice_date__lte=to_date)
+            except ValueError:
+                logger.warning(f"Invalid to_date format: {to_date_str}, skipping filter")
+
+        all_records = list(queryset)
+
+        # ── Pagination params ─────────────────────────────────────────
+        try:
+            page      = int(request.GET.get('page', 1))
+            page_size = int(request.GET.get('page_size', 10))
+            if page < 1:
+                logger.warning("Invalid page number, defaulting to 1")
+                page = 1
+            if page_size < 1:
+                logger.warning("Invalid page size, defaulting to 10")
+                page_size = 10
+        except ValueError:
+            logger.warning("Invalid page or page_size format, using defaults")
+            page      = 1
+            page_size = 10
+
+        # ── Pagination math ───────────────────────────────────────────
+        total_records = len(all_records)
+        total_pages   = (total_records + page_size - 1) // page_size
+        start_index   = (page - 1) * page_size
+        end_index     = start_index + page_size
+        page_records  = all_records[start_index:end_index]
+
+        # ── Build response ────────────────────────────────────────────
+        response_data = []
+        for obj in page_records:
+            try:
+                # Fetch vendor details
+                vendor_details = {
+                    'vendor': '',
+                    'phone': '',
+                    'gstin': '',
+                    'address': '',
+                    'email': ''
+                }
+                if obj.vendor_id:
+                    try:
+                        vendor = VelavanVendors.objects.get(vendor_id=obj.vendor_id)
+                        vendor_details = {
+                            'vendor': vendor.name,
+                            'phone': vendor.phone or '',
+                            'gstin': vendor.gstin or '',
+                            'address': f"{vendor.addressLine1}, {vendor.addressLine2}, {vendor.city}, {vendor.state}".strip(', '),
+                            'email': vendor.email or ''
+                        }
+                    except VelavanVendors.DoesNotExist:
+                        logger.warning(f"Vendor with vendor_id {obj.vendor_id} not found")
+
+                # Handle items field
+                items = getattr(obj, 'items', [])
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                        if not isinstance(items, list):
+                            logger.warning(f"Items field for GRN {obj.grn_number} is not a valid JSON list")
+                            items = []
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON in items for GRN {obj.grn_number}")
+                        items = []
+                elif isinstance(items, list):
+                    pass
+                else:
+                    logger.warning(f"Items field for GRN {obj.grn_number} is neither a string nor a list")
+                    items = []
+
+                # Convert numeric fields in items
+                for item in items:
+                    numeric_item_fields = [
+                        'itemValue', 'packingPrice', 'unitPrice', 'cgstAmt', 'sgstAmt',
+                        'purchaseCost', 'mrp', 'tax', 'cgstPercent', 'sgstPercent'
+                    ]
+                    for field in numeric_item_fields:
+                        if field in item:
+                            item[field] = convert_decimal128_to_float(item[field])
+
+                # Financial fields
+                total_amount_paid = convert_decimal128_to_float(getattr(obj, 'total_amount_paid', 0))
+                total_amount      = convert_decimal128_to_float(getattr(obj, 'total_amount', 0))
+                pending_amount    = max(0.0, total_amount - total_amount_paid)
+
+                item_data = {
+                    'id':             str(getattr(obj, '_id', None)),
+                    'grn_number':     getattr(obj, 'grn_number', None),
+                    'vendor_id':      getattr(obj, 'vendor_id', None),
+                    'vendor':         vendor_details['vendor'],
+                    'phone':          vendor_details['phone'],
+                    'gstin':          vendor_details['gstin'],
+                    'address':        vendor_details['address'],
+                    'pending_amount': pending_amount,
+                    'invoice_no':     getattr(obj, 'invoice_no', None),
+                    'payment_mode':   getattr(obj, 'payment_mode', None),
+                    'remarks':        getattr(obj, 'remarks', None) or '',
+                    'created_by':     getattr(obj, 'created_by', None),
+                    'ip_number':      getattr(obj, 'ip_number', None),
+                    'patient_name':   getattr(obj, 'patient_name', None),
+                    'surgeon_name':   getattr(obj, 'surgeon_name', None),
+                    'items':          getattr(obj, 'items', None),
+                    'lastmodified_by': getattr(obj, 'lastmodified_by', None),
+                }
+
+                # Date fields
+                date_fields = ['date', 'invoice_date', 'due_date', 'created_date', 'lastmodified_date']
+                for field in date_fields:
+                    value = getattr(obj, field, None)
+                    item_data[field] = value.isoformat() if hasattr(value, 'isoformat') else str(value) if value else None
+
+                # Numeric fields
+                numeric_fields = [
+                    'non_taxable_amount', 'taxable_amount', 'tax_paid_to_supplier',
+                    'local_tax', 'cgst', 'sgst', 'igst', 'cess', 'central_sales_tax',
+                    'round_amount', 'total_amount', 'tax_on_free_items', 'total_discount',
+                    'net_invoice_amount', 'quotation_rate', 'courier_transport_charge'
+                ]
+                for field in numeric_fields:
+                    value = getattr(obj, field, None)
+                    item_data[field] = convert_decimal128_to_float(value)
+
+                response_data.append(item_data)
+
+            except Exception as item_error:
+                logger.error(f"Error processing GRN {obj.grn_number}: {str(item_error)}\n{traceback.format_exc()}")
+                response_data.append({
+                    'id':         str(getattr(obj, '_id', None)),
+                    'grn_number': getattr(obj, 'grn_number', None),
+                    'vendor_id':  getattr(obj, 'vendor_id', None),
+                    'vendor':     '',
+                    'error':      f'Processing failed: {str(item_error)}'
+                })
+
+        return Response({
+            'status': 'success',
+            'data': response_data,
+            'pagination': {
+                'current_page':  page,
+                'total_pages':   total_pages,
+                'total_records': total_records,
+                'has_next':      page < total_pages,
+                'has_previous':  page > 1,
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Error in list_velavan_invoices: {str(e)}\n{traceback.format_exc()}")
+        return Response({
+            'status': 'error',
+            'message': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Recursive cleaner to convert Decimal128 & ObjectId to JSON-safe types
+def clean_mongo_document(doc):
+    if isinstance(doc, dict):
+        return {k: clean_mongo_document(v) for k, v in doc.items()}
+    elif isinstance(doc, list):
+        return [clean_mongo_document(i) for i in doc]
+    elif isinstance(doc, Decimal128):
+        return float(doc.to_decimal())
+    elif isinstance(doc, ObjectId):
+        return str(doc)
+    return doc
+
+def convert_decimal128_to_float(value):
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+    try:
+        return float(value)
+    except Exception:
+        return value
+    
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_previous_purchases(request):
+    hsn = request.GET.get('hsn')
+    item_name = request.GET.get('item_name')
+
+    if not hsn or not item_name:
+        return Response({'status': 'error', 'message': 'HSN and Item Name are required'}, status=400)
+
+    try:       
+        purchases_collection = db["hospital_velavaninvoice"]
+        vendors_collection   = db["hospital_velavan_vendors"]
+
+        # Fetch all purchase records (removed is_active filter)
+        documents = purchases_collection.find({})
+        matched_purchases = []
+
+        for doc in documents:
+            items = doc.get('items', [])
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing items for GRN {doc.get('grn_number')}: {e}")
+                    continue
+            elif not isinstance(items, list):
+                continue
+
+            payment_details = doc.get('payment_details', {})
+            if isinstance(payment_details, str):
+                try:
+                    payment_details = json.loads(payment_details)
+                except json.JSONDecodeError:
+                    payment_details = {}
+            if not isinstance(payment_details, dict):
+                payment_details = {}
+            else:
+                for field in ['amount_paid', 'pending_amount']:
+                    if field in payment_details:
+                        payment_details[field] = convert_decimal128_to_float(payment_details[field])
+
+            for item in items:
+                mongo_name = " ".join(item.get('name', '').strip().split())
+                input_name = " ".join(item_name.strip().split())
+
+                if str(item.get('hsn', '')).strip() == str(hsn).strip() and mongo_name.lower() == input_name.lower():
+                    doc['matched_item']    = item
+                    doc['payment_details'] = payment_details
+
+                    # Fetch vendor name (removed is_active filter)
+                    vendor_name = None
+                    vendor_id   = doc.get('vendor_id')
+                    if vendor_id:
+                        vendor_doc = vendors_collection.find_one({
+                            "$or": [
+                                {"vendor_id": str(vendor_id).strip()},
+                                {"vendor_id": int(vendor_id)}
+                            ]
+                        })
+                        if vendor_doc:
+                            vendor_name = vendor_doc.get('name')
+                    doc['vendor_name'] = vendor_name
+
+                    matched_purchases.append(clean_mongo_document(doc))
+                    break
+
+        return Response({'status': 'success', 'data': matched_purchases}, status=200)
+
+    except Exception as e:
+        print(f"Error in get_previous_purchases: {e}")
+        return Response({'status': 'error', 'message': str(e)}, status=500)
+
+
+def normalize_dates(data):
+    """Convert date/datetime objects into ISO strings recursively"""
+    for key, value in data.items():
+        if isinstance(value, date) and not isinstance(value, datetime):
+            data[key] = value.isoformat()   # YYYY-MM-DD
+        elif isinstance(value, datetime):
+            data[key] = value.isoformat()   # full timestamp
+        elif isinstance(value, dict):
+            normalize_dates(value)
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                if isinstance(v, (date, datetime)):
+                    data[key][i] = v.isoformat()
+                elif isinstance(v, dict):
+                    normalize_dates(v)
+    return data
+
+
+def parse_date_field(value):
+    """Parse a date string or date/datetime object into a datetime object."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        value = value.strip()
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S.%f'):
+            try:
+                return datetime.strptime(value[:len(fmt)], fmt)
+            except ValueError:
+                continue
+    logger.warning(f"Could not parse date value: {value!r}")
+    return None
+
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def update_velavan_invoice(request, grn_number):
+    try:
+        collection = db["hospital_velavaninvoice"]
+
+        document = collection.find_one({"grn_number": grn_number})
+        if not document:
+            logger.warning(f"No record found for GRN {grn_number}")
+            return Response({
+                'status': 'error',
+                'message': f'No record found for GRN {grn_number}'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        data    = request.data
+        summary = data.get('summary', {})
+
+        # ── Parse date fields → raw Python datetime (NOT string) ──────
+        # PyMongo will store these as BSON Date {"$date": "..."} automatically
+        parsed_date         = parse_date_field(data.get('date'))
+        parsed_invoice_date = parse_date_field(data.get('invoiceDate'))
+        parsed_due_date     = parse_date_field(data.get('dueDate'))
+
+        update_data = {
+            'purchase_category': data.get('purchaseCategory'),
+            'vendor_id':         data.get('vendor_id'),
+            'date':              parsed_date,           # datetime → BSON Date
+            'invoice_no':        data.get('invoiceNo'),
+            'invoice_date':      parsed_invoice_date,   # datetime → BSON Date
+            'due_date':          parsed_due_date,        # datetime → BSON Date
+            'payment_mode':      data.get('paymentMode'),
+            'ip_number':         data.get('ipNumber'),
+            'patient_name':      data.get('patientName'),
+            'surgeon_name':      data.get('surgeonName'),
+            'items':             json.dumps(data.get('items', [])),
+            'lastmodified_date': timezone.now(),         # datetime → BSON Date
+            'lastmodified_by':   request.headers.get('auth-user-id', 'system'),
+            'remarks':           summary.get('remarks', document.get('remarks', '')),
+        }
+
+        # Remove None values
+        update_data = {k: v for k, v in update_data.items() if v is not None}
+
+        # ── Numeric summary fields → Decimal128 ───────────────────────
+        summary_mapping = {
+            'non_taxable_amount':       'nonTaxableAmount',
+            'taxable_amount':           'taxableAmount',
+            'tax_paid_to_supplier':     'taxPaidToSupplier',
+            'local_tax':                'localTax',
+            'cgst':                     'cgst',
+            'sgst':                     'sgst',
+            'igst':                     'igst',
+            'cess':                     'cess',
+            'central_sales_tax':        'centralSalesTax',
+            'round_amount':             'roundAmount',
+            'total_amount':             'totalAmount',
+            'tax_on_free_items':        'taxOnFreeItems',
+            'total_discount':           'totalDiscount',
+            'net_invoice_amount':       'netInvoiceAmount',
+            'quotation_rate':           'quotationRate',
+            'courier_transport_charge': 'courierTransportCharge',
+        }
+
+        for backend_field, frontend_field in summary_mapping.items():
+            raw   = summary.get(frontend_field, document.get(backend_field, 0))
+            value = convert_decimal128_to_float(raw)
+            update_data[backend_field] = Decimal128(str(value))
+
+        # ── DO NOT run normalize_dates — all date fields are already
+        #    Python datetime objects. PyMongo stores them as BSON Date
+        #    automatically, giving {"$date": "..."} in MongoDB. ─────────
+
+        result = collection.update_one(
+            {"grn_number": grn_number},
+            {"$set": update_data}
+        )
+
+        if result.matched_count == 1:
+            updated_doc = collection.find_one({"grn_number": grn_number})
+            cleaned_doc = clean_mongo_document(updated_doc)
+            return Response({
+                'status': 'success',
+                'message': f'Record {grn_number} updated successfully',
+                'data': cleaned_doc
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                'status': 'error',
+                'message': f'No record matched for GRN {grn_number}'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    except Exception as e:
+        logger.error(f"Error updating GRN {grn_number}: {str(e)}\n{traceback.format_exc()}")
+        return Response({
+            'status': 'error',
+            'message': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

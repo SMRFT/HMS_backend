@@ -2,6 +2,7 @@ from django.db import models
 from django.utils.timezone import now
 from django.utils import timezone
 
+
 # Base Audit Model
 class AuditModel(models.Model):
     created_by = models.CharField(max_length=100, null=True, blank=True)

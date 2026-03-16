@@ -701,3 +701,173 @@ def remove_individual_medicine_from_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_radiology_ward_requests(request):
+    try:
+        uhid = request.GET.get("uhid")
+        ip_number = request.GET.get("ipNumber")
+
+        query = {"is_active": True}
+        if uhid:
+            query["uhid"] = uhid
+        if ip_number:
+            query["ipNumber"] = ip_number
+
+        collection = mongo_db["hospital_radiologywardrequest"]
+        requests_data = list(collection.find(query).sort("created_date", -1))
+
+        formatted_data = []
+        for doc in requests_data:
+            items = doc.get("selectedTests", [])
+            tests = []
+            for itm in items:
+                tests.append({
+                    "test_id": itm.get("test_id", ""),
+                    "name": itm.get("itemName", ""),
+                    "price": itm.get("price", 0)
+                })
+            
+            formatted_doc = {
+                "id": str(doc.get("_id")),
+                "status": doc.get("status", "Result Pending"),
+                "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
+                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
+                "userName": doc.get("created_by", ""),
+                "billNo": doc.get("investBillNo", ""),
+                "billType": doc.get("billTypeName", ""),
+                "wardName": doc.get("wardName", ""),
+                "doctorName": doc.get("doctor", ""),
+                "tests": tests
+            }
+            formatted_data.append(formatted_doc)
+
+        return Response({
+            "success": True,
+            "data": serialize_doc(formatted_data)
+        })
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def save_radiology_ward_request(request):
+    try:
+        data = request.data
+        current_user = data.get('auth-user-id', "system")
+        
+        request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
+        
+        # ── Bill Number Generation (Prefix RAD) ──
+        bill_type_code = data.get("billTypeNo", "RAD")
+        today = datetime.now()
+        if today.month < 4:
+            financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
+        else:
+            financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
+
+        prefix_key = f"{financial_year}/{bill_type_code}"
+        prefix = f"{prefix_key}/"
+
+        counters_collection = mongo_db["hospital_counters"]
+        counter = counters_collection.find_one_and_update(
+            {"_id": prefix_key},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        next_number = counter["seq"]
+        invest_bill_no = f"{prefix}{next_number:06d}"
+        
+        request_doc.update({
+            "investBillNo": invest_bill_no,
+            "created_by": current_user,
+            "created_date": datetime.now(),
+            "status": "Result Pending",
+            "is_active": True
+        })
+        
+        collection = mongo_db["hospital_radiologywardrequest"]
+        result = collection.insert_one(request_doc)
+        
+        return Response({
+            "success": True,
+            "message": "Radiology Ward Request saved successfully",
+            "id": str(result.inserted_id),
+            "investBillNo": invest_bill_no
+        })
+        
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def cancel_radiology_ward_request(request):
+    try:
+        data = request.data
+        request_id = data.get("id")
+        
+        if not request_id:
+            return Response({"success": False, "error": "Request ID is required"}, status=400)
+            
+        from bson import ObjectId
+        collection = mongo_db["hospital_radiologywardrequest"]
+        
+        result = collection.update_one(
+            {"_id": ObjectId(request_id)},
+            {"$set": {"is_active": False, "status": "Cancelled"}}
+        )
+        
+        if result.modified_count > 0:
+            return Response({"success": True, "message": "Request cancelled successfully"})
+        else:
+            return Response({"success": False, "error": "Request not found"}, status=404)
+            
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def remove_individual_test_from_radiology_ward_request(request):
+    try:
+        data = request.data
+        request_id = data.get("id")
+        test_id = data.get("test_id")
+        test_name = data.get("test_name")
+        
+        if not request_id:
+            return Response({"success": False, "error": "Request ID is required"}, status=400)
+            
+        from bson import ObjectId
+        collection = mongo_db["hospital_radiologywardrequest"]
+        
+        pull_query = {"test_id": test_id} if test_id else {"itemName": test_name}
+
+        result = collection.update_one(
+            {"_id": ObjectId(request_id)},
+            {"$pull": {"selectedTests": pull_query}}
+        )
+        
+        if result.modified_count > 0:
+            doc = collection.find_one({"_id": ObjectId(request_id)})
+            tests = doc.get("selectedTests", [])
+            new_total = sum(float(t.get("price", 0)) for t in tests)
+            
+            update_fields = {"total_amount": new_total}
+            if not tests:
+                update_fields["status"] = "Cancelled"
+                update_fields["is_active"] = False
+                
+            collection.update_one({"_id": ObjectId(request_id)}, {"$set": update_fields})
+            
+            return Response({"success": True, "message": "Test removed successfully"})
+        else:
+            return Response({"success": False, "error": "Test not found"}, status=404)
+            
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)

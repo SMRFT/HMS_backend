@@ -1,4 +1,5 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from pyauth.auth import HasRoleAndDataPermission
 from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
@@ -21,12 +22,14 @@ def serialize_doc(doc):
 
 
 @api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
 def get_investigation_prices(request):
     """List all investigation price records."""
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_investigationprice']
+        
 
         query = {}
         search = request.query_params.get('search', '').strip()
@@ -48,12 +51,16 @@ def get_investigation_prices(request):
 
 
 @api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
 def create_investigation_price(request):
     """Create a new investigation price record. POST /investigation-prices/create/"""
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_investigationprice']
+        created_by = request.data.get('auth-user-id', "system")
+        branch_code = request.data.get('auth-branch-code', "system")
+        hospital_code = request.data.get('auth-hospital-code', "system")
 
         data = dict(request.data)
 
@@ -90,7 +97,9 @@ def create_investigation_price(request):
             'is_active':           bool(data.get('is_active', True)),
             'Items':               items,
             'created_date':        datetime.utcnow(),
-            'lastmodified_date':   datetime.utcnow(),
+            'created_by':     created_by,
+            'branch_code':         branch_code,
+            'hospital_code':       hospital_code,
         }
 
         result = collection.insert_one(doc)
@@ -108,6 +117,7 @@ def create_investigation_price(request):
 
 
 @api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
 def update_investigation_price(request, bill_type_no):
     """Update by billTypeNo. PATCH /investigation-prices/<bill_type_no>/update/"""
     client = None
@@ -116,6 +126,7 @@ def update_investigation_price(request, bill_type_no):
         collection = db['hospital_investigationprice']
 
         data   = dict(request.data)
+        current_user = request.data.get('auth-user-id', "system")
         update = {}
 
         if 'BillType' in data:
@@ -157,6 +168,7 @@ def update_investigation_price(request, bill_type_no):
             ]
 
         update['lastmodified_date'] = datetime.utcnow()
+        update['lastmodified_by'] = current_user
 
         result = collection.update_one(
             {'billTypeNo': bill_type_no},
@@ -177,16 +189,18 @@ def update_investigation_price(request, bill_type_no):
 
 
 @api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
 def delete_investigation_price(request, bill_type_no):
     """Soft-delete. PATCH /investigation-prices/<bill_type_no>/delete/"""
     client = None
     try:
         client, db = get_hms_db()
         collection = db['hospital_investigationprice']
+        current_user = request.data.get('auth-user-id', "system")
 
         result = collection.update_one(
             {'billTypeNo': bill_type_no},
-            {'$set': {'is_active': False, 'lastmodified_date': datetime.utcnow()}}
+            {'$set': {'is_active': False, 'deleted_date': datetime.utcnow(), 'deleted_by': current_user}}
         )
 
         if result.matched_count == 0:
