@@ -112,6 +112,53 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
+
+    #Package Master:
+    '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/departments/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/packages_crud/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/packages/create/': 'HMS-P-IPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-IPKG',     
+
+    #Bill Type Master:
+    '/_b_a_c_k_e_n_d/HMS/bill-types_get/': 'HMS-P-BT',                  
+    '/_b_a_c_k_e_n_d/HMS/bill-types/create/': 'HMS-P-BT',                  
+    '/_b_a_c_k_e_n_d/HMS/investigation-price/patch-bill-type/': 'HMS-P-BT',       
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types_get/?(\?.*)?$': 'HMS-P-BT',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-BT',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-BT',                  
+
+    #Investigation Prices:
+    '/_b_a_c_k_e_n_d/HMS/investigation-prices_get/': 'HMS-P-IP',                  
+    '/_b_a_c_k_e_n_d/HMS/investigation-prices/create/': 'HMS-P-IP',                        
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update(?:/[^/]+)+/$': 'HMS-P-IP',                  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete(?:/[^/]+)+/$': 'HMS-P-IP',  
+
+    #Report:
+    r'^/_b_a_c_k_e_n_d/HMS/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',   
+
+    #Velavan Items:
+    '/_b_a_c_k_e_n_d/HMS/velavan_items/list/': 'HMS-P-VI',               
+    '/_b_a_c_k_e_n_d/HMS/velavan_create_item/': 'HMS-P-VI',               
+    '/_b_a_c_k_e_n_d/HMS/velavan_get_items/': 'HMS-P-VI',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_update_item(?:/[^/]+)+/$': 'HMS-P-VI',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_item(?:/[^/]+)+/$': 'HMS-P-VI',               
+
+    #Velavan Vendors:
+    '/_b_a_c_k_e_n_d/HMS/velavan_vendors/list/': 'HMS-P-VV', 
+    '/_b_a_c_k_e_n_d/HMS/velavan_create_vendor/': 'HMS-P-VV',               
+    '/_b_a_c_k_e_n_d/HMS/velavan_get_vendors/': 'HMS-P-VV',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_update_vendor(?:/[^/]+)+/$': 'HMS-P-VV',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_vendor(?:/[^/]+)+/$': 'HMS-P-VV',  
+
+    #Velavan Invoices:
+    '/_b_a_c_k_e_n_d/HMS/velavan/invoices/': 'HMS-P-VIN',        
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VINR',        
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VINR',  
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',      
 }
 
 
