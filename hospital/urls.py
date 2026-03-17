@@ -62,9 +62,7 @@ urlpatterns = [
     path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
     path("discharge-billing/<int:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
     path("discharge-billing/<int:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
-    path("discharge-detail/",discharge.discharge_detail_view,name="discharge-detail",),
     path('search-admissions/', discharge.search_discharge_patient, name='search-admissions'),
-    path('discharge/', discharge.discharge_detail_view, name='discharge-create'),
 
     # Patient URLs
     path('patients/register/', views.patientCreateView, name='patient-register'),
