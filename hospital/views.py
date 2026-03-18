@@ -27,7 +27,22 @@ from .models import Billing, TempPatientRegistration
 from .serializers import PatientSerializer
 @api_view(['GET', 'POST'])
 @csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def patientCreateView(request):
+    # Extract audit info from headers
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+    print("Employee ID:", employee_id)
+    hospital_code = (
+        request.data.get('hospital-code') or
+        request.headers.get('hospital-code') or
+        "system"
+    )
+    print("Hospital Code:", hospital_code)
+
     if request.method == 'GET':
         uhid = request.GET.get('uhid')
         ip_number = request.GET.get('ip_number')
@@ -67,7 +82,15 @@ def patientCreateView(request):
         if serializer.is_valid():
             print("Serializer Valid. Saving...")
             try:
-                patient = serializer.save()
+                # Set audit fields before saving
+                save_kwargs = {
+                    'lastmodified_by': employee_id,
+                    'hospital_code': hospital_code
+                }
+                if not serializer.instance:
+                    save_kwargs['created_by'] = employee_id
+                    
+                patient = serializer.save(**save_kwargs)
                 print("Patient Saved:", patient)
             except Exception as e:
                 print("Error saving patient:", e)
@@ -89,7 +112,10 @@ def patientCreateView(request):
                 consulting_fee=consulting_fee,
                 total_fees=total_fees,
                 payment_method=payment_method,
-                doctor_id=doctor_id
+                doctor_id=doctor_id,
+                created_by=employee_id,
+                lastmodified_by=employee_id,
+                hospital_code=hospital_code
             )
 
             return Response({
@@ -143,40 +169,6 @@ def convert_decimal128_to_float(data):
     return data
 
 
-@api_view(['GET', 'PATCH'])
-def doctor_detail(request, first_name):
-    # MongoDB connection setup
-    client = MongoClient(f'mongodb+srv://shanmugainnovations:smrft%402024@cluster0.fgdtg.mongodb.net/')
-    db = client['ShanmugaHospital']
-    collection = db['hospital_doctor']
-
-    doctor = collection.find_one({"first_name": first_name})
-
-    if not doctor:
-        return Response({"error": "Doctor not found"}, status=status.HTTP_404_NOT_FOUND)
-    
-    if request.method == 'GET':
-        # Return doctor data (excluding _id field from MongoDB document)
-        doctor_data = {key: doctor[key] for key in doctor if key != '_id'}
-        doctor_data = convert_decimal128_to_float(doctor_data)  # Convert Decimal128 to float
-        return Response(doctor_data, status=status.HTTP_200_OK)
-    
-    if request.method == 'PATCH':
-        # Update the doctor details with the provided data
-        update_data = request.data
-        result = collection.update_one(
-            {"first_name": first_name},
-            {"$set": update_data}
-        )
-
-        if result.modified_count > 0:
-            # Return the updated doctor data
-            updated_doctor = collection.find_one({"first_name": first_name})
-            updated_doctor_data = {key: updated_doctor[key] for key in updated_doctor if key != '_id'}
-            updated_doctor_data = convert_decimal128_to_float(updated_doctor_data)  # Convert Decimal128 to float
-            return Response(updated_doctor_data, status=status.HTTP_200_OK)
-        else:
-            return Response({"error": "No changes were made or invalid data"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 
@@ -257,12 +249,13 @@ def get_reference_doctors(request):
     return Response(serializer.data, status=200)
 
 @api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
 def get_last_uhid(request):
     try:
         # Assuming typical Django auto-increment or similar logic, or explicit time field.
         # Since it's often user-provided or custom generated, we just want the latest record.
-        # If using standard ID:
-        last_patient = Patient.objects.all().order_by('-pk').first()
+        # Order by uhid to get the highest sequential number
+        last_patient = Patient.objects.all().order_by('-uhid').first()
         if last_patient:
             return Response({"uhid": last_patient.uhid}, status=200)
         return Response({"uhid": "None"}, status=200)
@@ -315,8 +308,11 @@ def get_user_permissions(request):
                 extra_permissions = user_access.get("allowed_pages", [])
 
         # 3. Combine and return
-        # Frontend expects 'allowed_pages' list to merge into allowedActions
-        combined_permissions = list(set(roles + extra_permissions))
+        # Logic: If extra_permissions exist, we prioritize them over roles for HMS-specific pages.
+        if extra_permissions:
+            combined_permissions = list(set(extra_permissions))
+        else:
+            combined_permissions = list(set(roles))
         
         return Response({
             "employeeId": employee_id, 
@@ -434,6 +430,9 @@ def registration_bills(request):
 
 @api_view(['PATCH'])
 def update_bill_status(request, bill_number):
+    employee_id = request.headers.get('auth-user-id', 'system')
+    hospital_code = request.headers.get('hospital-code', 'system')
+
     try:
         bill = Billing.objects.get(bill_number=bill_number)
 
@@ -466,6 +465,9 @@ def update_bill_status(request, bill_number):
         if transaction_id:
             bill.transaction_id = transaction_id
             
+        # Update audit fields
+        bill.lastmodified_by = employee_id
+        bill.hospital_code = hospital_code
         bill.save()
         
         serializer = BillingSerializer(bill)
@@ -527,15 +529,23 @@ def patient_registration_stats(request):
         
         # Optimization: fetch patient dates in a list/dict if needed, but iteration is fine for moderate scale
         for bill in bills:
-            # Check if patient created in the query range
-            p_created = bill.patient.created_at
+            if not hasattr(bill, 'patient') or bill.patient is None:
+                print(f"Warning: Bill {bill.bill_number} has no patient reference.")
+                existing_visit_count += 1
+                continue
+
+            p_created = bill.patient.created_date
             
+            if p_created is None:
+                # If no created_date, treat as old patient
+                existing_visit_count += 1
+                continue
+
             # Ensure p_created is aware for comparison
             if timezone.is_naive(p_created):
                 p_created = timezone.make_aware(p_created)
                 
-            # Logic: If patient created today (start_dt), it's a new registration
-            # We want to know if it's a NEW registration TODAY (or in range).
+            # Logic: If patient created in range (>= start_dt), it's a new registration
             if p_created >= start_dt:
                  new_visit_count += 1
             else:
@@ -549,6 +559,8 @@ def patient_registration_stats(request):
 
     except Exception as e:
         print(f"Error in stats: {e}")
+        import traceback
+        traceback.print_exc()
         return Response({"error": str(e)}, status=500)
 
 
@@ -592,33 +604,41 @@ def patient_visit_list(request):
         
         data = []
         for bill in bills:
-            p_created = bill.patient.created_at
-            if timezone.is_naive(p_created):
+            if not hasattr(bill, 'patient') or bill.patient is None:
+                print(f"Warning: Bill {bill.bill_number} has no patient.")
+                continue
+
+            p_created = bill.patient.created_date
+            if p_created and timezone.is_naive(p_created):
                 p_created = timezone.make_aware(p_created)
             
-            visit_type = "New" if p_created >= start_dt else "Review"
+            if p_created and start_dt:
+                visit_type = "New" if p_created >= start_dt else "Review"
+            else:
+                visit_type = "Review"
             
-            full_name = f"{bill.patient.salutation or ''} {bill.patient.firstName or ''} {bill.patient.lastName or ''}".strip()
+            p = bill.patient
+            full_name = f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
             
             # Formatting address safely
             address_parts = [
-                bill.patient.permanent_address,
-                bill.patient.area,
-                bill.patient.city,
-                bill.patient.state,
-                bill.patient.zipcode
+                p.permanent_address,
+                p.area,
+                p.city,
+                p.state,
+                p.zipcode
             ]
-            full_address = " ".join([p for p in address_parts if p]).strip()
+            full_address = ", ".join([str(val) for val in address_parts if val]).strip()
 
             data.append({
-                "uhid": bill.patient.uhid,
+                "uhid": p.uhid,
                 "patientName": full_name,
-                "age": bill.patient.age,
-                "gender": bill.patient.gender,
-                "mobile": bill.patient.mobilePhone,
+                "age": p.age,
+                "gender": p.gender,
+                "mobile": p.mobilePhone,
                 "doctor": bill.doctor_id, 
-                "doctorName": bill.patient.doctorName or '',
-                "spouseName": bill.patient.spouse_name or '',
+                "doctorName": p.doctorName or '',
+                "spouseName": p.spouse_name or '',
                 "address": full_address,
                 "visitType": visit_type,
                 "billNumber": bill.bill_number,
@@ -627,7 +647,7 @@ def patient_visit_list(request):
                 "billAmount": str(bill.total_fees or 0),
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
-                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p")
+                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else ''
             })
             
         return Response(data)
@@ -753,21 +773,88 @@ def consume_qr_registration(request):
 @api_view(['GET'])
 def get_sidebar_mapping(request):
     """
-    Fetches the dynamic sidebar mapping structure from MongoDB.
+    Fetches the dynamic sidebar mapping structure from MongoDB, filtered by user permissions.
     """
+    employee_id = request.GET.get('employeeId')
+    
+    # Handle JS "null" or "undefined" strings and empty strings
+    if employee_id in [None, "", "null", "undefined"]:
+        employee_id = None
+
     try:
         mongo_host = os.getenv("GLOBAL_DB_HOST")
-        client = MongoClient(mongo_host)
+        if not mongo_host:
+            return Response({"error": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
         db = client['HMS']
-        collection = db['frontendendpagemapping']
         
-        # Fetch all mappings
-        sidebar_data = list(collection.find({}, {'_id': 0}).sort('order', 1)) 
+        # 2. Fetch all mappings (Commonly used)
+        mapping_collection = db['frontendendpagemapping']
+        all_groups = list(mapping_collection.find({}, {'_id': 0}).sort('order', 1)) 
+        
+        # If no valid employee_id is provided, return the full mapping (unfiltered)
+        if not employee_id:
+            client.close()
+            return Response(all_groups, status=200)
+
+        # 1. Fetch user permissions (for filtering)
+        # -----------------------------------------------------------------
+        global_db = client['Global']
+        diag_collection = global_db['backend_diagnostics_profile']
+        user_profile = diag_collection.find_one({"employeeId": employee_id}, {"primaryRole": 1, "additionalRoles": 1, "_id": 0})
+        
+        roles = []
+        if user_profile:
+            p_role = user_profile.get("primaryRole")
+            if p_role: roles.append(p_role)
+            roles.extend(user_profile.get("additionalRoles", []))
+            
+        extra_permissions = []
+        if "HMS-P" in roles:
+            access_collection = db['UserPageAccess']
+            user_access = access_collection.find_one({"employeeId": employee_id})
+            if user_access:
+                extra_permissions = user_access.get("allowed_pages", [])
+        
+        # Priority: DB permissions first, then Roles
+        allowed_actions = extra_permissions if extra_permissions else roles
+        # -----------------------------------------------------------------
+        
+        # 3. Filter mapping based on allowed_actions
+        filtered_groups = []
+        for group in all_groups:
+            allowed_pages = []
+            for page in group.get('pages', []):
+                page_perms = page.get('permissions', [])
+                if not page_perms:
+                    # If no specific permissions listed, we allow it
+                    allowed_pages.append(page)
+                    continue
+                
+                # Check if any of the page's permissions are in user's allowed_actions
+                is_match = any(
+                    any(action.startswith(p) for action in allowed_actions)
+                    for p in page_perms
+                )
+                if is_match:
+                    allowed_pages.append(page)
+            
+            if allowed_pages:
+                new_group = group.copy()
+                new_group['pages'] = allowed_pages
+                filtered_groups.append(new_group)
+
         client.close()
-        
-        return JsonResponse(sidebar_data, safe=False, status=200)
+        return Response(filtered_groups, status=200)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        print(f"Error in get_sidebar_mapping: {e}")
+        return Response({"error": str(e)}, status=500)
+    except Exception as e:
+        print(f"Error in get_sidebar_mapping: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
 
 @api_view(['POST'])
 def update_sidebar_mapping(request):
@@ -777,10 +864,13 @@ def update_sidebar_mapping(request):
     try:
         updated_mapping = request.data.get('mapping', [])
         if not isinstance(updated_mapping, list):
-            return JsonResponse({"error": "Invalid data format. Expected a list."}, status=400)
+            return Response({"error": "Invalid data format. Expected a list."}, status=400)
             
         mongo_host = os.getenv("GLOBAL_DB_HOST")
-        client = MongoClient(mongo_host)
+        if not mongo_host:
+            return Response({"error": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
         db = client['HMS']
         collection = db['frontendendpagemapping']
         
@@ -790,6 +880,9 @@ def update_sidebar_mapping(request):
             collection.insert_many(updated_mapping)
             
         client.close()
-        return JsonResponse({"message": "Sidebar mapping updated successfully."}, status=200)
+        return Response({"message": "Sidebar mapping updated successfully."}, status=200)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        print(f"Error in update_sidebar_mapping: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)

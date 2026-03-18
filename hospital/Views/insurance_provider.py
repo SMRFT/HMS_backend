@@ -1,11 +1,14 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from pyauth.auth import HasRoleAndDataPermission
+from rest_framework.decorators import permission_classes
 from django.shortcuts import get_object_or_404
 from ..models import InsuranceProvider
 from ..serializers import InsuranceProviderSerializer
 
 @api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
 def insurance_provider_list_create(request):
     if request.method == 'GET':
         providers = InsuranceProvider.objects.all().order_by('company_name')

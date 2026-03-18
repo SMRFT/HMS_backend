@@ -1,32 +1,172 @@
 from django.db import models, transaction
+from django.db.models import Max
+import re
 from django.utils import timezone
 from django.utils.timezone import now
 
 # Base Audit Model
 class AuditModel(models.Model):
-    hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
-    # branch_code = models.CharField(max_length=100, null=True, blank=True)
-    # department_code = models.CharField(max_length=100, null=True, blank=True)
     created_by = models.CharField(max_length=100, null=True, blank=True)
-    created_date = models.DateTimeField(default=now)
+    created_date = models.DateTimeField(default=timezone.now)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
     lastmodified_date = models.DateTimeField(auto_now=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
     department_code = models.CharField(max_length=100, null=True, blank=True)
-    hospital_code = models.CharField(max_length=100, null=True, blank=True)
+    hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
 
     class Meta:
         abstract = True
 
     def save(self, *args, **kwargs):
-        now = datetime.utcnow()
-
         if not self.created_date:
-            self.created_date = now
+            self.created_date = timezone.now()
 
-        self.lastmodified_date = now
+        self.lastmodified_date = timezone.now()
 
         super().save(*args, **kwargs)
+
+class Patient(AuditModel):
+    GENDER_CHOICES = (
+        ('Male', 'Male'),
+        ('Female', 'Female'),
+        ('Other', 'Other'),
+    )
+
+    CUSTOMER_TYPE_CHOICES = (
+        ('General', 'General'),
+        ('Insurance', 'Insurance'),
+        ('Corporate', 'Corporate'),
+        ('Employee', 'Employee'),
+        ('Staff', 'Staff'),
+        ('Family', 'Family'),
+    )
+
+    company_code = models.CharField(max_length=100, blank=True, null=True)
+
+    BLOOD_GROUP_CHOICES = (
+        ('A+', 'A+'),
+        ('A-', 'A-'),
+        ('B+', 'B+'),
+        ('B-', 'B-'),
+        ('AB+', 'AB+'),
+        ('AB-', 'AB-'),
+        ('O+', 'O+'),
+        ('O-', 'O-'),
+    )
+
+    uhid = models.CharField(max_length=20)
+    ip_number = models.CharField(max_length=20, blank=True, null=True)
+    customer_type = models.CharField(max_length=20, choices=CUSTOMER_TYPE_CHOICES, default='General')
+    registration_date =models.CharField(max_length=100, blank=True, null=True)
+    salutation = models.CharField(max_length=10, blank=True, null=True)
+    firstName = models.CharField(max_length=100)
+    lastName = models.CharField(max_length=100)
+    dob = models.DateField()
+    age = models.IntegerField()
+    gender = models.CharField(max_length=10, choices=GENDER_CHOICES)
+    permanent_address = models.TextField(blank=True, null=True)
+    area = models.CharField(max_length=100, blank=True, null=True)
+    zipcode = models.CharField(max_length=10, blank=True, null=True)
+    city = models.CharField(max_length=50, blank=True, null=True)
+    state = models.CharField(max_length=50, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    mobilePhone = models.CharField(max_length=15)
+    home_phone = models.CharField(max_length=15, blank=True, null=True)
+    blood_group =models.CharField(max_length=20, blank=True, null=True)
+    spouse_name = models.CharField(max_length=100, blank=True, null=True)
+
+    # Referred fields
+    referredBy = models.CharField(max_length=100, blank=True, null=True)
+    referred_doctor_phone = models.CharField(max_length=15, blank=True, null=True)
+    doctorName = models.CharField(max_length=100, blank=True, null=True)
+
+    # Emergency Contact
+    emergency_contact = models.CharField(max_length=15, blank=True, null=True)
+
+    # MLC fields
+    mlc_type = models.CharField(max_length=50, blank=True, null=True)
+    mlc_doc = models.CharField(max_length=100, blank=True, null=True)
+    mlc_remarks = models.TextField(blank=True, null=True)
+    pass_alert_to_authority =models.CharField(max_length=100, blank=True, null=True)
+
+    # New Born fields
+
+    # New Born fields
+    birth_time = models.CharField(max_length=100, blank=True, null=True)
+    birth_time_am_pm = models.CharField(max_length=20, blank=True, null=True, default='AM')
+    weight = models.CharField(max_length=100, blank=True, null=True)
+    mothers_uhid_no = models.CharField(max_length=20, blank=True, null=True)
+    pediatrician_responsible = models.CharField(max_length=100, blank=True, null=True)
+
+    # Additional fields
+    is_cross_consultation = models.CharField(max_length=100, blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.firstName} {self.lastName} ({self.uhid})"
+
+    def save(self, *args, **kwargs):
+        current_year = now().year % 100   # get last 2 digits (2026 -> 26)
+
+        if not self.uhid:
+            prefix = f"S0{current_year}"
+
+            # get last patient of the year
+            last_patient = Patient.objects.filter(
+                uhid__startswith=prefix
+            ).order_by('-uhid').first()
+
+            if last_patient and last_patient.uhid:
+                last_number = int(last_patient.uhid.split('/')[-1])
+            else:
+                last_number = 0
+
+            next_number = last_number + 1
+
+            self.uhid = f"{prefix}/{next_number:07d}"
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.firstName} {self.lastName}" if self.firstName else "Unnamed Patient"
+
+
+class Billing(AuditModel):
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
+    registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    payment_method = models.CharField(max_length=50, blank=True, null=True)
+    doctor_id = models.CharField(max_length=50, blank=True, null=True)
+    bill_number = models.CharField(max_length=50, unique=True, blank=True ,primary_key=True)
+    billed_date = models.DateTimeField(auto_now_add=True)
+    payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    paid_date = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.bill_number:
+            date_prefix = now().strftime('%Y%m%d')
+            pattern = f"{date_prefix}/"
+            
+            # Find the last bill that matches the current date pattern
+            last_bill = Billing.objects.filter(bill_number__startswith=pattern).order_by('-bill_number').first()
+            
+            if last_bill and last_bill.bill_number:
+                try:
+                    # Extract the sequence number (dates matching)
+                    last_number = int(last_bill.bill_number.split('/')[-1])
+                except (ValueError, IndexError):
+                    last_number = 0
+            else:
+                last_number = 0
+                
+            next_number = last_number + 1
+            self.bill_number = f"{pattern}{next_number:04d}"
+            
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Billing {self.bill_number} for {self.patient.uhid} - {self.total_fees}"
 class TempPatientRegistration(models.Model):
     session_id = models.CharField(max_length=100, unique=True)
     data = models.TextField() # Storing JSON data as string
@@ -147,7 +287,85 @@ class PharmacyItem(AuditModel):
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
     
+class OPPharmacyBill(AuditModel):
 
+    patient_name = models.CharField(max_length=200)
+
+    bill_no = models.CharField(max_length=50, primary_key=True)
+
+    estimate_no = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True
+    )
+
+    bill_date = models.DateTimeField(auto_now_add=True)
+
+    uhid = models.CharField(max_length=50)
+
+    inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+
+    bill_type = models.CharField(max_length=200, blank=True, null=True)
+
+    bill_name = models.CharField(max_length=200, blank=True, null=True)
+
+    doctor_id = models.CharField(max_length=50, blank=True, null=True)
+
+    room_no = models.CharField(max_length=20, blank=True, null=True)
+
+    medicine_particulars = models.JSONField()
+
+    total_amount = models.FloatField(default=0)
+
+    overall_discount_type = models.CharField(
+        max_length=10,
+        default="percent"
+    )
+
+    overall_discount_value = models.FloatField(default=0)
+
+    overall_discount_amount = models.FloatField(default=0)
+
+    net_amount = models.FloatField(default=0)
+
+    billing_status = models.CharField(
+        max_length=20,
+        default="Estimated"
+    )
+    billing_mode = models.CharField(
+    max_length=20,
+    choices=[
+        ("DIRECT", "Direct Billing"),
+        ("ESTIMATE", "Estimate Billing"),
+    ],
+    default="DIRECT"
+)
+    edit_history = models.JSONField(default=list, blank=True, null=True)
+
+    payment_details = models.JSONField(null=True, blank=True)
+
+    cashier_id = models.CharField(max_length=50, blank=True, null=True)
+
+    @staticmethod
+    def generate_estimate_no():
+        max_estimate = OPPharmacyBill.objects.all().aggregate(Max('estimate_no'))['estimate_no__max']
+        
+        if max_estimate:
+            match = re.search(r'EST/(\d+)', max_estimate)
+            if match:
+                last_no = int(match.group(1))
+                new_no = last_no + 1
+            else:
+                new_no = 1
+        else:
+            new_no = 1
+        
+        return f"EST/{str(new_no).zfill(6)}"
+
+    def __str__(self):
+        return f"{self.billing_status} - {self.patient_name}"
+
+        
 class PharmacyStock(AuditModel):
     stock_id                 = models.AutoField(primary_key=True)
     department_code          = models.CharField(max_length=20)
@@ -242,38 +460,6 @@ class GRN(AuditModel):
         return f"{self.name} ({self.vendor_id})"
 
 
-
-
-
-class Admission(AuditModel):
-    uhid = models.CharField(max_length=20)
-    ipNumber = models.CharField(max_length=20)
-    admissionDateTime = models.DateTimeField()
-    customerType = models.CharField(max_length=20, default='General')
-    admittingDoctor = models.CharField(max_length=100)
-    consultingDoctor = models.CharField(max_length=100, blank=True)
-    roomNo = models.CharField(max_length=10)
-    bedNo = models.CharField(max_length=10)
-    extensionNumber = models.CharField(max_length=10, blank=True)
-    callRelease = models.CharField(max_length=10, default='Local')
-    nursingStation = models.CharField(max_length=50, blank=True)
-    presentComplaints = models.TextField(blank=True)
-    reasonForAdmission = models.TextField(blank=True)
-    admissionFee = models.DecimalField(max_digits=10, decimal_places=2)
-    creditLimit = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    mlcType = models.CharField(max_length=20, blank=True)
-    mlcRemarks = models.TextField(blank=True)
-    uploadMLCDoc = models.FileField(upload_to='mlc_docs/', blank=True, null=True)
-    passAlertToAuthority = models.BooleanField(default=False)
-    birthTime = models.CharField(max_length=10, blank=True, null=True)
-    weight = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
-    mothersUHIDNo = models.CharField(max_length=20, blank=True)
-    pediatricianResponsible = models.CharField(max_length=100, blank=True)
-
-    def __str__(self):
-        return f"{self.firstName} {self.lastName} ({self.uhid})"
-
-
 class Block(AuditModel):
     block_id = models.IntegerField(primary_key=True)
     block_name = models.CharField(max_length=100)
@@ -349,7 +535,7 @@ class Admission(AuditModel):
     packageName         = models.CharField(max_length=100, blank=True, null=True)
     roomNo              = models.CharField(max_length=10)
     bedNo               = models.CharField(max_length=10)
-    roomShitingDetails  = models.JSONField(blank=True, null=True)
+    roomShiftingDetails  = models.JSONField(blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
 
     # ── Advance / Finance ───────────────────────────────────────────────────
@@ -400,149 +586,9 @@ class DischargeDetail(AuditModel):
         return f"{self.uhid_no} - {self.status}"
 
 
-class Patient(AuditModel):
-    GENDER_CHOICES = (
-        ('Male', 'Male'),
-        ('Female', 'Female'),
-        ('Other', 'Other'),
-    )
 
-    CUSTOMER_TYPE_CHOICES = (
-        ('General', 'General'),
-        ('Insurance', 'Insurance'),
-        ('Corporate', 'Corporate'),
-        ('Employee', 'Employee'),
-        ('Staff', 'Staff'),
-        ('Family', 'Family'),
-    )
 
-    company_code = models.CharField(max_length=100, blank=True, null=True)
 
-    BLOOD_GROUP_CHOICES = (
-        ('A+', 'A+'),
-        ('A-', 'A-'),
-        ('B+', 'B+'),
-        ('B-', 'B-'),
-        ('AB+', 'AB+'),
-        ('AB-', 'AB-'),
-        ('O+', 'O+'),
-        ('O-', 'O-'),
-    )
-
-    uhid = models.CharField(max_length=20)
-    ip_number = models.CharField(max_length=20, blank=True, null=True)
-    customer_type = models.CharField(max_length=20, choices=CUSTOMER_TYPE_CHOICES, default='General')
-    registration_date =models.CharField(max_length=100, blank=True, null=True)
-    salutation = models.CharField(max_length=10, blank=True, null=True)
-    firstName = models.CharField(max_length=100)
-    lastName = models.CharField(max_length=100)
-    dob = models.DateField()
-    age = models.IntegerField()
-    gender = models.CharField(max_length=10, choices=GENDER_CHOICES)
-    permanent_address = models.TextField(blank=True, null=True)
-    area = models.CharField(max_length=100, blank=True, null=True)
-    zipcode = models.CharField(max_length=10, blank=True, null=True)
-    city = models.CharField(max_length=50, blank=True, null=True)
-    state = models.CharField(max_length=50, blank=True, null=True)
-    email = models.EmailField(blank=True, null=True)
-    mobilePhone = models.CharField(max_length=15)
-    home_phone = models.CharField(max_length=15, blank=True, null=True)
-    blood_group =models.CharField(max_length=20, blank=True, null=True)
-    spouse_name = models.CharField(max_length=100, blank=True, null=True)
-
-    # Referred fields
-    referredBy = models.CharField(max_length=100, blank=True, null=True)
-    referred_doctor_phone = models.CharField(max_length=15, blank=True, null=True)
-    doctorName = models.CharField(max_length=100, blank=True, null=True)
-
-    # Emergency Contact
-    emergency_contact = models.CharField(max_length=15, blank=True, null=True)
-
-    # MLC fields
-    mlc_type = models.CharField(max_length=50, blank=True, null=True)
-    mlc_doc = models.CharField(max_length=100, blank=True, null=True)
-    mlc_remarks = models.TextField(blank=True, null=True)
-    pass_alert_to_authority =models.CharField(max_length=100, blank=True, null=True)
-
-    # New Born fields
-
-    # New Born fields
-    birth_time = models.CharField(max_length=100, blank=True, null=True)
-    birth_time_am_pm = models.CharField(max_length=20, blank=True, null=True, default='AM')
-    weight = models.CharField(max_length=100, blank=True, null=True)
-    mothers_uhid_no = models.CharField(max_length=20, blank=True, null=True)
-    pediatrician_responsible = models.CharField(max_length=100, blank=True, null=True)
-
-    # Additional fields
-    is_cross_consultation = models.CharField(max_length=100, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"{self.firstName} {self.lastName} ({self.uhid})"
-
-    def save(self, *args, **kwargs):
-        current_year = now().year % 100   # get last 2 digits (2026 -> 26)
-
-        if not self.uhid:
-            prefix = f"S0{current_year}"
-
-            # get last patient of the year
-            last_patient = Patient.objects.filter(
-                uhid__startswith=prefix
-            ).order_by('-uhid').first()
-
-            if last_patient and last_patient.uhid:
-                last_number = int(last_patient.uhid.split('/')[-1])
-            else:
-                last_number = 0
-
-            next_number = last_number + 1
-
-            self.uhid = f"{prefix}/{next_number:07d}"
-
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.firstName} {self.lastName}" if self.firstName else "Unnamed Patient"
-
-class Billing(AuditModel):
-    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
-    registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    payment_method = models.CharField(max_length=50, blank=True, null=True)
-    doctor_id = models.CharField(max_length=50, blank=True, null=True)
-    bill_number = models.CharField(max_length=50, unique=True, blank=True ,primary_key=True)
-    billed_date = models.DateTimeField(auto_now_add=True)
-    payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
-    transaction_id = models.CharField(max_length=100, blank=True, null=True)
-    paid_date = models.DateTimeField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        if not self.bill_number:
-            date_prefix = now().strftime('%Y%m%d')
-            pattern = f"{date_prefix}/"
-            
-            # Find the last bill that matches the current date pattern
-            last_bill = Billing.objects.filter(bill_number__startswith=pattern).order_by('-bill_number').first()
-            
-            if last_bill and last_bill.bill_number:
-                try:
-                    # Extract the sequence number (dates matching)
-                    last_number = int(last_bill.bill_number.split('/')[-1])
-                except (ValueError, IndexError):
-                    last_number = 0
-            else:
-                last_number = 0
-                
-            next_number = last_number + 1
-            self.bill_number = f"{pattern}{next_number:04d}"
-            
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"Billing {self.bill_number} for {self.patient.uhid} - {self.total_fees}"
     
 
 class Doctor(AuditModel):
@@ -667,22 +713,7 @@ class Log(AuditModel):
         return f"{self.log_type} - {self.message}"
 
 
-class OPPharmacyBill(AuditModel):
-    patient_name=models.CharField(max_length=200)
-    bill_no = models.CharField(max_length=50)
-    bill_date = models.CharField(max_length=20)
-    op_number = models.CharField(max_length=50)
-    inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    patient_name = models.CharField(max_length=100)
-    doctor = models.CharField(max_length=100)
-    room_no = models.CharField(max_length=20, blank=True, null=True)
-    medicine_name = models.JSONField()
-    net_amount = models.FloatField(default=0)
 
-    def __str__(self):
-        return f"Bill {self.bill_no} - {self.patient_name}"
-
-    
 class InsuranceProvider(AuditModel):
     company_name = models.CharField(max_length=255)
     company_code = models.CharField(max_length=100,primary_key=True)

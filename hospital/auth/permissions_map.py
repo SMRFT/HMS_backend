@@ -1,5 +1,16 @@
 PAGE_MAPPING = {
 
+    r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-ADM',
+    '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_list/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
+    '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-AIN',
+
+
     # ==================== ADMISSION ====================
     r'^/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/?(\?.*)?$': 'HMS-P-DLD',
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
