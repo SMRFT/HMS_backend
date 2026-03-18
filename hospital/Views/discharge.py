@@ -1,460 +1,580 @@
-from django.shortcuts import render
-from rest_framework.response import Response
-from django.http import JsonResponse
-from rest_framework import status
-from django.utils.timezone import now
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
-from django.views.decorators.csrf import csrf_exempt
-from pyauth.auth import HasRoleAndDataPermission
-from pymongo import MongoClient
-from bson import ObjectId
+"""
+views.py — Discharge Billing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Djongo translates Django ORM to MongoDB via a SQL layer that crashes on
+any complex query (.order_by, __startswith, __gte, multi-field filters).
+
+Rule applied throughout this file:
+  ✅  DischargeBilling.objects.all()          — safe (full collection scan)
+  ✅  DischargeBilling.objects.get(pk=pk)     — safe (PK lookup only)
+  ❌  .filter(status=...).order_by(...)       — crashes Djongo
+
+All filtering, sorting, and searching is done in plain Python after
+fetching the full queryset.  Collections are small enough for this to
+be fine; add a dedicated MongoDB view layer later if scale demands it.
+
+InvestBilling has no Django model → raw PyMongo only (as required).
+"""
+
 import os
 import datetime
 import json as _json
+from decimal import Decimal, InvalidOperation
 
-from ..models import DischargeBilling, Patient, Admission
-from ..serializers import DischargeBillingSerializer
+from pymongo import MongoClient, DESCENDING
+
+from django.utils.timezone import now
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+
+from pyauth.auth import HasRoleAndDataPermission
+from ..models import Patient, Admission, DischargeBilling
 
 
-# ─────────────────────────────────────────────
-# MongoDB connection
-# ─────────────────────────────────────────────
-def get_mongo_db():
+# ─────────────────────────────────────────────────────────────────────────────
+# Raw PyMongo — InvestBilling ONLY (no Django model exists for it)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _invest_col():
     client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
-    return client["HMS"]
+    return client["HMS"]["hospital_investbilling"]
 
 
-# ─────────────────────────────────────────────
-# Financial Year  e.g. 2526
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError, InvalidOperation):
+        return 0.0
+
+
+def _to_dec(v, default=Decimal("0.00")):
+    try:
+        return Decimal(str(v))
+    except (InvalidOperation, TypeError):
+        return default
+
+
+def _parse_items(raw):
+    """Always return a Python list regardless of input type."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = _json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patient details — simplest possible ORM call Djongo can handle
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_patient_details(uhid):
+    if not uhid:
+        return {}
+    try:
+        # .get() with a single PK-equivalent field — Djongo handles this
+        p = Patient.objects.get(uhid=uhid)
+        return {
+            "patient_name": f"{p.firstName} {p.lastName}".strip(),
+            "age":          p.age,
+            "gender":       p.gender,
+            "mobile":       p.mobilePhone,
+        }
+    except Patient.DoesNotExist:
+        return {}
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Serialise a DischargeBilling instance → JSON-safe dict
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _billing_to_dict(obj):
+    return {
+        "id":               obj.pk,
+        "status":           obj.status,
+        "estimate_number":  obj.estimate_number,
+        "bill_no":          obj.bill_no,
+        "uhid":             obj.uhid,
+        "ip_number":        obj.ip_number,
+        "bill_date":        obj.bill_date.isoformat() if obj.bill_date else None,
+        "items":            _parse_items(obj.items),
+        "total_amount":     _to_float(obj.total_amount),
+        "advance_amount":   _to_float(obj.advance_amount),
+        "sales_return":     _to_float(obj.sales_return),
+        "medicines_amount": _to_float(obj.medicines_amount),
+        "taxable_amount":   _to_float(obj.taxable_amount),
+        "non_tax_amount":   _to_float(obj.non_tax_amount),
+        "gst_amount":       _to_float(obj.gst_amount),
+        "room_tax":         _to_float(obj.room_tax),
+        "discount_percent": _to_float(obj.discount_percent),
+        "discount_amount":  _to_float(obj.discount_amount),
+        "disc_reason":      obj.disc_reason or "",
+        "item_disc":        _to_float(obj.item_disc),
+        "total_disc":       _to_float(obj.total_disc),
+        "net_amount":       _to_float(obj.net_amount),
+        "remarks":          obj.remarks or "",
+        "converted_from_id": obj.converted_from_id,
+        "is_active":        obj.is_active,
+        "hospital_code":    obj.hospital_code or "",
+        "created_date":     obj.created_date.isoformat() if obj.created_date else None,
+        "lastmodified_date": obj.lastmodified_date.isoformat() if obj.lastmodified_date else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Number generators — fetch ALL then find max in Python (Djongo-safe)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _financial_year():
     today = datetime.date.today()
     y = today.year
     if today.month >= 4:
-        return f"{str(y)[2:]}{str(y+1)[2:]}"
-    return f"{str(y-1)[2:]}{str(y)[2:]}"
+        return f"{str(y)[2:]}{str(y + 1)[2:]}"
+    return f"{str(y - 1)[2:]}{str(y)[2:]}"
 
 
-# ─────────────────────────────────────────────
-# Estimate Number Generator  EST/YYMM/000001
-# ─────────────────────────────────────────────
 def generate_estimate_number():
-    today = datetime.date.today()
+    today  = datetime.date.today()
     prefix = f"EST/{str(today.year)[2:]}{str(today.month).zfill(2)}/"
-    last = (
-        DischargeBilling.objects
-        .filter(estimate_number__startswith=prefix)
-        .order_by("estimate_number")
-        .last()
-    )
+
+    # Fetch ALL, filter in Python — avoids Djongo __startswith crash
     seq = 1
-    if last and last.estimate_number:
-        try:
-            seq = int(last.estimate_number.split("/")[-1]) + 1
-        except Exception:
-            seq = 1
+    try:
+        all_nums = (
+            DischargeBilling.objects
+            .all()
+            .values_list("estimate_number", flat=True)
+        )
+        matching = [n for n in all_nums if n and n.startswith(prefix)]
+        if matching:
+            seqs = []
+            for n in matching:
+                try:
+                    seqs.append(int(n.split("/")[-1]))
+                except Exception:
+                    pass
+            if seqs:
+                seq = max(seqs) + 1
+    except Exception:
+        seq = 1
+
     return f"{prefix}{str(seq).zfill(6)}"
 
 
-# ─────────────────────────────────────────────
-# Bill Number Generator  FY/DCH/000001
-# ─────────────────────────────────────────────
 def generate_bill_number():
     prefix = f"{_financial_year()}/DCH/"
-    last = (
-        DischargeBilling.objects
-        .filter(bill_no__startswith=prefix)
-        .order_by("bill_no")
-        .last()
-    )
+
     seq = 1
-    if last and last.bill_no:
-        try:
-            seq = int(last.bill_no.split("/")[-1]) + 1
-        except Exception:
-            seq = 1
+    try:
+        all_nums = (
+            DischargeBilling.objects
+            .all()
+            .values_list("bill_no", flat=True)
+        )
+        matching = [n for n in all_nums if n and n.startswith(prefix)]
+        if matching:
+            seqs = []
+            for n in matching:
+                try:
+                    seqs.append(int(n.split("/")[-1]))
+                except Exception:
+                    pass
+            if seqs:
+                seq = max(seqs) + 1
+    except Exception:
+        seq = 1
+
     return f"{prefix}{str(seq).zfill(6)}"
 
 
-# ─────────────────────────────────────────────
-# Patient + Admission helper
-# ─────────────────────────────────────────────
-def _build_patient_info(patient, admission=None):
-    info = {
-        "patient_name": f"{patient.firstName} {patient.lastName}".strip(),
-        "uhid":         patient.uhid,
-        "age":          patient.age,
-        "gender":       patient.gender,
-        "mobile":       patient.mobilePhone,
-        "patient_type": patient.customer_type,
-        "company":      getattr(patient, "company_code", "") or "",
-        "doctor":       patient.doctorName or "",
-        "ip_number":    "",
-        "room_no":      "",
-        "total_days":   0,
-        "admission_date": "",
-    }
-    if admission:
-        info["ip_number"] = admission.ipNumber or ""
-        info["room_no"]   = (
-            f"{admission.roomNo}/{admission.bedNo}"
-            if admission.bedNo
-            else admission.roomNo or ""
-        )
-        info["doctor"] = admission.admittingDoctor or patient.doctorName or ""
-        if admission.admissionDateTime:
-            info["admission_date"] = admission.admissionDateTime.strftime("%d-%m-%Y")
-            delta = (datetime.date.today() - admission.admissionDateTime.date()).days
-            info["total_days"] = delta
-    return info
+# ─────────────────────────────────────────────────────────────────────────────
+# Build field kwargs for create / update
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_kwargs(data, existing=None):
+    def flt(key):
+        val = data.get(key)
+        if val is None and existing:
+            val = getattr(existing, key, None)
+        return _to_dec(val)
+
+    def s(key, default=""):
+        val = data.get(key)
+        if val is None and existing:
+            val = getattr(existing, key, default)
+        return str(val) if val is not None else default
+
+    raw_items = data.get("items")
+    if raw_items is None and existing:
+        raw_items = existing.items
+    items = _parse_items(raw_items)
+
+    return dict(
+        uhid             = s("uhid"),
+        ip_number        = s("ip_number"),
+        items            = items,
+        total_amount     = flt("total_amount"),
+        advance_amount   = flt("advance_amount"),
+        sales_return     = flt("sales_return"),
+        medicines_amount = flt("medicines_amount"),
+        taxable_amount   = flt("taxable_amount"),
+        non_tax_amount   = flt("non_tax_amount"),
+        gst_amount       = flt("gst_amount"),
+        room_tax         = flt("room_tax"),
+        discount_percent = flt("discount_percent"),
+        discount_amount  = flt("discount_amount"),
+        disc_reason      = s("disc_reason"),
+        item_disc        = flt("item_disc"),
+        total_disc       = flt("total_disc"),
+        net_amount       = flt("net_amount"),
+        remarks          = s("remarks"),
+        is_active        = True,
+    )
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Search Discharge Patient
-# GET /search-discharge-patient/
-# Query params: uhid=  OR  ipNumber=
-#
-# Logic:
-#  1. Resolve Patient from UHID (or via Admission if ipNumber given)
-#  2. Find active Admission (is_admissionActive=True, is_discharged=False)
-#  3. Fetch Credit+Pending investigation items from hospital_investbilling
-#     filtered by the resolved ip_number
-# ─────────────────────────────────────────────
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
-from bson import ObjectId
-import json as _json
-
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
-import json as _json
-
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
-import json as _json
+# GET /search-discharge-patient/?uhid=…  OR  ?ipNumber=…
+# ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def search_discharge_patient(request):
-
-    uhid = request.GET.get("uhid", "").strip()
+    uhid      = request.GET.get("uhid",     "").strip()
     ip_number = request.GET.get("ipNumber", "").strip()
 
     if not uhid and not ip_number:
         return Response(
             {"error": "Provide uhid or ipNumber"},
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    db = get_mongo_db()
-    invest_collection = db["hospital_investbilling"]
-
-    # ─────────────────────────────────────
-    # 1. Resolve Patient
-    # ─────────────────────────────────────
-    patient = None
-
-    try:
-        if uhid:
-            patient = Patient.objects.filter(uhid=uhid).first()
-
-        elif ip_number:
-            admission_ref = Admission.objects.filter(ipNumber=ip_number).first()
-
-            if not admission_ref:
-                return Response(
-                    {"error": "Admission not found for given IP number"},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-
-            patient = Patient.objects.filter(uhid=admission_ref.uhid).first()
-
-        if not patient:
-            return Response(
-                {"error": "Patient not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-    except Exception as e:
-        return Response(
-            {"error": f"Patient lookup failed: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    # ─────────────────────────────────────
-    # 2. Get Admission (latest admission)
-    # ─────────────────────────────────────
+    patient   = None
     admission = None
 
     try:
-        if ip_number:
-            admission = Admission.objects.filter(
-                ipNumber=ip_number
-            ).first()
+        if uhid:
+            # .get() on a single field — Djongo handles this fine
+            try:
+                patient = Patient.objects.get(uhid=uhid)
+            except Patient.DoesNotExist:
+                return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            # Fetch all admissions for this uhid, sort in Python
+            admissions = list(Patient.objects.get(uhid=uhid) and
+                              Admission.objects.all())
+            # Filter in Python to avoid Djongo filter crash
+            admissions = [a for a in Admission.objects.all() if a.uhid == uhid]
+            admissions.sort(key=lambda a: a.admissionDateTime or datetime.datetime.min, reverse=True)
+            admission = admissions[0] if admissions else None
 
         else:
-            admission = (
-                Admission.objects
-                .filter(uhid=patient.uhid)
-                .order_by("-admissionDateTime")
-                .first()
-            )
+            # Find admission by ipNumber in Python
+            all_admissions = list(Admission.objects.all())
+            matched = [a for a in all_admissions if a.ipNumber == ip_number]
+            if not matched:
+                return Response({"error": "Admission not found"}, status=status.HTTP_404_NOT_FOUND)
+            admission = matched[0]
 
-    except Exception:
-        admission = None
+            # Find patient by uhid
+            all_patients = list(Patient.objects.all())
+            matched_p = [p for p in all_patients if p.uhid == admission.uhid]
+            if not matched_p:
+                return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+            patient = matched_p[0]
 
+    except Exception as e:
+        return Response(
+            {"error": f"Lookup failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
-    # ─────────────────────────────────────
-    # 3. Build Patient Info
-    # ─────────────────────────────────────
+    # Build patient info
+    adm_dt  = getattr(admission, "admissionDateTime", None) if admission else None
+    adm_str = adm_dt.isoformat() if adm_dt else ""
+
+    room_details = (admission.room_details or []) if admission else []
+    current_room = ""
+    if room_details and isinstance(room_details, list):
+        last_room = room_details[-1]
+        if isinstance(last_room, dict):
+            current_room = last_room.get("roomNumber", "") or last_room.get("room_number", "")
+
+    total_days = 0
+    if adm_dt:
+        try:
+            today = datetime.date.today()
+            adm_date = adm_dt.date() if isinstance(adm_dt, datetime.datetime) else adm_dt
+            total_days = (today - adm_date).days
+        except Exception:
+            total_days = 0
+
     patient_info = {
-        "uhid": patient.uhid,
-        "patient_name": f"{getattr(patient,'firstName','')} {getattr(patient,'lastName','')}".strip(),
-        "age": getattr(patient, "age", ""),
-        "gender": getattr(patient, "gender", ""),
-        "mobile": getattr(patient, "mobilePhone", ""),
-        "ipNumber": admission.ipNumber if admission else None,
+        "uhid":           patient.uhid,
+        "patient_name":   f"{patient.firstName} {patient.lastName}".strip(),
+        "age":            patient.age,
+        "gender":         patient.gender,
+        "mobile":         patient.mobilePhone,
+        "ip_number":      admission.ipNumber if admission else None,
+        "ipNumber":       admission.ipNumber if admission else None,
+        "admission_date": adm_str,
+        "patient_type":   getattr(patient, "customer_type", ""),
+        "company":        getattr(patient, "company_code", "") or "",
+        "room_no":        current_room,
+        "total_days":     total_days,
+        "doctor":         getattr(admission, "admittingDoctor", "") if admission else "",
     }
 
-
-    # ─────────────────────────────────────
-    # 4. Fetch Pending Credit Bills (MongoDB)
-    # ─────────────────────────────────────
+    # Fetch pending invest-billing items — raw PyMongo (no model)
     effective_ip = ip_number or (admission.ipNumber if admission else None)
-
+    query = {"paymentMethod": "Credit", "paymentStatus": "Pending", "is_active": True}
     if effective_ip:
-        query = {
-            "ipNumber": effective_ip,
-            "paymentMethod": "Credit",
-            "paymentStatus": "Pending",
-            "is_active": True
-        }
+        query["ipNumber"] = effective_ip
     else:
-        query = {
-            "uhid": patient.uhid,
-            "paymentMethod": "Credit",
-            "paymentStatus": "Pending",
-            "is_active": True
-        }
+        query["uhid"] = patient.uhid
 
-    raw_bills = list(invest_collection.find(query))
-
-
-    # ─────────────────────────────────────
-    # 5. Flatten Bill Items
-    # ─────────────────────────────────────
     invest_items = []
+    try:
+        for bill in _invest_col().find(query):
+            bill_no   = bill.get("investBillNo", "")
+            doctor    = bill.get("doctor", "")
+            raw_items = bill.get("item", [])
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = _json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            for it in raw_items:
+                invest_items.append({
+                    "invest_bill_no": bill_no,
+                    "bill_object_id": str(bill.get("_id")),
+                    "itemName":       it.get("itemName", ""),
+                    "price":          float(it.get("price", 0) or 0),
+                    "quantity":       int(it.get("quantity", 1) or 1),
+                    "billTypeNo":     it.get("billTypeNo", ""),
+                    "test_id":        it.get("test_id"),
+                    "doctor":         doctor,
+                    "payment_status": bill.get("paymentStatus", ""),
+                    "package_name":   it.get("packageName", "") or bill.get("packageName", ""),
+                })
+    except Exception:
+        invest_items = []
 
-    for bill in raw_bills:
-
-        bill_no = bill.get("investBillNo", "")
-        doctor = bill.get("doctor", "")
-        raw_items = bill.get("item", [])
-
-        if isinstance(raw_items, str):
-            try:
-                raw_items = _json.loads(raw_items)
-            except Exception:
-                raw_items = []
-
-        for it in raw_items:
-
-            invest_items.append({
-                "invest_bill_no": bill_no,
-                "bill_object_id": str(bill.get("_id")),
-                "itemName": it.get("itemName", ""),
-                "price": float(it.get("price", 0) or 0),
-                "quantity": int(it.get("quantity", 1) or 1),
-                "billTypeNo": it.get("billTypeNo", ""),
-                "test_id": it.get("test_id"),
-                "doctor": doctor,
-                "payment_status": bill.get("paymentStatus", ""),
-                "package_name": it.get("packageName", "") or bill.get("packageName", ""),
-            })
-
-
-    # ─────────────────────────────────────
-    # 6. Final Response
-    # ─────────────────────────────────────
-    return Response({
-        "patient": patient_info,
-        "invest_items": invest_items
-    })
+    return Response({"patient": patient_info, "invest_items": invest_items})
 
 
-# ═════════════════════════════════════════════
-# LIST + CREATE  BILLING
-# ═════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# LIST + CREATE
+# GET  /discharge-billing/
+# POST /discharge-billing/
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 def discharge_billing_list_create(request):
 
-    # ───────────────── GET
+    # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
-        qs = DischargeBilling.objects.filter(is_active=True)
+        status_f = request.GET.get("status")
+        uhid_f   = request.GET.get("uhid")
+        ip_f     = request.GET.get("ip_number")
+        from_f   = request.GET.get("from_date")
+        to_f     = request.GET.get("to_date")
 
-        status_filter = request.GET.get("status")
-        uhid          = request.GET.get("uhid")
-        ip_number     = request.GET.get("ip_number")
+        # ✅ Only .all() — Djongo handles full collection scan safely
+        all_records = list(DischargeBilling.objects.all())
 
-        if status_filter:
-            qs = qs.filter(status=status_filter)
-        if uhid:
-            qs = qs.filter(uhid=uhid)
-        if ip_number:
-            qs = qs.filter(ip_number=ip_number)
+        # ✅ All filtering done in Python — zero Djongo query complexity
+        filtered = []
+        for obj in all_records:
+            if not obj.is_active:
+                continue
+            if status_f and obj.status != status_f:
+                continue
+            if uhid_f and obj.uhid != uhid_f:
+                continue
+            if ip_f and obj.ip_number != ip_f:
+                continue
+            if from_f:
+                try:
+                    from_date = datetime.date.fromisoformat(from_f)
+                    bd = obj.bill_date
+                    if bd and (bd if isinstance(bd, datetime.date) else bd.date()) < from_date:
+                        continue
+                except ValueError:
+                    pass
+            if to_f:
+                try:
+                    to_date = datetime.date.fromisoformat(to_f)
+                    bd = obj.bill_date
+                    if bd and (bd if isinstance(bd, datetime.date) else bd.date()) > to_date:
+                        continue
+                except ValueError:
+                    pass
+            filtered.append(obj)
 
-        data = DischargeBillingSerializer(qs, many=True).data
+        # Sort newest bill_date first, then newest pk first — in Python
+        def _sort_key(obj):
+            bd = obj.bill_date
+            if bd is None:
+                bd = datetime.date.min
+            if isinstance(bd, datetime.datetime):
+                bd = bd.date()
+            return (bd, obj.pk or 0)
 
-        # Enrich with patient name
-        for row in data:
-            try:
-                p = Patient.objects.get(uhid=row.get("uhid"))
-                row["patient_details"] = {
-                    "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                    "age":    p.age,
-                    "gender": p.gender,
-                    "mobile": p.mobilePhone,
-                }
-            except Patient.DoesNotExist:
-                row["patient_details"] = {}
+        filtered.sort(key=_sort_key, reverse=True)
 
-        return Response(data)
+        result = []
+        for obj in filtered:
+            row = _billing_to_dict(obj)
+            row["patient_details"] = _get_patient_details(obj.uhid)
+            result.append(row)
 
-    # ───────────────── POST
+        return Response(result)
+
+    # ── POST ──────────────────────────────────────────────────────────────────
     if request.method == "POST":
-        data           = request.data.copy()
-        billing_status = data.get("status")
+        data           = request.data
+        billing_status = data.get("status", "Estimate")
+
+        kwargs = _build_kwargs(data)
+        kwargs["status"]    = billing_status
+        kwargs["bill_date"] = datetime.date.today()
 
         if billing_status == "Estimate":
-            data["estimate_number"] = generate_estimate_number()
-        elif billing_status == "Billed":
-            data["bill_no"] = generate_bill_number()
+            kwargs["estimate_number"] = generate_estimate_number()
+            kwargs["bill_no"]         = None
+        else:
+            kwargs["bill_no"]         = generate_bill_number()
+            kwargs["estimate_number"] = None
+            kwargs["status"]          = "Billed"
 
-        data["bill_date"] = now().date()
+        try:
+            obj = DischargeBilling(**kwargs)
+            obj.save()
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = DischargeBillingSerializer(data=data)
-        if serializer.is_valid():
-            obj    = serializer.save()
-            result = DischargeBillingSerializer(obj).data
-            try:
-                p = Patient.objects.get(uhid=obj.uhid)
-                result["patient_details"] = {
-                    "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                    "age":    p.age,
-                    "gender": p.gender,
-                    "mobile": p.mobilePhone,
-                }
-            except Patient.DoesNotExist:
-                result["patient_details"] = {}
-            return Response(result, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        row = _billing_to_dict(obj)
+        row["patient_details"] = _get_patient_details(obj.uhid)
+        return Response(row, status=status.HTTP_201_CREATED)
 
 
-# ═════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 # RETRIEVE / UPDATE / DELETE
-# ═════════════════════════════════════════════
+# GET    /discharge-billing/<pk>/
+# PATCH  /discharge-billing/<pk>/
+# PUT    /discharge-billing/<pk>/
+# DELETE /discharge-billing/<pk>/
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
 @permission_classes([HasRoleAndDataPermission])
 def discharge_billing_detail(request, pk):
 
-    billing = get_object_or_404(DischargeBilling, pk=pk, is_active=True)
+    # ✅ .get(pk=pk) — single PK lookup, Djongo handles this reliably
+    try:
+        billing = DischargeBilling.objects.get(pk=pk)
+    except DischargeBilling.DoesNotExist:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    if not billing.is_active:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
-        data = DischargeBillingSerializer(billing).data
-        try:
-            p = Patient.objects.get(uhid=billing.uhid)
-            data["patient_details"] = {
-                "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                "age": p.age, "gender": p.gender, "mobile": p.mobilePhone,
-            }
-        except Patient.DoesNotExist:
-            data["patient_details"] = {}
-        return Response(data)
+        row = _billing_to_dict(billing)
+        row["patient_details"] = _get_patient_details(billing.uhid)
+        return Response(row)
 
+    # ── PUT / PATCH ───────────────────────────────────────────────────────────
     if request.method in ["PUT", "PATCH"]:
         if billing.status == "Billed":
             return Response(
                 {"error": "Final bill cannot be edited"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        partial    = request.method == "PATCH"
-        serializer = DischargeBillingSerializer(billing, data=request.data, partial=partial)
-        if serializer.is_valid():
-            updated = serializer.save()
-            data    = DischargeBillingSerializer(updated).data
-            try:
-                p = Patient.objects.get(uhid=updated.uhid)
-                data["patient_details"] = {
-                    "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                    "age": p.age, "gender": p.gender, "mobile": p.mobilePhone,
-                }
-            except Patient.DoesNotExist:
-                data["patient_details"] = {}
-            return Response(data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        kwargs = _build_kwargs(request.data, existing=billing)
+        # Lock status — only the convert endpoint sets "Billed"
+        kwargs["status"] = "Estimate"
+
+        for field, value in kwargs.items():
+            setattr(billing, field, value)
+
+        try:
+            billing.save()
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        row = _billing_to_dict(billing)
+        row["patient_details"] = _get_patient_details(billing.uhid)
+        return Response(row)
+
+    # ── DELETE ────────────────────────────────────────────────────────────────
     if request.method == "DELETE":
         billing.is_active = False
         billing.save(update_fields=["is_active"])
         return Response({"message": "Record deleted"})
 
 
-# ═════════════════════════════════════════════
-# CONVERT ESTIMATE → BILL
-# ═════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# CONVERT ESTIMATE → BILL  (in-place, same row)
+# POST /discharge-billing/<pk>/convert-to-bill/
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def convert_estimate_to_bill(request, pk):
+    """
+    Mutates the SAME row in-place:
+      status    → "Billed"
+      bill_no   → newly generated sequential number
+      bill_date → today
+    No new row is created.
+    """
+    try:
+        estimate = DischargeBilling.objects.get(pk=pk)
+    except DischargeBilling.DoesNotExist:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    estimate = get_object_or_404(DischargeBilling, pk=pk, is_active=True)
+    if not estimate.is_active:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
     if estimate.status != "Estimate":
         return Response(
-            {"error": "Only Estimate can be converted"},
+            {"error": "Only an Estimate can be converted to a Bill"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    bill = DischargeBilling.objects.create(
-        status            = "Billed",
-        bill_no           = generate_bill_number(),
-        bill_date         = now().date(),
-        uhid              = estimate.uhid,
-        ip_number         = estimate.ip_number,
-        items             = estimate.items,
-        total_amount      = estimate.total_amount,
-        advance_amount    = estimate.advance_amount,
-        sales_return      = estimate.sales_return,
-        medicines_amount  = estimate.medicines_amount,
-        taxable_amount    = estimate.taxable_amount,
-        non_tax_amount    = estimate.non_tax_amount,
-        gst_amount        = estimate.gst_amount,
-        room_tax          = estimate.room_tax,
-        discount_percent  = estimate.discount_percent,
-        discount_amount   = estimate.discount_amount,
-        disc_reason       = estimate.disc_reason,
-        item_disc         = estimate.item_disc,
-        total_disc        = estimate.total_disc,
-        net_amount        = estimate.net_amount,
-        remarks           = estimate.remarks,
-        converted_from_id = estimate.pk,
-        is_active         = True,
-    )
+    estimate.status    = "Billed"
+    estimate.bill_no   = generate_bill_number()
+    estimate.bill_date = datetime.date.today()
 
-    data = DischargeBillingSerializer(bill).data
     try:
-        p = Patient.objects.get(uhid=bill.uhid)
-        data["patient_details"] = {
-            "patient_name": f"{p.firstName} {p.lastName}".strip(),
-            "age": p.age, "gender": p.gender, "mobile": p.mobilePhone,
-        }
-    except Patient.DoesNotExist:
-        data["patient_details"] = {}
+        # ✅ save() with no update_fields — let Djongo write the whole doc
+        # update_fields causes Djongo to generate a partial UPDATE which it
+        # sometimes translates incorrectly; a full save() is safer.
+        estimate.save()
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    return Response(data, status=status.HTTP_201_CREATED)
+    row = _billing_to_dict(estimate)
+    row["patient_details"] = _get_patient_details(estimate.uhid)
+    return Response(row, status=status.HTTP_200_OK)
