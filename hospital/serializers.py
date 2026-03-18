@@ -43,6 +43,14 @@ class PharmacyStockSerializer(serializers.ModelSerializer):
         model  = PharmacyStock
         fields = "__all__"
 
+from rest_framework import serializers
+from .models import OPPharmacyBill
+
+class OPPharmacyBillSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = OPPharmacyBill
+        fields = "__all__"
 
 from .models import GRN
 class GRNSerializer(serializers.ModelSerializer):

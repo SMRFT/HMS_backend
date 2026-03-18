@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 import os
 from datetime import datetime, timedelta
-from ..models import Admission
+from ..models import Admission, OPPharmacyBill
 from ..serializers import AdmissionSerializer
 from django.conf import settings
 from django.db import DatabaseError
@@ -315,21 +315,33 @@ def get_lab_ward_requests(request):
         uhid = request.GET.get("uhid")
         ip_number = request.GET.get("ipNumber")
 
-        query = {"is_active": True}
+        query = {
+            "is_active": True,
+            "is_ward_request": True,
+            "ward_request_type": "LAB"
+        }
         if uhid:
             query["uhid"] = uhid
         if ip_number:
             query["ipNumber"] = ip_number
 
-        # Fetch from the new lab ward request collection
-        ward_req_collection = mongo_db["hospital_labwardrequest"]
+        # Fetch from the centralized investbilling collection
+        ward_req_collection = mongo_db["hospital_investbilling"]
         requests_data = list(ward_req_collection.find(query).sort("created_date", -1))
 
         # Enrich and format for the frontend component
         formatted_data = []
         for doc in requests_data:
-            # In the new collection, 'selectedTests' is likely already a list
-            items = doc.get("selectedTests", [])
+            import json
+            # Parse 'item' field back to list
+            item_data = doc.get("item", "[]")
+            if isinstance(item_data, str):
+                try:
+                    items = json.loads(item_data)
+                except json.JSONDecodeError:
+                    items = []
+            else:
+                items = item_data
             
             # Map tests for the frontend structure
             tests = []
@@ -337,7 +349,7 @@ def get_lab_ward_requests(request):
                 tests.append({
                     "test_id": itm.get("test_id", ""),
                     "name": itm.get("itemName", ""),
-                    "collectionTime": "" 
+                    "collectionTime": itm.get("collectionTime", "") 
                 })
             
             formatted_doc = {
@@ -370,12 +382,20 @@ def get_lab_ward_requests(request):
 @permission_classes([HasRoleAndDataPermission])
 def save_lab_ward_request(request):
     try:
+        import json
         data = request.data
         current_user = data.get('auth-user-id', "system")
+        branch_code = data.get('auth-branch-code', 'system')
+        department_code = data.get('auth-department-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'system')
         
         # Prepare the document for saving
         # We remove auth fields
         request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
+        
+        # ── Map selectedTests to 'item' for compatibility ──
+        selected_tests = request_doc.get("selectedTests", [])
+        request_doc["item"] = json.dumps(selected_tests)
         
         # ── Bill Number Generation ──────────────────────────────
         bill_type_code = data.get("billTypeNo", "LAB")
@@ -399,14 +419,22 @@ def save_lab_ward_request(request):
         invest_bill_no = f"{prefix}{next_number:06d}"
         
         # Add metadata and generated fields
-        request_doc["investBillNo"] = invest_bill_no
-        request_doc["created_by"] = current_user
-        request_doc["created_date"] = datetime.now()
-        request_doc["status"] = "Result Pending"
-        request_doc["is_active"] = True
+        request_doc.update({
+            "investBillNo": invest_bill_no,
+            "created_by": current_user,
+            "branch_code": branch_code,
+            "department_code": department_code,
+            "hospital_code": hospital_code,
+            "created_date": datetime.now(),
+            "status": "Result Pending",
+            "is_active": True,
+            "is_ward_request": True,
+            "ward_request_type": "LAB",
+            "investBillDate": datetime.now()
+        })
         
-        # Save to the new collection
-        collection = mongo_db["hospital_labwardrequest"]
+        # Save to the centralized investbilling collection
+        collection = mongo_db["hospital_investbilling"]
         result = collection.insert_one(request_doc)
         
         return Response({
@@ -434,10 +462,10 @@ def cancel_lab_ward_request(request):
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
         from bson import ObjectId
-        collection = mongo_db["hospital_labwardrequest"]
+        collection = mongo_db["hospital_investbilling"]
         
         result = collection.update_one(
-            {"_id": ObjectId(request_id)},
+            {"_id": ObjectId(request_id), "is_ward_request": True},
             {"$set": {"is_active": False, "status": "Cancelled"}}
         )
         
@@ -454,6 +482,7 @@ def cancel_lab_ward_request(request):
 @permission_classes([HasRoleAndDataPermission])
 def remove_individual_test_from_lab_ward_request(request):
     try:
+        import json
         data = request.data
         request_id = data.get("id")
         test_id = data.get("test_id")
@@ -463,31 +492,43 @@ def remove_individual_test_from_lab_ward_request(request):
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
         from bson import ObjectId
-        collection = mongo_db["hospital_labwardrequest"]
+        collection = mongo_db["hospital_investbilling"]
         
-        # Build the match criteria for pulling the test
-        pull_query = {}
-        if test_id:
-            pull_query = {"test_id": test_id}
+        # Step 1: Get the document
+        doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
+        if not doc:
+            return Response({"success": False, "error": "Request not found"}, status=404)
+            
+        # Parse items
+        item_data = doc.get("item", "[]")
+        if isinstance(item_data, str):
+            items = json.loads(item_data)
         else:
-            pull_query = {"itemName": test_name}
-
-        # Step 1: Remove the test
-        result = collection.update_one(
-            {"_id": ObjectId(request_id)},
-            {"$pull": {"selectedTests": pull_query}}
-        )
-        
-        if result.modified_count > 0:
-            # Step 2: Recalculate total amount
-            doc = collection.find_one({"_id": ObjectId(request_id)})
-            tests = doc.get("selectedTests", [])
+            items = item_data
             
-            # Recalculate new total
-            new_total = sum(float(t.get("price", 0)) for t in tests)
+        # Step 2: Remove the test
+        new_items = []
+        found = False
+        for itm in items:
+            if test_id and str(itm.get("test_id")) == str(test_id):
+                found = True
+                continue
+            if not test_id and itm.get("itemName") == test_name:
+                found = True
+                continue
+            new_items.append(itm)
             
-            update_fields = {"total_amount": new_total}
-            if not tests:
+        if found:
+            # Step 3: Recalculate total amount
+            new_total = sum(float(t.get("price", 0)) for t in new_items)
+            
+            update_fields = {
+                "item": json.dumps(new_items),
+                "selectedTests": new_items, # Keep both for now
+                "total_amount": new_total
+            }
+            
+            if not new_items:
                 update_fields["status"] = "Cancelled"
                 update_fields["is_active"] = False
                 
@@ -499,7 +540,7 @@ def remove_individual_test_from_lab_ward_request(request):
             return Response({
                 "success": True, 
                 "message": "Test removed successfully",
-                "remaining_tests": len(tests)
+                "remaining_tests": len(new_items)
             })
         else:
             return Response({"success": False, "error": "Test not found in request"}, status=404)
@@ -518,23 +559,29 @@ def get_medicine_ward_requests(request):
         if not uhid:
             return Response({"success": False, "error": "UHID is required"}, status=400)
             
-        collection = mongo_db["hospital_medicinewardrequest"]
-        query = {"uhid": uhid, "is_active": True}
+        # Fetch from OPPharmacyBill (Django model) where billing_status="Estimated"
+        query_params = {
+            "uhid": uhid,
+            "billing_status": "Estimated",
+            "billing_mode": "ESTIMATE"
+        }
         if ip_number:
-            query["ipNumber"] = ip_number
+            query_params["inpatient_number"] = ip_number
             
-        requests_data = list(collection.find(query).sort("created_date", -1))
+        requests_data = OPPharmacyBill.objects.filter(**query_params).order_by("-bill_date")
         
         formatted_data = []
         for doc in requests_data:
-            items = doc.get("selectedMedicines", [])
+            # medicine_particulars is already a list (JSONField)
+            items = doc.medicine_particulars or []
+
             medicines = []
             for itm in items:
                 medicines.append({
                     "item_id": itm.get("item_id", ""),
-                    "name": itm.get("itemName", ""),
-                    "quantity": itm.get("quantity", 1),
-                    "price": itm.get("price", 0),
+                    "name": itm.get("itemName", itm.get("item_name", "")),
+                    "quantity": itm.get("quantity", itm.get("qty", 1)),
+                    "price": itm.get("price", itm.get("Price", 0)),
                     "billType": itm.get("billType", ""),
                     "doctor": itm.get("doctor", ""),
                     "dosage": itm.get("dosage", ""),
@@ -542,77 +589,82 @@ def get_medicine_ward_requests(request):
                     "dose": itm.get("dose", ""),
                     "doseUnit": itm.get("doseUnit", ""),
                     "route": itm.get("route", ""),
-                    "remark": itm.get("remark", ""),
-                    "isRegular": itm.get("isRegular", False),
-                    "isDischarge": itm.get("isDischarge", False)
+                    "instruction": itm.get("instruction", "")
                 })
-            
+
             formatted_doc = {
-                "id": str(doc.get("_id")),
-                "status": doc.get("status", "Pending"),
-                "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
-                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
-                "userName": doc.get("created_by", ""),
-                "requestNo": doc.get("medicineRequestNo", ""),
-                "wardName": doc.get("wardName", ""),
-                "doctorName": doc.get("doctor", ""),
+                "id": doc.bill_no, # PK
+                "uhid": doc.uhid,
+                "ipNumber": doc.inpatient_number,
+                "patientName": doc.patient_name,
+                "reqDate": doc.bill_date.strftime("%d-%m-%Y") if doc.bill_date else "",
+                "reqTime": doc.bill_date.strftime("%I:%M %p") if doc.bill_date else "",
+                "userName": doc.created_by,
+                "requestNo": doc.estimate_no,
+                "doctorName": doc.doctor_id,
                 "medicines": medicines,
-                "total_amount": doc.get("total_amount", 0)
+                "total_amount": doc.total_amount
             }
             formatted_data.append(formatted_doc)
 
         return Response({
             "success": True,
-            "data": serialize_doc(formatted_data)
+            "data": formatted_data
         })
 
     except Exception as e:
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
 
+
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
 def save_medicine_ward_request(request):
     try:
+        # import json # Not needed with new logic
         data = request.data
         current_user = data.get('auth-user-id', "system")
+        branch_code = data.get('auth-branch-code', 'system')
+        # department_code = data.get('auth-department-code', 'system') # Not needed with new logic
+        # hospital_code = data.get('auth-hospital-code', 'system') # Not needed with new logic
         
         request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
         
-        # ── Request Number Generation ──────────────────────────────
-        collection = mongo_db["hospital_medicinewardrequest"]
-        counters = mongo_db["hospital_counters"]
+        selected_medicines = request_doc.get("selectedMedicines", [])
+        total_amount = float(request_doc.get("total_amount", 0))
         
-        from datetime import datetime
-        now = datetime.now()
-        year_prefix = now.strftime("%y%y") # e.g. 2424 or similar logic
-        # Simplified logic for now
+        # ── Estimate Number Generation ──────────────────────────────
+        estimate_no = OPPharmacyBill.generate_estimate_no()
         
-        counter = counters.find_one_and_update(
-            {"_id": "medicine_ward_request"},
-            {"$inc": {"sequence_value": 1}},
-            upsert=True,
-            return_document=True
+        # ── Map Fields for OPPharmacyBill ──────────────────────────
+        # Patient name should be combined if split
+        first_name = request_doc.get("firstName", "")
+        last_name = request_doc.get("lastName", "")
+        patient_name = f"{first_name} {last_name}".strip()
+        
+        # Create Estimate in OPPharmacyBill
+        bill_obj = OPPharmacyBill.objects.create(
+            bill_no="", # Following pharmacy.py pattern for estimates
+            estimate_no=estimate_no,
+            patient_name=patient_name,
+            uhid=request_doc.get("uhid"),
+            inpatient_number=request_doc.get("ipNumber"),
+            doctor_id=request_doc.get("doctor"),
+            room_no=request_doc.get("room_no"),
+            medicine_particulars=selected_medicines,
+            total_amount=total_amount,
+            net_amount=total_amount,
+            billing_status="Estimated",
+            billing_mode="ESTIMATE",
+            created_by=current_user,
+            branch_code=branch_code
         )
-        seq = str(counter["sequence_value"]).zfill(6)
-        medicine_request_no = f"{year_prefix}/MED/{seq}"
-        # ──────────────────────────────────────────────────────────
-        
-        request_doc.update({
-            "medicineRequestNo": medicine_request_no,
-            "created_at": datetime.now(),
-            "created_date": datetime.now(),
-            "created_by": current_user,
-            "is_active": True,
-            "status": "Pending"
-        })
-        
-        result = collection.insert_one(request_doc)
         
         return Response({
             "success": True,
-            "message": "Medicine request saved successfully",
-            "medicineRequestNo": medicine_request_no
+            "message": "Medicine ward request saved as Pharmacy Estimate successfully",
+            "estimateNo": estimate_no,
+            "id": bill_obj.bill_no # bill_no is pk
         })
         
     except Exception as e:
@@ -624,21 +676,19 @@ def save_medicine_ward_request(request):
 def cancel_medicine_ward_request(request):
     try:
         data = request.data
-        request_id = data.get("id")
+        request_id = data.get("id") # bill_no
         
         if not request_id:
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
-        from bson import ObjectId
-        collection = mongo_db["hospital_medicinewardrequest"]
+        # For OPPharmacyBill, we might set billing_status to "Cancelled" or similar
+        # But looking at pharmacy.py, they seem to use billing_status for workflow.
+        # Let's use billing_status="Cancelled"
         
-        result = collection.update_one(
-            {"_id": ObjectId(request_id)},
-            {"$set": {"is_active": False, "status": "Cancelled"}}
-        )
+        result = OPPharmacyBill.objects.filter(bill_no=request_id).update(billing_status="Cancelled")
         
-        if result.modified_count > 0:
-            return Response({"success": True, "message": "Request cancelled successfully"})
+        if result > 0:
+            return Response({"success": True, "message": "Medicine ward request cancelled successfully"})
         else:
             return Response({"success": False, "error": "Request not found"}, status=404)
             
@@ -651,47 +701,45 @@ def cancel_medicine_ward_request(request):
 def remove_individual_medicine_from_ward_request(request):
     try:
         data = request.data
-        request_id = data.get("id")
+        request_id = data.get("id") # bill_no
         item_id = data.get("item_id")
         item_name = data.get("item_name")
         
         if not request_id:
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
-        from bson import ObjectId
-        collection = mongo_db["hospital_medicinewardrequest"]
-        
-        pull_query = {}
-        if item_id:
-            pull_query = {"item_id": item_id}
-        else:
-            pull_query = {"itemName": item_name}
-
-        result = collection.update_one(
-            {"_id": ObjectId(request_id)},
-            {"$pull": {"selectedMedicines": pull_query}}
-        )
-        
-        if result.modified_count > 0:
-            doc = collection.find_one({"_id": ObjectId(request_id)})
-            medicines = doc.get("selectedMedicines", [])
+        # Step 1: Get the document
+        doc = OPPharmacyBill.objects.filter(bill_no=request_id).first()
+        if not doc:
+            return Response({"success": False, "error": "Request not found"}, status=404)
             
-            new_total = sum(float(m.get("price", 0)) * int(m.get("quantity", 1)) for m in medicines)
+        items = doc.medicine_particulars or []
             
-            update_fields = {"total_amount": new_total}
-            if not medicines:
-                update_fields["status"] = "Cancelled"
-                update_fields["is_active"] = False
-                
-            collection.update_one(
-                {"_id": ObjectId(request_id)},
-                {"$set": update_fields}
-            )
+        # Step 2: Remove the medicine
+        new_items = []
+        found = False
+        for itm in items:
+            if item_id and str(itm.get("item_id")) == str(item_id):
+                found = True
+                continue
+            if not item_id and itm.get("itemName") == item_name:
+                found = True
+                continue
+            new_items.append(itm)
+            
+        if found:
+            # Step 3: Recalculate total amount
+            new_total = sum(float(t.get("price", t.get("Price", 0))) for t in new_items)
+            
+            doc.medicine_particulars = new_items
+            doc.total_amount = new_total
+            doc.net_amount = new_total
+            doc.save()
             
             return Response({
                 "success": True, 
                 "message": "Medicine removed successfully",
-                "remaining_items": len(medicines)
+                "remaining_medicines": len(new_items)
             })
         else:
             return Response({"success": False, "error": "Medicine not found in request"}, status=404)
@@ -705,21 +753,37 @@ def remove_individual_medicine_from_ward_request(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_radiology_ward_requests(request):
     try:
-        uhid = request.GET.get("uhid")
-        ip_number = request.GET.get("ipNumber")
+        uhid = request.query_params.get("uhid")
+        ip_number = request.query_params.get("ipNumber")
 
-        query = {"is_active": True}
-        if uhid:
-            query["uhid"] = uhid
+        if not uhid:
+            return Response({"success": False, "error": "UHID is required"}, status=400)
+
+        collection = mongo_db["hospital_investbilling"]
+        query = {
+            "uhid": uhid,
+            "is_active": True,
+            "is_ward_request": True,
+            "ward_request_type": "RADIOLOGY"
+        }
         if ip_number:
             query["ipNumber"] = ip_number
 
-        collection = mongo_db["hospital_radiologywardrequest"]
         requests_data = list(collection.find(query).sort("created_date", -1))
 
         formatted_data = []
         for doc in requests_data:
-            items = doc.get("selectedTests", [])
+            import json
+            # Parse 'item' field back to list
+            item_data = doc.get("item", "[]")
+            if isinstance(item_data, str):
+                try:
+                    items = json.loads(item_data)
+                except json.JSONDecodeError:
+                    items = []
+            else:
+                items = item_data
+
             tests = []
             for itm in items:
                 tests.append({
@@ -738,7 +802,8 @@ def get_radiology_ward_requests(request):
                 "billType": doc.get("billTypeName", ""),
                 "wardName": doc.get("wardName", ""),
                 "doctorName": doc.get("doctor", ""),
-                "tests": tests
+                "tests": tests,
+                "total_amount": doc.get("total_amount", 0)
             }
             formatted_data.append(formatted_doc)
 
@@ -755,13 +820,22 @@ def get_radiology_ward_requests(request):
 @permission_classes([HasRoleAndDataPermission])
 def save_radiology_ward_request(request):
     try:
+        import json
         data = request.data
         current_user = data.get('auth-user-id', "system")
+        branch_code = data.get('auth-branch-code', 'system')
+        department_code = data.get('auth-department-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'system')
         
         request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
         
+        # ── Map selectedTests to 'item' for compatibility ──
+        selected_tests = request_doc.get("selectedTests", [])
+        request_doc["item"] = json.dumps(selected_tests)
+        
         # ── Bill Number Generation (Prefix RAD) ──
         bill_type_code = data.get("billTypeNo", "RAD")
+        from datetime import datetime
         today = datetime.now()
         if today.month < 4:
             financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
@@ -785,11 +859,18 @@ def save_radiology_ward_request(request):
             "investBillNo": invest_bill_no,
             "created_by": current_user,
             "created_date": datetime.now(),
+            "created_at": datetime.now(),
+            "branch_code": branch_code,
+            "department_code": department_code,
+            "hospital_code": hospital_code,
             "status": "Result Pending",
-            "is_active": True
+            "is_active": True,
+            "is_ward_request": True,
+            "ward_request_type": "RADIOLOGY",
+            "investBillDate": datetime.now()
         })
         
-        collection = mongo_db["hospital_radiologywardrequest"]
+        collection = mongo_db["hospital_investbilling"]
         result = collection.insert_one(request_doc)
         
         return Response({
@@ -798,7 +879,7 @@ def save_radiology_ward_request(request):
             "id": str(result.inserted_id),
             "investBillNo": invest_bill_no
         })
-        
+
     except Exception as e:
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
@@ -814,10 +895,10 @@ def cancel_radiology_ward_request(request):
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
         from bson import ObjectId
-        collection = mongo_db["hospital_radiologywardrequest"]
+        collection = mongo_db["hospital_investbilling"]
         
         result = collection.update_one(
-            {"_id": ObjectId(request_id)},
+            {"_id": ObjectId(request_id), "is_ward_request": True, "ward_request_type": "RADIOLOGY"},
             {"$set": {"is_active": False, "status": "Cancelled"}}
         )
         
@@ -834,6 +915,7 @@ def cancel_radiology_ward_request(request):
 @permission_classes([HasRoleAndDataPermission])
 def remove_individual_test_from_radiology_ward_request(request):
     try:
+        import json
         data = request.data
         request_id = data.get("id")
         test_id = data.get("test_id")
@@ -843,30 +925,53 @@ def remove_individual_test_from_radiology_ward_request(request):
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
         from bson import ObjectId
-        collection = mongo_db["hospital_radiologywardrequest"]
+        collection = mongo_db["hospital_investbilling"]
         
-        pull_query = {"test_id": test_id} if test_id else {"itemName": test_name}
-
-        result = collection.update_one(
-            {"_id": ObjectId(request_id)},
-            {"$pull": {"selectedTests": pull_query}}
-        )
-        
-        if result.modified_count > 0:
-            doc = collection.find_one({"_id": ObjectId(request_id)})
-            tests = doc.get("selectedTests", [])
-            new_total = sum(float(t.get("price", 0)) for t in tests)
+        # Step 1: Get document
+        doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True, "ward_request_type": "RADIOLOGY"})
+        if not doc:
+            return Response({"success": False, "error": "Request not found"}, status=404)
             
-            update_fields = {"total_amount": new_total}
-            if not tests:
+        # Parse items
+        item_data = doc.get("item", "[]")
+        if isinstance(item_data, str):
+            try:
+                items = json.loads(item_data)
+            except json.JSONDecodeError:
+                items = []
+        else:
+            items = item_data
+            
+        # Step 2: Remove test
+        new_items = []
+        found = False
+        for itm in items:
+            if test_id and str(itm.get("test_id")) == str(test_id):
+                found = True
+                continue
+            if not test_id and itm.get("itemName") == test_name:
+                found = True
+                continue
+            new_items.append(itm)
+            
+        if found:
+            # Step 3: Recalculate total amount
+            new_total = sum(float(t.get("price", 0)) for t in new_items)
+            
+            update_fields = {
+                "item": json.dumps(new_items),
+                "selectedTests": new_items, # Keep both for now
+                "total_amount": new_total
+            }
+            if not new_items:
                 update_fields["status"] = "Cancelled"
                 update_fields["is_active"] = False
                 
             collection.update_one({"_id": ObjectId(request_id)}, {"$set": update_fields})
             
-            return Response({"success": True, "message": "Test removed successfully"})
+            return Response({"success": True, "message": "Test removed successfully", "remaining_tests": len(new_items)})
         else:
-            return Response({"success": False, "error": "Test not found"}, status=404)
+            return Response({"success": False, "error": "Test not found in request"}, status=404)
             
     except Exception as e:
         print(traceback.format_exc())

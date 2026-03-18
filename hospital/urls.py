@@ -38,7 +38,10 @@ urlpatterns = [
     # Pharmacy Category URLs
     path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),
     path("pharmacy-category/<int:pk>/", inventory.pharmacycategory_view, name="pharmacy-category-detail"),
-
+    path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
+    path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
@@ -75,7 +78,6 @@ urlpatterns = [
     path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('doctors/', views.doctor_view, name='doctor_view'),
     path('doctor_list/', views.doctor_list, name='doctor_list'),
-    path('doctor_detail/<str:first_name>/', views.doctor_detail, name='doctor_detail'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
 
