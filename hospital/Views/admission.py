@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
 import os
+import json
+import traceback
 from datetime import datetime, date
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
@@ -188,29 +190,161 @@ def search_op_patients(request):
     return Response(PatientSerializer(patients, many=True).data)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Rooms  (uses Room model + RoomSerializer)
-# ──────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------
+# SAFE JSON PARSER
+# --------------------------------------------------
+def parse_json_field(value):
 
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, dict):
+        return [value]
+
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+        except Exception:
+            return []
+
+    return []
+
+
+# --------------------------------------------------
+# SEARCH ROOMS
+# --------------------------------------------------
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def search_rooms(request):
+
     try:
-        qs = Room.objects.filter(is_active=True)
-        if request.GET.get('room_number'):
-            qs = qs.filter(room_number__icontains=request.GET['room_number'])
-        if request.GET.get('room_category'):
-            qs = qs.filter(room_category=request.GET['room_category'])
-        if request.GET.get('block'):
-            qs = qs.filter(block=request.GET['block'])
-        if request.GET.get('floor') not in (None, ''):
-            try:
-                qs = qs.filter(floor=int(request.GET['floor']))
-            except ValueError:
-                return Response({"error": "Floor must be a number"}, status=400)
-        return Response(RoomSerializer(qs, many=True).data)
+
+        result = []
+
+        # ==================================================
+        # STEP 1 — BUILD ADMISSION MAP
+        # ==================================================
+        admission_map = {}
+
+        for admission in Admission.objects.all():
+
+            if not admission.is_admissionActive:
+                continue
+
+            if admission.is_discharged:
+                continue
+
+            details = parse_json_field(admission.room_details)
+            shifts  = parse_json_field(admission.roomShitingDetails)
+
+            for entry in details + shifts:
+
+                if not isinstance(entry, dict):
+                    continue
+
+                room_no = str(entry.get("roomNo", "")).strip()
+                bed_no  = str(entry.get("bedNo", "")).strip()
+
+                if not room_no or not bed_no:
+                    continue
+
+                admission_map[(room_no, bed_no)] = True
+
+
+        # ==================================================
+        # STEP 2 — FILTER ROOMS IN PYTHON (DJONGO SAFE)
+        # ==================================================
+        room_number_filter = request.GET.get("room_number")
+        category_filter    = request.GET.get("room_category")
+        block_filter       = request.GET.get("block")
+        floor_filter       = request.GET.get("floor")
+
+        for room in Room.objects.all():
+
+            if not room.is_active:
+                continue
+
+            if room_number_filter:
+                if room_number_filter.lower() not in room.room_number.lower():
+                    continue
+
+            if category_filter:
+                if room.room_category != category_filter:
+                    continue
+
+            if block_filter:
+                if room.block != block_filter:
+                    continue
+
+            if floor_filter:
+                try:
+                    if room.floor != int(floor_filter):
+                        continue
+                except:
+                    continue
+
+
+            # ==================================================
+            # STEP 3 — BED STATUS
+            # ==================================================
+            beds = parse_json_field(room.beds)
+
+            beds_data = []
+
+            for bed in beds:
+
+                if not isinstance(bed, dict):
+                    continue
+
+                bed_number = str(bed.get("bed_number", "")).strip()
+
+                if not bed_number:
+                    continue
+
+                if room.room_blocked or room.room_status == "Blocked":
+
+                    status = "Maintenance"
+
+                else:
+
+                    key = (str(room.room_number), bed_number)
+
+                    if key in admission_map:
+                        status = "Occupied"
+                    else:
+                        status = "Available"
+
+                beds_data.append({
+                    "bed_number": bed_number,
+                    "status": status
+                })
+
+
+            result.append({
+                "room_number": room.room_number,
+                "room_type": room.room_type,
+                "room_category": room.room_category,
+                "block": room.block,
+                "floor": room.floor,
+                "beds": beds_data
+            })
+
+
+        return Response(result)
+
     except Exception as e:
+
+        print("SEARCH ROOMS ERROR:", str(e))
+        traceback.print_exc()
+
         return Response({"error": str(e)}, status=500)
 
 
