@@ -449,6 +449,7 @@ class Admission(AuditModel):
 
 class DischargeBilling(AuditModel):
     # ── Identity ──────────────────────────────────────────────────────────────
+    discharge_id    = models.IntegerField(primary_key=True)
     status          = models.CharField(max_length=20, db_index=True)
     estimate_number = models.CharField(max_length=60, blank=True, null=True, unique=True)
     bill_no         = models.CharField(max_length=60, blank=True, null=True, unique=True)
@@ -489,6 +490,12 @@ class DischargeBilling(AuditModel):
     # ── Estimate→Bill traceability ────────────────────────────────────────────
     converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
     is_active         = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.discharge_id is None:
+            last = DischargeBilling.objects.order_by('-discharge_id').first()
+            self.discharge_id = (last.discharge_id + 1) if last else 1
+        super().save(*args, **kwargs)
 
     def __str__(self):
         ref = self.bill_no if self.status == "Billed" else self.estimate_number

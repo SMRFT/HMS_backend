@@ -57,12 +57,11 @@ urlpatterns = [
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 
-    #Discharge URLs
+    # Discharge URLs
     path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),
     path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
-    path("discharge-billing/<int:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
-    path("discharge-billing/<int:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
-    path('search-admissions/', discharge.search_discharge_patient, name='search-admissions'),
+    path("discharge-billing/<str:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
+    path("discharge-billing/<str:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
 
     # Patient URLs
     path('patients/register/', views.patientCreateView, name='patient-register'),

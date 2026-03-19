@@ -133,7 +133,6 @@ class AdmissionSerializer(serializers.ModelSerializer):
 
 from .models import DischargeBilling
 class DischargeBillingSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
     class Meta:
         model = DischargeBilling
         fields = '__all__'
