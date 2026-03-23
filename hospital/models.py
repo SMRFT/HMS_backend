@@ -501,22 +501,31 @@ class DischargeBilling(AuditModel):
         ref = self.bill_no if self.status == "Billed" else self.estimate_number
         return f"{self.uhid or self.ip_number} | {ref} | {self.status}"
 
-class DischargeDetail(AuditModel):
-    uhid_no = models.CharField(max_length=100, blank=True)
-    ip_number = models.CharField(max_length=100, blank=True)
-    discharge_date = models.DateField(null=True, blank=True)
-    discharge_time = models.TimeField(null=True, blank=True)
-    free_visits = models.CharField(max_length=100, blank=True)
-    other_consultants = models.CharField(max_length=200, blank=True)
-    status = models.CharField(max_length=50, blank=True)
-    patient_expired = models.BooleanField(default=False)
-    date_of_death = models.DateField(null=True, blank=True)
-    time_of_death = models.TimeField(null=True, blank=True)
-    discharge_reason = models.TextField(blank=True)
 
+class InsuranceProvider(AuditModel):
+    company_name = models.CharField(max_length=255)
+    company_code = models.CharField(max_length=100,primary_key=True)
+    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
+    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
+    address_line_3 = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=20, null=True, blank=True)
+    gstin = models.CharField(max_length=50, null=True, blank=True)
+    contact_person = models.CharField(max_length=100, null=True, blank=True)
+    phone = models.CharField(max_length=20, null=True, blank=True)
+    mobile = models.CharField(max_length=20, null=True, blank=True)
+    email = models.EmailField(null=True, blank=True)
+    credit_limit = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    insurance_print_format = models.CharField(max_length=100, null=True, blank=True)
+    claim_pre_authorization_template = models.FileField(upload_to='insurance_templates/', null=True, blank=True)
+    blocked = models.BooleanField(default=False)
+    blocking_reason = models.TextField(null=True, blank=True)
+    enable_service_tax = models.BooleanField(default=False)
 
     def __str__(self):
-        return f"{self.uhid_no} - {self.status}"
+        return self.company_name
+        
     
 class Doctor(AuditModel):
     first_name = models.CharField(max_length=100)

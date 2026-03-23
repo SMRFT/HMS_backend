@@ -123,13 +123,18 @@ urlpatterns = [
     path("icd11/entity/<str:entity_id>/", ICD11.icd11_detail),
 
     #Investigation Billing:
+    re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
+    re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
-    path('lab-tests/', departmentBilling.get_lab_tests, name='get-lab-tests'), 
+    path('packages/', departmentBilling.get_packages, name='get_packages'),
+    path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
+    path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
     path('investBilling/', departmentBilling.invest_billing_create, name='invest-billing-create'),
     path('investBillingGet/', departmentBilling.billing_report_view, name='billing_report_view'),
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
+    
     
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate

@@ -1,24 +1,3 @@
-"""
-views.py — Discharge Billing
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Djongo rule:
-  ✅  .objects.all()           — safe
-  ✅  .objects.get(pk=pk)      — safe  (pk == discharge_id)
-  ❌  .filter().order_by()     — crashes Djongo
-
-All filtering / sorting done in Python after full-collection fetch.
-InvestBilling has no Django model → raw PyMongo only.
-
-Primary key: discharge_id (IntegerField, auto-incremented in model.save())
-
-Flows
-─────
-1. Direct Bill  : POST status=Billed   → bill_no generated, estimate_number=None
-2. Estimate     : POST status=Estimate → estimate_number generated, bill_no=None
-3. Edit Estimate: PATCH/<discharge_id>/          → update in-place, status stays Estimate
-4. Convert      : POST  /<discharge_id>/convert-to-bill/ → flip status, generate bill_no
-"""
-
 import os
 import datetime
 import json as _json

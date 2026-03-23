@@ -136,14 +136,6 @@ class DischargeBillingSerializer(serializers.ModelSerializer):
     class Meta:
         model = DischargeBilling
         fields = '__all__'
-        
-
-from .models import DischargeDetail
-class DischargeDetailSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = DischargeDetail
-        fields = '__all__'
 
 
 from .models import Patient
