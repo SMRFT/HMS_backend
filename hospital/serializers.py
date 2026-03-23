@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from bson import ObjectId
-
+from .models import SurgerySchedule,PharmacyStock,HSNCode,Ventor,IPPharmacyStock, OPPharmacyStock,Vendor,Patient,Doctor,Admission,Summary,EstimateBilling
 class ObjectIdField(serializers.Field):
     def to_representation(self, value):
         return str(value)
@@ -10,27 +10,24 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
-from .models import PharmacyStock
+        
 class PharmacyStockSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = PharmacyStock
         fields = '__all__'
 
-from .models import HSNCode
 class HSNCodeSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = HSNCode
         fields = '__all__'
-from .models import Ventor
+
 class VentorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ventor
         fields = ['id', 'ventor_name', 'phone', 'address', 'gst_number']
-from .models import IPPharmacyStock, OPPharmacyStock,Vendor
 
-# IP Pharmacy Stock Serializer
 class IPPharmacyStockSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
 
@@ -39,7 +36,6 @@ class IPPharmacyStockSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-# OP Pharmacy Stock Serializer
 class OPPharmacyStockSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
 
@@ -48,7 +44,6 @@ class OPPharmacyStockSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-# Vendor Serializer
 class VendorSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
 
@@ -57,7 +52,6 @@ class VendorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Patient
 class PatientSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     uhid = serializers.CharField(read_only=True)
@@ -66,7 +60,6 @@ class PatientSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Doctor
 class DoctorSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
 
@@ -74,22 +67,18 @@ class DoctorSerializer(serializers.ModelSerializer):
         model = Doctor
         fields = '__all__'
 
-
-from .models import Admission
 class AdmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Admission
         fields = '__all__'
 
 
-from .models import Summary
 class SummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Summary
         fields = '__all__'
 
 
-from .models import EstimateBilling
 class EstimateBillingSerializer(serializers.ModelSerializer):
     class Meta:
         model = EstimateBilling
@@ -168,4 +157,111 @@ class OPPharmacyBillSerializer(serializers.ModelSerializer):
         model = OPPharmacyBill
         fields = '__all__'
 
+class SurgeryScheduleSerializer(serializers.ModelSerializer):
+    """
+    Used for READ responses (list, retrieve, after create/update).
+    All audit/system fields are read-only — never accepted from the client.
+    """
 
+    class Meta:
+        model  = SurgerySchedule
+        fields = "__all__"
+        read_only_fields = [
+            "reference_no",
+            "status",
+            "is_active",
+            "is_postponed",
+            "postponed_date",
+            "post_startTime",
+            "post_endTime",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "branch_code",
+            "hospital_code",
+        ]
+
+
+class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
+ 
+    class Meta:
+        model  = SurgerySchedule
+        fields = [
+            "ip_number",
+            "ot_id",
+            "surgery_name",
+            "surgeon_id",
+            "scheduled_date",
+            "startTime",
+            "endTime",
+            "surgery_type",
+            "is_emergency",
+            "anaesthetist_id",
+            "anesthesia_id",
+            "diagnosis",
+            "remarks",
+            "additional_anaesthetists",
+            "additional_doctors",
+            "is_pack_request_CSSD",
+            "is_pack_return_CSSD",
+        ]
+
+    # ── Field-level validation ─────────────────────────────────────────────
+    def validate_ip_number(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("IP Number is required.")
+        return value.strip()
+
+    def validate_ot_id(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Operation Theater is required.")
+        return value.strip()
+
+    def validate_surgery_name(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Surgery Name is required.")
+        return value.strip()
+
+    def validate_surgeon_id(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Scheduled Surgeon is required.")
+        return value.strip()
+
+    def validate_scheduled_date(self, value):
+        if not value:
+            raise serializers.ValidationError("Scheduled Date is required.")
+        return value
+
+    def validate_additional_anaesthetists(self, value):
+        """Accept dict or JSON string; always store as JSON string."""
+        import json
+        if isinstance(value, dict):
+            return json.dumps(value)
+        if isinstance(value, str):
+            try:
+                json.loads(value)   # validate it's parseable
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("Must be a valid JSON object string.")
+        return value
+
+    def validate_additional_doctors(self, value):
+        import json
+        if isinstance(value, dict):
+            return json.dumps(value)
+        if isinstance(value, str):
+            try:
+                json.loads(value)
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("Must be a valid JSON object string.")
+        return value
+
+    # ── Object-level validation ────────────────────────────────────────────
+    def validate(self, attrs):
+        start = attrs.get("startTime")
+        end   = attrs.get("endTime")
+        if start and end and end <= start:
+            raise serializers.ValidationError(
+                {"endTime": "End time must be after start time."}
+            )
+        return attrs

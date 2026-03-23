@@ -901,3 +901,87 @@ class VelavanItems(AuditModel):
         db_table = 'hospital_velavan_items'
     def __str__(self):
         return self.itemName
+    
+
+class OTMaster(AuditModel):
+    ot_id = models.CharField(max_length=20, primary_key=True)
+    ot_name = models.CharField(max_length=100)
+    availability = models.CharField(
+        max_length=20,
+        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
+        default="Available"
+    )
+    capacity = models.CharField(max_length=10)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.ot_id} - {self.ot_name}"
+
+
+class AnesMaster(AuditModel):
+    anesthesia_id = models.CharField(max_length=20, primary_key=True)
+    anesthesia_name = models.CharField(max_length=100)
+    type_of_anesthesia = models.CharField(
+        max_length=30,
+        choices=[
+            ("General",  "General"),
+            ("Regional", "Regional"),
+            ("Local",    "Local"),
+            ("Sedation", "Sedation"),
+            ("Combined", "Combined"),
+        ],
+        default="General",
+    )
+    admin_guide = models.TextField(blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+ 
+    def __str__(self):
+        return f"{self.anesthesia_id} - {self.anesthesia_name}"
+
+
+class SurgerySchedule(AuditModel):
+    STATUS_CHOICES = [
+        ("Scheduled",  "Scheduled"),
+        ("Confirmed",  "Confirmed"),
+        ("Completed",  "Completed"),
+        ("Postponed",  "Postponed"),
+        ("Cancelled",  "Cancelled"),
+    ]
+    reference_no = models.CharField(max_length=20, primary_key=True)
+    ip_number   = models.CharField(max_length=30)         
+    ot_id            = models.CharField(max_length=20)     # Operation Theater
+    surgery_name     = models.CharField(max_length=100)    # billTypeNo maps to surgery
+    surgeon_id       = models.CharField(max_length=30)     # Scheduled Surgeon
+    scheduled_date   = models.DateField()
+    startTime        = models.TimeField(null=True, blank=True)
+    endTime          = models.TimeField(null=True, blank=True)
+ 
+    # ── Surgery Meta ──────────────────────────────────────────────────────────
+    surgery_type  = models.CharField(
+        max_length=10,
+        choices=[("Major", "Major"), ("Minor", "Minor")],
+        default="Minor",
+    )
+    is_emergency  = models.BooleanField(default=False)
+    diagnosis     = models.CharField(max_length=200, blank=True, default="")
+    remarks       = models.TextField(blank=True, default="")
+    anaesthetist_id  = models.CharField(max_length=30, blank=True, default="")
+    anesthesia_id    = models.CharField(max_length=20, blank=True, default="")
+    additional_anaesthetists = models.TextField(default="{}")
+    additional_doctors       = models.TextField(default="{}")
+    is_pack_request_CSSD = models.BooleanField(default=False)
+    is_pack_return_CSSD  = models.BooleanField(default=False)
+    is_postponed    = models.BooleanField(default=False)
+    postponed_date  = models.DateField(null=True, blank=True)
+    post_startTime  = models.TimeField(null=True, blank=True)
+    post_endTime    = models.TimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
+    is_active         = models.BooleanField(default=True)
+ 
+    def __str__(self):
+        return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
+ 
+    class Meta:
+        ordering = ["-scheduled_date"]
+ 

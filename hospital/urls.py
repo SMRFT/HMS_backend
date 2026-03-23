@@ -13,7 +13,7 @@ from .Views import (
     radiology,
     room,
     stock,
-    summary,package_crud, investigation_price, billType, velavan
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule
 )
 
 urlpatterns = [
@@ -162,6 +162,26 @@ urlpatterns = [
     path('velavan/invoices/', velavan.create_velavan_in, name='create_velavan_in'),
     path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
-    path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),   
+    path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
+
+    #OT Master:
+    path('create_ot/', otMaster.create_ot,  name='create_ot'),
+    path('list_ots/',  otMaster.list_ots,   name='list_ots'),
+    path('update_ot/<str:ot_id>/', otMaster.update_ot, name='update_ot'),
+    path('delete_ot/<str:ot_id>/', otMaster.delete_ot, name='delete_ot'), 
+
+    #Anesthesia Master:
+    path('create_anes/', anesthesia.create_anes,  name='create_anes'),
+    path('list_anes/',  anesthesia.list_anes,   name='list_anes'),
+    path('update_anes/<str:anesthesia_id>/', anesthesia.update_anes, name='update_anes'),
+    path('delete_anes/<str:anesthesia_id>/', anesthesia.delete_anes, name='delete_anes'), 
+
+    #Surgery Schedule:
+    path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule),
+    path("list_surgery_schedules/",  surgeryschedule.list_surgery_schedules),
+    path("get_surgery_schedule/",surgeryschedule.get_surgery_schedule),
+    path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule),
+    path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule),
+    path("update_schedule_status/",  surgeryschedule.update_schedule_status),
 
 ]
