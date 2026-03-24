@@ -14,9 +14,6 @@ from .Views import (
 )
 
 urlpatterns = [
-    re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', views.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
-    re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', views.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
-
     # Admission URLs
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), # Duplicate but consistent
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
