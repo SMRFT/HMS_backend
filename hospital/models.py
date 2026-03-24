@@ -1,4 +1,5 @@
-from django.db import models, transaction
+from djongo import models
+from django.db import transaction
 from django.db.models import Max
 import re
 from django.utils import timezone
@@ -288,17 +289,15 @@ class PharmacyItem(AuditModel):
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
     
+# Correctly using djongo models below
+from django.utils import timezone
+
 class OPPharmacyBill(AuditModel):
 
-    patient_name = models.CharField(max_length=200)
+    Bill_id = models.IntegerField(primary_key=True)
 
-    bill_no = models.CharField(max_length=50, primary_key=True)
-
-    estimate_no = models.CharField(
-        max_length=50,
-        null=True,
-        blank=True
-    )
+    bill_no = models.CharField(max_length=50, blank=True, null=True)
+    estimate_no = models.CharField(max_length=50, blank=True, null=True)
 
     bill_date = models.DateTimeField(auto_now_add=True)
 
@@ -308,13 +307,11 @@ class OPPharmacyBill(AuditModel):
 
     bill_type = models.CharField(max_length=200, blank=True, null=True)
 
-    bill_name = models.CharField(max_length=200, blank=True, null=True)
-
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
 
     room_no = models.CharField(max_length=20, blank=True, null=True)
 
-    medicine_particulars = models.JSONField()
+    medicine_particulars = models.JSONField(default=list)
 
     total_amount = models.FloatField(default=0)
 
@@ -329,39 +326,22 @@ class OPPharmacyBill(AuditModel):
 
     net_amount = models.FloatField(default=0)
 
-    billing_status = models.CharField(
-        max_length=20,
-        default="Estimated"
-    )
-    billing_mode = models.CharField(
-    max_length=20,
-    choices=[
-        ("DIRECT", "Direct Billing"),
-        ("ESTIMATE", "Estimate Billing"),
-    ],
-    default="DIRECT"
-)
-    edit_history = models.JSONField(default=list, blank=True, null=True)
+    billing_status = models.CharField(max_length=20)
+
+    billing_mode = models.CharField(max_length=20)
 
     payment_details = models.JSONField(null=True, blank=True)
 
+    edit_history = models.JSONField(default=list, blank=True, null=True)
     cashier_id = models.CharField(max_length=50, blank=True, null=True)
 
-    @staticmethod
-    def generate_estimate_no():
-        max_estimate = OPPharmacyBill.objects.all().aggregate(Max('estimate_no'))['estimate_no__max']
-        
-        if max_estimate:
-            match = re.search(r'EST/(\d+)', max_estimate)
-            if match:
-                last_no = int(match.group(1))
-                new_no = last_no + 1
-            else:
-                new_no = 1
-        else:
-            new_no = 1
-        
-        return f"EST/{str(new_no).zfill(6)}"
+    # :white_check_mark: AUTO-INCREMENT LOGIC
+    def save(self, *args, **kwargs):
+        if not self.Bill_id:
+            last = OPPharmacyBill.objects.order_by('-Bill_id').first()
+            self.Bill_id = (last.Bill_id + 1) if last else 1
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.billing_status} - {self.patient_name}"
@@ -564,7 +544,6 @@ class Admission(AuditModel):
     packageName         = models.CharField(max_length=100, blank=True, null=True)
     roomNo              = models.CharField(max_length=10)
     bedNo               = models.CharField(max_length=10)
-    roomShiftingDetails  = models.JSONField(blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
 
     # ── Advance / Finance ───────────────────────────────────────────────────

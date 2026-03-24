@@ -145,6 +145,7 @@ urlpatterns = [
     path("save_radiology_ward_request/", NursingStation.save_radiology_ward_request, name="save_radiology_ward_request"),
     path("cancel_radiology_ward_request/", NursingStation.cancel_radiology_ward_request, name="cancel_radiology_ward_request"),
     path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
+    path("dosage_master/", NursingStation.dosage_master_view, name="dosage_master"),
     
     #Package Master:
     path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
