@@ -5,6 +5,8 @@ import os
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
 from django.views.decorators.csrf import csrf_exempt
+import json
+import traceback
 
 from ..models import Block, RoomCategory, Room, Admission
 from ..serializers import (
@@ -323,44 +325,7 @@ def room_view(request, pk=None):
 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-        
-
-# --------------------------------------------------
-# ROOM ENQUIRY (Block → Floor → Room → Bed)
-# --------------------------------------------------
-@api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
-def room_enquiry_view(request):
-    try:
-        result = []
-        blocks = Block.objects.filter(is_active=True)
-
-        for block in blocks:
-            rooms = Room.objects.filter(
-                block=block,
-                is_active=True
-            ).order_by("floor")
-
-            floor_map = {}
-
-            for room in rooms:
-                floor = room.floor or 0
-                floor_map.setdefault(floor, [])
-
-                room_data = RoomSerializer(room).data
-                floor_map[floor].append(room_data)
-
-            result.append({
-                "block": BlockSerializer(block).data,
-                "floors": {str(k): v for k, v in floor_map.items()}
-            })
-
-        return Response(result)
-
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
-
+    
 
 # --------------------------------------------------
 # ROOM SHIFTING
@@ -432,3 +397,234 @@ def room_shifting_view(request):
 
         return Response({"message": "Room shifted successfully"})
 
+
+
+import json
+from django.db.models.fields.json import JSONField
+
+# --------------------------------------------------
+# PATCH JSONFIELD FROM_DB_VALUE FOR DJONGO
+# --------------------------------------------------
+def safe_json_from_db_value(self, value, expression, connection):
+    if value is None:
+        return None
+
+    # If Mongo already returned list/dict, return directly
+    if isinstance(value, (list, dict)):
+        return value
+
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+JSONField.from_db_value = safe_json_from_db_value
+# --------------------------------------------------
+# SAFE JSON PARSER
+# Handles list / dict / string / bytes
+# --------------------------------------------------
+def parse_json_field(value):
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, dict):
+        return [value]
+
+    if value is None:
+        return []
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            return []
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        if not value or value in ("null", "None", "[]", "{}"):
+            return []
+
+        try:
+            parsed = json.loads(value)
+
+            if isinstance(parsed, list):
+                return parsed
+
+            if isinstance(parsed, dict):
+                return [parsed]
+
+        except Exception:
+            return []
+
+    try:
+        parsed = json.loads(str(value))
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+    except Exception:
+        pass
+
+    return []
+
+
+# --------------------------------------------------
+# ROOM ENQUIRY
+# --------------------------------------------------
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_enquiry_view(request):
+
+    try:
+
+        result = []
+        floor_map = {}
+
+        # ==================================================
+        # STEP 1 — BUILD ADMISSION MAP (OCCUPIED BEDS)
+        # ==================================================
+        admission_map = {}
+
+        admissions = Admission.objects.values(
+            "room_details",
+            "roomShitingDetails",
+            "is_admissionActive",
+            "is_discharged",
+        )
+
+        for admission in admissions:
+
+            if not admission.get("is_admissionActive"):
+                continue
+
+            if admission.get("is_discharged"):
+                continue
+
+            details = parse_json_field(admission.get("room_details"))
+            shifts  = parse_json_field(admission.get("roomShitingDetails"))
+
+            for entry in details + shifts:
+
+                if not isinstance(entry, dict):
+                    continue
+
+                room_no = str(entry.get("roomNo", "")).strip()
+                bed_no  = str(entry.get("bedNo", "")).strip()
+
+                if not room_no or not bed_no:
+                    continue
+
+                admission_map[(room_no, bed_no)] = {
+                    "is_roomActive": bool(entry.get("is_roomActive", False)),
+                    "is_roomCleaned": bool(entry.get("is_roomCleaned", False)),
+                }
+
+        # ==================================================
+        # STEP 2 — PROCESS ROOMS
+        # ==================================================
+        rooms = Room.objects.values(
+            "room_number",
+            "floor",
+            "room_type",
+            "block",
+            "room_status",
+            "room_blocked",
+            "is_active",
+            "beds",
+        )
+
+        for room in rooms:
+
+            if not room.get("is_active"):
+                continue
+
+            floor = room.get("floor") or 0
+
+            if floor not in floor_map:
+                floor_map[floor] = []
+
+            beds_raw = room.get("beds")
+            beds = parse_json_field(beds_raw)
+
+            beds_data = []
+
+            for bed in beds:
+
+                if not isinstance(bed, dict):
+                    continue
+
+                bed_number = str(bed.get("bed_number", "")).strip()
+
+                if not bed_number:
+                    continue
+
+                # --------------------------------------------------
+                # Determine bed status
+                # --------------------------------------------------
+                if room.get("room_status") == "Blocked" or room.get("room_blocked"):
+
+                    status = "Maintenance"
+
+                else:
+
+                    key = (str(room.get("room_number")), bed_number)
+
+                    admission_info = admission_map.get(key)
+
+                    if admission_info:
+
+                        active = admission_info["is_roomActive"]
+                        cleaned = admission_info["is_roomCleaned"]
+
+                        if active and not cleaned:
+                            status = "Occupied"
+
+                        elif not active and cleaned:
+                            status = "Available"
+
+                        elif not active and not cleaned:
+                            status = "Available (Not Cleaned)"
+
+                        else:
+                            status = "Occupied"
+
+                    else:
+                        status = "Available"
+
+                beds_data.append({
+                    "bed_number": bed_number,
+                    "status": status
+                })
+
+            floor_map[floor].append({
+                "room_number": room.get("room_number"),
+                "room_type": room.get("room_type"),
+                "block": room.get("block"),
+                "beds": beds_data,
+            })
+
+        # ==================================================
+        # STEP 3 — SORT FLOORS
+        # ==================================================
+        for floor in sorted(floor_map.keys()):
+
+            result.append({
+                "floor": floor,
+                "rooms": floor_map[floor]
+            })
+
+        return Response(result)
+
+    except Exception as exc:
+
+        print("ROOM ENQUIRY ERROR:", str(exc))
+        traceback.print_exc()
+
+        return Response(
+            {"error": f"Room enquiry failed: {str(exc)}"},
+            status=500
+        )

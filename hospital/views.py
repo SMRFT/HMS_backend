@@ -24,6 +24,7 @@ load_dotenv()
     
 from .models import Billing, TempPatientRegistration
 
+from .models import Billing
 from .serializers import PatientSerializer
 @api_view(['GET', 'POST'])
 @csrf_exempt

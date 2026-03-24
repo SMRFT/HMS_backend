@@ -37,11 +37,10 @@ class VendorSerializer(serializers.ModelSerializer):
 
 from .models import PharmacyStock
 class PharmacyStockSerializer(serializers.ModelSerializer):
-    stock_id = serializers.IntegerField(read_only=True)
-
     class Meta:
-        model  = PharmacyStock
+        model = PharmacyStock
         fields = "__all__"
+        read_only_fields = ["stock_id"]
 
 from rest_framework import serializers
 from .models import OPPharmacyBill
@@ -151,11 +150,10 @@ class AdmissionSerializer(serializers.ModelSerializer):
         return None 
 
 
-from .models import DischargeDetail
-class DischargeDetailSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+from .models import DischargeBilling
+class DischargeBillingSerializer(serializers.ModelSerializer):
     class Meta:
-        model = DischargeDetail
+        model = DischargeBilling
         fields = '__all__'
 
 

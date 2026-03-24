@@ -61,9 +61,11 @@ urlpatterns = [
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 
-    #Discharge URLs
-    path('search-admissions/', discharge.search_discharge_patient, name='search-admissions'),
-    path('discharge/', discharge.discharge_detail_view, name='discharge-create'),
+    # Discharge URLs
+    path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),
+    path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
+    path("discharge-billing/<str:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
+    path("discharge-billing/<str:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
 
     # Patient URLs
     path('patients/register/', views.patientCreateView, name='patient-register'),
@@ -116,6 +118,7 @@ urlpatterns = [
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
+    
     
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
