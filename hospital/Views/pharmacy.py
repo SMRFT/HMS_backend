@@ -1,17 +1,27 @@
 from django.http import JsonResponse
 from pymongo import MongoClient
 import os
+import json
+import pytz
+from datetime import datetime, date
+from decimal import Decimal, InvalidOperation
 
 from bson import ObjectId
-from ..models import Patient,PharmacyStock
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework import status
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.db import DatabaseError
+from django.utils import timezone
+from django.db.models import Max
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
+
+# Models & Serializers
+from ..models import Patient, PharmacyStock, OPPharmacyBill, PharmacyItem
+from ..serializers import OPPharmacyBillSerializer
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -20,7 +30,8 @@ COLLECTION_NAME = "hospital_oppharmacystock"
 
 client = MongoClient(MONGO_URI)
 mongo_db = client[DB_NAME]
-collection = mongo_db[COLLECTION_NAME]
+stock_collection = mongo_db["hospital_oppharmacystock"]
+bill_collection = mongo_db["hospital_oppharmacybill"]
 
 from bson.decimal128 import Decimal128
 
@@ -37,12 +48,13 @@ def convert_decimals(obj):
 @permission_classes([HasRoleAndDataPermission])
 def get_oppharmacy_stock(request):
     try:
+        dept_code = request.GET.get("department_code", "OP001")
 
         pipeline = [
 
     {
         "$match": {
-            "department_code": "OP001"
+            "department_code": dept_code
         }
     },
 
@@ -142,21 +154,20 @@ def get_oppharmacy_stock(request):
 
 
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from django.utils import timezone
-import pytz
-
-from ..models import OPPharmacyBill
+# ----------------------------------------------------------
+# SANITIZE MEDICINES
 
 
 
+
+
+# ----------------------------------------------------------
+# SANITIZE MEDICINES
+# ----------------------------------------------------------
 def sanitize_medicines(medicines):
-
     clean = []
 
     for med in medicines:
-
         if not med:
             continue
 
@@ -164,18 +175,18 @@ def sanitize_medicines(medicines):
 
         clean.append({
             "item_id": int(med.get("item_id")),
-            "item_name": str(med.get("item_name", "")),
             "batch_number": str(med.get("batch_number")),
-            "expiry_date": str(med.get("expiry_date", "")),
             "qty": int(med.get("qty", 0)),
-            "price": float(price)
+            "price": float(price),
+            "edit_history": med.get("edit_history", [])
         })
 
     return clean
-# ----------------------------------------------------------
-# STOCK BLOCK UPDATE
-# ----------------------------------------------------------
 
+
+# ----------------------------------------------------------
+# STOCK UPDATE
+# ----------------------------------------------------------
 def adjust_blocked_stock(old_meds, new_meds, department_code="OP001"):
 
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -185,7 +196,7 @@ def adjust_blocked_stock(old_meds, new_meds, department_code="OP001"):
     old_map = {(m["item_id"], m["batch_number"]): m for m in old_meds}
     new_map = {(m["item_id"], m["batch_number"]): m for m in new_meds}
 
-    keys = set(old_map.keys()).union(set(new_map.keys()))
+    keys = set(old_map.keys()).union(new_map.keys())
 
     for key in keys:
 
@@ -212,334 +223,216 @@ def adjust_blocked_stock(old_meds, new_meds, department_code="OP001"):
 
 
 # ----------------------------------------------------------
-# MAIN SAVE API
+# EDIT HISTORY
 # ----------------------------------------------------------
+def build_edit_history(old_meds, new_meds, employee_id):
 
-@api_view(["POST"])
+    updated = []
+
+    old_map = {(m["item_id"], m["batch_number"]): m for m in old_meds}
+    new_map = {(m["item_id"], m["batch_number"]): m for m in new_meds}
+
+    keys = set(old_map.keys()).union(new_map.keys())
+
+    for key in keys:
+
+        old = old_map.get(key)
+        new = new_map.get(key)
+
+        now = datetime.utcnow().isoformat()
+
+        if not old and new:
+            new.setdefault("edit_history", [])
+            new["edit_history"].append({
+                "action": "medicine_added",
+                "qty": new["qty"],
+                "blocked_change": new["qty"],
+                "timestamp": now,
+                "edited_by": employee_id
+            })
+            updated.append(new)
+
+        elif old and not new:
+            old.setdefault("edit_history", [])
+            old["edit_history"].append({
+                "action": "medicine_deleted",
+                "qty_deleted": old["qty"],
+                "blocked_change": -old["qty"],
+                "timestamp": now,
+                "edited_by": employee_id
+            })
+            updated.append(old)
+
+        elif old and new:
+            old_qty = old.get("qty", 0)
+            new_qty = new.get("qty", 0)
+
+            history = old.get("edit_history", [])
+
+            if old_qty != new_qty:
+                diff = new_qty - old_qty
+
+                history.append({
+                    "action": "qty_added" if diff > 0 else "qty_deleted",
+                    "old_qty": old_qty,
+                    "new_qty": new_qty,
+                    "blocked_change": diff,
+                    "timestamp": now,
+                    "edited_by": employee_id
+                })
+
+            new["edit_history"] = history
+            updated.append(new)
+
+    return updated
+
+
+@api_view(["POST", "PATCH"])
 @permission_classes([HasRoleAndDataPermission])
 def save_oppharmacy_bill(request):
-
     data = request.data
+    employee_id = data.get("auth-user-id")  # Use consistently
+
+    # ✅ STATUS NORMALIZATION (unchanged)
+    status_raw = str(data.get("status", "")).strip().lower()
+    if status_raw in ["estimate", "estimated"]:
+        status = "Estimate"
+    elif status_raw == "billed":
+        status = "Billed"
+    else:
+        return Response({"success": False, "error": "Invalid status"})
+
+    Bill_id = data.get("Bill_id")  # Frontend sends Bill_id (note lowercase 'id')
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
-
-    status = data.get("status")  # Estimate / Billed
-    estimate_no = data.get("estimate_no")
-
-    employee_id = data.get("auth-user-id")
-
-    total_amount = float(data.get("total_amount", 0))
-    net_amount = float(data.get("net_amount", 0))
-
-    discount_type = data.get("overall_discount_type")
-    discount_value = float(data.get("overall_discount_value", 0))
-    discount_amount = float(data.get("overall_discount_amount", 0))
-
-    bill_type = data.get("bill_type")
-    bill_name = data.get("bill_name")
-    doctor_id = data.get("doctor_id")
-    room_no = data.get("room_no")
-
-    patient_name = data.get("patient_name")
-    uhid = data.get("uhid")
-    inpatient_number = data.get("inpatient_number")
-
     department_code = "OP001"
 
+    # COMMON FIELDS (Removed patient_name and bill_name)
+    fields = {
+        "uhid": data.get("uhid"),
+        "inpatient_number": data.get("inpatient_number"),
+        "bill_type": data.get("bill_type"),
+        "doctor_id": data.get("doctor_id"),
+        "room_no": data.get("room_no"),
+        "total_amount": float(data.get("total_amount", 0)),
+        "overall_discount_type": data.get("overall_discount_type"),
+        "overall_discount_value": float(data.get("overall_discount_value", 0)),
+        "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
+        "net_amount": float(data.get("net_amount", 0)),
+    }
+
     # ======================================================
-    # 1️⃣ DIRECT BILL
+    # 🔁 PATCH (UPDATE / CONVERT) - Fixed: Ensure int(Bill_id), handle missing
     # ======================================================
+    # ======================================================
+    # 🔁 PATCH (UPDATE / CONVERT)
+    # ======================================================
+    if request.method == "PATCH":
+        if not Bill_id:
+            return Response({"success": False, "error": "Bill_id required for updates/conversions"})
 
-    if status == "Billed" and not estimate_no:
+        try:
+            record = OPPharmacyBill.objects.get(Bill_id=int(Bill_id))
+        except OPPharmacyBill.DoesNotExist:
+            return Response({"success": False, "error": "Record not found"})
 
-        bill_no = get_last_oppharmacy_billno(get_financial_year())
+        old_meds = record.medicine_particulars or []
+        updated_meds = build_edit_history(old_meds, medicines, employee_id)
+        adjust_blocked_stock(old_meds, updated_meds, department_code)
 
-        OPPharmacyBill.objects.create(
+        # Update metadata
+        update_data = {**fields}
+        update_data["medicine_particulars"] = updated_meds
+        update_data["lastmodified_by"] = employee_id
+        update_data["lastmodified_date"] = datetime.utcnow()
 
-            bill_no=bill_no,
-            estimate_no=None,
+        # 🔥 CASE 3: UPDATE ESTIMATE
+        if status == "Estimate":
+            update_data["billing_status"] = "Estimate"
+            update_data["billing_mode"] = "ESTIMATE"
 
-            patient_name=patient_name,
-            uhid=uhid,
-            inpatient_number=inpatient_number,
+        # 🔥 CASE 4: CONVERT TO BILL
+        elif status == "Billed":
+            if not record.bill_no:
+                update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
+            update_data["billing_status"] = "Billed"
+            update_data["billing_mode"] = "ESTIMATE"
 
-            bill_type=bill_type,
-            bill_name=bill_name,
-
-            doctor_id=doctor_id,
-            room_no=room_no,
-
-            medicine_particulars=medicines,
-
-            total_amount=total_amount,
-            overall_discount_type=discount_type,
-            overall_discount_value=discount_value,
-            overall_discount_amount=discount_amount,
-            net_amount=net_amount,
-
-            billing_status="Billed",
-            billing_mode="DIRECT",
-
-            cashier_id=employee_id
+        # ✅ NATIVE MONGO UPDATE
+        bill_collection.update_one(
+            {"Bill_id": int(Bill_id)},
+            {"$set": update_data}
         )
 
-        # block stock
-        adjust_blocked_stock([], medicines, department_code)
+        # Refresh for response
+        record.refresh_from_db()
 
         return Response({
             "success": True,
-            "bill_no": bill_no
+            "Bill_id": record.Bill_id,
+            "bill_no": record.bill_no,
+            "estimate_no": record.estimate_no
         })
 
     # ======================================================
-    # 5️⃣ CONVERT BILL → ESTIMATE
+    # 🆕 POST (CREATE)
     # ======================================================
+    if request.method == "POST":
+        # Calculate next Bill_id
+        last = OPPharmacyBill.objects.order_by('-Bill_id').first()
+        next_Bill_id = (last.Bill_id + 1) if last else 1
 
-    if status == "Estimate" and data.get("bill_no"):
-
-        bill = OPPharmacyBill.objects.filter(
-            bill_no=data.get("bill_no")
-        ).first()
-
-        if not bill:
-            return Response({
-                "success": False,
-                "error": "Bill not found"
-            })
-
-        old_medicines = bill.medicine_particulars or []
-
-        # adjust stock
-        adjust_blocked_stock(old_medicines, medicines, department_code)
-
-        # Capture history
-        history_snapshot = {
-            "type": "Bill to Estimate Conversion",
-            "medicine_particulars": old_medicines,
-            "total_amount": bill.total_amount,
-            "overall_discount_type": bill.overall_discount_type,
-            "overall_discount_value": bill.overall_discount_value,
-            "overall_discount_amount": bill.overall_discount_amount,
-            "net_amount": bill.net_amount,
-            "billing_status": bill.billing_status,
-            "modified_by": employee_id,
-            "modified_at": timezone.now().astimezone(pytz.timezone("Asia/Kolkata")).isoformat()
+        record_doc = {
+            "Bill_id": next_Bill_id,
+            "medicine_particulars": medicines,
+            "billing_status": status,
+            "cashier_id": employee_id,
+            "created_by": employee_id,
+            "created_date": datetime.utcnow(),
+            "bill_date": datetime.utcnow(),
+            **fields
         }
 
-        if bill.edit_history is None:
-            bill.edit_history = []
-        
-        bill.edit_history.append(history_snapshot)
-
-        # Update to Estimate
-        bill.billing_status = "Estimated"
-        bill.billing_mode = "ESTIMATE"
-        
-        if not bill.estimate_no:
-            bill.estimate_no = generate_estimate_no()
-
-        bill.patient_name = patient_name
-        bill.uhid = uhid
-        bill.inpatient_number = inpatient_number
-
-        bill.bill_type = bill_type
-        bill.bill_name = bill_name
-
-        bill.doctor_id = doctor_id
-        bill.room_no = room_no
-
-        bill.medicine_particulars = medicines
-
-        bill.total_amount = total_amount
-        bill.overall_discount_type = discount_type
-        bill.overall_discount_value = discount_value
-        bill.overall_discount_amount = discount_amount
-        bill.net_amount = net_amount
-
-        bill.save()
-
-        return Response({
-            "success": True,
-            "estimate_no": bill.estimate_no
-        })
-
-    # ======================================================
-    # 2️⃣ CREATE ESTIMATE
-    # ======================================================
-
-    if status == "Estimate" and not estimate_no:
-
-        estimate_no = generate_estimate_no()
-
-        OPPharmacyBill.objects.create(
-
-            bill_no="",
-            estimate_no=estimate_no,
-
-            patient_name=patient_name,
-            uhid=uhid,
-            inpatient_number=inpatient_number,
-
-            bill_type=bill_type,
-            bill_name=bill_name,
-
-            doctor_id=doctor_id,
-            room_no=room_no,
-
-            medicine_particulars=medicines,
-
-            total_amount=total_amount,
-            overall_discount_type=discount_type,
-            overall_discount_value=discount_value,
-            overall_discount_amount=discount_amount,
-            net_amount=net_amount,
-
-            billing_status="Estimated",
-            billing_mode="ESTIMATE",
-
-            cashier_id=employee_id
-        )
-
-        # block stock
-        adjust_blocked_stock([], medicines, department_code)
-
-        return Response({
-            "success": True,
-            "estimate_no": estimate_no
-        })
-
-    # ======================================================
-    # 3️⃣ EDIT ESTIMATE
-    # ======================================================
-
-    if status == "Estimate" and estimate_no:
-
-        estimate = OPPharmacyBill.objects.filter(
-            estimate_no=estimate_no
-        ).first()
-
-        if not estimate:
+        # CASE 1: DIRECT BILL
+        if status == "Billed":
+            bill_no = get_last_oppharmacy_billno(get_financial_year())
+            record_doc.update({
+                "bill_no": bill_no,
+                "estimate_no": None,
+                "billing_mode": "DIRECT",
+            })
+            bill_collection.insert_one(record_doc)
+            adjust_blocked_stock([], medicines, department_code)
             return Response({
-                "success": False,
-                "error": "Estimate not found"
+                "success": True,
+                "bill_no": bill_no,
+                "Bill_id": next_Bill_id
             })
 
-        old_medicines = estimate.medicine_particulars or []
-
-        # adjust blocked qty
-        adjust_blocked_stock(old_medicines, medicines, department_code)
-
-        # Capture current state for history before updating
-        history_snapshot = {
-            "medicine_particulars": old_medicines,
-            "total_amount": estimate.total_amount,
-            "overall_discount_type": estimate.overall_discount_type,
-            "overall_discount_value": estimate.overall_discount_value,
-            "overall_discount_amount": estimate.overall_discount_amount,
-            "net_amount": estimate.net_amount,
-            "modified_by": employee_id,
-            "modified_at": timezone.now().astimezone(pytz.timezone("Asia/Kolkata")).isoformat()
-        }
-
-        if estimate.edit_history is None:
-            estimate.edit_history = []
-        
-        estimate.edit_history.append(history_snapshot)
-
-
-
-        estimate.patient_name = patient_name
-        estimate.uhid = uhid
-        estimate.inpatient_number = inpatient_number
-
-        estimate.bill_type = bill_type
-        estimate.bill_name = bill_name
-
-        estimate.doctor_id = doctor_id
-        estimate.room_no = room_no
-
-        estimate.medicine_particulars = medicines
-
-        estimate.total_amount = total_amount
-        estimate.overall_discount_type = discount_type
-        estimate.overall_discount_value = discount_value
-        estimate.overall_discount_amount = discount_amount
-        estimate.net_amount = net_amount
-
-        estimate.save()
-
-
-        return Response({
-            "success": True,
-            "estimate_no": estimate.estimate_no
-        })
-
-    # ======================================================
-    # 4️⃣ CONVERT ESTIMATE → BILL
-    # ======================================================
-
-    if status == "Billed" and estimate_no:
-
-        estimate = OPPharmacyBill.objects.filter(
-            estimate_no=estimate_no
-        ).first()
-
-        if not estimate:
-
+        # CASE 2: ESTIMATE
+        if status == "Estimate":
+            estimate_no = generate_estimate_no()
+            record_doc.update({
+                "bill_no": None,
+                "estimate_no": estimate_no,
+                "billing_mode": "ESTIMATE",
+            })
+            bill_collection.insert_one(record_doc)
+            adjust_blocked_stock([], medicines, department_code)
             return Response({
-                "success": False,
-                "error": "Estimate not found"
+                "success": True,
+                "estimate_no": estimate_no,
+                "Bill_id": next_Bill_id
             })
 
-        old_medicines = estimate.medicine_particulars or []
-
-        bill_no = get_last_oppharmacy_billno(get_financial_year())
-
-        # adjust stock ONLY IF modified
-        adjust_blocked_stock(old_medicines, medicines, department_code)
-
-        estimate.bill_no = bill_no
-        estimate.billing_status = "Billed"
-        estimate.billing_mode = "ESTIMATE"
-
-        estimate.patient_name = patient_name
-        estimate.uhid = uhid
-        estimate.inpatient_number = inpatient_number
-
-        estimate.bill_type = bill_type
-        estimate.bill_name = bill_name
-
-        estimate.doctor_id = doctor_id
-        estimate.room_no = room_no
-
-        estimate.medicine_particulars = medicines
-
-        estimate.total_amount = total_amount
-        estimate.overall_discount_type = discount_type
-        estimate.overall_discount_value = discount_value
-        estimate.overall_discount_amount = discount_amount
-        estimate.net_amount = net_amount
-
-        estimate.save()
-
-        return Response({
-            "success": True,
-            "bill_no": bill_no
-        })
-
-    return Response({
-        "success": False,
-        "error": "Invalid request"
-    })
+    return Response({"success": False, "error": "Invalid request"})
 
 
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_BillType(request):
-    client = MongoClient(MONGO_URI)
     db = client["HMS"]
-
     stock_collection = db["hospital_billtype"]
 
     cursor = stock_collection.find(
@@ -560,8 +453,6 @@ def get_pharmacy_BillType(request):
         "data": billtypes
     })
 
-from datetime import date
-
 def get_financial_year():
     today = date.today()
     year = today.year
@@ -575,21 +466,7 @@ def get_financial_year():
 
     return f"{start:02d}{end:02d}"
 
-
-# @api_view(["GET"])
-# @permission_classes([HasRolePermission])
-# def generate_oppharmacy_billno(request):
-#     fy = get_financial_year()
-#     bill_no = get_last_oppharmacy_billno(fy)
-
-#     return Response({
-#         "bill_no": bill_no,
-#         "financial_year": fy
-#     })
-
-
-
-from ..models import OPPharmacyBill
+# HELPER: GET LAST BILL NO
 
 def get_last_oppharmacy_billno(fy):
     last_bill = (
@@ -662,7 +539,7 @@ def get_last_billed_uhid(request):
     })
 
 
-from django.db.models import Max
+# HELPER: GENERATE ESTIMATE NO
 @permission_classes([HasRoleAndDataPermission])
 def generate_estimate_no():
     last = OPPharmacyBill.objects.aggregate(
@@ -694,48 +571,66 @@ def save_oppharmacy_estimate(request):
     data["created_by"] = employee_id
     data["created_date"] = now_ist   # timezone-aware datetime
     data["is_active"] = True
+    data["billing_status"] = "Estimate"
 
-    serializer = OPPharmacyEstimatebillSerializer(data=data)
+    # Calculate next Bill_id if using PyMongo
+    last = OPPharmacyBill.objects.order_by('-Bill_id').first()
+    next_Bill_id = (last.Bill_id + 1) if last else 1
 
-    if serializer.is_valid():
-        estimate = serializer.save(
-            estimate_no=generate_estimate_no()  # ✅ AUTO estimate no
-        )
+    medicines = sanitize_medicines(data.get("medicine_particulars", []))
 
+    record_doc = {
+        "Bill_id": next_Bill_id,
+        "uhid": data.get("uhid"),
+        "inpatient_number": data.get("inpatient_number"),
+        "bill_type": data.get("bill_type"),
+        "doctor_id": data.get("doctor_id"),
+        "room_no": data.get("room_no"),
+        "total_amount": float(data.get("total_amount", 0)),
+        "overall_discount_type": data.get("overall_discount_type"),
+        "overall_discount_value": float(data.get("overall_discount_value", 0)),
+        "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
+        "net_amount": float(data.get("net_amount", 0)),
+        "medicine_particulars": medicines,
+        "billing_status": "Estimate",
+        "billing_mode": "ESTIMATE",
+        "estimate_no": generate_estimate_no(),
+        "created_by": employee_id,
+        "created_date": now_ist,
+        "bill_date": now_ist
+    }
+
+    result = bill_collection.insert_one(record_doc)
+
+    if result.inserted_id:
         return Response(
             {
                 "success": True,
-                "estimate_no": estimate.estimate_no
+                "estimate_no": record_doc["estimate_no"],
+                "Bill_id": next_Bill_id
             },
             status=201
         )
 
-    return Response(serializer.errors, status=400)
+    return Response({"error": "Failed to save estimate"}, status=400)
 
 
 
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_active_estimates(request):
   
-    estimates = OPPharmacyEstimatebill.objects.all()
-    active_estimates = [obj for obj in estimates if obj.is_active == True]
-    serializer = OPPharmacyEstimatebillSerializer(active_estimates, many=True)
+    estimates = OPPharmacyBill.objects.filter(billing_status="Estimate")
+    serializer = OPPharmacyBillSerializer(estimates, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-
-from ..models import PharmacyItem
-import json
 
 @api_view(["GET"])
 def get_estimate_bills(request):
     try:
 
-        bills = OPPharmacyBill.objects.filter(billing_status="Estimated")
+        bills = OPPharmacyBill.objects.filter(billing_status="Estimate")
         data = []
 
         for bill in bills:
@@ -750,31 +645,36 @@ def get_estimate_bills(request):
 
             for med in meds:
                 item_id = med.get("item_id")
-                batch_no = med.get("batch_number")
-
+                
+                # Fetch name since it is no longer stored in medicine_particulars array
                 item = PharmacyItem.objects.filter(item_id=item_id).first()
+                item_name = item.item_name if item else ""
 
                 particulars.append({
                     "item_id": item_id,
-                    "item_name": item.item_name if item else "",
-                    "batch_number": batch_no,
+                    "item_name": item_name,
+                    "batch_number": med.get("batch_number"),
                     "qty": med.get("qty"),
-                    "Price": med.get("Price"),
+                    "price": med.get("price") or med.get("Price") or 0,
+                    "edit_history": med.get("edit_history", [])
                 })
+
+            # Re-fetch patient name from Patient model
+            patient = Patient.objects.filter(uhid=bill.uhid).first()
+            patient_name = patient.patient_name if patient else ""
 
             data.append({
                 "created_date": bill.created_date,
                 "lastmodified_date": bill.lastmodified_date,
                 "created_by": bill.created_by,
                 "lastmodified_by": bill.lastmodified_by,
-                "patient_name": bill.patient_name,
+                "patient_name": patient_name,
                 "bill_no": bill.bill_no,
                 "estimate_no": bill.estimate_no,
                 "bill_date": bill.bill_date,
                 "uhid": bill.uhid,
                 "inpatient_number": bill.inpatient_number,
                 "bill_type": bill.bill_type,
-                "bill_name": bill.bill_name,
                 "doctor_id": bill.doctor_id,
                 "room_no": bill.room_no,
                 "medicine_particulars": particulars,
@@ -795,34 +695,36 @@ def get_estimate_bills(request):
         return Response({"error": str(e)}, status=500)
 
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from django.utils import timezone
-import pytz
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def convert_estimate_to_bill(request, estimate_no):
 
-    estimate = OPPharmacyEstimatebill.objects.get(
+    estimate = OPPharmacyBill.objects.get(
         estimate_no=estimate_no,
-        is_active=True
+        billing_status="Estimate"
     )
 
-    medicines = json.loads(estimate.medicine_particulars)
+    medicines = estimate.medicine_particulars
+    if isinstance(medicines, str):
+        medicines = json.loads(medicines)
 
     converted_items = []
 
     for m in medicines:
         converted_items.append({
             "item_id": m.get("item_id"),
-            "batch_number": m.get("batch"),
-            "qty": m.get("quantity"),
-            "Price": m.get("mrp")
+            "batch_number": m.get("batch_number"),
+            "qty": m.get("qty"),
+            "price": m.get("price") or m.get("Price") or 0,
+            "edit_history": m.get("edit_history", [])
         })
 
+    # Re-fetch patient name for the response payload
+    patient = Patient.objects.filter(uhid=estimate.uhid).first()
+    patient_name = patient.patient_name if patient else ""
+
     data = {
-        "patient_name": estimate.patient_name,
+        "patient_name": patient_name,
         "uhid": estimate.uhid,
         "inpatient_number": estimate.inpatient_number,
         "doctor_id": estimate.doctor_id,
@@ -845,12 +747,6 @@ def convert_estimate_to_bill(request, estimate_no):
 
 
 
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from ..models import OPPharmacyBill
-from ..serializers import OPPharmacyBillSerializer
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def OPPharmacy_pending_bills(request):
@@ -859,11 +755,6 @@ def OPPharmacy_pending_bills(request):
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-
-from decimal import Decimal, InvalidOperation
-from django.utils import timezone
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
@@ -911,20 +802,17 @@ def collect_oppharmacy_payment(request):
             status=400
         )
 
-    # ✅ UPDATE CORRECT FIELDS
-    bill.billing_status = "Paid"
-    bill.payment_details = payments
-    bill.cashier_id = cashier_id
-    bill.lastmodified_by = cashier_id
-    bill.lastmodified_date = timezone.now()
-
-    bill.save(update_fields=[
-        "billing_status",
-        "payment_details",
-        "cashier_id",
-        "lastmodified_by",
-        "lastmodified_date"
-    ])
+    # ✅ UPDATE CORRECT FIELDS VIA PyMongo to avoid stringification
+    bill_collection.update_one(
+        {"Bill_id": bill.Bill_id},
+        {"$set": {
+            "billing_status": "Paid",
+            "payment_details": payments,
+            "cashier_id": cashier_id,
+            "lastmodified_by": cashier_id,
+            "lastmodified_date": datetime.utcnow()
+        }}
+    )
 
     return Response({
         "success": True,
