@@ -225,4 +225,12 @@ urlpatterns = [
     
     path('group-type-master/', stores.group_type_list_create, name='group_type_list_create'),
     path('group-type-master/<str:pk>/', stores.group_type_detail, name='group_type_detail'),
+
+    path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
+    path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
+
+    path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
+    path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
+    path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
+    path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
 ]
