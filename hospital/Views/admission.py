@@ -1,209 +1,232 @@
 from decimal import Decimal, InvalidOperation
-from bson import ObjectId
 from rest_framework.response import Response
-from rest_framework import status
-from pymongo import MongoClient
-import os
-import json
-import traceback
-from datetime import datetime, date
 from rest_framework.decorators import api_view, permission_classes
-from pyauth.auth import HasRoleAndDataPermission
 from django.http import JsonResponse
-from django.forms.models import model_to_dict
-from ..models import Admission, Room, Patient          # adjust Patient import to your app
-from ..serializers import RoomSerializer, PatientSerializer
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
+from pyauth.auth import HasRoleAndDataPermission
+from ..models import Admission, Room, Patient, InsuranceProvider
+import traceback
+import json
+from datetime import datetime
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _global_db():
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    return client['Global']
-
-
-def _doctor_name(employee_id):
-    """Resolve employeeId → employeeName from Global diagnostics collection."""
-    if not employee_id:
-        return ""
-    doc = _global_db()['backend_diagnostics_profile'].find_one(
-        {"employeeId": employee_id}
-    ) or {}
-    return doc.get('employeeName', str(employee_id))
-
-
-def _doctor_names_bulk(ids):
-    """Return {employeeId: employeeName} for a list of ids."""
-    ids = [i for i in ids if i]
-    if not ids:
-        return {}
-    docs = _global_db()['backend_diagnostics_profile'].find(
-        {"employeeId": {"$in": ids}}
-    )
-    return {str(d['employeeId']): d.get('employeeName', '') for d in docs}
-
-
-def _admission_to_dict(obj: Admission) -> dict:
-    """
-    Convert an Admission ORM object to a plain dict.
-    We never hardcode field names – we use model_to_dict + getattr for
-    any field not returned by model_to_dict (e.g. auto fields).
-    """
-    d = model_to_dict(obj)
-    # model_to_dict skips auto/pk fields; add them manually
-    d['id']               = obj.pk
-    d['ipNumber']         = obj.ipNumber
-    d['uhid']             = obj.uhid
-    d['admissionDateTime'] = obj.admissionDateTime.isoformat() if obj.admissionDateTime else None
-    d['created_date']     = obj.created_date.isoformat() if hasattr(obj, 'created_date') and obj.created_date else None
-    d['lastmodified_date'] = obj.lastmodified_date.isoformat() if hasattr(obj, 'lastmodified_date') and obj.lastmodified_date else None
-    # Decimal → float
-    for f in ('advance', 'ip_advance', 'total_advance', 'creditLimit', 'refunded_Amount'):
-        if d.get(f) is not None:
-            d[f] = float(d[f])
-    return d
-
-
-def _enrich(d: dict) -> dict:
-    """
-    Attach patient info (from Patient model) and doctor names
-    (from Global MongoDB) to an admission dict.
-    """
-    uhid = d.get('uhid')
-    if uhid:
-        try:
-            patient = Patient.objects.get(uhid=uhid)
-            ps = PatientSerializer(patient).data
-            d.update({
-                'salutation':          ps.get('salutation', ''),
-                'firstName':           ps.get('firstName', ''),
-                'middleName':          ps.get('middleName', ''),
-                'lastName':            ps.get('lastName', ''),
-                'age':                 ps.get('age', ''),
-                'gender':              ps.get('gender', ''),
-                'phone':               ps.get('phone', ''),
-                'permanent_address':   ps.get('permanent_address', ''),
-                'area':                ps.get('area', ''),
-                'zipcode':             ps.get('zipcode', ''),
-                'city':                ps.get('city', ''),
-                'state':               ps.get('state', ''),
-                'customerType':        ps.get('customerType', ''),
-                'insuranceCompany':    ps.get('insuranceCompany', ''),
-                'privilegedCustomerId': ps.get('privilegedCustomerId', ''),
-            })
-        except Patient.DoesNotExist:
-            pass
-
-    doctor_map = _doctor_names_bulk([d.get('admittingDoctor'), d.get('consultingDoctor')])
-    d['admittingDoctorName']  = doctor_map.get(str(d.get('admittingDoctor', '')), '')
-    d['consultingDoctorName'] = doctor_map.get(str(d.get('consultingDoctor', '')), '')
-    return d
-
-
-def _next_ip_number() -> str:
-    """Generate the next IP number based on financial year."""
-    now   = datetime.now()
-    year  = now.year
-    month = now.month
-    fy    = (year - 2001) if month < 4 else (year - 2000)
-    prefix = f"S{fy:03d}"
-
-    latest = Admission.objects.order_by('-ipNumber').first()
-    if latest:
-        try:
-            lp, ln = latest.ipNumber.split('/')
-            next_n = 500001 if lp != prefix else int(ln) + 1
-        except Exception:
-            next_n = 500001
-    else:
-        next_n = 500001
-    return f"{prefix}/{next_n:06d}"
-
-
-def _next_bill_number(ip_number: str) -> str:
-    """
-    Generate a bill number for advance slip.
-    Format: <YYMM>/<6-digit-seq>
-    Sequence is global across all Admission advance_payments.
-    """
-    now    = datetime.now()
-    prefix = f"{str(now.year)[2:]}{now.month:02d}"
-
-    # Count all existing advance bill numbers across all admissions
-    # to determine the next sequence
-    from django.db.models import Q
-    all_payments = []
-    for adm in Admission.objects.exclude(advance_payments=None).exclude(advance_payments=[]):
-        if adm.advance_payments:
-            all_payments.extend(adm.advance_payments)
-
-    max_seq = 0
-    for p in all_payments:
-        bn = p.get('bill_number', '')
-        if '/' in bn:
-            try:
-                seq = int(bn.split('/')[-1])
-                if seq > max_seq:
-                    max_seq = seq
-            except ValueError:
-                pass
-    return f"{prefix}/{max_seq + 1:06d}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# IP Number preview
+# IP Number Preview  →  GET /next-ip-number/
 # ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_next_ip_number(request):
-    return Response({"next_ipNumber": _next_ip_number()})
+    try:
+        now   = datetime.now()
+        year  = now.year
+        month = now.month
+        fy    = (year - 2001) if month < 4 else (year - 2000)
+        prefix = f"S{fy:03d}"
+
+        latest = Admission.objects.order_by('-ipNumber').first()
+        if latest:
+            try:
+                lp, ln = latest.ipNumber.split('/')
+                next_n = 500001 if lp != prefix else int(ln) + 1
+            except Exception:
+                next_n = 500001
+        else:
+            next_n = 500001
+
+        return JsonResponse({"success": True, "next_ipNumber": f"{prefix}/{next_n:06d}"})
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Patient lookup  (uses Patient model, no hardcoded fields)
+# Patient Lookup by UHID  →  GET /op-patient/<uhid>/
 # ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_op_patient_by_uhid(request, uhid):
+    """
+    Search by UHID → Patient model only.
+    Insurance name resolved from InsuranceProvider model via company_code.
+    Blocks if already actively admitted.
+    IP number is NOT returned here — auto-generated on save.
+    """
     try:
-        patient = Patient.objects.get(uhid=uhid)
-        return Response(PatientSerializer(patient).data)
-    except Patient.DoesNotExist:
-        return Response({"error": "Patient not found"}, status=404)
+        try:
+            patient = Patient.objects.get(uhid=uhid)
+        except Patient.DoesNotExist:
+            return JsonResponse({"success": False, "error": "Patient not found"}, status=404)
 
+        # Block re-admission if already active
+        existing = Admission.objects.filter(
+            uhid=uhid,
+            is_admissionActive=True,
+            is_discharged=False
+        ).first()
+        if existing:
+            return JsonResponse({
+                "success": False,
+                "error": f"Patient already admitted. IP Number: {existing.ipNumber}",
+                "already_admitted": True,
+                "ipNumber": existing.ipNumber
+            }, status=400)
+
+        # Resolve insurance company name from InsuranceProvider model
+        insurance_company_name = ''
+        if patient.company_code:
+            try:
+                provider = InsuranceProvider.objects.get(company_code=patient.company_code)
+                insurance_company_name = provider.company_name
+            except InsuranceProvider.DoesNotExist:
+                insurance_company_name = patient.company_code or ''
+
+        data = {
+            'uhid':                 patient.uhid,
+            'salutation':           patient.salutation or '',
+            'firstName':            patient.firstName or '',
+            'lastName':             patient.lastName or '',
+            'age':                  patient.age,
+            'gender':               patient.gender or '',
+            'mobilePhone':          patient.mobilePhone or '',
+            'permanent_address':    patient.permanent_address or '',
+            'area':                 patient.area or '',
+            'zipcode':              patient.zipcode or '',
+            'city':                 patient.city or '',
+            'state':                patient.state or '',
+            'customer_type':        patient.customer_type or '',
+            'company_code':         patient.company_code or '',
+            'insuranceCompanyName': insurance_company_name,
+            'blood_group':          patient.blood_group or '',
+            'email':                patient.email or '',
+            'dob':                  patient.dob.isoformat() if patient.dob else '',
+        }
+
+        return JsonResponse({"success": True, "data": data})
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Admission Lookup by IP Number  →  GET /admission-by-ip/<ip_number>/
+# ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
-def search_op_patients(request):
-    q = request.GET.get('uhid', '').strip()
-    if len(q) < 4:
-        return Response({"error": "Enter at least 4 characters"}, status=400)
-    patients = Patient.objects.filter(uhid__icontains=q)[:20]
-    return Response(PatientSerializer(patients, many=True).data)
+def get_admission_by_ip(request, ip_number):
+    """
+    Search by IP Number → Admission model.
+    Then fetches Patient via admission.uhid → Patient model.
+    Insurance name resolved from InsuranceProvider model via company_code.
+    """
+    try:
+        adm = Admission.objects.filter(
+            ipNumber__icontains=ip_number,
+            is_admissionActive=True
+        ).first()
+
+        if not adm:
+            return JsonResponse({"success": False, "error": "Admission not found"}, status=404)
+
+        # Fetch patient details from Patient model using uhid
+        patient_data = {}
+        insurance_company_name = ''
+        try:
+            patient = Patient.objects.get(uhid=adm.uhid)
+            if patient.company_code:
+                try:
+                    provider = InsuranceProvider.objects.get(company_code=patient.company_code)
+                    insurance_company_name = provider.company_name
+                except InsuranceProvider.DoesNotExist:
+                    insurance_company_name = patient.company_code or ''
+
+            patient_data = {
+                'salutation':           patient.salutation or '',
+                'firstName':            patient.firstName or '',
+                'lastName':             patient.lastName or '',
+                'age':                  patient.age,
+                'gender':               patient.gender or '',
+                'mobilePhone':          patient.mobilePhone or '',
+                'permanent_address':    patient.permanent_address or '',
+                'area':                 patient.area or '',
+                'zipcode':              patient.zipcode or '',
+                'city':                 patient.city or '',
+                'state':                patient.state or '',
+                'customer_type':        patient.customer_type or '',
+                'company_code':         patient.company_code or '',
+                'insuranceCompanyName': insurance_company_name,
+            }
+        except Patient.DoesNotExist:
+            pass
+
+        # Build room details — read from room_details JSON field
+        room_details = adm.room_details if isinstance(adm.room_details, list) else []
+        current_room = room_details[0] if room_details else {}
+
+        result = {
+            'id':                  str(adm.pk),
+            'uhid':                adm.uhid,
+            'ipNumber':            adm.ipNumber,
+            'admissionDateTime':   adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+            'admittingDoctor':     adm.admittingDoctor or '',
+            'consultingDoctor':    adm.consultingDoctor or '',
+            'packageName':         adm.packageName or '',
+            'roomNo':              current_room.get('roomNo', ''),
+            'bedNo':               current_room.get('bedNo', ''),
+            'reasonForAdmission':  adm.reasonForAdmission or '',
+            'mlc_type':            adm.mlc_type or '',
+            'mlc_remarks':         adm.mlc_remarks or '',
+            'advance_payments':    adm.advance_payments or [],
+            'is_advanceActive':    adm.is_advanceActive,
+            'is_admissionActive':  adm.is_admissionActive,
+            'is_discharged':       adm.is_discharged,
+            'created_date':        adm.created_date.isoformat() if hasattr(adm, 'created_date') and adm.created_date else None,
+            'lastmodified_date':   adm.lastmodified_date.isoformat() if hasattr(adm, 'lastmodified_date') and adm.lastmodified_date else None,
+            **patient_data,
+        }
+
+        return JsonResponse({"success": True, "data": result})
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
 
 
-# --------------------------------------------------
-# SAFE JSON PARSER
-# --------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Insurance Providers List  →  GET /insurance-providers/
+# ──────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def get_insurance_providers(request):
+    """Returns all non-blocked insurance providers from InsuranceProvider model."""
+    try:
+        providers = InsuranceProvider.objects.filter(blocked=False).values(
+            'company_code', 'company_name', 'city', 'state', 'phone', 'email'
+        )
+        data = list(providers)
+        return JsonResponse({"success": True, "data": data})
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+
 def parse_json_field(value):
-
     if isinstance(value, list):
         return value
-
     if isinstance(value, dict):
         return [value]
-
     if value is None:
         return []
-
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
@@ -213,9 +236,7 @@ def parse_json_field(value):
                 return [parsed]
         except Exception:
             return []
-
     return []
-
 
 # --------------------------------------------------
 # SEARCH ROOMS
@@ -346,151 +367,295 @@ def search_rooms(request):
         traceback.print_exc()
 
         return Response({"error": str(e)}, status=500)
-
-
-@api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
-def get_room_beds(request, room_number):
-    try:
-        room = Room.objects.get(room_number=room_number, is_active=True)
-        return Response(RoomSerializer(room).data)
-    except Room.DoesNotExist:
-        return Response({"error": "Room not found or inactive"}, status=404)
-
+    
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Admissions  List / Create
+# Admissions List / Create  →  GET/POST /admission/
 # ──────────────────────────────────────────────────────────────────────────────
-
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_view(request):
-    """
-    GET  /admission/   – list active admissions
-    POST /admission/   – create new admission
-    """
-    # ── GET ───────────────────────────────────────────────────────────────────
+    # ── GET ─────────────────────────────────────────────
     if request.method == 'GET':
         try:
-            qs = Admission.objects.filter(is_admissionActive=True)
             ip_filter = request.GET.get('ip_number', '').strip()
-            if ip_filter:
-                if len(ip_filter) < 4:
-                    return JsonResponse({"error": "ip_number must be at least 4 chars"}, status=400)
-                qs = qs.filter(ipNumber__icontains=ip_filter)
 
-            data = [_enrich(_admission_to_dict(a)) for a in qs]
-            return JsonResponse(data, safe=False)
+            if ip_filter and len(ip_filter) < 4:
+                return JsonResponse({"error": "ip_number must be at least 4 chars"}, status=400)
+
+            # ❗ FETCH ALL (DJONGO SAFE)
+            admissions = list(Admission.objects.all())
+
+            data = []
+
+            for adm in admissions:
+
+                # ✅ FILTER IN PYTHON (NOT DB)
+                if not adm.is_admissionActive:
+                    continue
+
+                if ip_filter:
+                    if ip_filter.lower() not in (adm.ipNumber or "").lower():
+                        continue
+
+                # ✅ SAFE JSON FIELD
+                room_details = adm.room_details if isinstance(adm.room_details, list) else []
+                current_room = room_details[0] if room_details else {}
+
+                data.append({
+                    "id": str(adm.pk),
+                    "uhid": adm.uhid,
+                    "ipNumber": adm.ipNumber,
+                    "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+                    "admittingDoctor": adm.admittingDoctor or "",
+                    "consultingDoctor": adm.consultingDoctor or "",
+                    "packageName": adm.packageName or "",
+                    "roomNo": current_room.get("roomNo", ""),
+                    "bedNo": current_room.get("bedNo", ""),
+                    "reasonForAdmission": adm.reasonForAdmission or "",
+                    "mlc_type": adm.mlc_type or "",
+                    "mlc_remarks": adm.mlc_remarks or "",
+                    "advance_payments": adm.advance_payments if isinstance(adm.advance_payments, list) else [],
+                    "is_advanceActive": bool(adm.is_advanceActive),
+                    "is_admissionActive": bool(adm.is_admissionActive),
+                    "is_discharged": bool(adm.is_discharged),
+                })
+
+            return JsonResponse({
+                "success": True,
+                "data": data
+            }, safe=False)
+
         except Exception as e:
-            import traceback; print(traceback.format_exc())
+            traceback.print_exc()
             return JsonResponse({"error": str(e)}, status=500)
 
-    # ── POST ──────────────────────────────────────────────────────────────────
+    # ── POST ─────────────────────────────────────────────
     elif request.method == 'POST':
         try:
-            raw = dict(request.data)
-            data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw.items()}
+            data = {k: request.data.get(k) for k in request.data}
 
-            # Parse admissionDateTime
-            dt_raw = data.get('admissionDateTime')
-            try:
-                admission_dt = datetime.fromisoformat(dt_raw.replace('Z', '+00:00')) if dt_raw else datetime.now()
-            except Exception:
-                admission_dt = datetime.now()
+            uhid = str(data.get('uhid', '')).strip()
+            if not uhid:
+                return JsonResponse({"error": "UHID is required"}, status=400)
 
-            ip_number = _next_ip_number()
-            employee_id = request.headers.get('auth-user-id', 'system')
+            # ✅ DJONGO SAFE FILTER
+            existing = None
+            for adm in Admission.objects.filter(uhid=uhid):
+                if adm.is_admissionActive and not adm.is_discharged:
+                    existing = adm
+                    break
 
-            # Use only fields that exist on the model; avoid hardcoding names
-            adm = Admission()
-            adm.uhid              = data.get('uhid', '')
-            adm.ipNumber          = ip_number
-            adm.ipserial_number   = data.get('ipserial_number', '')
-            adm.admissionDateTime = admission_dt
-            adm.admittingDoctor   = data.get('admittingDoctor', '')
-            adm.consultingDoctor  = data.get('consultingDoctor', '')
-            adm.packageName       = data.get('packageName', '')
-            adm.roomNo            = data.get('roomNo', '')
-            adm.bedNo             = data.get('bedNo', '')
-            adm.reasonForAdmission = data.get('reasonForAdmission', '')
-            adm.mlc_type          = data.get('mlc_type') or None
-            adm.mlc_remarks       = data.get('mlc_remarks') or None
-            adm.is_admissionActive = True
-            adm.is_advanceActive  = False
-            adm.is_roomCleaned    = False
-            adm.is_roomActive     = False
-            adm.is_discharged     = False
-            adm.advance_payments  = []
-            if hasattr(adm, 'created_by'):
-                adm.created_by = employee_id
-                adm.lastmodified_by = employee_id
-            adm.save()
+            if existing:
+                return JsonResponse({
+                    "error": f"Patient already has active admission. IP: {existing.ipNumber}",
+                    "ipNumber": existing.ipNumber
+                }, status=400)
 
-            result = _enrich(_admission_to_dict(adm))
-            return JsonResponse({'message': 'Admission created successfully!', 'data': result}, status=201)
+            # ✅ SAFE DATETIME
+            admission_dt = parse_datetime(str(data.get('admissionDateTime') or '')) or timezone.now()
+
+            # ==================================================
+            # ✅ SAFE IP NUMBER GENERATION (NO order_by)
+            # ==================================================
+            now_dt = datetime.now()
+            fy = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
+            prefix = f"S{fy:03d}"
+
+            max_num = 500000
+
+            for adm in Admission.objects.all():
+                ip = adm.ipNumber or ""
+                if "/" in ip:
+                    try:
+                        p, n = ip.split("/")
+                        if p == prefix:
+                            max_num = max(max_num, int(n))
+                    except:
+                        continue
+
+            next_n = max_num + 1
+            ip_number = f"{prefix}/{next_n:06d}"
+
+            # ==================================================
+            # ROOM JSON
+            # ==================================================
+            room_details = [{
+                "roomNo": str(data.get("roomNo") or ""),
+                "bedNo": str(data.get("bedNo") or ""),
+                "is_roomActive": True,
+                "is_roomCleaned": False
+            }]
+
+            # ==================================================
+            # CREATE (SAFE)
+            # ==================================================
+            adm = Admission.objects.create(
+                uhid=uhid,
+                ipNumber=ip_number,
+                admissionDateTime=admission_dt,
+                admittingDoctor=str(data.get('admittingDoctor') or ""),
+                consultingDoctor=data.get('consultingDoctor') or None,
+                packageName=data.get('packageName') or None,
+                room_details=room_details,
+                roomShitingDetails=[],
+                advance_payments=[],
+                reasonForAdmission=data.get('reasonForAdmission') or None,
+                mlc_type=data.get('mlc_type') or None,
+                mlc_remarks=data.get('mlc_remarks') or None,
+                is_admissionActive=True,
+                is_advanceActive=False,
+                is_discharged=False,
+            )
+
+            return JsonResponse({
+                "success": True,
+                "message": "Admission created successfully",
+                "data": {
+                    "id": str(adm.pk),
+                    "uhid": adm.uhid,
+                    "ipNumber": adm.ipNumber
+                }
+            }, status=201)
+
         except Exception as e:
-            import traceback; print(traceback.format_exc())
-            return JsonResponse({'error': str(e)}, status=500)
-
+            traceback.print_exc()
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+        
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Admission Detail  GET / PUT / DELETE   (lookup by ipNumber – unique per patient)
+# Admission Detail  →  GET/PUT/DELETE /admission/<ip_number>/
 # ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_detail(request, ip_number):
-    """
-    GET    /admission/<ip_number>/
-    PUT    /admission/<ip_number>/
-    DELETE /admission/<ip_number>/   – soft cancel
-    """
     try:
         try:
             adm = Admission.objects.get(ipNumber=ip_number, is_admissionActive=True)
         except Admission.DoesNotExist:
-            return JsonResponse({'error': 'Admission not found'}, status=404)
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
 
         employee_id = request.headers.get('auth-user-id', 'system')
 
+        # Shared patient enrichment (inline, no helper)
+        def _patient_block(uhid):
+            pd = {}
+            ins_name = ''
+            try:
+                pt = Patient.objects.get(uhid=uhid)
+                if pt.company_code:
+                    try:
+                        prov = InsuranceProvider.objects.get(company_code=pt.company_code)
+                        ins_name = prov.company_name
+                    except InsuranceProvider.DoesNotExist:
+                        ins_name = pt.company_code or ''
+                pd = {
+                    'salutation':           pt.salutation or '',
+                    'firstName':            pt.firstName or '',
+                    'lastName':             pt.lastName or '',
+                    'age':                  pt.age,
+                    'gender':               pt.gender or '',
+                    'mobilePhone':          pt.mobilePhone or '',
+                    'permanent_address':    pt.permanent_address or '',
+                    'area':                 pt.area or '',
+                    'zipcode':              pt.zipcode or '',
+                    'city':                 pt.city or '',
+                    'state':                pt.state or '',
+                    'customer_type':        pt.customer_type or '',
+                    'company_code':         pt.company_code or '',
+                    'insuranceCompanyName': ins_name,
+                }
+            except Patient.DoesNotExist:
+                pass
+            return pd
+
+        def _build_result(adm):
+            room_details = adm.room_details if isinstance(adm.room_details, list) else []
+            current_room = room_details[0] if room_details else {}
+            return {
+                'id':                  str(adm.pk),
+                'uhid':                adm.uhid,
+                'ipNumber':            adm.ipNumber,
+                'admissionDateTime':   adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+                'admittingDoctor':     adm.admittingDoctor or '',
+                'consultingDoctor':    adm.consultingDoctor or '',
+                'packageName':         adm.packageName or '',
+                'roomNo':              current_room.get('roomNo', ''),
+                'bedNo':               current_room.get('bedNo', ''),
+                'reasonForAdmission':  adm.reasonForAdmission or '',
+                'mlc_type':            adm.mlc_type or '',
+                'mlc_remarks':         adm.mlc_remarks or '',
+                'advance_payments':    adm.advance_payments or [],
+                'is_advanceActive':    adm.is_advanceActive,
+                'is_admissionActive':  adm.is_admissionActive,
+                'is_discharged':       adm.is_discharged,
+                'created_date':        adm.created_date.isoformat() if hasattr(adm, 'created_date') and adm.created_date else None,
+                'lastmodified_date':   adm.lastmodified_date.isoformat() if hasattr(adm, 'lastmodified_date') and adm.lastmodified_date else None,
+                **_patient_block(adm.uhid),
+            }
+
         # ── GET ───────────────────────────────────────────────────────────────
         if request.method == 'GET':
-            return JsonResponse(_enrich(_admission_to_dict(adm)))
+            return JsonResponse({"success": True, "data": _build_result(adm)})
 
         # ── PUT ───────────────────────────────────────────────────────────────
         elif request.method == 'PUT':
-            raw = dict(request.data)
+            raw  = dict(request.data)
             data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw.items()}
 
-            updatable = {
-                'admittingDoctor', 'consultingDoctor',
-                'roomNo', 'bedNo', 'packageName',
-                'reasonForAdmission',
-                'mlc_type', 'mlc_doc', 'mlc_remarks',
-                'admissionDateTime',
-            }
-            for field in updatable:
+            # Update scalar fields
+            for field in ('admittingDoctor', 'consultingDoctor', 'packageName',
+                          'reasonForAdmission', 'mlc_type', 'mlc_remarks'):
                 if field in data:
-                    if field == 'admissionDateTime':
-                        try:
-                            setattr(adm, field, datetime.fromisoformat(data[field].replace('Z', '+00:00')))
-                        except Exception:
-                            pass
-                    else:
-                        setattr(adm, field, data[field])
+                    setattr(adm, field, data[field] or None)
+
+            if 'admissionDateTime' in data and data['admissionDateTime']:
+                try:
+                    setattr(adm, 'admissionDateTime',
+                            datetime.fromisoformat(data['admissionDateTime'].replace('Z', '+00:00')))
+                except Exception:
+                    pass
+
+            # Update room_details JSONField when roomNo/bedNo change
+            new_room = str(data.get('roomNo', '') or '')
+            new_bed  = str(data.get('bedNo', '') or '')
+            if new_room or new_bed:
+                existing_details = adm.room_details if isinstance(adm.room_details, list) else []
+                # Mark old room as inactive
+                for entry in existing_details:
+                    if isinstance(entry, dict):
+                        entry['is_roomActive'] = False
+                # Append new active room
+                existing_details.append({
+                    'roomNo':         new_room,
+                    'bedNo':          new_bed,
+                    'is_roomActive':  True,
+                    'is_roomCleaned': False,
+                })
+                adm.room_details = existing_details
+
+            mlc_doc_file = request.FILES.get('mlc_doc')
+            if mlc_doc_file:
+                adm.mlc_doc = mlc_doc_file.name
 
             if hasattr(adm, 'lastmodified_by'):
                 adm.lastmodified_by = employee_id
             adm.save()
-            return JsonResponse({'message': 'Admission updated successfully!'})
 
-        # ── DELETE (soft cancel) ──────────────────────────────────────────────
+            return JsonResponse({
+                'success': True,
+                'message': 'Admission updated successfully!',
+                'data': _build_result(adm)
+            })
+
+        # ── DELETE ────────────────────────────────────────────────────────────
         elif request.method == 'DELETE':
-            raw = dict(request.data)
+            raw  = dict(request.data)
             data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw.items()}
+
             adm.is_admissionActive = False
             if hasattr(adm, 'cancelled_by'):
                 adm.cancelled_by = employee_id
@@ -499,34 +664,26 @@ def admission_detail(request, ip_number):
             if hasattr(adm, 'lastmodified_by'):
                 adm.lastmodified_by = employee_id
             adm.save()
-            return JsonResponse({'message': 'Admission cancelled successfully'})
+            return JsonResponse({'success': True, 'message': 'Admission cancelled successfully'})
 
     except Exception as e:
-        import traceback; print(traceback.format_exc())
-        return JsonResponse({'error': str(e)}, status=500)
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Advance  – Add / Update  (all stored inside the same Admission record)
+# Advance  →  POST /admission/<ip_number>/add-advance/
 # ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def add_advance(request, ip_number):
-    """
-    POST /admission/<ip_number>/advance/
-    Body: { amount, payment_mode, remarks, type }
-      type = "advance" | "ip_advance"
-
-    Each call appends one entry to advance_payments[], regenerates totals,
-    and returns the full enriched admission + a print-ready bill dict.
-    """
     try:
         try:
             adm = Admission.objects.get(ipNumber=ip_number, is_admissionActive=True)
         except Admission.DoesNotExist:
-            return JsonResponse({'error': 'Admission not found'}, status=404)
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
 
         raw  = dict(request.data)
         data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw.items()}
@@ -534,100 +691,155 @@ def add_advance(request, ip_number):
         try:
             amount = Decimal(str(data.get('amount', 0)))
         except InvalidOperation:
-            return JsonResponse({'error': 'Invalid amount'}, status=400)
-
+            return JsonResponse({'success': False, 'error': 'Invalid amount'}, status=400)
         if amount <= 0:
-            return JsonResponse({'error': 'Amount must be positive'}, status=400)
+            return JsonResponse({'success': False, 'error': 'Amount must be positive'}, status=400)
 
-        adv_type      = data.get('type', 'advance')          # "advance" or "ip_advance"
-        payment_mode  = data.get('payment_mode', 'Cash')
-        remarks       = data.get('remarks', '')
-        employee_id   = request.headers.get('auth-user-id', 'system')
-        bill_number   = _next_bill_number(ip_number)
-        paid_date     = datetime.now()
+        adv_type     = data.get('type', 'advance')
+        payment_mode = data.get('payment_mode', 'Cash')
+        remarks      = data.get('remarks', '')
+        employee_id  = request.headers.get('auth-user-id', 'system')
+        paid_date    = datetime.now()
 
-        # Build the payment entry
+        # Generate bill number from Admission.advance_payments only — no collection
+        now_dt  = datetime.now()
+        prefix  = f"{str(now_dt.year)[2:]}{now_dt.month:02d}"
+        max_seq = 0
+        for a in Admission.objects.exclude(advance_payments=None).exclude(advance_payments=[]):
+            for p in (a.advance_payments or []):
+                bn = p.get('bill_number', '')
+                if '/' in bn:
+                    try:
+                        seq = int(bn.split('/')[-1])
+                        if seq > max_seq:
+                            max_seq = seq
+                    except ValueError:
+                        pass
+        bill_number = f"{prefix}/{max_seq + 1:06d}"
+
         entry = {
-            'bill_number':   bill_number,
-            'amount':        float(amount),
-            'payment_mode':  payment_mode,
-            'remarks':       remarks,
-            'type':          adv_type,
-            'paid_date':     paid_date.isoformat(),
-            'created_by':    employee_id,
-            'advance_status': 'Not Paid',   # default; can be updated later
+            'bill_number':    bill_number,
+            'amount':         float(amount),
+            'payment_mode':   payment_mode,
+            'remarks':        remarks,
+            'type':           adv_type,
+            'paid_date':      paid_date.isoformat(),
+            'created_by':     employee_id,
+            'advance_status': 'Not Paid',
         }
 
-        # Append to advance_payments list
-        payments = adm.advance_payments or []
+        payments = adm.advance_payments if isinstance(adm.advance_payments, list) else []
         payments.append(entry)
         adm.advance_payments = payments
 
-        # Update running totals
-        total = sum(Decimal(str(p['amount'])) for p in payments)
-        adm.total_advance = total
-
+        total        = sum(Decimal(str(p['amount'])) for p in payments)
         adv_total    = sum(Decimal(str(p['amount'])) for p in payments if p.get('type') == 'advance')
         ip_adv_total = sum(Decimal(str(p['amount'])) for p in payments if p.get('type') == 'ip_advance')
-        adm.advance    = adv_total    if adv_total    > 0 else None
-        adm.ip_advance = ip_adv_total if ip_adv_total > 0 else None
 
+        adm.total_advance    = total
+        adm.advance          = adv_total    if adv_total    > 0 else None
+        adm.ip_advance       = ip_adv_total if ip_adv_total > 0 else None
         adm.is_advanceActive = True
+
         if hasattr(adm, 'lastmodified_by'):
             adm.lastmodified_by = employee_id
         adm.save()
 
-        # Build bill data for print
+        # Patient name for bill
+        patient_name = adm.uhid
         try:
-            patient = Patient.objects.get(uhid=adm.uhid)
-            ps      = PatientSerializer(patient).data
-            patient_name = f"{ps.get('salutation','')} {ps.get('firstName','')} {ps.get('lastName','')}".strip()
-            room_no = adm.roomNo
-        except Exception:
-            patient_name = adm.uhid
-            room_no      = adm.roomNo
+            pt = Patient.objects.get(uhid=adm.uhid)
+            patient_name = f"{pt.salutation or ''} {pt.firstName or ''} {pt.lastName or ''}".strip()
+        except Patient.DoesNotExist:
+            pass
+
+        # roomNo from room_details
+        room_details = adm.room_details if isinstance(adm.room_details, list) else []
+        current_room = next((r for r in reversed(room_details) if isinstance(r, dict) and r.get('is_roomActive')), {})
+        room_no = current_room.get('roomNo', '')
 
         bill_data = {
-            'bill_number':      bill_number,
-            'ip_number':        adm.ipNumber,
-            'uhid':             adm.uhid,
-            'patient_name':     patient_name,
-            'room_no':          room_no,
-            'bill_date':        paid_date.strftime('%d/%m/%Y:%H:%M:%S'),
-            'amount':           float(amount),
-            'payment_mode':     payment_mode,
-            'remarks':          remarks,
-            'type':             adv_type,
-            'total_advance':    float(adm.total_advance or 0),
-            'created_by':       employee_id,
+            'bill_number':   bill_number,
+            'ip_number':     adm.ipNumber,
+            'uhid':          adm.uhid,
+            'patient_name':  patient_name,
+            'room_no':       room_no,
+            'bill_date':     paid_date.strftime('%d/%m/%Y:%H:%M:%S'),
+            'amount':        float(amount),
+            'payment_mode':  payment_mode,
+            'remarks':       remarks,
+            'type':          adv_type,
+            'total_advance': float(adm.total_advance or 0),
+            'created_by':    employee_id,
         }
 
-        result = _enrich(_admission_to_dict(adm))
+        # Build enriched result inline
+        patient_data = {}
+        insurance_company_name = ''
+        try:
+            pt = Patient.objects.get(uhid=adm.uhid)
+            if pt.company_code:
+                try:
+                    prov = InsuranceProvider.objects.get(company_code=pt.company_code)
+                    insurance_company_name = prov.company_name
+                except InsuranceProvider.DoesNotExist:
+                    insurance_company_name = pt.company_code or ''
+            patient_data = {
+                'salutation':           pt.salutation or '',
+                'firstName':            pt.firstName or '',
+                'lastName':             pt.lastName or '',
+                'age':                  pt.age,
+                'gender':               pt.gender or '',
+                'mobilePhone':          pt.mobilePhone or '',
+                'customer_type':        pt.customer_type or '',
+                'company_code':         pt.company_code or '',
+                'insuranceCompanyName': insurance_company_name,
+            }
+        except Patient.DoesNotExist:
+            pass
+
+        result = {
+            'id':                  str(adm.pk),
+            'uhid':                adm.uhid,
+            'ipNumber':            adm.ipNumber,
+            'admissionDateTime':   adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+            'admittingDoctor':     adm.admittingDoctor or '',
+            'consultingDoctor':    adm.consultingDoctor or '',
+            'roomNo':              room_no,
+            'bedNo':               current_room.get('bedNo', ''),
+            'advance':             float(adm.advance) if adm.advance is not None else None,
+            'ip_advance':          float(adm.ip_advance) if adm.ip_advance is not None else None,
+            'total_advance':       float(adm.total_advance) if adm.total_advance is not None else None,
+            'advance_payments':    adm.advance_payments or [],
+            'is_advanceActive':    adm.is_advanceActive,
+            **patient_data,
+        }
+
         return JsonResponse({
-            'message': 'Advance added successfully!',
+            'success': True,
+            'message': 'Advance added!',
             'data':    result,
-            'bill':    bill_data,
+            'bill':    bill_data
         }, status=201)
 
     except Exception as e:
-        import traceback; print(traceback.format_exc())
-        return JsonResponse({'error': str(e)}, status=500)
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Finance Update  →  PUT /admission/<ip_number>/finance/
+# ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['PUT'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def update_advance_finance(request, ip_number):
-    """
-    PUT /admission/<ip_number>/finance/
-    Update creditLimit, or correct advance / ip_advance totals directly.
-    Body: { creditLimit?, advance?, ip_advance? }
-    """
     try:
         try:
             adm = Admission.objects.get(ipNumber=ip_number, is_admissionActive=True)
         except Admission.DoesNotExist:
-            return JsonResponse({'error': 'Admission not found'}, status=404)
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
 
         raw  = dict(request.data)
         data = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw.items()}
@@ -640,35 +852,69 @@ def update_advance_finance(request, ip_number):
                 except InvalidOperation:
                     pass
 
-        # Recalculate total_advance from advance_payments (source of truth)
-        payments = adm.advance_payments or []
+        payments = adm.advance_payments if isinstance(adm.advance_payments, list) else []
         if payments:
             adm.total_advance = sum(Decimal(str(p['amount'])) for p in payments)
+
         if hasattr(adm, 'lastmodified_by'):
             adm.lastmodified_by = employee_id
         adm.save()
 
-        return JsonResponse({'message': 'Finance updated successfully!', 'data': _enrich(_admission_to_dict(adm))})
+        # Inline enriched result
+        patient_data = {}
+        insurance_company_name = ''
+        try:
+            pt = Patient.objects.get(uhid=adm.uhid)
+            if pt.company_code:
+                try:
+                    prov = InsuranceProvider.objects.get(company_code=pt.company_code)
+                    insurance_company_name = prov.company_name
+                except InsuranceProvider.DoesNotExist:
+                    insurance_company_name = pt.company_code or ''
+            patient_data = {
+                'salutation':           pt.salutation or '',
+                'firstName':            pt.firstName or '',
+                'lastName':             pt.lastName or '',
+                'age':                  pt.age,
+                'gender':               pt.gender or '',
+                'mobilePhone':          pt.mobilePhone or '',
+                'customer_type':        pt.customer_type or '',
+                'company_code':         pt.company_code or '',
+                'insuranceCompanyName': insurance_company_name,
+            }
+        except Patient.DoesNotExist:
+            pass
+
+        result = {
+            'id':              str(adm.pk),
+            'uhid':            adm.uhid,
+            'ipNumber':        adm.ipNumber,
+            'advance':         float(adm.advance) if adm.advance is not None else None,
+            'ip_advance':      float(adm.ip_advance) if adm.ip_advance is not None else None,
+            'total_advance':   float(adm.total_advance) if adm.total_advance is not None else None,
+            'creditLimit':     float(adm.creditLimit) if adm.creditLimit is not None else None,
+            'advance_payments': adm.advance_payments or [],
+            **patient_data,
+        }
+
+        return JsonResponse({'success': True, 'message': 'Finance updated!', 'data': result})
+
     except Exception as e:
-        import traceback; print(traceback.format_exc())
-        return JsonResponse({'error': str(e)}, status=500)
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Advance search / list  (used for the bottom table in IP Advance page)
+# Advance List  →  GET /advances/
 # ──────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def list_advances(request):
-    """
-    GET /advances/?from_date=&to_date=&uhid=&ip_number=
-    Returns a flat list of advance payment entries across all admissions.
-    """
     try:
-        from_date_str = request.GET.get('from_date', '')
-        to_date_str   = request.GET.get('to_date', '')
+        from_date_str = request.GET.get('from_date', '').strip()
+        to_date_str   = request.GET.get('to_date', '').strip()
         uhid_filter   = request.GET.get('uhid', '').strip()
         ip_filter     = request.GET.get('ip_number', '').strip()
 
@@ -691,15 +937,18 @@ def list_advances(request):
             except ValueError:
                 pass
 
+        # Bulk-fetch patients
+        uhids    = list(qs.values_list('uhid', flat=True))
+        patients = {p.uhid: p for p in Patient.objects.filter(uhid__in=uhids)}
+
         rows = []
         for adm in qs:
-            payments = adm.advance_payments or []
-            try:
-                patient = Patient.objects.get(uhid=adm.uhid)
-                ps = PatientSerializer(patient).data
-                patient_name = f"{ps.get('firstName', '')} {ps.get('lastName', '')}".strip()
-            except Exception:
-                patient_name = adm.uhid
+            payments = adm.advance_payments if isinstance(adm.advance_payments, list) else []
+            pt = patients.get(adm.uhid)
+            patient_name = f"{pt.firstName or ''} {pt.lastName or ''}".strip() if pt else adm.uhid
+
+            room_details = adm.room_details if isinstance(adm.room_details, list) else []
+            current_room = next((r for r in reversed(room_details) if isinstance(r, dict) and r.get('is_roomActive')), {})
 
             for p in payments:
                 paid_date_str = p.get('paid_date', '')
@@ -714,21 +963,22 @@ def list_advances(request):
                         pass
 
                 rows.append({
-                    'bill_date':        paid_date_str[:10] if paid_date_str else '',
-                    'bill_number':      p.get('bill_number', ''),
-                    'payment_mode':     p.get('payment_mode', ''),
+                    'bill_date':         paid_date_str[:10] if paid_date_str else '',
+                    'bill_number':       p.get('bill_number', ''),
+                    'payment_mode':      p.get('payment_mode', ''),
                     'advance_reference': p.get('remarks', ''),
-                    'advance_status':   p.get('advance_status', 'Not Paid'),
-                    'uhid':             adm.uhid,
-                    'patient':          patient_name,
-                    'description':      p.get('type', ''),
-                    'advance_amount':   p.get('amount', 0),
-                    'balance_amount':   float(adm.total_advance or 0),
-                    'ip_number':        adm.ipNumber,
-                    'room_no':          adm.roomNo,
+                    'advance_status':    p.get('advance_status', 'Not Paid'),
+                    'uhid':              adm.uhid,
+                    'patient':           patient_name,
+                    'description':       p.get('type', ''),
+                    'advance_amount':    p.get('amount', 0),
+                    'balance_amount':    float(adm.total_advance or 0),
+                    'ip_number':         adm.ipNumber,
+                    'room_no':           current_room.get('roomNo', ''),
                 })
 
-        return JsonResponse(rows, safe=False)
+        return JsonResponse({"success": True, "data": rows}, safe=False)
+
     except Exception as e:
-        import traceback; print(traceback.format_exc())
-        return JsonResponse({'error': str(e)}, status=500)
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)

@@ -538,24 +538,17 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=20, unique=True)
     ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
-    admissionDateTime   = models.DateTimeField()
-    admittingDoctor     = models.CharField(max_length=100)               # stores employeeId
-    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  # stores employeeId
+    admissionDateTime   = models.DateTimeField(default=timezone.now)
+    admittingDoctor     = models.CharField(max_length=100)           
+    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  
     packageName         = models.CharField(max_length=100, blank=True, null=True)
-    roomNo              = models.CharField(max_length=10)
-    bedNo               = models.CharField(max_length=10)
+    room_details        = models.JSONField(default=list)
+    roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
-
-    # ── Advance / Finance ───────────────────────────────────────────────────
-    advance             = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    ip_advance          = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    total_advance       = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    creditLimit         = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
-    refunded_Amount     = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
 
     # Stores each advance payment as a list of objects:
     # [{ bill_number, amount, payment_mode, remarks, paid_date, type, created_by }]
-    advance_payments    = models.JSONField(blank=True, null=True, default=list)
+    advance_payments    = models.JSONField(default=list, blank=True, null=True)
 
     # ── MLC ────────────────────────────────────────────────────────────────
     mlc_type            = models.CharField(max_length=50, blank=True, null=True)
@@ -565,8 +558,6 @@ class Admission(AuditModel):
     # ── Flags ──────────────────────────────────────────────────────────────
     is_advanceActive    = models.BooleanField(default=False)
     is_admissionActive  = models.BooleanField(default=True)
-    is_roomCleaned      = models.BooleanField(default=False)
-    is_roomActive       = models.BooleanField(default=False)
     is_discharged       = models.BooleanField(default=False)
 
     class Meta:

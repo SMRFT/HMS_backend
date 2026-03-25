@@ -132,10 +132,8 @@ class RoomSerializer(serializers.ModelSerializer):
     
 
 from .models import Admission
-from .models import Admission, Patient
 
 class AdmissionSerializer(serializers.ModelSerializer):
-
     patient_details = serializers.SerializerMethodField()
 
     class Meta:
