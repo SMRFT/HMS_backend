@@ -485,3 +485,42 @@ def update_schedule_status(request):
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
             status=500,
         )
+
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def list_diagnosis(request):
+    """
+    Fetch all active diagnosis records from hospital_diagnosis collection (HMS DB).
+    Returns: { success: true, data: [{ diagnostics_id, diagnostics_name }] }
+    """
+    try:
+        import os
+        from pymongo import MongoClient
+ 
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db     = client[os.getenv("HMS_DB_NAME")]
+ 
+        cursor = db["hospital_diagnosis"].find(
+            {"is_active": True},
+            {"diagnostics_id": 1, "diagnostics_name": 1, "_id": 0},
+        ).sort("diagnostics_name", 1)   # alphabetical order
+ 
+        data = [
+            {
+                "diagnostics_id":   doc.get("diagnostics_id"),
+                "diagnostics_name": doc.get("diagnostics_name", ""),
+            }
+            for doc in cursor
+        ]
+ 
+        client.close()
+ 
+        return Response({"success": True, "data": data})
+ 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+        )
+ 
