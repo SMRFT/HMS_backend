@@ -171,6 +171,14 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/list_anes/': 'HMS-P-AM',                  
     r'^/_b_a_c_k_e_n_d/HMS/update_anes(?:/[^/]+)+/$': 'HMS-P-AM',               
     r'^/_b_a_c_k_e_n_d/HMS/delete_anes(?:/[^/]+)+/$': 'HMS-P-AM', 
+
+    #Surgery Schedule:
+    '/_b_a_c_k_e_n_d/HMS/create_surgery_schedule/': 'HMS-P-OTSS',               
+    r'^/_b_a_c_k_e_n_d/HMS/list_surgery_schedules/?(\?.*)?$': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/get_surgery_schedule/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/update_surgery_schedule/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSS',                
 }
 
 

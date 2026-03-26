@@ -6,25 +6,18 @@ from pyauth.auth import HasRoleAndDataPermission
 from django.utils import timezone
 from django.db import connections
 import traceback, json
+from datetime import datetime, date as date_type
 
 
 # ─── ID Generator ─────────────────────────────────────────────────────────────
 def generate_reference_no():
-    """
-    Format: SUR2526/00001
-      SUR        — fixed prefix
-      2526       — financial year tag  (Apr 2025–Mar 2026 → "2526")
-      /00001     — 5-digit sequence, resets every financial year
-    """
-    from datetime import datetime
-
     today = datetime.today()
     if today.month < 4:
         financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
     else:
         financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-    prefix = f"SUR{financial_year}/"   # e.g. "SUR2526/"
+    prefix = f"SUR{financial_year}/"
 
     try:
         records = SurgerySchedule.objects.all().values("reference_no")
@@ -43,134 +36,208 @@ def generate_reference_no():
         return f"{prefix}00001"
 
 
-# ─── Enrichment Helper ────────────────────────────────────────────────────────
-def _enrich(record: dict) -> dict:
+# ─── BULK LOOKUP HELPERS ──────────────────────────────────────────────────────
+
+def _bulk_get_patient_info(ip_numbers: set) -> dict:
+    if not ip_numbers:
+        return {}
+    try:
+        from ..models import Admission, Patient, InsuranceProvider
+
+        # Step 1: ip_number → uhid
+        admissions = list(
+            Admission.objects.filter(ipNumber__in=ip_numbers)
+            .values("ipNumber", "uhid")
+        )
+        if not admissions:
+            return {}
+
+        ip_to_uhid = {a["ipNumber"]: a["uhid"] for a in admissions}
+        uhids = set(ip_to_uhid.values())
+
+        # Step 2: uhid → Patient
+        patients = list(
+            Patient.objects.filter(uhid__in=uhids)
+            .values("uhid", "salutation", "firstName", "lastName",
+                    "age", "gender", "customer_type", "company_code")
+        )
+        uhid_to_patient = {p["uhid"]: p for p in patients}
+
+        # Step 3: company_code → company_name
+        company_codes = {p["company_code"] for p in patients if p.get("company_code")}
+        code_to_name = {}
+        if company_codes:
+            insurers = InsuranceProvider.objects.filter(
+                company_code__in=company_codes
+            ).values("company_code", "company_name")
+            code_to_name = {i["company_code"]: i["company_name"] for i in insurers}
+
+        # Step 4: assemble result keyed by ip_number
+        result = {}
+        for ip_num, uhid in ip_to_uhid.items():
+            pt         = uhid_to_patient.get(uhid, {})
+            salutation = (pt.get("salutation") or "").strip()
+            first      = (pt.get("firstName")  or "").strip()
+            last       = (pt.get("lastName")   or "").strip()
+            full_name  = " ".join(filter(None, [salutation, first, last])) or None
+            cc         = pt.get("company_code")
+
+            result[ip_num] = {
+                "uhid":          uhid,
+                "patient_name":  full_name,
+                "age":           pt.get("age"),
+                "gender":        pt.get("gender"),
+                "customer_type": pt.get("customer_type"),
+                "company_name":  code_to_name.get(cc) if cc else None,
+            }
+
+        return result
+
+    except Exception as e:
+        print(f"[ERROR] _bulk_get_patient_info: {e}\n{traceback.format_exc()}")
+        return {}
+
+
+def _bulk_get_employee_names(emp_ids: set) -> dict:
     """
-    Takes a raw SurgerySchedule values() dict and returns it enriched with:
-      - patient_name, uhid, gender, age, customer_type, company_name  (via ip_number)
-      - ot_name                                                        (via ot_id)
-      - anesthesia_name                                                (via anesthesia_id)
-      - surgeon_name, anaesthetist_name                                (via employee IDs)
-      - additional_anaesthetists_names, additional_doctors_names       (via JSON maps)
+    Single pymongo query to global DB.
+    Returns { emp_id_str: employeeName }
 
-    All lookups are best-effort — a missing record just leaves the field as None.
+    NOTE: Uses pymongo directly because the global DB is MongoDB,
+          NOT a SQL database — django connections["global"] won't work here.
     """
+    if not emp_ids:
+        return {}
 
-    # ── 1. Patient info from Admission + Patient models ───────────────────────
-    ip_number = record.get("ip_number", "")
-    patient_info = {
-        "uhid":         None,
-        "patient_name": None,
-        "age":          None,
-        "gender":       None,
-        "customer_type": None,
-        "company_name": None,
-    }
+    clean_ids = [str(e) for e in emp_ids if e]
+    if not clean_ids:
+        return {}
 
-    if ip_number:
-        try:
-            from ..models import Admission, Patient, InsuranceProvider
+    try:
+        import os
+        from pymongo import MongoClient
 
-            admission = Admission.objects.filter(ipNumber=ip_number).first()
-            if admission:
-                patient_info["uhid"] = admission.uhid
-                try:
-                    patient = Patient.objects.get(uhid=admission.uhid)
-                    salutation  = getattr(patient, "salutation", "") or ""
-                    first_name  = getattr(patient, "firstName",  "") or ""
-                    last_name   = getattr(patient, "lastName",   "") or ""
-                    patient_info["patient_name"] = f"{salutation} {first_name} {last_name}".strip()
-                    patient_info["age"]          = getattr(patient, "age",           None)
-                    patient_info["gender"]       = getattr(patient, "gender",        None)
-                    patient_info["customer_type"]= getattr(patient, "customer_type", None)
+        client     = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db  = client[os.getenv("GLOBAL_DB_NAME", "Global")]
+        collection = global_db["backend_diagnostics_profile"]
 
-                    company_code = getattr(patient, "company_code", None)
-                    if company_code:
-                        try:
-                            insurance = InsuranceProvider.objects.get(company_code=company_code)
-                            patient_info["company_name"] = insurance.company_name
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        cursor = collection.find(
+            {"employeeId": {"$in": clean_ids}},
+            {"employeeId": 1, "employeeName": 1, "_id": 0}
+        )
 
-    record.update(patient_info)
+        result = {doc["employeeId"]: doc["employeeName"] for doc in cursor}
 
-    # ── 2. OT name from OTMaster ──────────────────────────────────────────────
-    ot_id = record.get("ot_id", "")
-    record["ot_name"] = None
-    if ot_id:
-        try:
-            ot = OTMaster.objects.filter(ot_id=ot_id).first()
-            if ot:
-                record["ot_name"] = ot.ot_name
-        except Exception:
-            pass
+        # Debug: warn about any IDs that returned nothing
+        missing = set(clean_ids) - set(result.keys())
+        if missing:
+            print(f"[DEBUG] Employee IDs not found in global DB: {missing}")
 
-    # ── 3. Anesthesia name from AnesMaster ────────────────────────────────────
-    anesthesia_id = record.get("anesthesia_id", "")
-    record["anesthesia_name"] = None
-    if anesthesia_id:
-        try:
-            anes = AnesMaster.objects.filter(anesthesia_id=anesthesia_id).first()
-            if anes:
-                record["anesthesia_name"] = anes.anesthesia_name
-        except Exception:
-            pass
+        return result
 
-    # ── 4. Employee name lookup from Global DB (backend_diagnostics_profile) ──
-    def get_employee_name(emp_id: str) -> str | None:
-        """Query backend_diagnostics_profile by employeeId → employeeName."""
-        if not emp_id:
-            return None
-        try:
-            global_db = connections["global"]
-            with global_db.cursor() as cursor:
-                cursor.execute(
-                    'SELECT "employeeName" FROM "backend_diagnostics_profile" '
-                    'WHERE "employeeId" = %s LIMIT 1',
-                    [str(emp_id)],
-                )
-                row = cursor.fetchone()
-                return row[0] if row else None
-        except Exception:
-            return None
+    except Exception as e:
+        print(f"[ERROR] _bulk_get_employee_names failed: {e}\n{traceback.format_exc()}")
+        return {}
 
-    # Surgeon
-    record["surgeon_name"] = get_employee_name(record.get("surgeon_id", ""))
 
-    # Primary anaesthetist
-    record["anaesthetist_name"] = get_employee_name(record.get("anaesthetist_id", ""))
+def _bulk_get_ot_names(ot_ids: set) -> dict:
+    if not ot_ids:
+        return {}
+    try:
+        ots = OTMaster.objects.filter(ot_id__in=ot_ids).values("ot_id", "ot_name")
+        return {o["ot_id"]: o["ot_name"] for o in ots}
+    except Exception as e:
+        print(f"[ERROR] _bulk_get_ot_names failed: {e}")
+        return {}
 
-    # Additional anaesthetists  →  {"1":"60380","2":"60254"}  →  ["Name A","Name B"]
-    def resolve_staff_map(json_str: str) -> list:
+
+def _bulk_get_anes_names(anes_ids: set) -> dict:
+    if not anes_ids:
+        return {}
+    try:
+        anes = AnesMaster.objects.filter(
+            anesthesia_id__in=anes_ids
+        ).values("anesthesia_id", "anesthesia_name")
+        return {a["anesthesia_id"]: a["anesthesia_name"] for a in anes}
+    except Exception as e:
+        print(f"[ERROR] _bulk_get_anes_names failed: {e}")
+        return {}
+
+
+# ─── BULK ENRICH ─────────────────────────────────────────────────────────────
+def _enrich_bulk(records: list) -> list:
+    if not records:
+        return records
+
+    # ── Collect all IDs ───────────────────────────────────────────────────────
+    ip_numbers = {r["ip_number"]     for r in records if r.get("ip_number")}
+    ot_ids     = {r["ot_id"]         for r in records if r.get("ot_id")}
+    anes_ids   = {r["anesthesia_id"] for r in records if r.get("anesthesia_id")}
+
+    emp_ids: set = set()
+    for r in records:
+        for field in ("surgeon_id", "anaesthetist_id"):
+            if r.get(field):
+                emp_ids.add(str(r[field]))
+        for json_field in ("additional_anaesthetists", "additional_doctors"):
+            raw = r.get(json_field) or "{}"
+            try:
+                mapping = json.loads(raw) if isinstance(raw, str) else raw
+                emp_ids.update(str(v) for v in mapping.values() if v)
+            except Exception:
+                pass
+
+    # ── Batch fetch ───────────────────────────────────────────────────────────
+    patient_map = _bulk_get_patient_info(ip_numbers)
+    ot_map      = _bulk_get_ot_names(ot_ids)
+    anes_map    = _bulk_get_anes_names(anes_ids)
+    emp_map     = _bulk_get_employee_names(emp_ids)
+
+    # ── Stitch back ───────────────────────────────────────────────────────────
+    def resolve_staff_map(json_str) -> list:
         if not json_str or json_str == "{}":
             return []
         try:
             mapping = json.loads(json_str) if isinstance(json_str, str) else json_str
-            return [
-                get_employee_name(str(emp_id))
-                for emp_id in mapping.values()
-                if emp_id
-            ]
+            return [emp_map.get(str(v)) for v in mapping.values() if v]
         except Exception:
             return []
 
-    record["additional_anaesthetists_names"] = resolve_staff_map(
-        record.get("additional_anaesthetists", "{}")
-    )
-    record["additional_doctors_names"] = resolve_staff_map(
-        record.get("additional_doctors", "{}")
-    )
+    enriched = []
+    for r in records:
+        pt = patient_map.get(r.get("ip_number"), {})
+        r.update({
+            "uhid":          pt.get("uhid"),
+            "patient_name":  pt.get("patient_name"),
+            "age":           pt.get("age"),
+            "gender":        pt.get("gender"),
+            "customer_type": pt.get("customer_type"),
+            "company_name":  pt.get("company_name"),
 
-    return record
+            "ot_name":         ot_map.get(r.get("ot_id")),
+            "anesthesia_name": anes_map.get(r.get("anesthesia_id")),
+
+            "surgeon_name":      emp_map.get(str(r.get("surgeon_id", ""))),
+            "anaesthetist_name": emp_map.get(str(r.get("anaesthetist_id", ""))),
+
+            "additional_anaesthetists_names": resolve_staff_map(
+                r.get("additional_anaesthetists", "{}")
+            ),
+            "additional_doctors_names": resolve_staff_map(
+                r.get("additional_doctors", "{}")
+            ),
+        })
+        enriched.append(r)
+
+    return enriched
 
 
-# ─── CREATE ───────────────────────────────────────────────────────────────────
+def _enrich(record: dict) -> dict:
+    return _enrich_bulk([record])[0]
+
+
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def create_surgery_schedule(request):
     try:
         user_id       = request.data.get("auth-user-id",       "system")
@@ -178,7 +245,6 @@ def create_surgery_schedule(request):
         hospital_code = request.data.get("auth-hospital-code", "system")
 
         serializer = SurgeryScheduleWriteSerializer(data=request.data)
-
         if not serializer.is_valid():
             first_error = next(iter(serializer.errors.values()))[0]
             return Response(
@@ -188,7 +254,6 @@ def create_surgery_schedule(request):
 
         schedule = serializer.save(
             reference_no  = generate_reference_no(),
-            billTypeNo    = "SUR01",          # always stored as SUR01
             status        = "Scheduled",
             is_active     = True,
             is_postponed  = False,
@@ -197,16 +262,11 @@ def create_surgery_schedule(request):
             created_by    = user_id,
         )
 
-        # Return enriched record so the frontend gets names immediately
-        raw = SurgeryScheduleSerializer(schedule).data
+        raw      = SurgeryScheduleSerializer(schedule).data
         enriched = _enrich(dict(raw))
 
         return Response(
-            {
-                "success": True,
-                "message": "Surgery schedule created successfully",
-                "data":    enriched,
-            },
+            {"success": True, "message": "Surgery schedule created successfully", "data": enriched},
             status=201,
         )
 
@@ -217,19 +277,12 @@ def create_surgery_schedule(request):
         )
 
 
-# ─── LIST (with date range + cancelled toggle) ────────────────────────────────
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def list_surgery_schedules(request):
     try:
         from_date_str = request.GET.get("from_date", "")
         to_date_str   = request.GET.get("to_date",   "")
-
-        # Djongo cannot handle chained exclude() + date range + boolean in one query.
-        # Fetch all and filter in Python (same pattern as OTMaster, AnesMaster).
-        all_records = list(SurgerySchedule.objects.all().values())
-
-        from datetime import date as date_type, datetime
 
         def parse_date(s):
             if not s:
@@ -240,7 +293,6 @@ def list_surgery_schedules(request):
                 return None
 
         def coerce_date(val):
-            """Djongo returns scheduled_date as datetime; normalise to date."""
             if val is None:
                 return None
             if isinstance(val, date_type):
@@ -252,19 +304,10 @@ def list_surgery_schedules(request):
         from_date = parse_date(from_date_str)
         to_date   = parse_date(to_date_str)
 
-        filtered = []
-        for r in all_records:
-            scheduled_date   = coerce_date(r.get("scheduled_date"))
-            postponed_date   = coerce_date(r.get("postponed_date"))
-            has_postponed    = postponed_date is not None
+        all_records = list(SurgerySchedule.objects.all().values())
 
-            # A record matches the date range if EITHER of these is true:
-            #   1. Its scheduled_date falls within [from_date, to_date]
-            #   2. It has a postponed_date that falls within [from_date, to_date]
-            # If no date range is given, all records pass.
-
+        if from_date or to_date:
             def in_range(d):
-                """Return True if date d falls within the requested range."""
                 if d is None:
                     return False
                 if from_date and d < from_date:
@@ -273,17 +316,17 @@ def list_surgery_schedules(request):
                     return False
                 return True
 
-            if from_date or to_date:
-                # At least one range boundary is set — must match on one of the dates
-                matches_scheduled = in_range(scheduled_date)
-                matches_postponed = has_postponed and in_range(postponed_date)
-                if not matches_scheduled and not matches_postponed:
-                    continue
+            filtered = []
+            for r in all_records:
+                scheduled_date = coerce_date(r.get("scheduled_date"))
+                postponed_date = coerce_date(r.get("postponed_date"))
+                if in_range(scheduled_date) or in_range(postponed_date):
+                    filtered.append(r)
+        else:
+            filtered = all_records
 
-            filtered.append(r)
-
-        # Enrich every record with patient / OT / anesthesia / staff names
-        enriched = [_enrich(dict(r)) for r in filtered]
+        # ONE bulk enrich call — not N individual calls
+        enriched = _enrich_bulk(filtered)
 
         return Response({"success": True, "data": enriched})
 
@@ -293,24 +336,17 @@ def list_surgery_schedules(request):
         )
 
 
-# ─── GET SINGLE ───────────────────────────────────────────────────────────────
-# reference_no is passed as a GET query param to avoid slash-in-URL issues:
-#   GET /get_surgery_schedule/?reference_no=SUR2526/00001
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_surgery_schedule(request):
     try:
         reference_no = request.GET.get("reference_no", "").strip()
         if not reference_no:
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
-        # Djongo can't handle chained filters — fetch by PK then check is_active in Python
         schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
-
         if not schedule or not schedule.is_active:
-            return Response(
-                {"success": False, "message": "Record not found"}, status=404
-            )
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
         raw      = SurgeryScheduleSerializer(schedule).data
         enriched = _enrich(dict(raw))
@@ -323,32 +359,21 @@ def get_surgery_schedule(request):
             status=500,
         )
 
-
-# ─── UPDATE ───────────────────────────────────────────────────────────────────
-# reference_no is read from the request body to avoid slash-in-URL issues.
-# Frontend sends: PUT /update_surgery_schedule/  with { reference_no: "SUR2526/00001", ... }
 @api_view(["PUT"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def update_surgery_schedule(request):
     try:
         reference_no = request.data.get("reference_no", "").strip()
         if not reference_no:
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
-        user_id = request.data.get("auth-user-id", "system")
-
-        # Djongo can't handle chained filters — fetch by PK then check is_active in Python
+        user_id  = request.data.get("auth-user-id", "system")
         schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
 
         if not schedule or not schedule.is_active:
-            return Response(
-                {"success": False, "message": "Record not found"}, status=404
-            )
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
-        serializer = SurgeryScheduleWriteSerializer(
-            schedule, data=request.data, partial=True
-        )
-
+        serializer = SurgeryScheduleWriteSerializer(schedule, data=request.data, partial=True)
         if not serializer.is_valid():
             first_error = next(iter(serializer.errors.values()))[0]
             return Response(
@@ -365,11 +390,7 @@ def update_surgery_schedule(request):
         enriched = _enrich(dict(raw))
 
         return Response(
-            {
-                "success": True,
-                "message": "Surgery schedule updated successfully",
-                "data":    enriched,
-            }
+            {"success": True, "message": "Surgery schedule updated successfully", "data": enriched}
         )
 
     except Exception as e:
@@ -379,26 +400,19 @@ def update_surgery_schedule(request):
         )
 
 
-# ─── CANCEL (soft delete) ─────────────────────────────────────────────────────
-# reference_no is read from the request body to avoid slash-in-URL issues.
-# Frontend sends: DELETE /cancel_surgery_schedule/  with { reference_no: "SUR2526/00001" }
 @api_view(["DELETE"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def cancel_surgery_schedule(request):
     try:
         reference_no = request.data.get("reference_no", "").strip()
         if not reference_no:
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
-        user_id = request.data.get("auth-user-id", "system")
-
-        # Djongo can't handle chained filters — fetch by PK then check is_active in Python
+        user_id  = request.data.get("auth-user-id", "system")
         schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
 
         if not schedule or not schedule.is_active:
-            return Response(
-                {"success": False, "message": "Record not found"}, status=404
-            )
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
         schedule.status            = "Cancelled"
         schedule.is_active         = False
@@ -406,9 +420,7 @@ def cancel_surgery_schedule(request):
         schedule.lastmodified_date = timezone.now()
         schedule.save()
 
-        return Response(
-            {"success": True, "message": "Surgery schedule cancelled successfully"}
-        )
+        return Response({"success": True, "message": "Surgery schedule cancelled successfully"})
 
     except Exception as e:
         return Response(
@@ -417,26 +429,19 @@ def cancel_surgery_schedule(request):
         )
 
 
-# ─── STATUS UPDATE ────────────────────────────────────────────────────────────
-# reference_no is read from the request body to avoid slash-in-URL issues.
-# Body: { "reference_no": "SUR2526/00001", "status": "Postponed", ... }
 @api_view(["PATCH"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def update_schedule_status(request):
     try:
         reference_no = request.data.get("reference_no", "").strip()
         if not reference_no:
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
-        user_id = request.data.get("auth-user-id", "system")
-
-        # Djongo can't handle chained filters — fetch by PK then check is_active in Python
+        user_id  = request.data.get("auth-user-id", "system")
         schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
 
         if not schedule or not schedule.is_active:
-            return Response(
-                {"success": False, "message": "Record not found"}, status=404
-            )
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
         new_status = request.data.get("status", "").strip()
         allowed    = ["Scheduled", "Confirmed", "Completed", "Postponed", "Cancelled"]
@@ -461,7 +466,6 @@ def update_schedule_status(request):
         if new_status == "Cancelled":
             schedule.is_active = False
 
-        # Allow explicit is_active override (e.g. Confirm reactivates a cancelled schedule)
         if "is_active" in request.data:
             schedule.is_active = bool(request.data["is_active"])
 
@@ -473,11 +477,7 @@ def update_schedule_status(request):
         enriched = _enrich(dict(raw))
 
         return Response(
-            {
-                "success": True,
-                "message": f"Status updated to '{new_status}'",
-                "data":    enriched,
-            }
+            {"success": True, "message": f"Status updated to '{new_status}'", "data": enriched}
         )
 
     except Exception as e:

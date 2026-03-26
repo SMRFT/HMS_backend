@@ -177,11 +177,11 @@ urlpatterns = [
     path('delete_anes/<str:anesthesia_id>/', anesthesia.delete_anes, name='delete_anes'), 
 
     #Surgery Schedule:
-    path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule),
-    path("list_surgery_schedules/",  surgeryschedule.list_surgery_schedules),
-    path("get_surgery_schedule/",surgeryschedule.get_surgery_schedule),
-    path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule),
-    path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule),
-    path("update_schedule_status/",  surgeryschedule.update_schedule_status),
+    path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule, name='create_surgery_schedule'),
+    path("list_surgery_schedules/",  surgeryschedule.list_surgery_schedules, name='list_surgery_schedules'),
+    path("get_surgery_schedule/",surgeryschedule.get_surgery_schedule, name='get_surgery_schedule'),
+    path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
+    path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
+    path("update_schedule_status/",  surgeryschedule.update_schedule_status, name='update_schedule_status'),
 
 ]
