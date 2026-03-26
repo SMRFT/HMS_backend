@@ -536,7 +536,7 @@ class Room(AuditModel):
 
 class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
-    ipNumber            = models.CharField(max_length=20, unique=True)
+    ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)           
@@ -559,118 +559,7 @@ class Admission(AuditModel):
     is_advanceActive    = models.BooleanField(default=False)
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
-
-    class Meta:
-        ordering = ['-admissionDateTime']
-
-    def __str__(self):
-        return f"{self.uhid} | {self.ipNumber}"
-
-
-class DischargeDetail(AuditModel):
-    uhid_no = models.CharField(max_length=100, blank=True)
-    ip_number = models.CharField(max_length=100, blank=True)
-    discharge_date = models.DateField(null=True, blank=True)
-    discharge_time = models.TimeField(null=True, blank=True)
-    free_visits = models.CharField(max_length=100, blank=True)
-    other_consultants = models.CharField(max_length=200, blank=True)
-    status = models.CharField(max_length=50, blank=True)
-    patient_expired = models.BooleanField(default=False)
-    date_of_death = models.DateField(null=True, blank=True)
-    time_of_death = models.TimeField(null=True, blank=True)
-    discharge_reason = models.TextField(blank=True)
-
-
-    def __str__(self):
-        return f"{self.uhid_no} - {self.status}"
-
-
-
-
-    def save(self, *args, **kwargs):
-        current_year = now().year % 100   # get last 2 digits (2026 -> 26)
-
-        if not self.uhid:
-            prefix = f"S0{current_year}"
-
-            # get last patient of the year
-            last_patient = Patient.objects.filter(
-                uhid__startswith=prefix
-            ).order_by('-uhid').first()
-
-            if last_patient and last_patient.uhid:
-                last_number = int(last_patient.uhid.split('/')[-1])
-            else:
-                last_number = 0
-
-            next_number = last_number + 1
-
-            self.uhid = f"{prefix}/{next_number:07d}"
-
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.firstName} {self.lastName}" if self.firstName else "Unnamed Patient"
-    
-class Billing(AuditModel):
-    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
-    registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    payment_method = models.CharField(max_length=50, blank=True, null=True)
-    bill_number = models.CharField(max_length=50, unique=True, blank=True)
-    billed_date = models.DateTimeField(auto_now_add=True)
-
-    def save(self, *args, **kwargs):
-        if not self.bill_number:
-            date_prefix = now().strftime('%Y%m%d')
-            pattern = f"{date_prefix}/"
-            
-            # Find the last bill that matches the current date pattern
-            last_bill = Billing.objects.filter(bill_number__startswith=pattern).order_by('-bill_number').first()
-            
-            if last_bill and last_bill.bill_number:
-                try:
-                    # Extract the sequence number (dates matching)
-                    last_number = int(last_bill.bill_number.split('/')[-1])
-                except (ValueError, IndexError):
-                    last_number = 0
-            else:
-                last_number = 0
-                
-            next_number = last_number + 1
-            self.bill_number = f"{pattern}{next_number:04d}"
-            
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"Billing {self.bill_number} for {self.patient.uhid} - {self.total_fees}"
-
-class Admission(AuditModel):
-    uhid                = models.CharField(max_length=20)
-    ipNumber            = models.CharField(max_length=20, unique=True)
-    ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
-    admissionDateTime   = models.DateTimeField(default=timezone.now)
-    admittingDoctor     = models.CharField(max_length=100)           
-    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  
-    packageName         = models.CharField(max_length=100, blank=True, null=True)
-    room_details        = models.JSONField(default=list)
-    roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
-    reasonForAdmission  = models.TextField(blank=True, null=True)
-
-    # Stores each advance payment as a list of objects:
-    # [{ bill_number, amount, payment_mode, remarks, paid_date, type, created_by }]
-    advance_payments    = models.JSONField(default=list, blank=True, null=True)
-
-    # ── MLC ────────────────────────────────────────────────────────────────
-    mlc_type            = models.CharField(max_length=50, blank=True, null=True)
-    mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
-    mlc_remarks         = models.TextField(blank=True, null=True)
-
-    # ── Flags ──────────────────────────────────────────────────────────────
-    is_advanceActive    = models.BooleanField(default=False)
-    is_admissionActive  = models.BooleanField(default=True)
-    is_discharged       = models.BooleanField(default=False)
+    is_admitted         = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['-admissionDateTime']
@@ -878,33 +767,6 @@ class Log(AuditModel):
 
     def __str__(self):
         return f"{self.log_type} - {self.message}"
-
-
-
-class InsuranceProvider(AuditModel):
-    company_name = models.CharField(max_length=255)
-    company_code = models.CharField(max_length=100,primary_key=True)
-    address_line_1 = models.CharField(max_length=255, null=True, blank=True)
-    address_line_2 = models.CharField(max_length=255, null=True, blank=True)
-    address_line_3 = models.CharField(max_length=255, null=True, blank=True)
-    city = models.CharField(max_length=100, null=True, blank=True)
-    state = models.CharField(max_length=100, null=True, blank=True)
-    pincode = models.CharField(max_length=20, null=True, blank=True)
-    gstin = models.CharField(max_length=50, null=True, blank=True)
-    contact_person = models.CharField(max_length=100, null=True, blank=True)
-    phone = models.CharField(max_length=20, null=True, blank=True)
-    mobile = models.CharField(max_length=20, null=True, blank=True)
-    email = models.EmailField(null=True, blank=True)
-    credit_limit = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    insurance_print_format = models.CharField(max_length=100, null=True, blank=True)
-    claim_pre_authorization_template = models.FileField(upload_to='insurance_templates/', null=True, blank=True)
-    blocked = models.BooleanField(default=False)
-    blocking_reason = models.TextField(null=True, blank=True)
-    enable_service_tax = models.BooleanField(default=False)
-
-    def __str__(self):
-        return self.company_name
-
 
 class VelavanInvoice(AuditModel):
     # GRN number
