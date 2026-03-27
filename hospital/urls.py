@@ -5,16 +5,20 @@ from .Views import (
     departmentBilling,
     discharge,
     doctormaster,
-    grn,
     ICD11,
     inventory,
     package_crud,
     pharmacy,
     radiology,
     room,
-    stock,
+    NursingStation,
+    dashboard,
+    advanced_dashboard,
+    doctor_dashboard,
+    insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule
 )
+from .Views.Stores import stores
 
 urlpatterns = [
     # Admission URLs
@@ -23,52 +27,57 @@ urlpatterns = [
     path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
     path('search-rooms/', admission.search_rooms, name='search-rooms'), 
 
-    # Pharmacy Stock URLs
-    path('ip-pharmacy-stock/', stock.ip_pharmacy_stock_view, name='ip_pharmacy_stock_list'),
-    path('ip-pharmacy-stock/<str:pk>/', stock.ip_pharmacy_stock_view, name='ip_pharmacy_stock_detail'),
-    path('op-pharmacy-stock/', stock.op_pharmacy_stock_view, name='op_pharmacy_stock_list'),
-    path('op-pharmacy-stock/<str:pk>/', stock.op_pharmacy_stock_view, name='op_pharmacy_stock_detail'),
-
-    # GRN URLs
-    path('ip-grn/', grn.ip_grn_view, name='ip_grn_list'),
-    path('ip-grn/<str:pk>/', grn.ip_grn_view, name='ip_grn_detail'),
-    path('op-grn/', grn.op_grn_view, name='op_grn_list'),
-    path('op-grn/<str:pk>/', grn.op_grn_view, name='op_grn_detail'),
-
     # Vendor URLs
-    path('vendor/', inventory.vendor_view, name='vendor_list'),
-    path('vendor/<str:vendor_id>/', inventory.vendor_view, name='vendor_detail'),
-    
+    path("vendors/", inventory.vendor_view, name="vendor-list"),
+    path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
+
+    # Stock URLs
+    path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
+    path("pharmacy-items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
+
+    # Pharmacy Category URLs
+    path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),
+    path("pharmacy-category/<int:pk>/", inventory.pharmacycategory_view, name="pharmacy-category-detail"),
+    path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
+    path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
+    # GRN URLs
+    path('grn/', inventory.grn_view, name='grn_list'),
+    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+        
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
     path('block/<int:pk>/', room.block_view, name='block_update_delete'),
-    
+
     path('room-category/', room.room_category_view, name='room_category_list_create'),
-    path('room-category/<int:pk>/', room.room_category_view, name='room_category_update_delete'),
+    path('room-category/<str:pk>/', room.room_category_view, name='room_category_update_delete'),
     
     path('room/', room.room_view, name='room_list_create'),
-    path('room/<int:pk>/', room.room_view, name='room_update_delete'),
+    path('room/<str:pk>/', room.room_view, name='room_update_delete'),
     
-    path('bed/', room.bed_view, name='bed_list_create'),
-    path('bed/<int:pk>/', room.bed_view, name='bed_update_delete'),
-    
-    path('service/', room.service_view, name='service_list_create'),
-    path('service/<int:pk>/', room.service_view, name='service_update_delete'),
-    
+    path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
+
     path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
     path('room-shifting/', room.room_shifting_view, name='room_shifting'),
 
-    #Discharge URLs
-    path('search-admissions/', discharge.search_discharge_patient, name='search-admissions'),
-    path('discharge/', discharge.discharge_detail_view, name='discharge-create'),
+    # Discharge URLs
+    path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),
+    path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
+    path("discharge-billing/<str:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
+    path("discharge-billing/<str:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
 
     # Patient URLs
     path('patients/register/', views.patientCreateView, name='patient-register'),
     path('create/', views.patientCreateView, name='patient-list'),
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
-    path('doctors/', views.doctor_view, name='doctor_view'),
-    path('doctor_list/', views.doctor_list, name='doctor_list'),
-    path('doctor_detail/<str:first_name>/', views.doctor_detail, name='doctor_detail'),
+    path('patient-registration-stats/', views.patient_registration_stats, name='patient_registration_stats'),
+    path('patient-visit-list/', views.patient_visit_list, name='patient_visit_list'),
+    path('generate-qr-session/', views.generate_qr_session, name='generate_qr_session'),
+    path('submit-qr-registration/', views.submit_qr_registration, name='submit_qr_registration'),
+    path('check-qr-status/', views.check_qr_status, name='check_qr_status'),
+    path('get-pending-qr-registrations/', views.get_pending_qr_registrations, name='get_pending_qr_registrations'),
+    path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
 
@@ -108,6 +117,7 @@ urlpatterns = [
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
     
+    
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
@@ -117,7 +127,24 @@ urlpatterns = [
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
 
-
+    path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
+    path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
+    path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),
+    path("get_lab_ward_requests/", NursingStation.get_lab_ward_requests, name="get_lab_ward_requests"),
+    path("save_lab_ward_request/", NursingStation.save_lab_ward_request, name="save_lab_ward_request"),
+    path("cancel_lab_ward_request/", NursingStation.cancel_lab_ward_request, name="cancel_lab_ward_request"),
+    path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
+    path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
+    path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
+    path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
+    path("get_radiology_ward_requests/", NursingStation.get_radiology_ward_requests, name="get_radiology_ward_requests"),
+    path("save_radiology_ward_request/", NursingStation.save_radiology_ward_request, name="save_radiology_ward_request"),
+    path("cancel_radiology_ward_request/", NursingStation.cancel_radiology_ward_request, name="cancel_radiology_ward_request"),
+    path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
+    path("dosage_master/", NursingStation.dosage_master_view, name="dosage_master"),
+    
     #Package Master:
     path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
     path('lab-items/',  package_crud.get_lab_items,    name='get_lab_items'),
@@ -164,6 +191,47 @@ urlpatterns = [
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
     path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
 
+    # Dashboard URLs
+    path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
+    path('advanced-dashboard/stats/', advanced_dashboard.advanced_dashboard_stats, name='advanced_dashboard_stats'),
+    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+
+    # User Permissions (Dynamic Table)
+    path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),
+    path('update-user-permissions/', views.update_user_permissions, name='update_user_permissions'),
+    path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
+    path('registration-bills/', views.registration_bills, name='registration_bills'),
+    re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
+    path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
+    
+    # Insurance Provider URLs
+    path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
+    path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
+
+    # Stores URLs
+    path('item-master/', stores.item_master_list_create, name='item_master_list_create'),
+    path('item-master/<str:pk>/', stores.item_master_detail, name='item_master_detail'),
+    
+    path('department-master/', stores.department_list_create, name='department_list_create'),
+    path('department-master/<str:pk>/', stores.department_detail, name='department_detail'),
+    
+    path('group-master/', stores.group_list_create, name='group_list_create'),
+    path('group-master/<str:pk>/', stores.group_detail, name='group_detail'),
+    
+    path('category-master/', stores.category_list_create, name='category_list_create'),
+    path('category-master/<str:pk>/', stores.category_detail, name='category_detail'),
+    
+    path('group-type-master/', stores.group_type_list_create, name='group_type_list_create'),
+    path('group-type-master/<str:pk>/', stores.group_type_detail, name='group_type_detail'),
+
+    path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
+    path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
+
+    path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
+    path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
+    path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
+    path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
     #OT Master:
     path('create_ot/', otMaster.create_ot,  name='create_ot'),
     path('list_ots/',  otMaster.list_ots,   name='list_ots'),

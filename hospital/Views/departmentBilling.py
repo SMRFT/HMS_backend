@@ -66,7 +66,6 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             response_data = {
                 'ipNumber': admission.ipNumber,
                 'uhid': admission.uhid,
-                'roomNo': admission.roomNo,
                 'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
                 'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
                 'admittingDoctor': admission.admittingDoctor,
@@ -434,6 +433,7 @@ def get_investigation_items(request):
     try:
         bill_type_no = request.GET.get('billTypeNo')
         bill_type = request.GET.get('billType')
+        item_name = request.GET.get('itemName')
         
         # Validate billTypeNo
         if bill_type_no is None or bill_type_no == 'undefined' or bill_type_no == 'null':
@@ -465,9 +465,14 @@ def get_investigation_items(request):
             db = client['Diagnostics']
             collection = db['core_testdetails']
             
+            # Build query
+            query = {"is_active": True}
+            if item_name:
+                query["test_name"] = {"$regex": item_name, "$options": "i"}
+
             # Fetch active tests
             tests = list(collection.find(
-                {"is_active": True},
+                query,
                 {
                     "test_id": 1,
                     "test_name": 1,
