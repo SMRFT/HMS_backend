@@ -13,7 +13,7 @@ class AuditModel(models.Model):
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
     lastmodified_date = models.DateTimeField(auto_now=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
-    department_code = models.CharField(max_length=100, null=True, blank=True)
+    outlet_code = models.CharField(max_length=100, null=True, blank=True)
     hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
 
     class Meta:
