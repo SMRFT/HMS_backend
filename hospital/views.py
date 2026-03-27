@@ -335,34 +335,47 @@ def update_user_permissions(request):
         return Response({"error": str(e)}, status=500)
 
 
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from pymongo import MongoClient
+import os
+
+
 @api_view(['GET'])
 def get_all_employees(request):
     """
-    Fetches employees from Global.backend_diagnostics_profile who have the 'HMS-P' role.
-    This ensures we only show users eligible for HMS permission management.
+    Fetch employees who have ANY role starting with 'HMS'
+    (primaryRole or additionalRoles).
     """
+
     try:
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
-        
+
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
-        
-        # Query: Find users where primaryRole is 'HMS-P' OR additionalRoles contains 'HMS-P'
+
+        # 🔥 Match roles starting with "HMS"
         query = {
             "$or": [
-                {"primaryRole": "HMS-P"},
-                {"additionalRoles": "HMS-P"}
+                {"primaryRole": {"$regex": "^HMS"}},
+                {"additionalRoles": {"$elemMatch": {"$regex": "^HMS"}}}
             ]
         }
 
         employees = list(diag_collection.find(
-            query, 
-            {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}
+            query,
+            {
+                "employeeId": 1,
+                "employeeName": 1,
+                "designation": 1,
+                "_id": 0
+            }
         ))
-        
+
+        client.close()
         return Response(employees, status=200)
-        
+
     except Exception as e:
         print(f"Error fetching employees: {e}")
         return Response({"error": str(e)}, status=500)
