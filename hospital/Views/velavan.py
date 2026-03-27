@@ -108,9 +108,9 @@ def velavan_create_vendor(request):
         gstin = data.get("gstin")
 
         user_id = data.get('auth-user-id', 'system')
-        branch_code = data.get('auth-branch-code', 'system')
-        department_code = data.get('auth-department-code', 'system')
-        hospital_code = data.get('auth-hospital-code', 'system')
+        outlet_code = data.get('outlet_code','OLET005')
+        branch_code = data.get('auth-branch-code', 'SHB001')        
+        hospital_code = data.get('auth-hospital-code', 'SH001')
 
         if not name:
             return Response(
@@ -170,7 +170,7 @@ def velavan_create_vendor(request):
             "lastmodified_by":  user_id,
             "lastmodified_date": now,
             "branch_code":      branch_code,
-            "department_code":  department_code,
+            "outlet_code":  outlet_code,
             "hospital_code":    hospital_code,
         }
 
@@ -336,9 +336,9 @@ def velavan_create_item(request):
         hsn = request.data.get("hsn")
         data = request.data
         user_id = data.get('auth-user-id', 'system')
-        branch_code = data.get('auth-branch-code', 'system')
-        department_code = data.get('auth-department-code', 'system')
-        hospital_code = data.get('auth-hospital-code', 'system')
+        outlet_code = data.get('outlet_code','OLET005')
+        branch_code = data.get('auth-branch-code', 'SHB001')        
+        hospital_code = data.get('auth-hospital-code', 'SH001')
         
 
         if not item_name:
@@ -367,7 +367,7 @@ def velavan_create_item(request):
             hsn=hsn,
             created_by=user_id,
             branch_code=branch_code,
-            department_code=department_code,
+            outlet_code=outlet_code,
             hospital_code=hospital_code
         )
 
@@ -482,6 +482,9 @@ def create_velavan_in(request):
     try:
         data = request.data
         summary = data.get('summary', {})
+        outlet_code = data.get('outlet_code','OLET005')
+        branch_code = data.get('auth-branch-code', 'SHB001')        
+        hospital_code = data.get('auth-hospital-code', 'SH001')
 
         def to_decimal(val, default=0):
             try:
@@ -557,6 +560,9 @@ def create_velavan_in(request):
             net_invoice_amount      = to_decimal(summary.get('netInvoiceAmount')),
             quotation_rate          = to_decimal(summary.get('quotationRate')),
             created_by              = employee_id,
+            branch_code             = branch_code,
+            hospital_code           = hospital_code,
+            outlet_code             = outlet_code,
         )
 
         invoice.save()
