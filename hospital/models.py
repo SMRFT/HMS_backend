@@ -627,8 +627,12 @@ class Billing(AuditModel):
     consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     payment_method = models.CharField(max_length=50, blank=True, null=True)
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    payment_status = models.CharField(max_length=20, default="Pending") # Pending, Paid, Unpaid
+    doctor_id = models.CharField(max_length=50, blank=True, null=True) # Employee ID
     bill_number = models.CharField(max_length=50, unique=True, blank=True)
     billed_date = models.DateTimeField(auto_now_add=True)
+    paid_date = models.DateTimeField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
         if not self.bill_number:
