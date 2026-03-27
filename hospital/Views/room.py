@@ -325,78 +325,6 @@ def room_view(request, pk=None):
 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-    
-
-# --------------------------------------------------
-# ROOM SHIFTING
-# --------------------------------------------------
-@api_view(['GET', 'POST'])
-@permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
-def room_shifting_view(request):
-    user_id = request.headers.get("auth-user-id", "system")
-
-    # ==================== GET (Search Admission) ====================
-    if request.method == "GET":
-        query = request.GET.get("search") # UHID or IP
-
-        if not query:
-            return Response({"error": "Search query (UHID or IP) required"}, status=400)
-
-        # Try to find active admission by UHID or IP
-        admissions = Admission.objects.filter(is_active=True).filter(
-            models.Q(uhid__icontains=query) | models.Q(ipNumber__icontains=query)
-        )
-        
-        if not admissions.exists():
-             return Response({"error": "Active admission not found"}, status=404)
-        
-        # Return the first match or list? Let's return list if needed, but simplistic approach first match
-        admission = admissions.first()
-
-        return Response({
-            "uhid": admission.uhid,
-            "ip_no": admission.ipNumber,
-            "patient_name": f"{admission.firstName} {admission.lastName}",
-            "current_room_no": admission.roomNo,
-            "current_bed_no": admission.bedNo,
-        })
-
-    # ==================== POST (Shift Room) ====================
-    elif request.method == "POST":
-        uhid = request.data.get("uhid")
-        ip_no = request.data.get("ip_no")
-        new_room_no = request.data.get("newRoomNo")
-        new_bed_no = request.data.get("newBedNo")
-
-        if not (uhid or ip_no) or not (new_room_no and new_bed_no):
-            return Response({"error": "Missing required fields"}, status=400)
-
-        try:
-            if uhid:
-                admission = Admission.objects.get(uhid=uhid, is_active=True)
-            else:
-                admission = Admission.objects.get(ipNumber=ip_no, is_active=True)
-        except Admission.DoesNotExist:
-            return Response({"error": "Active admission not found"}, status=404)
-        
-        old_room_no = admission.roomNo
-        old_bed_no = admission.bedNo
-
-        # 1. Update Admission
-        admission.roomNo = new_room_no
-        admission.bedNo = new_bed_no
-        admission.lastmodified_by = user_id
-        admission.save()
-
-        # 3. Update New Bed (Make Occupied)
-        try:
-            new_room = Room.objects.get(room_number=new_room_no, is_active=True)
-        except Room.DoesNotExist:
-             return Response({"error": f"New Room {new_room_no} not found"}, status=404)
-
-        return Response({"message": "Room shifted successfully"})
-
 
 
 import json
@@ -628,3 +556,74 @@ def room_enquiry_view(request):
             {"error": f"Room enquiry failed: {str(exc)}"},
             status=500
         )
+    
+
+# --------------------------------------------------
+# ROOM SHIFTING
+# --------------------------------------------------
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_shifting_view(request):
+    user_id = request.headers.get("auth-user-id", "system")
+
+    # ==================== GET (Search Admission) ====================
+    if request.method == "GET":
+        query = request.GET.get("search") # UHID or IP
+
+        if not query:
+            return Response({"error": "Search query (UHID or IP) required"}, status=400)
+
+        # Try to find active admission by UHID or IP
+        admissions = Admission.objects.filter(is_active=True).filter(
+            models.Q(uhid__icontains=query) | models.Q(ipNumber__icontains=query)
+        )
+        
+        if not admissions.exists():
+             return Response({"error": "Active admission not found"}, status=404)
+        
+        # Return the first match or list? Let's return list if needed, but simplistic approach first match
+        admission = admissions.first()
+
+        return Response({
+            "uhid": admission.uhid,
+            "ip_no": admission.ipNumber,
+            "patient_name": f"{admission.firstName} {admission.lastName}",
+            "current_room_no": admission.roomNo,
+            "current_bed_no": admission.bedNo,
+        })
+
+    # ==================== POST (Shift Room) ====================
+    elif request.method == "POST":
+        uhid = request.data.get("uhid")
+        ip_no = request.data.get("ip_no")
+        new_room_no = request.data.get("newRoomNo")
+        new_bed_no = request.data.get("newBedNo")
+
+        if not (uhid or ip_no) or not (new_room_no and new_bed_no):
+            return Response({"error": "Missing required fields"}, status=400)
+
+        try:
+            if uhid:
+                admission = Admission.objects.get(uhid=uhid, is_active=True)
+            else:
+                admission = Admission.objects.get(ipNumber=ip_no, is_active=True)
+        except Admission.DoesNotExist:
+            return Response({"error": "Active admission not found"}, status=404)
+        
+        old_room_no = admission.roomNo
+        old_bed_no = admission.bedNo
+
+        # 1. Update Admission
+        admission.roomNo = new_room_no
+        admission.bedNo = new_bed_no
+        admission.lastmodified_by = user_id
+        admission.save()
+
+        # 3. Update New Bed (Make Occupied)
+        try:
+            new_room = Room.objects.get(room_number=new_room_no, is_active=True)
+        except Room.DoesNotExist:
+             return Response({"error": f"New Room {new_room_no} not found"}, status=404)
+
+        return Response({"message": "Room shifted successfully"})

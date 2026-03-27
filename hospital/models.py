@@ -533,29 +533,26 @@ class Room(AuditModel):
             self.room_kits = []
         super().save(*args, **kwargs)
 
-
 class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
-    ipserial_number     = models.CharField(max_length=50, blank=True, null=True)
+    ipserial_number     = models.IntegerField(blank=True, null=True)   # ✅ change to IntegerField
+
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)           
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  
     packageName         = models.CharField(max_length=100, blank=True, null=True)
+
     room_details        = models.JSONField(default=list)
     roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
 
-    # Stores each advance payment as a list of objects:
-    # [{ bill_number, amount, payment_mode, remarks, paid_date, type, created_by }]
     advance_payments    = models.JSONField(default=list, blank=True, null=True)
 
-    # ── MLC ────────────────────────────────────────────────────────────────
     mlc_type            = models.CharField(max_length=50, blank=True, null=True)
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
 
-    # ── Flags ──────────────────────────────────────────────────────────────
     is_advanceActive    = models.BooleanField(default=False)
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
@@ -563,6 +560,22 @@ class Admission(AuditModel):
 
     class Meta:
         ordering = ['-admissionDateTime']
+
+    def save(self, *args, **kwargs):
+
+        # 🔥 AUTO GENERATE SERIAL NUMBER
+        if not self.ipserial_number:
+
+            last_admission = Admission.objects.filter(
+                uhid=self.uhid
+            ).order_by('-ipserial_number').first()
+
+            if last_admission and last_admission.ipserial_number:
+                self.ipserial_number = last_admission.ipserial_number + 1
+            else:
+                self.ipserial_number = 1
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.uhid} | {self.ipNumber}"
