@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 import calendar
-from ..models import Patient, Billing, Admission, DischargeDetail, Doctor
+from ..models import Patient, Billing, Admission, DischargeDetail
 
 @api_view(['GET'])
 def doctor_dashboard_stats(request):

@@ -129,35 +129,6 @@ def patientCreateView(request):
 
 
     
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-import json
-from .models import Doctor
-from .serializers import DoctorSerializer
-
-@csrf_exempt
-def doctor_view(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            serializer = DoctorSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return JsonResponse(serializer.data, status=201)
-            return JsonResponse(serializer.errors, status=400)
-        except json.JSONDecodeError:
-            return JsonResponse({"error": "Invalid JSON data"}, status=400)
-    return JsonResponse({"error": "Method not allowed"}, status=405)
-
-
-from .models import Doctor
-from .serializers import DoctorSerializer
-@api_view(['GET'])
-def doctor_list(request):
-    doctors = Doctor.objects.all()
-    serializer = DoctorSerializer(doctors, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
-
 
 from bson import Decimal128
 # Helper function to convert Decimal128 fields to float

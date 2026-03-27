@@ -66,7 +66,6 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             response_data = {
                 'ipNumber': admission.ipNumber,
                 'uhid': admission.uhid,
-                'roomNo': admission.roomNo,
                 'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
                 'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
                 'admittingDoctor': admission.admittingDoctor,
@@ -708,6 +707,8 @@ def invest_billing_create(request):
     finally:
         if mongo_client:
             mongo_client.close()
+
+
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
