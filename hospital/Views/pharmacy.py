@@ -45,7 +45,7 @@ def convert_decimals(obj):
     return obj
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_oppharmacy_stock(request):
     try:
         dept_code = request.GET.get("department_code", "OP001")

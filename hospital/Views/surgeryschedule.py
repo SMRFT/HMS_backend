@@ -7,6 +7,8 @@ from django.utils import timezone
 from django.db import connections
 import traceback, json
 from datetime import datetime, date as date_type
+import os
+from pymongo import MongoClient
 
 
 # ─── ID Generator ─────────────────────────────────────────────────────────────
@@ -113,9 +115,7 @@ def _bulk_get_employee_names(emp_ids: set) -> dict:
     if not clean_ids:
         return {}
 
-    try:
-        import os
-        from pymongo import MongoClient
+    try:      
 
         client     = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         global_db  = client[os.getenv("GLOBAL_DB_NAME", "Global")]
@@ -496,9 +496,6 @@ def list_diagnosis(request):
     Returns: { success: true, data: [{ diagnostics_id, diagnostics_name }] }
     """
     try:
-        import os
-        from pymongo import MongoClient
- 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db     = client[os.getenv("HMS_DB_NAME")]
  
@@ -524,3 +521,78 @@ def list_diagnosis(request):
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
         )
  
+@api_view(["POST"])
+# @permission_classes([HasRoleAndDataPermission])
+def save_ot_medicine_ward_request(request):
+    try:
+        client     = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db  = client[os.getenv("HMS_DB_NAME", "HMS")]
+        data = request.data
+        current_user = data.get('auth-user-id', "system")
+        branch_code = data.get('auth-branch-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'SH001')
+        
+        request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
+        
+        # Extract medicines and totals (round to 2 digits)
+        medicine_particulars = data.get("medicine_particulars", [])
+        total_amount = round(float(data.get("total_amount", 0)), 2)
+
+        # Clean up unnecessary fields from medicine_particulars for ward request
+        for med in medicine_particulars:
+            med.pop("edit_history", None)
+            med.pop("billType", None)
+            med.pop("billTypeNo", None)
+            med.pop("billTypeName", None)
+            med.pop("total_stock", None)
+            med.pop("price", None)
+            med.pop("expiry_date", None)
+            
+        from datetime import datetime
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        
+        # Create Ward Request document for PyMongo insert (To allow native BSON arrays)
+        bill_doc = {            
+            "branch_code": branch_code,
+            "hospital_code": hospital_code,
+            "outlet_code": "OLET001",
+            "created_by": current_user,
+            "created_date": now_ist,
+            "bill_no": "", 
+            "estimate_no": "",
+            "uhid": data.get("uhid"),
+            "inpatient_number": data.get("ipNumber"),
+            "bill_type": 18,
+            "doctor_id": data.get("doctor_id"),
+            "room_no": data.get("wardName", ""),
+            "medicine_particulars": medicine_particulars, # Native List
+            "total_amount": total_amount,
+            "net_amount": total_amount,
+            "overall_discount_amount": 0.0,
+            "overall_discount_type": "percent",
+            "overall_discount_value": 0.0,
+            "billing_status": "Pending",
+            "billing_mode": "Credit",
+            "is_ward_request": True,
+            "is_discharge_medicine": False,
+            "is_regugar_medicine": True,
+            "is_active": True,
+            "bill_date": ""
+            # Note: edit_history is deliberately removed for ward requests
+        }
+        
+        # Insert into hospital_oppharmacybill natively to avoid Djongo JSONField stringification
+        collection = hms_db["hospital_oppharmacybill"]
+        result = collection.insert_one(bill_doc)
+        
+        return Response({
+            "success": True,
+            "message": "Medicine ward request saved successfully",
+            "id": str(result.inserted_id)
+        })
+        
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)

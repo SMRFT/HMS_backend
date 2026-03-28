@@ -252,5 +252,6 @@ urlpatterns = [
     path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
     path("update_schedule_status/",  surgeryschedule.update_schedule_status, name='update_schedule_status'),
     path("list_diagnosis/",  surgeryschedule.list_diagnosis, name='list_diagnosis'),
+    path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
 
 ]
