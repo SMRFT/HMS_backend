@@ -294,6 +294,7 @@ def admission_view(request):
                     "customerType":        customer_type,
                     "insuranceCompanyName": insurance_name,
                     "company_code":        company_code,
+                    "ipserial_number":     adm.ipserial_number,
                 })
 
             return JsonResponse({"success": True, "data": data}, safe=False)
@@ -483,6 +484,7 @@ def admission_detail(request, ipNumber):
                 'advance_payments': safe_list(adm.advance_payments),
                 'is_admitted': adm.is_admitted,
                 'is_discharged': adm.is_discharged,
+                'ipserial_number': adm.ipserial_number,
                 **_patient_block(adm.uhid),
             }
 

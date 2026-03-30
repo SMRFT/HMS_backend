@@ -1,4 +1,5 @@
 from rest_framework.response import Response
+from django.http import JsonResponse
 from rest_framework import status
 from pymongo import MongoClient
 import os
@@ -6,9 +7,13 @@ from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
 from django.views.decorators.csrf import csrf_exempt
 import json
+from uuid import uuid4
+from django.utils import timezone
+from django.utils import timezone as tz
+from datetime import datetime
 import traceback
 
-from ..models import Block, RoomCategory, Room, Admission
+from ..models import Block, RoomCategory, Room, Admission,Patient
 from ..serializers import (
     BlockSerializer,
     RoomCategorySerializer,
@@ -556,74 +561,626 @@ def room_enquiry_view(request):
             {"error": f"Room enquiry failed: {str(exc)}"},
             status=500
         )
-    
 
-# --------------------------------------------------
-# ROOM SHIFTING
-# --------------------------------------------------
-@api_view(['GET', 'POST'])
+
+@api_view(["GET"])
+@csrf_exempt
+def get_active_admission(request):
+    try:
+        uhid       = request.GET.get("uhid", "").strip()
+        ip_number  = request.GET.get("ip_number", "").strip()
+
+        if not uhid and not ip_number:
+            return Response({
+                "success": False,
+                "message": "Provide UHID or IP Number"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ Step 1: Basic queryset (Djongo safe)
+        if uhid:
+            qs = Admission.objects.filter(uhid=uhid)
+        else:
+            qs = Admission.objects.filter(ipNumber=ip_number)
+
+        # ✅ Step 2: Convert to list (avoid Djongo issues)
+        try:
+            all_records = list(qs.values(
+                'uhid', 'ipNumber', 'ipserial_number',
+                'admissionDateTime', 'admittingDoctor', 'consultingDoctor',
+                'packageName', 'room_details', 'roomShitingDetails',
+                'reasonForAdmission', 'advance_payments',
+                'mlc_type', 'mlc_doc', 'mlc_remarks',
+                'is_advanceActive', 'is_admissionActive',
+                'is_discharged', 'is_admitted',
+            ))
+        except Exception as db_err:
+            traceback.print_exc()
+            return Response({
+                "success": False,
+                "message": "Database query failed",
+                "error": str(db_err)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # ✅ Step 3: Filter active admissions
+        active_records = [
+            r for r in all_records
+            if r.get('is_admitted') is True
+            and r.get('is_admissionActive') is True
+            and r.get('is_discharged') is False
+        ]
+
+        if not active_records:
+            return Response({
+                "success": False,
+                "message": "No active admission found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # ✅ Step 4: Sort latest admission
+        def safe_sort_key(r):
+            dt = r.get('admissionDateTime')
+            if dt is None:
+                return datetime.min
+            if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+                return tz.make_naive(dt)
+            return dt
+
+        active_records.sort(key=safe_sort_key, reverse=True)
+        admission = active_records[0]
+
+        # ✅ Step 5: Fetch Patient using UHID
+        patient_data = {}
+        try:
+            patient = Patient.objects.filter(
+                uhid=admission.get('uhid')
+            ).values(
+                'uhid', 'firstName', 'lastName', 'age', 'gender',
+                'mobilePhone', 'email', 'city', 'state'
+            ).first()
+
+            if patient:
+                patient_data = {
+                    "uhid": patient.get("uhid") or "",
+                    "patientname": f"{patient.get('firstName','')} {patient.get('lastName','')}".strip(),
+                    "firstName": patient.get("firstName") or "",
+                    "lastName": patient.get("lastName") or "",
+                    "age": patient.get("age") or "",
+                    "gender": patient.get("gender") or "",
+                    "mobilePhone": patient.get("mobilePhone") or "",
+                    "email": patient.get("email") or "",
+                    "city": patient.get("city") or "",
+                    "state": patient.get("state") or "",
+                }
+        except Exception as e:
+            traceback.print_exc()
+            patient_data = {}
+
+        # ✅ Step 6: Parse room_details
+        room_details = admission.get('room_details') or []
+        if not isinstance(room_details, list):
+            try:
+                room_details = json.loads(room_details) if isinstance(room_details, str) else []
+            except Exception:
+                room_details = []
+
+        # ✅ Step 7: Find active room
+        active_room = {}
+        for r in reversed(room_details):
+            if isinstance(r, dict) and r.get("is_roomActive"):
+                active_room = r
+                break
+
+        if not active_room and room_details:
+            last = room_details[-1]
+            active_room = last if isinstance(last, dict) else {}
+
+        # ✅ Step 8: Format datetime
+        admission_date = ""
+        admission_time = ""
+        dt = admission.get('admissionDateTime')
+
+        if dt:
+            try:
+                admission_date = dt.strftime("%Y-%m-%d")
+                admission_time = dt.strftime("%H:%M:%S")
+            except Exception:
+                admission_date = str(dt)[:10]
+                admission_time = str(dt)[11:19]
+
+        # ✅ FINAL RESPONSE
+        return Response({
+            "success": True,
+            "data": {
+                "uhid":             admission.get('uhid') or "",
+                "ipNumber":         admission.get('ipNumber') or "",
+                "ipserial_number":  admission.get('ipserial_number') or "",
+
+                "admissionDate":    admission_date,
+                "admissionTime":    admission_time,
+
+                "admittingDoctor":  admission.get('admittingDoctor') or "",
+                "consultingDoctor": admission.get('consultingDoctor') or "",
+                "packageName":      admission.get('packageName') or "",
+
+                "roomNo":           active_room.get("roomNo", ""),
+                "bedNo":            active_room.get("bedNo", ""),
+                "room_details":     room_details,
+
+                "is_admitted":        admission.get('is_admitted'),
+                "is_admissionActive": admission.get('is_admissionActive'),
+                "is_discharged":      admission.get('is_discharged'),
+
+                # ✅ Patient Data
+                "patient": patient_data
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({
+            "success": False,
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_view(request):
+
     user_id = request.headers.get("auth-user-id", "system")
 
-    # ==================== GET (Search Admission) ====================
+    # ══════════════════════════════════════════════════════════════════════════
+    # GET
+    # ══════════════════════════════════════════════════════════════════════════
     if request.method == "GET":
-        query = request.GET.get("search") # UHID or IP
 
-        if not query:
-            return Response({"error": "Search query (UHID or IP) required"}, status=400)
+        from_date = str(request.GET.get("from_date", "")).strip()
+        to_date   = str(request.GET.get("to_date", "")).strip()
+        uhid      = str(request.GET.get("uhid", "")).strip()
+        ip_number = str(request.GET.get("ip_number", "")).strip()
 
-        # Try to find active admission by UHID or IP
-        admissions = Admission.objects.filter(is_active=True).filter(
-            models.Q(uhid__icontains=query) | models.Q(ipNumber__icontains=query)
-        )
-        
-        if not admissions.exists():
-             return Response({"error": "Active admission not found"}, status=404)
-        
-        # Return the first match or list? Let's return list if needed, but simplistic approach first match
-        admission = admissions.first()
+        results = []
 
-        return Response({
-            "uhid": admission.uhid,
-            "ip_no": admission.ipNumber,
-            "patient_name": f"{admission.firstName} {admission.lastName}",
-            "current_room_no": admission.roomNo,
-            "current_bed_no": admission.bedNo,
+        admissions = Admission.objects.filter(is_admitted=True)
+
+        for admission in admissions:
+
+            # avoid icontains / SQL-like filters
+            if uhid and uhid.lower() not in str(admission.uhid).lower():
+                continue
+
+            if ip_number and ip_number.lower() not in str(admission.ipNumber).lower():
+                continue
+
+            shiftings = admission.roomShitingDetails
+            if not isinstance(shiftings, list):
+                shiftings = []
+
+            for shift in shiftings:
+
+                if not isinstance(shift, dict):
+                    continue
+
+                shift_date = str(shift.get("shiftingDateTime", ""))[:10]
+
+                if from_date and shift_date and shift_date < from_date:
+                    continue
+
+                if to_date and shift_date and shift_date > to_date:
+                    continue
+
+                results.append({
+                    "uhid": admission.uhid,
+                    "ipNumber": admission.ipNumber,
+                    "ipserial_number": admission.ipserial_number,
+                    "shifting_id": str(shift.get("shifting_id", "")),
+                    "oldRoomNo": str(shift.get("oldRoomNo", "")),
+                    "oldBedNo": str(shift.get("oldBedNo", "")),
+                    "newRoomNo": str(shift.get("newRoomNo", "")),
+                    "newBedNo": str(shift.get("newBedNo", "")),
+                    "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+                    "shifted_by": str(shift.get("shifted_by", "")),
+                    "is_cancelled": bool(shift.get("is_cancelled", False)),
+                    "cancelled_by": str(shift.get("cancelled_by", "")),
+                    "cancelled_at": str(shift.get("cancelled_at", "")),
+                })
+
+        return Response(results, status=status.HTTP_200_OK)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # POST
+    # ══════════════════════════════════════════════════════════════════════════
+    elif request.method == "POST":
+
+        ip_number = str(request.data.get("ip_number", "")).strip()
+        new_room  = str(request.data.get("newRoomNo", "")).strip()
+        new_bed   = str(request.data.get("newBedNo", "")).strip()
+
+        if not ip_number:
+            return Response(
+                {"success": False, "error": "ip_number is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not new_room or not new_bed:
+            return Response(
+                {"success": False, "error": "newRoomNo and newBedNo are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        admission = None
+
+        for adm in Admission.objects.all():
+            if (
+                str(adm.ipNumber) == ip_number and
+                adm.is_admitted and
+                adm.is_admissionActive
+            ):
+                admission = adm
+                break
+
+        if not admission:
+            return Response(
+                {"success": False, "error": "Admission not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        room_details = admission.room_details
+        if not isinstance(room_details, list):
+            room_details = []
+
+        old_room = ""
+        old_bed = ""
+
+        updated_room_details = []
+
+        # deactivate current active room
+        for room in room_details:
+
+            if not isinstance(room, dict):
+                continue
+
+            room_obj = {
+                "roomNo": str(room.get("roomNo", "")),
+                "bedNo": str(room.get("bedNo", "")),
+                "is_roomActive": bool(room.get("is_roomActive", False)),
+                "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
+            }
+
+            if room_obj["is_roomActive"]:
+                old_room = room_obj["roomNo"]
+                old_bed = room_obj["bedNo"]
+                room_obj["is_roomActive"] = False
+
+            updated_room_details.append(room_obj)
+
+        # update existing current room object if only one room exists
+        updated_existing = False
+
+        if len(updated_room_details) == 1:
+            updated_room_details[0]["roomNo"] = new_room
+            updated_room_details[0]["bedNo"] = new_bed
+            updated_room_details[0]["is_roomActive"] = True
+            updated_room_details[0]["is_roomCleaned"] = False
+            updated_existing = True
+
+        # if multiple rooms / history exists, append new room entry
+        if not updated_existing:
+            updated_room_details.append({
+                "roomNo": new_room,
+                "bedNo": new_bed,
+                "is_roomActive": True,
+                "is_roomCleaned": False,
+            })
+
+        admission.room_details = updated_room_details
+
+        shifting_details = admission.roomShitingDetails
+        if not isinstance(shifting_details, list):
+            shifting_details = []
+
+        cleaned_shiftings = []
+
+        for shift in shifting_details:
+            if isinstance(shift, dict):
+                cleaned_shiftings.append({
+                    "shifting_id": str(shift.get("shifting_id", "")),
+                    "oldRoomNo": str(shift.get("oldRoomNo", "")),
+                    "oldBedNo": str(shift.get("oldBedNo", "")),
+                    "newRoomNo": str(shift.get("newRoomNo", "")),
+                    "newBedNo": str(shift.get("newBedNo", "")),
+                    "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+                    "shifted_by": str(shift.get("shifted_by", "")),
+                    "is_cancelled": bool(shift.get("is_cancelled", False)),
+                    "cancelled_by": str(shift.get("cancelled_by", "")),
+                    "cancelled_at": str(shift.get("cancelled_at", "")),
+                })
+
+        cleaned_shiftings.append({
+            "shifting_id": str(uuid4()),
+            "oldRoomNo": old_room,
+            "oldBedNo": old_bed,
+            "newRoomNo": new_room,
+            "newBedNo": new_bed,
+            "shiftingDateTime": timezone.now().isoformat(),
+            "shifted_by": str(user_id),
+            "is_cancelled": False,
+            "cancelled_by": "",
+            "cancelled_at": "",
         })
 
-    # ==================== POST (Shift Room) ====================
-    elif request.method == "POST":
-        uhid = request.data.get("uhid")
-        ip_no = request.data.get("ip_no")
-        new_room_no = request.data.get("newRoomNo")
-        new_bed_no = request.data.get("newBedNo")
+        admission.roomShitingDetails = cleaned_shiftings
 
-        if not (uhid or ip_no) or not (new_room_no and new_bed_no):
-            return Response({"error": "Missing required fields"}, status=400)
+        admission.lastmodified_by = str(user_id)
 
-        try:
-            if uhid:
-                admission = Admission.objects.get(uhid=uhid, is_active=True)
-            else:
-                admission = Admission.objects.get(ipNumber=ip_no, is_active=True)
-        except Admission.DoesNotExist:
-            return Response({"error": "Active admission not found"}, status=404)
-        
-        old_room_no = admission.roomNo
-        old_bed_no = admission.bedNo
+        if not isinstance(admission.advance_payments, list):
+            admission.advance_payments = []
 
-        # 1. Update Admission
-        admission.roomNo = new_room_no
-        admission.bedNo = new_bed_no
-        admission.lastmodified_by = user_id
         admission.save()
 
-        # 3. Update New Bed (Make Occupied)
-        try:
-            new_room = Room.objects.get(room_number=new_room_no, is_active=True)
-        except Room.DoesNotExist:
-             return Response({"error": f"New Room {new_room_no} not found"}, status=404)
+        return Response(
+            {
+                "success": True,
+                "message": "Room shifted successfully",
+                "data": {
+                    "uhid": admission.uhid,
+                    "ipNumber": admission.ipNumber,
+                    "room_details": admission.room_details,
+                    "roomShitingDetails": admission.roomShitingDetails
+                }
+            },
+            status=status.HTTP_200_OK
+        )
 
-        return Response({"message": "Room shifted successfully"})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATCH /room-shifting/<ip_number>/
+# Update only roomShitingDetails
+# In room_details only make current active room inactive
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(["PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_shifting_detail_view(request, ip_number):
+
+    user_id = request.headers.get("auth-user-id", "system")
+
+    shifting_id = str(request.data.get("shifting_id", "")).strip()
+    new_room    = str(request.data.get("newRoomNo", "")).strip()
+    new_bed     = str(request.data.get("newBedNo", "")).strip()
+
+    if not shifting_id:
+        return Response(
+            {"success": False, "error": "shifting_id is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not new_room or not new_bed:
+        return Response(
+            {"success": False, "error": "newRoomNo and newBedNo are required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    admission = None
+
+    for adm in Admission.objects.all():
+        if str(adm.ipNumber) == str(ip_number):
+            admission = adm
+            break
+
+    if not admission:
+        return Response(
+            {"success": False, "error": "Admission not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    shifting_details = admission.roomShitingDetails
+    if not isinstance(shifting_details, list):
+        shifting_details = []
+
+    room_details = admission.room_details
+    if not isinstance(room_details, list):
+        room_details = []
+
+    updated_shiftings = []
+    shift_found = False
+
+    for shift in shifting_details:
+
+        if not isinstance(shift, dict):
+            continue
+
+        shift_obj = {
+            "shifting_id": str(shift.get("shifting_id", "")),
+            "oldRoomNo": str(shift.get("oldRoomNo", "")),
+            "oldBedNo": str(shift.get("oldBedNo", "")),
+            "newRoomNo": str(shift.get("newRoomNo", "")),
+            "newBedNo": str(shift.get("newBedNo", "")),
+            "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+            "shifted_by": str(shift.get("shifted_by", "")),
+            "is_cancelled": bool(shift.get("is_cancelled", False)),
+            "cancelled_by": str(shift.get("cancelled_by", "")),
+            "cancelled_at": str(shift.get("cancelled_at", "")),
+        }
+
+        if shift_obj["shifting_id"] == shifting_id:
+
+            if shift_obj["is_cancelled"]:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "Cancelled shifting record cannot be edited"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # only update roomShitingDetails values
+            shift_obj["newRoomNo"] = new_room
+            shift_obj["newBedNo"] = new_bed
+            shift_obj["lastmodified_by"] = str(user_id)
+            shift_obj["lastmodified_date"] = timezone.now().isoformat()
+
+            shift_found = True
+
+        updated_shiftings.append(shift_obj)
+
+    if not shift_found:
+        return Response(
+            {"success": False, "error": "Shifting record not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # only deactivate currently active room in room_details
+    updated_rooms = []
+
+    for room in room_details:
+
+        if not isinstance(room, dict):
+            continue
+
+        room_obj = {
+            "roomNo": str(room.get("roomNo", "")),
+            "bedNo": str(room.get("bedNo", "")),
+            "is_roomActive": bool(room.get("is_roomActive", False)),
+            "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
+        }
+
+        if room_obj["is_roomActive"]:
+            room_obj["is_roomActive"] = False
+
+        updated_rooms.append(room_obj)
+
+    admission.roomShitingDetails = updated_shiftings
+    admission.room_details = updated_rooms
+    admission.lastmodified_by = str(user_id)
+
+    admission.save()
+
+    return Response(
+        {
+            "success": True,
+            "message": "Room shifting updated successfully",
+            "data": {
+                "ipNumber": admission.ipNumber,
+                "room_details": admission.room_details,
+                "roomShitingDetails": admission.roomShitingDetails
+            }
+        },
+        status=status.HTTP_200_OK
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /room-shifting/<shifting_id>/cancel/
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_shifting_cancel_view(request, shifting_id):
+
+    user_id = request.headers.get("auth-user-id", "system")
+
+    admission = None
+
+    for adm in Admission.objects.all():
+
+        shiftings = adm.roomShitingDetails
+        if not isinstance(shiftings, list):
+            continue
+
+        found = False
+
+        for shift in shiftings:
+            if isinstance(shift, dict) and str(shift.get("shifting_id", "")) == str(shifting_id):
+                admission = adm
+                found = True
+                break
+
+        if found:
+            break
+
+    if not admission:
+        return Response(
+            {"success": False, "error": "Shifting record not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    shiftings = admission.roomShitingDetails
+    room_details = admission.room_details
+
+    if not isinstance(shiftings, list):
+        shiftings = []
+
+    if not isinstance(room_details, list):
+        room_details = []
+
+    cancelled_shift = None
+
+    for shift in shiftings:
+
+        if not isinstance(shift, dict):
+            continue
+
+        if str(shift.get("shifting_id", "")) == str(shifting_id):
+
+            if shift.get("is_cancelled"):
+                return Response(
+                    {"success": False, "error": "Already cancelled"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            shift["is_cancelled"] = True
+            shift["cancelled_by"] = str(user_id)
+            shift["cancelled_at"] = timezone.now().isoformat()
+
+            cancelled_shift = shift
+            break
+
+    if not cancelled_shift:
+        return Response(
+            {"success": False, "error": "Shifting record not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    updated_rooms = []
+
+    for room in room_details:
+
+        if not isinstance(room, dict):
+            continue
+
+        room_obj = {
+            "roomNo": str(room.get("roomNo", "")),
+            "bedNo": str(room.get("bedNo", "")),
+            "is_roomActive": bool(room.get("is_roomActive", False)),
+            "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
+        }
+
+        if (
+            room_obj["roomNo"] == str(cancelled_shift.get("newRoomNo", "")) and
+            room_obj["bedNo"] == str(cancelled_shift.get("newBedNo", ""))
+        ):
+            room_obj["is_roomActive"] = False
+            room_obj["is_roomCleaned"] = True
+
+        if (
+            room_obj["roomNo"] == str(cancelled_shift.get("oldRoomNo", "")) and
+            room_obj["bedNo"] == str(cancelled_shift.get("oldBedNo", ""))
+        ):
+            room_obj["is_roomActive"] = True
+            room_obj["is_roomCleaned"] = False
+
+        updated_rooms.append(room_obj)
+
+    admission.room_details = updated_rooms
+    admission.roomShitingDetails = shiftings
+    admission.lastmodified_by = str(user_id)
+
+    admission.save()
+
+    return Response(
+        {
+            "success": True,
+            "message": "Shifting record cancelled successfully"
+        },
+        status=status.HTTP_200_OK
+    )
