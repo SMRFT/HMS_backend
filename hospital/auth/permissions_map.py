@@ -12,7 +12,6 @@ PAGE_MAPPING = {
 
 
     # ==================== ADMISSION ====================
-    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DLD',
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/admission/?(\?.*)?$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/admission/[^/]+/?(\?.*)?$': 'HMS-P-ADD',
@@ -120,7 +119,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
 
     #Doctor Master: 
-    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DRM',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DLD',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
 
