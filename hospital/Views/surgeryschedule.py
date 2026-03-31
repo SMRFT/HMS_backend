@@ -7,6 +7,14 @@ from django.utils import timezone
 from django.db import connections
 import traceback, json
 from datetime import datetime, date as date_type
+import os
+from pymongo import MongoClient
+from pymongo import MongoClient
+import pytz
+
+
+client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+hms_db   = client[os.getenv("HMS_DB_NAME", "HMS")]
 
 
 # ─── ID Generator ─────────────────────────────────────────────────────────────
@@ -113,9 +121,7 @@ def _bulk_get_employee_names(emp_ids: set) -> dict:
     if not clean_ids:
         return {}
 
-    try:
-        import os
-        from pymongo import MongoClient
+    try:      
 
         client     = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         global_db  = client[os.getenv("GLOBAL_DB_NAME", "Global")]
@@ -496,13 +502,8 @@ def list_diagnosis(request):
     Returns: { success: true, data: [{ diagnostics_id, diagnostics_name }] }
     """
     try:
-        import os
-        from pymongo import MongoClient
- 
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db     = client[os.getenv("HMS_DB_NAME")]
- 
-        cursor = db["hospital_diagnosis"].find(
+        
+        cursor = hms_db["hospital_diagnosis"].find(
             {"is_active": True},
             {"diagnostics_id": 1, "diagnostics_name": 1, "_id": 0},
         ).sort("diagnostics_name", 1)   # alphabetical order
@@ -523,4 +524,186 @@ def list_diagnosis(request):
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
         )
+    
+
+@api_view(["GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def get_ot_medicine_ward_requests(request):
+    try:
+        uhid = request.query_params.get("uhid")
+        ip_number = request.query_params.get("ipNumber")
+        
+        if not uhid:
+            return Response({"success": False, "error": "UHID is required"}, status=400)
+            
+        # Fetch from OPPharmacyBill where is_ward_request=True using PyMongo
+        query_params = {
+            "uhid": uhid,
+            "is_ward_request": True
+        }
+        if ip_number:
+            query_params["inpatient_number"] = ip_number
+            
+        ward_req_collection = hms_db["hospital_oppharmacybill"]
+        requests_data = list(ward_req_collection.find(query_params).sort("created_date", -1))
+
+        # ── Fetch all relevant bill_types in one query ──────────────────────
+        bill_types = {doc.get("bill_type") for doc in requests_data if doc.get("bill_type")}
+        billtype_collection = hms_db["hospital_billtype"]
+        billtype_map = {
+            bt["bill_type"]: bt.get("bill_name", "")
+            for bt in billtype_collection.find(
+                {"bill_type": {"$in": list(bill_types)}},
+                {"bill_type": 1, "bill_name": 1, "_id": 0}
+            )
+        }
+        # ────────────────────────────────────────────────────────────────────
+        
+        formatted_data = []
+        for doc in requests_data:
+            items = doc.get("medicine_particulars", [])
+            if isinstance(items, str):
+                import json
+                try:
+                    items = json.loads(items)
+                except json.JSONDecodeError:
+                    items = []
+
+            medicines = []
+            for itm in items:
+                if isinstance(itm, str):
+                    import json
+                    try:
+                        itm = json.loads(itm)
+                    except Exception:
+                        continue
+                if not isinstance(itm, dict):
+                    continue
+                medicines.append({
+                    "item_id": itm.get("item_id", ""),
+                    "name": itm.get("itemName", itm.get("item_name", "")),
+                    "quantity": itm.get("quantity", itm.get("qty", 1)),
+                    "doctor": itm.get("doctor", ""),
+                    "dosage": itm.get("dosage", ""),
+                    "noOfDays": itm.get("noOfDays", ""),
+                    "dose": itm.get("dose", ""),
+                    "doseUnit": itm.get("doseUnit", ""),
+                    "route": itm.get("route", ""),
+                    "instruction": itm.get("instruction", "")
+                })
+
+            # ── Resolve bill_name from the pre-fetched map ──────────────────
+            bill_type = doc.get("bill_type")
+            bill_name = billtype_map.get(bill_type, "")
+            # ────────────────────────────────────────────────────────────────
+
+            formatted_doc = {
+                "id": str(doc["_id"]),
+                "uhid": doc.get("uhid", ""),
+                "ipNumber": doc.get("inpatient_number", ""),
+                "patientName": doc.get("patient_name", ""),
+                "billType": bill_type,
+                "billName": bill_name,          # ← resolved from hospital_billtype
+                "reqDate": doc.get("created_date").strftime("%d-%m-%Y") if doc.get("created_date") else "",
+                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
+                "userName": doc.get("created_by", ""),
+                "requestNo": doc.get("estimate_no", ""),
+                "doctor": doc.get("doctor", ""),
+                "doctorName": doc.get("doctor_id", ""),
+                "medicines": medicines,
+                "total_amount": doc.get("total_amount", 0)
+            }
+            formatted_data.append(formatted_doc)
+
+        return Response({
+            "success": True,
+            "data": formatted_data
+        })
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["POST"])
+# @permission_classes([HasRoleAndDataPermission])
+def save_ot_medicine_ward_request(request):
+    """
+    Save an OT medicine ward request to hospital_oppharmacybill.
  
+    All billing meta (bill_type=18, billing_status, billing_mode, is_ward_request,
+    is_regular_medicine, is_discharge_medicine) are set server-side.
+    The frontend only sends: uhid, ipNumber, wardName, doctor_id,
+    medicine_particulars (with remark per item), total_amount, surgeryRef.
+    """
+    try:
+        data          = request.data
+        current_user  = data.get("auth-user-id",       "system")
+        branch_code   = data.get("auth-branch-code",   "system")
+        hospital_code = data.get("auth-hospital-code", "SH001")
+ 
+        medicine_particulars = data.get("medicine_particulars", [])
+        total_amount         = round(float(data.get("total_amount", 0)), 2)
+ 
+        # ── Clean medicine items — keep only what the ward needs ──────────────
+        # Fields sent by frontend: item_id, itemName, qty, quantity, price,
+        #                          noOfDays, dosage, dose, doseUnit, route, remark
+        # Fields to strip (handled by billing at bill-generation time):
+        STRIP_FIELDS = {
+            "edit_history", "billType", "billTypeNo", "billTypeName",
+            "total_stock", "price", "expiry_date",
+        }
+ 
+        cleaned_medicines = []
+        for med in medicine_particulars:
+            cleaned = {k: v for k, v in med.items() if k not in STRIP_FIELDS}
+            # Ensure remark is always present (even if empty string)
+            cleaned.setdefault("remark", "")
+            cleaned_medicines.append(cleaned)
+ 
+        ist     = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+ 
+        bill_doc = {
+            "branch_code":   branch_code,
+            "hospital_code": hospital_code,
+            "outlet_code":   "OLET001",
+            "created_by":   current_user,
+            "created_date": now_ist,
+            "bill_no":      "",
+            "estimate_no":  "",
+            "bill_date":    "",
+            "uhid":              data.get("uhid"),
+            "inpatient_number":  data.get("ipNumber"),
+            "bill_type":         18,           
+            "billing_status":    "Pending",
+            "billing_mode":      "Credit",
+            "is_ward_request":   True,
+            "is_discharge_medicine": False,
+            "is_regugar_medicine":   True,     
+            "is_active":         True,
+            "doctor_id":  data.get("doctor_id"),
+            "room_no":    data.get("wardName", ""),
+            "medicine_particulars": cleaned_medicines,
+            "total_amount":              total_amount,
+            "net_amount":                total_amount,
+            "overall_discount_amount":   0.0,
+            "overall_discount_type":     "percent",
+            "overall_discount_value":    0.0,
+        }
+ 
+        collection = hms_db["hospital_oppharmacybill"]
+        result     = collection.insert_one(bill_doc)
+ 
+        client.close()
+ 
+        return Response({
+            "success": True,
+            "message": "OT medicine ward request saved successfully",
+            "id":      str(result.inserted_id),
+        })
+ 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )

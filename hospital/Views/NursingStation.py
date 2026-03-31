@@ -39,7 +39,7 @@ profile_collection = global_db["backend_diagnostics_profile"]
 room_collection = mongo_db["hospital_room"]
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_admission_list(request):
     try:
         from_date = request.GET.get("from_date")
@@ -229,7 +229,7 @@ collection = mongo_db[COLLECTION_NAME]
 
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_wards_list(request):
     try:
         # ✅ Fetch only active wards
@@ -262,7 +262,7 @@ client = MongoClient(MONGO_URI)
 mongo_db = client["HMS"]
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_LabBillType_list(request):
     try:
         collection = mongo_db["hospital_billtype"]
@@ -351,7 +351,7 @@ def serialize_doc(doc):
     return doc
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_lab_ward_requests(request):
     try:
         uhid = request.GET.get("uhid")
@@ -421,7 +421,7 @@ def get_lab_ward_requests(request):
         }, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def save_lab_ward_request(request):
     try:
         import json
@@ -520,7 +520,7 @@ def save_lab_ward_request(request):
         }, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def cancel_lab_ward_request(request):
     try:
         data = request.data
@@ -547,7 +547,7 @@ def cancel_lab_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def remove_individual_test_from_lab_ward_request(request):
     try:
         import json
@@ -617,7 +617,7 @@ def remove_individual_test_from_lab_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_medicine_ward_requests(request):
     try:
         uhid = request.query_params.get("uhid")
@@ -701,7 +701,7 @@ def get_medicine_ward_requests(request):
 
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def save_medicine_ward_request(request):
     try:
         data = request.data
@@ -788,7 +788,7 @@ def save_medicine_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["GET", "POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def dosage_master_view(request):
     dosage_col = mongo_db["hospital_dosage"]
     try:
@@ -813,7 +813,7 @@ def dosage_master_view(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def cancel_medicine_ward_request(request):
     try:
         data = request.data
@@ -839,7 +839,7 @@ def cancel_medicine_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def remove_individual_medicine_from_ward_request(request):
     try:
         data = request.data
@@ -898,7 +898,7 @@ def remove_individual_medicine_from_ward_request(request):
 
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_radiology_ward_requests(request):
     try:
         uhid = request.query_params.get("uhid")
@@ -965,7 +965,7 @@ def get_radiology_ward_requests(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def save_radiology_ward_request(request):
     try:
         import json
@@ -1058,7 +1058,7 @@ def save_radiology_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def cancel_radiology_ward_request(request):
     try:
         data = request.data
@@ -1085,7 +1085,7 @@ def cancel_radiology_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def remove_individual_test_from_radiology_ward_request(request):
     try:
         import json
