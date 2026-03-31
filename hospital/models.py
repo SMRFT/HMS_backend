@@ -907,6 +907,8 @@ class VelavanInvoice(AuditModel):
     ip_number = models.CharField(max_length=100, blank=True, null=True)
     patient_name = models.CharField(max_length=255, blank=True, null=True)
     surgeon_id = models.CharField(max_length=255, blank=True, null=True)
+    customer_type = models.CharField(max_length=255, blank=True, null=True)
+    company_name = models.CharField(max_length=255, blank=True, null=True)
 
     # Items stored as JSON
     items = models.JSONField(default=list, blank=True)

@@ -543,6 +543,8 @@ def create_velavan_in(request):
             ip_number               = data.get('ipNumber') or '',
             patient_name            = data.get('patientName') or '',
             surgeon_id            = data.get('surgeonName') or '',
+            customer_type           = data.get('customerType') or '',
+            company_name            = data.get('companyName') or '',
             items                   = clean_items,
             non_taxable_amount      = to_decimal(summary.get('nonTaxableAmount')),
             taxable_amount          = to_decimal(summary.get('taxableAmount')),
@@ -753,6 +755,8 @@ def list_velavan_invoices(request):
                     'patient_name':    obj.patient_name,
                     'surgeon_id':      surgeon_id,    # from model field
                     'surgeon_name':    surgeon_name,  # resolved from Global DB
+                    'customer_type':   obj.customer_type,
+                    'company_name':    obj.company_name,
                     'items':           items,
                     'lastmodified_by': getattr(obj, 'lastmodified_by', None),
                 }
