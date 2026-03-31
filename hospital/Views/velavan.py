@@ -615,39 +615,34 @@ def list_velavan_invoices(request):
         logger.debug(f"Request headers: {request.headers}")
         logger.debug(f"Request user: {request.user}, Query params: {request.GET}")
 
-        # ── MongoDB connections ──
+        # ── Connect to Global DB for surgeon name lookup only ──
         mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         global_db    = mongo_client['Global']
         profile_collection = global_db['backend_diagnostics_profile']
 
-        hms_client  = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        hms_db_name = os.getenv('HMS_DB_NAME', 'hms')
-        hms_db      = hms_client[hms_db_name]
-
-        invoice_collection = hms_db['hospital_velavaninvoice']  # ✅ correct collection name
-
         from_date_str = request.GET.get('from_date', None)
         to_date_str   = request.GET.get('to_date', None)
 
-        # ── Build PyMongo filter ──
-        mongo_filter = {}
+        queryset = VelavanInvoice.objects.all().order_by('-created_date')
+
         if from_date_str:
             try:
                 from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
-                mongo_filter.setdefault('invoice_date', {})['$gte'] = from_date
+                queryset = queryset.filter(invoice_date__gte=from_date)
             except ValueError:
-                logger.warning(f"Invalid from_date format: {from_date_str}")
+                logger.warning(f"Invalid from_date format: {from_date_str}, skipping filter")
 
         if to_date_str:
             try:
                 to_date = datetime.strptime(to_date_str, '%Y-%m-%d').replace(
                     hour=23, minute=59, second=59, microsecond=999999
                 )
-                mongo_filter.setdefault('invoice_date', {})['$lte'] = to_date
+                queryset = queryset.filter(invoice_date__lte=to_date)
             except ValueError:
-                logger.warning(f"Invalid to_date format: {to_date_str}")
+                logger.warning(f"Invalid to_date format: {to_date_str}, skipping filter")
 
-        # ── Pagination ──
+        all_records = list(queryset)
+
         try:
             page      = int(request.GET.get('page', 1))
             page_size = int(request.GET.get('page_size', 10))
@@ -656,46 +651,17 @@ def list_velavan_invoices(request):
         except ValueError:
             page, page_size = 1, 10
 
-        total_records = invoice_collection.count_documents(mongo_filter)
+        total_records = len(all_records)
         total_pages   = (total_records + page_size - 1) // page_size
-        skip          = (page - 1) * page_size
+        start_index   = (page - 1) * page_size
+        end_index     = start_index + page_size
+        page_records  = all_records[start_index:end_index]
 
-        # ── Fetch raw docs directly from PyMongo ──
-        raw_docs = list(
-            invoice_collection.find(mongo_filter)
-            .sort('created_date', -1)
-            .skip(skip)
-            .limit(page_size)
-        )
-
-        logger.debug(f"Fetched {len(raw_docs)} raw docs from hospital_velavaninvoice")
-
-        # ── Pre-fetch all vendor details ──
-        vendor_ids = list(set(
-            str(doc.get('vendor_id'))
-            for doc in raw_docs
-            if doc.get('vendor_id')
-        ))
-        vendor_map = {}
-        for vid in vendor_ids:
-            try:
-                vendor = VelavanVendors.objects.get(vendor_id=vid)
-                vendor_map[vid] = {
-                    'vendor':  vendor.name,
-                    'phone':   vendor.phone or '',
-                    'gstin':   vendor.gstin or '',
-                    'address': f"{vendor.addressLine1}, {vendor.addressLine2}, {vendor.city}, {vendor.state}".strip(', '),
-                    'email':   vendor.email or ''
-                }
-            except VelavanVendors.DoesNotExist:
-                logger.warning(f"Vendor {vid} not found")
-                vendor_map[vid] = {'vendor': '', 'phone': '', 'gstin': '', 'address': '', 'email': ''}
-
-        # ── Pre-fetch all surgeon names in one Global DB query ──
+        # ── Pre-fetch all unique surgeon_ids on this page in one Global DB query ──
         surgeon_ids = list(set(
-            str(doc.get('surgeon_id'))
-            for doc in raw_docs
-            if doc.get('surgeon_id')
+            str(obj.surgeon_id)
+            for obj in page_records
+            if obj.surgeon_id  # surgeon_id is declared in model, getattr is not needed
         ))
         logger.debug(f"Unique surgeon_ids on this page: {surgeon_ids}")
 
@@ -709,36 +675,54 @@ def list_velavan_invoices(request):
                 for profile in profiles:
                     surgeon_name_map[profile['employeeId']] = profile.get('employeeName', '')
                 logger.debug(f"Resolved surgeon_name_map: {surgeon_name_map}")
-            except Exception as e:
-                logger.warning(f"Could not fetch surgeon profiles: {e}")
+            except Exception as surgeon_err:
+                logger.warning(f"Could not fetch surgeon profiles: {surgeon_err}")
 
-        # ── Build response ──
         response_data = []
-        for doc in raw_docs:
+        for obj in page_records:
             try:
-                grn_number   = doc.get('grn_number')
-                vendor_id    = str(doc.get('vendor_id', ''))
-                surgeon_id   = doc.get('surgeon_id')
+                vendor_details = {
+                    'vendor': '',
+                    'phone': '',
+                    'gstin': '',
+                    'address': '',
+                    'email': ''
+                }
+                if obj.vendor_id:
+                    try:
+                        vendor = VelavanVendors.objects.get(vendor_id=obj.vendor_id)
+                        vendor_details = {
+                            'vendor':  vendor.name,
+                            'phone':   vendor.phone or '',
+                            'gstin':   vendor.gstin or '',
+                            'address': f"{vendor.addressLine1}, {vendor.addressLine2}, {vendor.city}, {vendor.state}".strip(', '),
+                            'email':   vendor.email or ''
+                        }
+                    except VelavanVendors.DoesNotExist:
+                        logger.warning(f"Vendor with vendor_id {obj.vendor_id} not found")
+
+                # ── surgeon_id from Django model → surgeon_name from Global DB ──
+                surgeon_id   = obj.surgeon_id  # directly from model field
                 surgeon_name = surgeon_name_map.get(str(surgeon_id), '') if surgeon_id else ''
 
-                vendor_details = vendor_map.get(vendor_id, {
-                    'vendor': '', 'phone': '', 'gstin': '', 'address': '', 'email': ''
-                })
-
-                # ── Parse items ──
-                raw_items = doc.get('items', [])
+                # ── Parse items — always return a list, never a raw string ──
+                raw_items = getattr(obj, 'items', [])
                 if isinstance(raw_items, str):
                     try:
                         items = json.loads(raw_items)
                         if not isinstance(items, list):
+                            logger.warning(f"Items field for GRN {obj.grn_number} is not a valid JSON list after parsing")
                             items = []
                     except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON in items for GRN {obj.grn_number}")
                         items = []
                 elif isinstance(raw_items, list):
                     items = raw_items
                 else:
+                    logger.warning(f"Items field for GRN {obj.grn_number} is neither a string nor a list")
                     items = []
 
+                # Convert numeric fields in items
                 for item in items:
                     numeric_item_fields = [
                         'itemValue', 'packingPrice', 'unitPrice', 'cgstAmt', 'sgstAmt',
@@ -748,38 +732,36 @@ def list_velavan_invoices(request):
                         if field in item:
                             item[field] = convert_decimal128_to_float(item[field])
 
-                total_amount_paid = convert_decimal128_to_float(doc.get('total_amount_paid', 0))
-                total_amount      = convert_decimal128_to_float(doc.get('total_amount', 0))
+                total_amount_paid = convert_decimal128_to_float(getattr(obj, 'total_amount_paid', 0))
+                total_amount      = convert_decimal128_to_float(getattr(obj, 'total_amount', 0))
                 pending_amount    = max(0.0, total_amount - total_amount_paid)
 
                 item_data = {
-                    'id':              str(doc.get('_id')),
-                    'grn_number':      grn_number,
-                    'vendor_id':       doc.get('vendor_id'),
+                    'id':              str(getattr(obj, '_id', None)),
+                    'grn_number':      obj.grn_number,
+                    'vendor_id':       obj.vendor_id,
                     'vendor':          vendor_details['vendor'],
                     'phone':           vendor_details['phone'],
                     'gstin':           vendor_details['gstin'],
                     'address':         vendor_details['address'],
                     'pending_amount':  pending_amount,
-                    'invoice_no':      doc.get('invoice_no'),
-                    'payment_mode':    doc.get('payment_mode'),
-                    'remarks':         doc.get('remarks') or '',
-                    'created_by':      doc.get('created_by'),
-                    'ip_number':       doc.get('ip_number'),
-                    'patient_name':    doc.get('patient_name'),
-                    'surgeon_id':      surgeon_id,
-                    'surgeon_name':    surgeon_name,
+                    'invoice_no':      obj.invoice_no,
+                    'payment_mode':    obj.payment_mode,
+                    'remarks':         obj.remarks or '',
+                    'created_by':      getattr(obj, 'created_by', None),
+                    'ip_number':       obj.ip_number,
+                    'patient_name':    obj.patient_name,
+                    'surgeon_id':      surgeon_id,    # from model field
+                    'surgeon_name':    surgeon_name,  # resolved from Global DB
                     'items':           items,
-                    'lastmodified_by': doc.get('lastmodified_by'),
+                    'lastmodified_by': getattr(obj, 'lastmodified_by', None),
                 }
 
-                # ── Date fields ──
                 date_fields = ['date', 'invoice_date', 'due_date', 'created_date', 'lastmodified_date']
                 for field in date_fields:
-                    value = doc.get(field)
+                    value = getattr(obj, field, None)
                     item_data[field] = value.isoformat() if hasattr(value, 'isoformat') else str(value) if value else None
 
-                # ── Numeric fields ──
                 numeric_fields = [
                     'non_taxable_amount', 'taxable_amount', 'tax_paid_to_supplier',
                     'local_tax', 'cgst', 'sgst', 'igst', 'cess', 'central_sales_tax',
@@ -787,18 +769,19 @@ def list_velavan_invoices(request):
                     'net_invoice_amount', 'quotation_rate', 'courier_transport_charge'
                 ]
                 for field in numeric_fields:
-                    item_data[field] = convert_decimal128_to_float(doc.get(field))
+                    value = getattr(obj, field, None)
+                    item_data[field] = convert_decimal128_to_float(value)
 
                 response_data.append(item_data)
 
             except Exception as item_error:
-                logger.error(f"Error processing doc {doc.get('grn_number')}: {str(item_error)}\n{traceback.format_exc()}")
+                logger.error(f"Error processing GRN {obj.grn_number}: {str(item_error)}\n{traceback.format_exc()}")
                 response_data.append({
-                    'id':           str(doc.get('_id')),
-                    'grn_number':   doc.get('grn_number'),
-                    'vendor_id':    doc.get('vendor_id'),
+                    'id':           str(getattr(obj, '_id', None)),
+                    'grn_number':   obj.grn_number,
+                    'vendor_id':    obj.vendor_id,
                     'vendor':       '',
-                    'surgeon_id':   doc.get('surgeon_id'),
+                    'surgeon_id':   obj.surgeon_id,
                     'surgeon_name': '',
                     'items':        [],
                     'error':        f'Processing failed: {str(item_error)}'
@@ -826,10 +809,6 @@ def list_velavan_invoices(request):
     finally:
         try:
             mongo_client.close()
-        except Exception:
-            pass
-        try:
-            hms_client.close()
         except Exception:
             pass
 
