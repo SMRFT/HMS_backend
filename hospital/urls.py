@@ -16,7 +16,7 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule
 )
 from .Views.Stores import stores
 
@@ -82,8 +82,6 @@ urlpatterns = [
     path('check-qr-status/', views.check_qr_status, name='check_qr_status'),
     path('get-pending-qr-registrations/', views.get_pending_qr_registrations, name='get_pending_qr_registrations'),
     path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
-    path('doctors/', views.doctor_view, name='doctor_view'),
-    path('doctor_list/', views.doctor_list, name='doctor_list'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
 
@@ -194,7 +192,7 @@ urlpatterns = [
     path('velavan/invoices/', velavan.create_velavan_in, name='create_velavan_in'),
     path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
-    path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),   
+    path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
@@ -237,4 +235,25 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    #OT Master:
+    path('create_ot/', otMaster.create_ot,  name='create_ot'),
+    path('list_ots/',  otMaster.list_ots,   name='list_ots'),
+    path('update_ot/<str:ot_id>/', otMaster.update_ot, name='update_ot'),
+    path('delete_ot/<str:ot_id>/', otMaster.delete_ot, name='delete_ot'), 
+
+    #Anesthesia Master:
+    path('create_anes/', anesthesia.create_anes,  name='create_anes'),
+    path('list_anes/',  anesthesia.list_anes,   name='list_anes'),
+    path('update_anes/<str:anesthesia_id>/', anesthesia.update_anes, name='update_anes'),
+    path('delete_anes/<str:anesthesia_id>/', anesthesia.delete_anes, name='delete_anes'), 
+
+    #Surgery Schedule:
+    path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule, name='create_surgery_schedule'),
+    path("list_surgery_schedules/",  surgeryschedule.list_surgery_schedules, name='list_surgery_schedules'),
+    path("get_surgery_schedule/",surgeryschedule.get_surgery_schedule, name='get_surgery_schedule'),
+    path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
+    path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
+    path("update_schedule_status/",  surgeryschedule.update_schedule_status, name='update_schedule_status'),
+    path("list_diagnosis/",  surgeryschedule.list_diagnosis, name='list_diagnosis'),
+
 ]

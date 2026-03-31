@@ -752,6 +752,8 @@ def invest_billing_create(request):
         if mongo_client:
             mongo_client.close()
 
+
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def billing_report_view(request):

@@ -129,35 +129,6 @@ def patientCreateView(request):
 
 
     
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-import json
-from .models import Doctor
-from .serializers import DoctorSerializer
-
-@csrf_exempt
-def doctor_view(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            serializer = DoctorSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return JsonResponse(serializer.data, status=201)
-            return JsonResponse(serializer.errors, status=400)
-        except json.JSONDecodeError:
-            return JsonResponse({"error": "Invalid JSON data"}, status=400)
-    return JsonResponse({"error": "Method not allowed"}, status=405)
-
-
-from .models import Doctor
-from .serializers import DoctorSerializer
-@api_view(['GET'])
-def doctor_list(request):
-    doctors = Doctor.objects.all()
-    serializer = DoctorSerializer(doctors, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
-
 
 from bson import Decimal128
 # Helper function to convert Decimal128 fields to float
@@ -364,34 +335,47 @@ def update_user_permissions(request):
         return Response({"error": str(e)}, status=500)
 
 
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from pymongo import MongoClient
+import os
+
+
 @api_view(['GET'])
 def get_all_employees(request):
     """
-    Fetches employees from Global.backend_diagnostics_profile who have the 'HMS-P' role.
-    This ensures we only show users eligible for HMS permission management.
+    Fetch employees who have ANY role starting with 'HMS'
+    (primaryRole or additionalRoles).
     """
+
     try:
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
-        
+
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
-        
-        # Query: Find users where primaryRole is 'HMS-P' OR additionalRoles contains 'HMS-P'
+
+        # 🔥 Match roles starting with "HMS"
         query = {
             "$or": [
-                {"primaryRole": "HMS-P"},
-                {"additionalRoles": "HMS-P"}
+                {"primaryRole": {"$regex": "^HMS"}},
+                {"additionalRoles": {"$elemMatch": {"$regex": "^HMS"}}}
             ]
         }
 
         employees = list(diag_collection.find(
-            query, 
-            {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}
+            query,
+            {
+                "employeeId": 1,
+                "employeeName": 1,
+                "designation": 1,
+                "_id": 0
+            }
         ))
-        
+
+        client.close()
         return Response(employees, status=200)
-        
+
     except Exception as e:
         print(f"Error fetching employees: {e}")
         return Response({"error": str(e)}, status=500)
@@ -774,11 +758,11 @@ def consume_qr_registration(request):
 @api_view(['GET'])
 def get_sidebar_mapping(request):
     """
-    Fetches the dynamic sidebar mapping structure from MongoDB, filtered by user permissions.
+    Fetch sidebar mapping filtered by permissions
     """
+
     employee_id = request.GET.get('employeeId')
-    
-    # Handle JS "null" or "undefined" strings and empty strings
+
     if employee_id in [None, "", "null", "undefined"]:
         employee_id = None
 
@@ -789,58 +773,97 @@ def get_sidebar_mapping(request):
 
         client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
         db = client['HMS']
-        
-        # 2. Fetch all mappings (Commonly used)
+
+        # 🔹 Fetch all mappings
         mapping_collection = db['frontendendpagemapping']
-        all_groups = list(mapping_collection.find({}, {'_id': 0}).sort('order', 1)) 
-        
-        # If no valid employee_id is provided, return the full mapping (unfiltered)
+        all_groups = list(
+            mapping_collection.find({}, {'_id': 0}).sort('order', 1)
+        )
+
+        # 🔹 No employee → return all
         if not employee_id:
             client.close()
             return Response(all_groups, status=200)
 
-        # 1. Fetch user permissions (for filtering)
-        # -----------------------------------------------------------------
+        # 🔹 Fetch roles
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
-        user_profile = diag_collection.find_one({"employeeId": employee_id}, {"primaryRole": 1, "additionalRoles": 1, "_id": 0})
-        
+
+        user_profile = diag_collection.find_one(
+            {"employeeId": employee_id},
+            {"primaryRole": 1, "additionalRoles": 1, "_id": 0}
+        )
+
         roles = []
         if user_profile:
-            p_role = user_profile.get("primaryRole")
-            if p_role: roles.append(p_role)
+            if user_profile.get("primaryRole"):
+                roles.append(user_profile["primaryRole"])
             roles.extend(user_profile.get("additionalRoles", []))
-            
+
+        print("ROLES:", roles)  # 🔍 debug
+
+        # 🔹 Extra permissions (optional)
         extra_permissions = []
-        if "HMS-P" in roles:
+        if any(r.startswith("HMS-P") for r in roles):
             access_collection = db['UserPageAccess']
             user_access = access_collection.find_one({"employeeId": employee_id})
             if user_access:
                 extra_permissions = user_access.get("allowed_pages", [])
-        
-        # Priority: DB permissions first, then Roles
+
         allowed_actions = extra_permissions if extra_permissions else roles
-        # -----------------------------------------------------------------
-        
-        # 3. Filter mapping based on allowed_actions
+
+        print("ALLOWED:", allowed_actions)  # 🔍 debug
+
+        # ============================================================
+        # 🔥 PERMISSION EXPANSION (FIXED)
+        # ============================================================
+
+        # Step 1: Collect all permissions
+        all_permissions = set()
+        for group in all_groups:
+            for page in group.get('pages', []):
+                all_permissions.update(page.get('permissions', []))
+
+        # Step 2: Check HMS access
+        has_hms_access = any(role.startswith("HMS") for role in allowed_actions)
+
+        expanded_permissions = set()
+
+        if has_hms_access:
+            # ✅ FULL HMS ACCESS
+            for perm in all_permissions:
+                if perm.startswith("HMS"):
+                    expanded_permissions.add(perm)
+        else:
+            # ✅ Normal role logic
+            for action in allowed_actions:
+                expanded_permissions.add(action)
+
+                for perm in all_permissions:
+                    if perm.startswith(action + "-"):
+                        expanded_permissions.add(perm)
+
+        # ============================================================
+        # 🔹 FILTER SIDEBAR
+        # ============================================================
+
         filtered_groups = []
+
         for group in all_groups:
             allowed_pages = []
+
             for page in group.get('pages', []):
                 page_perms = page.get('permissions', [])
+
+                # No permission → allow
                 if not page_perms:
-                    # If no specific permissions listed, we allow it
                     allowed_pages.append(page)
                     continue
-                
-                # Check if any of the page's permissions are in user's allowed_actions
-                is_match = any(
-                    any(action.startswith(p) for action in allowed_actions)
-                    for p in page_perms
-                )
-                if is_match:
+
+                # Match
+                if set(page_perms) & expanded_permissions:
                     allowed_pages.append(page)
-            
+
             if allowed_pages:
                 new_group = group.copy()
                 new_group['pages'] = allowed_pages
@@ -848,11 +871,8 @@ def get_sidebar_mapping(request):
 
         client.close()
         return Response(filtered_groups, status=200)
+
     except Exception as e:
-        print(f"Error in get_sidebar_mapping: {e}")
-        return Response({"error": str(e)}, status=500)
-    except Exception as e:
-        print(f"Error in get_sidebar_mapping: {e}")
         import traceback
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
