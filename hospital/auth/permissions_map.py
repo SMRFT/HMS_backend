@@ -12,7 +12,7 @@ PAGE_MAPPING = {
 
 
     # ==================== ADMISSION ====================
-    r'^/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/?(\?.*)?$': 'HMS-P-DLD',
+    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DLD',
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/admission/?(\?.*)?$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/admission/[^/]+/?(\?.*)?$': 'HMS-P-ADD',
