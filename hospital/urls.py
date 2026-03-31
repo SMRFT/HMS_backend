@@ -99,6 +99,7 @@ urlpatterns = [
     re_path(r'^update-summary/(?P<ip_no>.+)/$', summary.update_summary_fields, name='update_summary_fields'),
     re_path(r'^patient-investigations/(?P<ip_no>[\w%/-]+)/$', summary.get_patient_investigations, name='get_patient_investigations'),
     re_path(r'^get-printsummary/(?P<ip_no>.+)/$', summary.get_printsummary, name='get_printsummary'),
+    re_path(r'^patient-medicines/(?P<ip_no>.+)/$', summary.get_patient_medicines, name='get_patient_medicines'),
 
     #ICD11:
     path("icd11/search/", ICD11.icd11_search,name='icd11_search'),
@@ -148,7 +149,7 @@ urlpatterns = [
     #Package Master:
     path('investigation-prices/',  package_crud.get_bill_types,    name='get_bill_types'),
     path('lab-items/',  package_crud.get_lab_items,    name='get_lab_items'),
-    path('departments/',  package_crud.get_departments,    name='get_departments'),
+    path('outlets/',  package_crud.get_outlets,    name='get_outlets'),
     path('packages_crud/',  package_crud.get_packages,    name='get_packages'),
     path('packages/create/',  package_crud.create_package,  name='create_package'),
     path('packages/<int:package_no>/', package_crud.get_package,     name='get_package'),
@@ -251,7 +252,8 @@ urlpatterns = [
     path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
     path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
     path("update_schedule_status/",  surgeryschedule.update_schedule_status, name='update_schedule_status'),
-    path("list_diagnosis/",  surgeryschedule.list_diagnosis, name='list_diagnosis'),
+    path("list_diagnosis/",  surgeryschedule.list_diagnosis, name='list_diagnosis'),    
+    path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
 
 ]
