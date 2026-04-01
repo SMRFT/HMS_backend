@@ -63,7 +63,6 @@ urlpatterns = [
     path('get_active_admission/', room.get_active_admission, name='get_active_admission'), 
     path("room-shifting/",                    room.room_shifting_view,        name="room_shifting"),
     path("room-shifting/<path:ip_number>/update/", room.room_shifting_detail_view, name="room_shifting_detail"),
-    path("room-shifting/<str:shifting_id>/cancel/", room.room_shifting_cancel_view, name="room_shifting_cancel"),
 
     # Discharge URLs
     path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),

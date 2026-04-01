@@ -519,14 +519,12 @@ def room_enquiry_view(request):
             for entry in shiftings:
                 if not isinstance(entry, dict):
                     continue
-                if entry.get("is_cancelled"):
-                    continue  # skip cancelled shiftings
- 
+
                 room_no = str(entry.get("newRoomNo", "")).strip()
                 bed_no  = str(entry.get("newBedNo", "")).strip()
                 if not room_no or not bed_no:
                     continue
- 
+
                 admission_map[(room_no, bed_no)] = {
                     "is_roomActive":  bool(entry.get("is_roomActive", False)),
                     "is_roomCleaned": bool(entry.get("is_roomCleaned", False)),
@@ -829,12 +827,9 @@ def get_active_admission(request):
  
         # Check if this admission has already been shifted
         # (has any non-cancelled entry in roomShitingDetails)
-        shiftings      = parse_json_field(admission.roomShitingDetails)
-        has_shifted    = any(
-            isinstance(s, dict) and not s.get("is_cancelled", False)
-            for s in shiftings
-        )
- 
+        shiftings   = parse_json_field(admission.roomShitingDetails)
+        has_shifted = any(isinstance(s, dict) for s in shiftings)
+        
         # datetime formatting
         admission_date = admission_time = ""
         dt = admission.admissionDateTime
@@ -931,15 +926,10 @@ def room_shifting_view(request):
                     "ipserial_number":  str(admission.ipserial_number or ""),
                     "patient_name":     patient_name,
                     "shifting_id":      str(shift.get("shifting_id",      "")),
-                    "oldRoomNo":        str(shift.get("oldRoomNo",        "")),
-                    "oldBedNo":         str(shift.get("oldBedNo",         "")),
                     "newRoomNo":        str(shift.get("newRoomNo",        "")),
                     "newBedNo":         str(shift.get("newBedNo",         "")),
                     "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
                     "shifted_by":       str(shift.get("shifted_by",       "")),
-                    "is_cancelled":     bool(shift.get("is_cancelled",    False)),
-                    "cancelled_by":     str(shift.get("cancelled_by",     "")),
-                    "cancelled_at":     str(shift.get("cancelled_at",     "")),
                     "is_roomActive":    bool(shift.get("is_roomActive",   False)),
                     "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
                 })
@@ -983,15 +973,16 @@ def room_shifting_view(request):
  
         # ── GUARD: only one active shift allowed per admission ────────────
         existing_shiftings = parse_json_field(admission.roomShitingDetails)
-        active_shiftings   = [
+        active_shiftings = [
             s for s in existing_shiftings
-            if isinstance(s, dict) and not s.get("is_cancelled", False)
+            if isinstance(s, dict)
         ]
+
         if active_shiftings:
             return Response(
                 {
                     "success": False,
-                    "error":   "Room already shifted. Use Edit or Cancel for existing shifting record.",
+                    "error": "Room already shifted. Use Edit for existing shifting record.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1036,15 +1027,10 @@ def room_shifting_view(request):
                 continue
             cleaned_shiftings.append({
                 "shifting_id":      str(shift.get("shifting_id",      "")),
-                "oldRoomNo":        str(shift.get("oldRoomNo",        "")),
-                "oldBedNo":         str(shift.get("oldBedNo",         "")),
                 "newRoomNo":        str(shift.get("newRoomNo",        "")),
                 "newBedNo":         str(shift.get("newBedNo",         "")),
                 "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
                 "shifted_by":       str(shift.get("shifted_by",       "")),
-                "is_cancelled":     bool(shift.get("is_cancelled",    False)),
-                "cancelled_by":     str(shift.get("cancelled_by",     "")),
-                "cancelled_at":     str(shift.get("cancelled_at",     "")),
                 "is_roomActive":    bool(shift.get("is_roomActive",   False)),
                 "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
             })
@@ -1052,15 +1038,10 @@ def room_shifting_view(request):
         # New shift — is_roomActive: True, is_roomCleaned: False (requirement #5)
         cleaned_shiftings.append({
             "shifting_id":      new_shifting_id,
-            "oldRoomNo":        old_room_no,
-            "oldBedNo":         old_bed_no,
             "newRoomNo":        new_room,
             "newBedNo":         new_bed,
             "shiftingDateTime": timezone.now().isoformat(),
             "shifted_by":       str(user_id),
-            "is_cancelled":     False,
-            "cancelled_by":     "",
-            "cancelled_at":     "",
             "is_roomActive":    True,   # ← requirement #5
             "is_roomCleaned":   False,  # ← requirement #5
         })
@@ -1130,57 +1111,46 @@ def room_shifting_detail_view(request, ip_number):
     shifting_details = parse_json_field(admission.roomShitingDetails)
     room_details     = parse_json_field(admission.room_details)
  
-    shift_found    = False
-    target_shift   = None
- 
+    shift_found  = False
+    target_shift = None
+
     for shift in shifting_details:
         if isinstance(shift, dict) and str(shift.get("shifting_id", "")) == shifting_id:
-            if shift.get("is_cancelled"):
-                return Response(
-                    {"success": False, "error": "Cancelled shifting record cannot be edited"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
             target_shift = shift
-            shift_found  = True
+            shift_found = True
             break
- 
+
     if not shift_found:
         return Response(
             {"success": False, "error": "Shifting record not found"},
             status=status.HTTP_404_NOT_FOUND,
         )
- 
-    # ── Requirement #6:
-    #    Edit → create NEW object in roomShitingDetails, set previous is_roomActive=False
-    # ──────────────────────────────────────────────────────────────────────────
+
     updated_shiftings = []
     for shift in shifting_details:
         if not isinstance(shift, dict):
             continue
+
         obj = dict(shift)
+
         if str(obj.get("shifting_id", "")) == shifting_id:
-            # Mark previous entry as inactive
-            obj["is_roomActive"]       = False
-            obj["lastmodified_by"]     = str(user_id)
-            obj["lastmodified_date"]   = timezone.now().isoformat()
+            obj["is_roomActive"] = False
+            obj["lastmodified_by"] = str(user_id)
+            obj["lastmodified_date"] = timezone.now().isoformat()
+
         updated_shiftings.append(obj)
- 
-    # Create a new shifting entry with the updated room/bed
+
     new_shifting_id = generate_shifting_id(updated_shiftings)
+
     updated_shiftings.append({
-        "shifting_id":      new_shifting_id,
-        "oldRoomNo":        str(target_shift.get("newRoomNo", "")),  # old = previous new
-        "oldBedNo":         str(target_shift.get("newBedNo",  "")),
-        "newRoomNo":        new_room,
-        "newBedNo":         new_bed,
+        "shifting_id": new_shifting_id,
+        "newRoomNo": new_room,
+        "newBedNo": new_bed,
         "shiftingDateTime": timezone.now().isoformat(),
-        "shifted_by":       str(user_id),
-        "is_cancelled":     False,
-        "cancelled_by":     "",
-        "cancelled_at":     "",
-        "is_roomActive":    True,   # new entry is active
-        "is_roomCleaned":   False,
-        "edited_from":      shifting_id,  # audit trail
+        "shifted_by": str(user_id),
+        "is_roomActive": True,
+        "is_roomCleaned": False,
+        "edited_from": shifting_id,
     })
  
     # ── Deactivate current active room in room_details ────────────────────
@@ -1211,100 +1181,3 @@ def room_shifting_detail_view(request, ip_number):
         status=status.HTTP_200_OK,
     )
  
- 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /room-shifting/<shifting_id>/cancel/
-# ─────────────────────────────────────────────────────────────────────────────
- 
-@api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
-def room_shifting_cancel_view(request, shifting_id):
- 
-    user_id = request.headers.get("auth-user-id", "system")
- 
-    admission       = None
-    cancelled_shift = None
- 
-    for adm in Admission.objects.all():
-        shiftings = parse_json_field(adm.roomShitingDetails)
-        for shift in shiftings:
-            if isinstance(shift, dict) and str(shift.get("shifting_id", "")) == str(shifting_id):
-                admission       = adm
-                cancelled_shift = shift
-                break
-        if admission:
-            break
- 
-    if not admission:
-        return Response(
-            {"success": False, "error": "Shifting record not found"},
-            status=status.HTTP_404_NOT_FOUND,
-        )
- 
-    shiftings    = parse_json_field(admission.roomShitingDetails)
-    room_details = parse_json_field(admission.room_details)
- 
-    found = False
-    for shift in shiftings:
-        if not isinstance(shift, dict):
-            continue
-        if str(shift.get("shifting_id", "")) == str(shifting_id):
-            if shift.get("is_cancelled"):
-                return Response(
-                    {"success": False, "error": "Already cancelled"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            shift["is_cancelled"] = True
-            shift["cancelled_by"] = str(user_id)
-            shift["cancelled_at"] = timezone.now().isoformat()
-            shift["is_roomActive"] = False
-            cancelled_shift = shift
-            found = True
-            break
- 
-    if not found:
-        return Response(
-            {"success": False, "error": "Shifting record not found"},
-            status=status.HTTP_404_NOT_FOUND,
-        )
- 
-    # Restore original room in room_details
-    updated_rooms = []
-    for room in room_details:
-        if not isinstance(room, dict):
-            continue
-        obj = {
-            "roomNo":         str(room.get("roomNo",         "")),
-            "bedNo":          str(room.get("bedNo",          "")),
-            "is_roomActive":  bool(room.get("is_roomActive",  False)),
-            "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
-        }
- 
-        # New room → mark cleaned (vacated)
-        if (
-            obj["roomNo"] == str(cancelled_shift.get("newRoomNo", "")) and
-            obj["bedNo"]  == str(cancelled_shift.get("newBedNo",  ""))
-        ):
-            obj["is_roomActive"]  = False
-            obj["is_roomCleaned"] = True
- 
-        # Old room → restore as active
-        if (
-            obj["roomNo"] == str(cancelled_shift.get("oldRoomNo", "")) and
-            obj["bedNo"]  == str(cancelled_shift.get("oldBedNo",  ""))
-        ):
-            obj["is_roomActive"]  = True
-            obj["is_roomCleaned"] = False
- 
-        updated_rooms.append(obj)
- 
-    admission.room_details       = updated_rooms
-    admission.roomShitingDetails = shiftings
-    admission.lastmodified_by    = str(user_id)
-    admission.save()
- 
-    return Response(
-        {"success": True, "message": "Shifting record cancelled successfully"},
-        status=status.HTTP_200_OK,
-    )
