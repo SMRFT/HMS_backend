@@ -727,8 +727,12 @@ def save_medicine_ward_request(request):
 
         bill_type = data.get("bill_type", "")
         bill_type_no = data.get("billTypeNo", "")
-        bill_name = data.get("billTypeName", "")
+        collection = mongo_db["hospital_oppharmacybill"]
         
+        # Calculate next Bill_id
+        last_bill = collection.find_one({}, sort=[("Bill_id", -1)])
+        next_Bill_id = (int(last_bill.get("Bill_id", 0)) + 1) if last_bill and "Bill_id" in last_bill else 1
+
         # Clean up unnecessary fields from medicine_particulars for ward request
         for med in medicine_particulars:
             med.pop("edit_history", None)
@@ -738,6 +742,8 @@ def save_medicine_ward_request(request):
             med.pop("total_stock", None)
             med.pop("price", None)
             med.pop("expiry_date", None)
+            med.pop("itemName", None)
+            med.pop("doctor", None)
             
         from datetime import datetime
         import pytz
@@ -746,6 +752,7 @@ def save_medicine_ward_request(request):
         
         # Create Ward Request document for PyMongo insert (To allow native BSON arrays)
         bill_doc = {
+            "Bill_id": next_Bill_id,
             "bill_no": "", 
             "estimate_no": "",
             "patient_name": patient_name,
@@ -753,7 +760,6 @@ def save_medicine_ward_request(request):
             "inpatient_number": data.get("ipNumber"),
             "bill_type": bill_type,
             "bill_type_no": bill_type_no,
-            "bill_name": bill_name,
             "doctor_id": data.get("doctor_id"),
             "doctor": data.get("doctor"),
             "room_no": data.get("wardName", ""),
@@ -763,7 +769,7 @@ def save_medicine_ward_request(request):
             "overall_discount_amount": 0.0,
             "overall_discount_type": "percent",
             "overall_discount_value": 0.0,
-            "billing_status": "Ward Request",
+            "billing_status": "Pending",
             "billing_mode": "WARD REQUEST",
             "is_ward_request": True,
             "is_active": True,
@@ -774,7 +780,6 @@ def save_medicine_ward_request(request):
         }
         
         # Insert into hospital_oppharmacybill natively to avoid Djongo JSONField stringification
-        collection = mongo_db["hospital_oppharmacybill"]
         result = collection.insert_one(bill_doc)
         
         return Response({
