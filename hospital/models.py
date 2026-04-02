@@ -533,6 +533,18 @@ class Room(AuditModel):
             self.room_kits = []
         super().save(*args, **kwargs)
 
+
+class RoomBooking(models.Model):
+    ip_number    = models.CharField(max_length=100, db_index=True)
+    room_number  = models.CharField(max_length=50)
+    bed_number   = models.CharField(max_length=50)
+    is_booked    = models.BooleanField(default=True)
+    room_shifted = models.BooleanField(default=False)   # True once patient is actually shifted
+    booked_date    = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Booking: IP={self.ip_number} | Room={self.room_number}/{self.bed_number} | shifted={self.room_shifted}"
+
 class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)

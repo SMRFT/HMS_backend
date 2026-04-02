@@ -59,7 +59,9 @@ urlpatterns = [
     
     path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
 
-    path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
+    path("room-enquiry/",       room.room_enquiry_view,       name="room_enquiry"),
+    path("update-room-cleaned/", room.update_room_cleaned_view, name="update_room_cleaned"),
+    path("book-room/",          room.book_room_view,           name="book_room"),
     path('get_active_admission/', room.get_active_admission, name='get_active_admission'), 
     path("room-shifting/",                    room.room_shifting_view,        name="room_shifting"),
     path("room-shifting/<path:ip_number>/update/", room.room_shifting_detail_view, name="room_shifting_detail"),

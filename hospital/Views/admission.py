@@ -73,80 +73,167 @@ def search_rooms(request):
     try:
         result = []
 
-        # STEP 1 — BUILD ADMISSION MAP
+        # ─────────────────────────────────────────────
+        # STEP 1 — BUILD BED STATUS MAP FROM ADMISSION
+        # ─────────────────────────────────────────────
+        # Key: (room_no, bed_no)
+        # Value:
+        #   Occupied
+        #   Available
+        #   Available - Not Cleaned
+        # ─────────────────────────────────────────────
         admission_map = {}
+
         for admission in Admission.objects.all():
+
             if not admission.is_admitted:
                 continue
+
             if admission.is_discharged:
                 continue
+
+            # Original room entries
             details = parse_json_field(admission.room_details)
-            shifts  = parse_json_field(admission.roomShitingDetails)
-            for entry in details + shifts:
+
+            for entry in details:
                 if not isinstance(entry, dict):
                     continue
+
                 room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo", "")).strip()
+                bed_no = str(entry.get("bedNo", "")).strip()
+
                 if not room_no or not bed_no:
                     continue
-                admission_map[(room_no, bed_no)] = True
 
-        # STEP 2 — FILTER ROOMS
+                is_room_active = bool(entry.get("is_roomActive", False))
+                is_room_cleaned = bool(entry.get("is_roomCleaned", False))
+
+                key = (room_no, bed_no)
+
+                # true + false => Occupied
+                if is_room_active and not is_room_cleaned:
+                    admission_map[key] = "Occupied"
+
+                # false + true => Available
+                elif not is_room_active and is_room_cleaned:
+                    admission_map[key] = "Available"
+
+                # false + false => Available - Not Cleaned
+                elif not is_room_active and not is_room_cleaned:
+                    admission_map[key] = "Available - Not Cleaned"
+
+            # Shifted room entries
+            shifts = parse_json_field(admission.roomShitingDetails)
+
+            for shift in shifts:
+                if not isinstance(shift, dict):
+                    continue
+
+                room_no = str(shift.get("newRoomNo", "")).strip()
+                bed_no = str(shift.get("newBedNo", "")).strip()
+
+                if not room_no or not bed_no:
+                    continue
+
+                is_room_active = bool(shift.get("is_roomActive", False))
+                is_room_cleaned = bool(shift.get("is_roomCleaned", False))
+
+                key = (room_no, bed_no)
+
+                # true + false => Occupied
+                if is_room_active and not is_room_cleaned:
+                    admission_map[key] = "Occupied"
+
+                # false + true => Available
+                elif not is_room_active and is_room_cleaned:
+                    admission_map[key] = "Available"
+
+                # false + false => Available - Not Cleaned
+                elif not is_room_active and not is_room_cleaned:
+                    admission_map[key] = "Available - Not Cleaned"
+
+        # ─────────────────────────────────────────────
+        # STEP 2 — APPLY ROOM FILTERS
+        # ─────────────────────────────────────────────
         room_number_filter = request.GET.get("room_number")
-        category_filter    = request.GET.get("room_category")
-        block_filter       = request.GET.get("block")
-        floor_filter       = request.GET.get("floor")
+        category_filter = request.GET.get("room_category")
+        block_filter = request.GET.get("block")
+        floor_filter = request.GET.get("floor")
 
         for room in Room.objects.all():
+
             if not room.is_active:
                 continue
+
             if room_number_filter:
-                if room_number_filter.lower() not in room.room_number.lower():
+                if room_number_filter.lower() not in str(room.room_number).lower():
                     continue
+
             if category_filter:
-                if room.room_category != category_filter:
+                if str(room.room_category) != str(category_filter):
                     continue
+
             if block_filter:
-                if room.block != block_filter:
+                if str(room.block) != str(block_filter):
                     continue
+
             if floor_filter:
                 try:
-                    if room.floor != int(floor_filter):
+                    if int(room.floor) != int(floor_filter):
                         continue
                 except Exception:
                     continue
 
-            # STEP 3 — BED STATUS
+            # ─────────────────────────────────────────
+            # STEP 3 — BUILD BED STATUS FOR ROOM
+            # ─────────────────────────────────────────
             beds = parse_json_field(room.beds)
             beds_data = []
+
             for bed in beds:
                 if not isinstance(bed, dict):
                     continue
+
                 bed_number = str(bed.get("bed_number", "")).strip()
+
                 if not bed_number:
                     continue
-                if room.room_blocked or room.room_status == "Blocked":
+
+                # Room itself blocked
+                if room.room_blocked or str(room.room_status).lower() == "blocked":
                     status = "Maintenance"
+
                 else:
-                    key = (str(room.room_number), bed_number)
-                    status = "Occupied" if key in admission_map else "Available"
-                beds_data.append({"bed_number": bed_number, "status": status})
+                    key = (str(room.room_number).strip(), bed_number)
+
+                    # Default if no admission entry exists
+                    status = admission_map.get(key, "Available")
+
+                beds_data.append({
+                    "bed_number": bed_number,
+                    "status": status
+                })
 
             result.append({
-                "room_number":   room.room_number,
-                "room_type":     room.room_type,
+                "room_number": room.room_number,
+                "room_type": room.room_type,
                 "room_category": room.room_category,
-                "block":         room.block,
-                "floor":         room.floor,
-                "beds":          beds_data,
+                "block": room.block,
+                "floor": room.floor,
+                "beds": beds_data,
             })
 
-        return Response(result)
+        return Response(result, status=200)
 
     except Exception as e:
         print("SEARCH ROOMS ERROR:", str(e))
         traceback.print_exc()
-        return Response({"error": str(e)}, status=500)
+        return Response(
+            {
+                "error": str(e)
+            },
+            status=500
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
