@@ -12,8 +12,8 @@ class AuditModel(models.Model):
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
     lastmodified_date = models.DateTimeField(auto_now=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
-    department_code = models.CharField(max_length=100, null=True, blank=True)
-    hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
+    outlet_code = models.CharField(max_length=100, null=True, blank=True)
+    hospital_code = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         abstract = True
@@ -330,6 +330,9 @@ class OPPharmacyBill(AuditModel):
     billing_mode = models.CharField(max_length=20)
 
     payment_details = models.JSONField(null=True, blank=True)
+    
+    
+    delete_reason = models.TextField(null=True, blank=True)
 
     round_off= models.IntegerField(default=0)
     edit_history = models.JSONField(default=list, blank=True, null=True)
@@ -874,3 +877,29 @@ class VelavanItems(AuditModel):
         db_table = 'hospital_velavan_items'
     def __str__(self):
         return self.itemName
+
+
+
+from django.db import models
+
+class Cashcountershiftdetails(AuditModel):
+
+    shiftno = models.CharField(primary_key=True,max_length=100000)
+
+    CashierID      = models.CharField(max_length=100)
+    CashCounter    = models.CharField(max_length=100)
+
+    OpeningBalance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    ClosingBalance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    ShiftStatus    = models.CharField(max_length=50, default="active")
+
+    StartingTime   = models.DateTimeField()
+    closingTime    = models.DateTimeField(null=True, blank=True)
+
+    
+
+    is_active      = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.CashierID} - {self.CashCounter}"

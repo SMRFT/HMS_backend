@@ -305,6 +305,7 @@ from ..models import Admission
 from ..serializers import AdmissionSerializer
 
 @api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 def uhidadmissionstatus(request):
 
     uhid = request.GET.get("uhid")

@@ -9,6 +9,7 @@ from .Views import (
     inventory,
     package_crud,
     pharmacy,
+    cashcounter,
     radiology,
     room,
     NursingStation,
@@ -45,6 +46,16 @@ urlpatterns = [
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
     path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
+    path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
+    path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+
+
+    # Central cah counter
+    path('cashcountershiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
+    path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
+    
+    
+    
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),

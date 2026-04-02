@@ -204,8 +204,7 @@ def get_oppharmacy_stock(request):
 
 
 
-# ----------------------------------------------------------
-# SANITIZE MEDICINES
+
 
 
 
@@ -341,7 +340,13 @@ def build_edit_history(old_meds, new_meds, employee_id):
 @permission_classes([HasRoleAndDataPermission])
 def save_oppharmacy_bill(request):
     data = request.data
-    employee_id = data.get("auth-user-id")  # Use consistently
+    print("data",data)
+
+    employee_id = data.get("auth-user-id")  
+    print("employee_id",employee_id)
+    
+    hospital_code = data.get("auth-hospital-code")
+    print("hospital_code",hospital_code)
 
     # ✅ STATUS NORMALIZATION (unchanged)
     status_raw = str(data.get("status", "")).strip().lower()
@@ -357,7 +362,7 @@ def save_oppharmacy_bill(request):
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
     department_code = "OP001"
 
-    # COMMON FIELDS (Removed patient_name and bill_name)
+    
     fields = {
         "uhid": data.get("uhid"),
         "inpatient_number": data.get("inpatient_number"),
@@ -393,6 +398,7 @@ def save_oppharmacy_bill(request):
         # Update metadata
         update_data = {**fields}
         update_data["medicine_particulars"] = updated_meds
+        update_data["hospital_code"] = hospital_code
         update_data["lastmodified_by"] = employee_id
         update_data["lastmodified_date"] = datetime.utcnow()
 
@@ -428,6 +434,7 @@ def save_oppharmacy_bill(request):
     # 🆕 POST (CREATE)
     # ======================================================
     if request.method == "POST":
+        
         # Calculate next Bill_id
         last = OPPharmacyBill.objects.order_by('-Bill_id').first()
         next_Bill_id = (last.Bill_id + 1) if last else 1
@@ -436,10 +443,11 @@ def save_oppharmacy_bill(request):
             "Bill_id": next_Bill_id,
             "medicine_particulars": medicines,
             "billing_status": status,
-            "cashier_id": employee_id,
             "created_by": employee_id,
+            "hospital_code":hospital_code,
             "created_date": datetime.utcnow(),
             "bill_date": datetime.utcnow(),
+            "is_deleted": False,
             **fields
         }
 
@@ -487,7 +495,7 @@ def get_pharmacy_BillType(request):
 
     cursor = stock_collection.find(
         {
-            "billing_outlet": "PHARMACY",
+            "outlet_code": "OLET002",
             "is_active": True
         }
     )
@@ -647,7 +655,8 @@ def save_oppharmacy_estimate(request):
         "estimate_no": generate_estimate_no(),
         "created_by": employee_id,
         "created_date": now_ist,
-        "bill_date": now_ist
+        "bill_date": now_ist,
+        
     }
 
     result = bill_collection.insert_one(record_doc)
@@ -680,6 +689,7 @@ from ..models import PharmacyItem
 import json
 
 @api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
     try:
 
@@ -802,6 +812,9 @@ def convert_estimate_to_bill(request, estimate_no):
 
 
 
+from pymongo import MongoClient
+import os
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def OPPharmacy_pending_bills(request):
@@ -824,11 +837,65 @@ def OPPharmacy_pending_bills(request):
         for p in patients
     }
 
-    # ✅ Attach patient_name
+    # =========================================================
+    # ✅ NEW: MongoDB Connections
+    # =========================================================
+    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+
+    # Global DB (Doctor Profile)
+    global_db = client["Global"]
+    profile_collection = global_db["backend_diagnostics_profile"]
+
+    # HMS DB (Bill Type)
+    hms_db = client["HMS"]
+    billtype_collection = hms_db["hospital_billtype"]
+
+    # =========================================================
+    # ✅ Collect doctor_ids & bill_types
+    # =========================================================
+    doctor_ids = list(set([bill.doctor_id for bill in bills if bill.doctor_id]))
+    bill_types = list(set([int(bill.bill_type) for bill in bills if bill.bill_type]))
+
+    # =========================================================
+    # ✅ Fetch Doctor Names (ONE QUERY)
+    # =========================================================
+    doctor_cursor = profile_collection.find(
+        {"employeeId": {"$in": doctor_ids}},
+        {"employeeId": 1, "employeeName": 1}
+    )
+
+    doctor_map = {
+        doc["employeeId"]: doc.get("employeeName", "")
+        for doc in doctor_cursor
+    }
+
+    # =========================================================
+    # ✅ Fetch Bill Type Names (ONE QUERY)
+    # =========================================================
+    billtype_cursor = billtype_collection.find(
+        {"bill_type": {"$in": bill_types}},
+        {"bill_type": 1, "bill_name": 1}
+    )
+
+    billtype_map = {
+        bt["bill_type"]: bt.get("bill_name", "")
+        for bt in billtype_cursor
+    }
+
+    # =========================================================
+    # ✅ Attach all fields
+    # =========================================================
     data = []
     for bill in bills:
         serialized = OPPharmacyBillSerializer(bill).data
+
+        # Existing
         serialized["patient_name"] = patient_map.get(bill.uhid, "")
+
+        # ✅ NEW
+        serialized["doctor_name"] = doctor_map.get(str(bill.doctor_id), "")
+        serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type), "")
+
         data.append(serialized)
 
     return Response(data, status=status.HTTP_200_OK)
@@ -847,6 +914,7 @@ from ..models import OPPharmacyBill
 
 
 @api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
 def collect_oppharmacy_payment(request):
     try:
         data = request.data
@@ -937,3 +1005,299 @@ def collect_oppharmacy_payment(request):
             "success": False,
             "error": str(e)
         })
+    
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from django.utils import timezone
+from django.db import transaction
+
+from ..models import OPPharmacyBill, PharmacyStock
+
+
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def oppharmacy_deletebill(request):
+    try:
+        bill_id = request.data.get("bill_id")
+        delete_reason = request.data.get("delete_reason")
+
+        if not bill_id or not delete_reason:
+            return Response({
+                "status": "error",
+                "message": "bill_id and delete_reason required"
+            }, status=400)
+
+        bill = OPPharmacyBill.objects.filter(Bill_id=bill_id).first()
+
+        if not bill:
+            return Response({
+                "status": "error",
+                "message": "Bill not found"
+            }, status=404)
+
+        # ✅ Prevent double delete
+        if (bill.billing_status or "").lower() == "deleted":
+            return Response({
+                "status": "error",
+                "message": "Bill already deleted"
+            }, status=400)
+
+        medicines = bill.medicine_particulars or []
+        updated_medicines = []
+
+        with transaction.atomic():
+
+            for med in medicines:
+                item_id = med.get("item_id")
+                batch = med.get("batch_number")
+                qty = int(med.get("qty", 0))
+
+                if not item_id or not batch or qty <= 0:
+                    updated_medicines.append(med)
+                    continue
+
+                # ✅ STOCK REVERSAL
+                stock = PharmacyStock.objects.filter(
+                    item_id=item_id,
+                    batch_number=batch
+                ).first()
+
+                if stock:
+                    new_blocked = max(0, stock.blocked_quantity - qty)
+
+                    PharmacyStock.objects.filter(
+                        item_id=item_id,
+                        batch_number=batch
+                    ).update(
+                        blocked_quantity=new_blocked,
+                        lastmodified_date=timezone.now()
+                    )
+
+                # ✅ HISTORY
+                history = med.get("edit_history", [])
+                history.append({
+                    "action": "qty_deleted",
+                    "deleted_qty": qty,
+                    "blockedqty_change": qty,
+                    "reason": delete_reason,
+                    "timestamp": str(timezone.now()),
+                    "edited_by": None
+                })
+
+                med["edit_history"] = history
+                updated_medicines.append(med)
+
+            # ✅ BILL UPDATE
+            OPPharmacyBill.objects.filter(Bill_id=bill_id).update(
+                billing_status="Deleted",
+                delete_reason=delete_reason,
+                medicine_particulars=updated_medicines,
+                lastmodified_date=timezone.now()
+            )
+
+        return Response({
+            "status": "success",
+            "message": "Bill deleted successfully"
+        }, status=200)
+
+    except Exception as e:
+        print("DELETE ERROR:", str(e))
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+    
+
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from ..models import OPPharmacyBill
+from ..serializers import OPPharmacyBillSerializer
+
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from django.db.models import Sum
+import ast
+
+from bson.decimal128 import Decimal128
+
+def convert_decimal(value):
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+    return float(value) if value is not None else 0
+
+@api_view(['POST'])
+def pharmacy_medicinechart(request):
+    try:
+        print("\n===== API START: pharmacy_medicinechart =====")
+
+        data = request.data
+
+        # 🔐 Headers
+        employee_id = request.headers.get("auth-user-id")
+        hospital_code = request.headers.get("auth-hospital-code")
+
+        if not hospital_code:
+            hospital_code = "SH001"
+            print("⚠️ hospital_code missing → using fallback:", hospital_code)
+
+        # 📦 Payload
+        branch_code = data.get("branch_code")
+        outlet_code = data.get("outlet_code")
+
+        if not branch_code or not outlet_code:
+            return Response(
+                {"error": "branch_code and outlet_code are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 🔎 Filtering
+        queryset = OPPharmacyBill.objects.filter(
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            billing_status="Pending"
+        ).order_by('-created_date')
+
+        print("Final Queryset Count:", queryset.count())
+
+        # 🔄 Serialize
+        serializer = OPPharmacyBillSerializer(queryset, many=True)
+        serialized_data = serializer.data
+
+        final_data = []
+
+        for index, bill in enumerate(serialized_data):
+            print(f"\nProcessing bill {index + 1}")
+
+            # =========================================
+            # 🔹 PATIENT DETAILS
+            # =========================================
+            uhid = bill.get("uhid")
+            patient_data = {}
+
+            if uhid:
+                patient = Patient.objects.filter(uhid=uhid).first()
+                if patient:
+                    patient_data = {
+                        "patient_name": f"{patient.firstName} {patient.lastName}",
+                        "address": patient.permanent_address,
+                        "mobile": patient.mobilePhone
+                    }
+
+            bill["patient_details"] = patient_data
+
+            # =========================================
+            # 🔹 MEDICINE ITEMS PARSE
+            # =========================================
+            items = bill.get("medicine_particulars", [])
+
+            if isinstance(items, str):
+                try:
+                    clean_str = items.replace("OrderedDict", "dict")
+                    items = eval(clean_str)
+                except Exception as e:
+                    print("❌ Parsing failed:", e)
+                    items = []
+
+            if not isinstance(items, list):
+                items = []
+
+            print("AFTER PARSE:", items)
+
+            mapped_items = []
+
+            for item in items:
+
+                if not isinstance(item, dict):
+                    continue
+
+                item_id = item.get("item_id")
+                print("Processing item_id:", item_id)
+
+                # =====================================
+                # 🔸 ITEM NAME
+                # =====================================
+                item_name = None
+                item_obj = PharmacyItem.objects.filter(item_id=item_id).first()
+
+                if item_obj:
+                    item_name = item_obj.item_name
+
+                # =====================================
+                # 🔸 STOCK + BATCH DETAILS
+                # =====================================
+                available_stock = 0
+                batch_number = None
+                cgst_per = 0
+                sgst_per = 0
+                cgst_amt = 0
+                sgst_amt = 0
+
+                stock_qs = PharmacyStock.objects.filter(
+                    item_id=item_id
+                ).order_by('-stock_id')
+
+                # 🔹 Aggregate stock (ALL batches)
+                stock_agg = stock_qs.aggregate(
+                    total_stock=Sum('total_stock'),
+                    sold=Sum('sold_quantity'),
+                    transferred=Sum('transferred_out_quantity'),
+                    grn_return=Sum('grn_return_quantity')
+                )
+
+                total_stock = stock_agg.get("total_stock") or 0
+                sold = stock_agg.get("sold") or 0
+                transferred = stock_agg.get("transferred") or 0
+                grn_return = stock_agg.get("grn_return") or 0
+
+                available_stock = total_stock - sold - transferred - grn_return
+
+                # 🔹 Latest batch details
+                latest_stock = stock_qs.first()
+
+                if latest_stock:
+                    batch_number = latest_stock.batch_number
+                    cgst_per = convert_decimal(latest_stock.CGST_Percentage)
+                    sgst_per = convert_decimal(latest_stock.SGST_Percentage)
+                    cgst_amt = convert_decimal(latest_stock.CGST_Amt)
+                    sgst_amt = convert_decimal(latest_stock.SGST_Amt)
+
+                # =====================================
+                # 🔸 FINAL MAP
+                # =====================================
+                item["item_name"] = item_name
+                item["available_stock"] = available_stock
+                item["batch_number"] = batch_number
+                item["CGST_Percentage"] = cgst_per
+                item["SGST_Percentage"] = sgst_per
+                item["CGST_Amt"] = cgst_amt
+                item["SGST_Amt"] = sgst_amt
+
+                mapped_items.append(item)
+
+            bill["medicine_items"] = mapped_items
+
+            final_data.append(bill)
+
+        print("\n===== API SUCCESS =====\n")
+
+        return Response({
+            "status": "success",
+            "count": len(final_data),
+            "data": final_data
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print("\n❌ ERROR OCCURRED:", str(e))
+        return Response(
+            {"error": "Something went wrong", "details": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

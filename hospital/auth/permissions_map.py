@@ -169,7 +169,25 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/velavan/invoices/': 'HMS-P-VIN',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VINR',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VINR',  
-    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',      
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',
+
+
+    # PHARMACY STOCK   
+        '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
+        '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
+        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
+        '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
+        '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
+        '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-PGLBU',
+         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
+         '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
+         '/_b_a_c_k_e_n_d/HMS/uhidadmissionstatus/': 'HMS-P-POPUAS',
+
+        # Central cah counter
+
+        '/_b_a_c_k_e_n_d/HMS/cashcountershiftdetails/': 'HMS-P-PCCSD',
+        '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-PGAS',
+
 }
 
 

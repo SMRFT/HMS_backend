@@ -223,3 +223,11 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
         model = InsuranceProvider
         fields = '__all__'
 
+
+from .models import Cashcountershiftdetails
+class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = Cashcountershiftdetails
+        fields = '__all__'
+
