@@ -28,44 +28,18 @@ class AuditModel(models.Model):
         super().save(*args, **kwargs)
 
 class Patient(AuditModel):
-    GENDER_CHOICES = (
-        ('Male', 'Male'),
-        ('Female', 'Female'),
-        ('Other', 'Other'),
-    )
-
-    CUSTOMER_TYPE_CHOICES = (
-        ('General', 'General'),
-        ('Insurance', 'Insurance'),
-        ('Corporate', 'Corporate'),
-        ('Employee', 'Employee'),
-        ('Staff', 'Staff'),
-        ('Family', 'Family'),
-    )
-
     company_code = models.CharField(max_length=100, blank=True, null=True)
 
-    BLOOD_GROUP_CHOICES = (
-        ('A+', 'A+'),
-        ('A-', 'A-'),
-        ('B+', 'B+'),
-        ('B-', 'B-'),
-        ('AB+', 'AB+'),
-        ('AB-', 'AB-'),
-        ('O+', 'O+'),
-        ('O-', 'O-'),
-    )
-
     uhid = models.CharField(max_length=20)
-    ip_number = models.CharField(max_length=20, blank=True, null=True)
-    customer_type = models.CharField(max_length=20, choices=CUSTOMER_TYPE_CHOICES, default='General')
+    # ip_number = models.CharField(max_length=20, blank=True, null=True)
+    customer_type = models.CharField(max_length=20, default='General')
     registration_date =models.CharField(max_length=100, blank=True, null=True)
     salutation = models.CharField(max_length=10, blank=True, null=True)
     firstName = models.CharField(max_length=100)
     lastName = models.CharField(max_length=100)
     dob = models.DateField()
     age = models.IntegerField()
-    gender = models.CharField(max_length=10, choices=GENDER_CHOICES)
+    gender = models.CharField(max_length=10)
     permanent_address = models.TextField(blank=True, null=True)
     area = models.CharField(max_length=100, blank=True, null=True)
     zipcode = models.CharField(max_length=10, blank=True, null=True)
@@ -98,6 +72,8 @@ class Patient(AuditModel):
     birth_time_am_pm = models.CharField(max_length=20, blank=True, null=True, default='AM')
     weight = models.CharField(max_length=100, blank=True, null=True)
     mothers_uhid_no = models.CharField(max_length=20, blank=True, null=True)
+
+    mothers_uhid_no = models.CharField(max_length=20, blank=True, null=True)
     pediatrician_responsible = models.CharField(max_length=100, blank=True, null=True)
 
     # Additional fields
@@ -107,30 +83,52 @@ class Patient(AuditModel):
         return f"{self.firstName} {self.lastName} ({self.uhid})"
 
     def save(self, *args, **kwargs):
-        current_year = now().year % 100   # get last 2 digits (2026 -> 26)
+        # 1. Determine Financial Year prefix (Starting April)
+        today = now()
+        # If month is 1, 2, or 3 (January, February, March), use previous year.
+        # Otherwise use current year. (Financial Year is 2026-27 starting April 2026)
+        fy_year = today.year if today.month >= 4 else today.year - 1
+        prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            prefix = f"S0{current_year}"
-
-            # get last patient of the year
+            # 2. Get last patient of the current financial year to increment
             last_patient = Patient.objects.filter(
                 uhid__startswith=prefix
             ).order_by('-uhid').first()
 
             if last_patient and last_patient.uhid:
-                last_number = int(last_patient.uhid.split('/')[-1])
+                try:
+                    # Expecting format "S0YY/NNNNN"
+                    last_number_str = last_patient.uhid.split('/')[-1]
+                    last_number = int(last_number_str)
+                except (ValueError, IndexError):
+                    last_number = 0
             else:
                 last_number = 0
-
+            
             next_number = last_number + 1
-
-            self.uhid = f"{prefix}/{next_number:07d}"
+            # 3. Format with 5-digit padding as per user requirement (S026/00001)
+            self.uhid = f"{prefix}/{next_number:05d}"
 
         super().save(*args, **kwargs)
 
-    def __str__(self):
-        return f"{self.firstName} {self.lastName}" if self.firstName else "Unnamed Patient"
+class CustomerType(AuditModel):
+    type_id = models.IntegerField(primary_key=True)
+    type_name = models.CharField(max_length=100, unique=True)
+    registration_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, null=True, blank=True)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    priority = models.IntegerField(default=1)
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
 
+    def save(self, *args, **kwargs):
+        if self.type_id is None:
+            last = CustomerType.objects.order_by('-type_id').first()
+            self.type_id = (last.type_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.type_name
 
 class Billing(AuditModel):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")

@@ -16,7 +16,7 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type
 )
 from .Views.Stores import stores
 
@@ -80,6 +80,10 @@ urlpatterns = [
     path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
+
+    # Customer Type URLs
+    path('customer-types/', customer_type.customer_type_list, name='customer_type_list'),
+    path('customer-types/<int:pk>/', customer_type.customer_type_detail, name='customer_type_detail'),
 
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),

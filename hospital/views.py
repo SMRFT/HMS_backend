@@ -30,20 +30,17 @@ from .serializers import PatientSerializer
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
 def patientCreateView(request):
-    # Extract audit info from headers
+    # Extract audit info from request data
     employee_id = (
         request.data.get('auth-user-id') or
         request.headers.get('auth-user-id') or
         "system"
     )
-    print("Employee ID:", employee_id)
     hospital_code = (
-        request.data.get('hospital-code') or
-        request.headers.get('hospital-code') or
+        request.data.get('auth-hospital-code') or
+        request.headers.get('auth-hospital-code') or
         "system"
     )
-    print("Hospital Code:", hospital_code)
-
     if request.method == 'GET':
         uhid = request.GET.get('uhid')
         ip_number = request.GET.get('ip_number')
@@ -83,13 +80,16 @@ def patientCreateView(request):
         if serializer.is_valid():
             print("Serializer Valid. Saving...")
             try:
-                # Set audit fields before saving
+                # Set audit fields before saving. 
+                # Per requirements: only hospital_code is needed here, not branch/outlet.
                 save_kwargs = {
                     'lastmodified_by': employee_id,
                     'hospital_code': hospital_code
                 }
                 if not serializer.instance:
                     save_kwargs['created_by'] = employee_id
+                    # Add registration date for new patients
+                    save_kwargs['registration_date'] = timezone.now().strftime("%Y-%m-%d")
                     
                 patient = serializer.save(**save_kwargs)
                 print("Patient Saved:", patient)
