@@ -552,14 +552,15 @@ def room_enquiry_view(request):
                 existing = admission_map.get(key)
                 if existing is None or status == "Occupied":
                     admission_map[key] = {
-                        "status":        status,
-                        "patient":       patient_data,
-                        "uhid":          uhid,
-                        "ip_number":     ip_number,
-                        "ipserial":      ipserial,
+                        "status":         status,
+                        "patient":        patient_data,
+                        "uhid":           uhid,
+                        "ip_number":      ip_number,
+                        "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
-                        "source":        "shifting",
-                        "shifting_id":   str(shift.get("shifting_id", "")),
+                        "is_roomActive":  is_active,   # ← ADD THIS
+                        "source":         "shifting",
+                        "shifting_id":    str(shift.get("shifting_id", "")),
                     }
 
             # ── Process room_details (original room) ───────────────────────
@@ -612,6 +613,7 @@ def room_enquiry_view(request):
                         "ip_number":      ip_number,
                         "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
+                        "is_roomActive":  is_active,   # ← ADD THIS
                         "source":         "room_details",
                         "shifting_id":    "",
                     }
@@ -694,12 +696,15 @@ def room_enquiry_view(request):
                 # Check admission map first
                 info = admission_map.get(key)
 
+                # In STEP 4, replace the "Check admission map first" branch:
+
                 if info:
                     beds_data.append({
                         "bed_number":     bed_number,
                         "status":         info.get("status", "Available"),
                         "patient":        info.get("patient", {}),
                         "is_roomCleaned": info.get("is_roomCleaned", False),
+                        "is_roomActive":  info.get("is_roomActive", False),   # ← ADD THIS
                         "source":         info.get("source", ""),
                         "shifting_id":    info.get("shifting_id", ""),
                         "ip_number":      info.get("ip_number", ""),
