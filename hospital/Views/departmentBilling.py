@@ -54,7 +54,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
         try:
             patient = Patient.objects.get(uhid=admission.uhid)
 
-            # Fetch company name if company_code exists
+            # ── Get Company Name ─────────────────────────────
             company_name = None
             if patient.company_code:
                 try:
@@ -63,21 +63,55 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 except InsuranceProvider.DoesNotExist:
                     pass
 
+            # ── Extract Room Details (Latest Active Room) ────
+            room_no = None
+            bed_no = None
+
+            if admission.room_details:
+                # Get last active room OR last entry
+                active_rooms = [r for r in admission.room_details if r.get("is_roomActive")]
+                
+                room_data = active_rooms[-1] if active_rooms else admission.room_details[-1]
+
+                room_no = room_data.get("roomNo")
+                bed_no = room_data.get("bedNo")
+
+            # ── Response ─────────────────────────────────────
             response_data = {
                 'ipNumber': admission.ipNumber,
+                'ipserial_number': admission.ipserial_number,
                 'uhid': admission.uhid,
+
+                # Room Info (UPDATED)
+                'roomNo': room_no,
+                'bedNo': bed_no,
+                'room_details': admission.room_details,
+
+                # Admission Info
                 'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
                 'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
                 'admittingDoctor': admission.admittingDoctor,
-                'salutation': patient.salutation if hasattr(patient, 'salutation') else '',
+                'consultingDoctor': admission.consultingDoctor,
+                'packageName': admission.packageName,
+                'reasonForAdmission': admission.reasonForAdmission,
+
+                # Flags
+                'is_discharged': admission.is_discharged,
+                'is_admissionActive': admission.is_admissionActive,
+
+                # Patient Info
+                'salutation': getattr(patient, 'salutation', ''),
                 'firstName': patient.firstName,
                 'lastName': patient.lastName,
                 'age': patient.age,
                 'gender': patient.gender,
+                'mobilePhone': patient.mobilePhone,
                 'area': patient.area,
                 'city': patient.city,
                 'state': patient.state,
-                # Company fields
+                'zipcode': patient.zipcode,
+
+                # Company
                 'customer_type': patient.customer_type,
                 'company_code': patient.company_code,
                 'company_name': company_name,
@@ -86,13 +120,23 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             return Response(response_data, status=status.HTTP_200_OK)
 
         except Patient.DoesNotExist:
-            return Response({"error": "Patient not found for the given UHID"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Patient not found for the given UHID"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
     except Admission.DoesNotExist:
-        return Response({"error": "Admission record not found for the given IP Number"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"error": "Admission record not found for the given IP Number"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
     except Exception as e:
-        return Response({"error": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
+        return Response(
+            {"error": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
  
 @csrf_exempt
 @api_view(['POST'])

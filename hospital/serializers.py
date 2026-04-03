@@ -42,14 +42,6 @@ class PharmacyStockSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["stock_id"]
 
-from rest_framework import serializers
-from .models import OPPharmacyBill
-
-class OPPharmacyBillSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = OPPharmacyBill
-        fields = "__all__"
 
 from .models import GRN
 class GRNSerializer(serializers.ModelSerializer):
@@ -132,10 +124,8 @@ class RoomSerializer(serializers.ModelSerializer):
     
 
 from .models import Admission
-from .models import Admission, Patient
 
 class AdmissionSerializer(serializers.ModelSerializer):
-
     patient_details = serializers.SerializerMethodField()
 
     class Meta:

@@ -5,7 +5,7 @@ from django.utils import timezone
 from datetime import timedelta
 import calendar
 from django.db.models import Sum, Count
-from ..models import Patient, Billing, Admission, DischargeDetail, GRN, Room
+from ..models import Patient, Billing, Admission, GRN, Room
 
 @api_view(['GET'])
 def advanced_dashboard_stats(request):

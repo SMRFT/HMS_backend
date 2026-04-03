@@ -26,6 +26,7 @@ urlpatterns = [
     path('admission/', admission.admission_view, name='admission'),
     path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
     path('search-rooms/', admission.search_rooms, name='search-rooms'), 
+    path('admission/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
 
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
@@ -58,8 +59,12 @@ urlpatterns = [
     
     path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
 
-    path('room-enquiry/', room.room_enquiry_view, name='room_enquiry'),
-    path('room-shifting/', room.room_shifting_view, name='room_shifting'),
+    path("room-enquiry/",       room.room_enquiry_view,       name="room_enquiry"),
+    path("update-room-cleaned/", room.update_room_cleaned_view, name="update_room_cleaned"),
+    path("book-room/",          room.book_room_view,           name="book_room"),
+    path('get_active_admission/', room.get_active_admission, name='get_active_admission'), 
+    path("room-shifting/",                    room.room_shifting_view,        name="room_shifting"),
+    path("room-shifting/<path:ip_number>/update/", room.room_shifting_detail_view, name="room_shifting_detail"),
 
     # Discharge URLs
     path("search-discharge-patient/",discharge.search_discharge_patient,name="search-discharge-patient",),
@@ -121,8 +126,7 @@ urlpatterns = [
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
-    
-    
+
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
