@@ -145,7 +145,7 @@ def estimate_billing_create(request):
     if request.method == 'POST':
         current_user = request.data.get('auth-user-id', 'system')
         branch_code = request.data.get('auth-branch-code', 'system')
-        department_code = request.data.get('auth-department-code', 'system')
+        outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         with transaction.atomic():
@@ -170,7 +170,8 @@ def estimate_billing_create(request):
             request_data['EstBillDate'] = timezone.now()   # ← server time
             request_data['created_by'] = current_user      # ← from auth header
             request_data['branch_code'] = branch_code      # ← from auth header
-            request_data['department_code'] = department_code      # ← from auth header
+            request_data['hospital_code'] = hospital_code      # ← from auth header
+            request_data['outlet_code'] = outlet_code      # ← from auth header
 
             serializer = EstimateBillingSerializer(data=request_data)
             if serializer.is_valid():
@@ -370,7 +371,7 @@ def get_bill_types(request):
                 "bill_type": 1,
                 "bill_name": 1,
                 "billTypeNo": 1,
-                "department_code": 1,
+                "outlet_code": 1,
                 "is_allowDiscount": 1,
             }
         ))
@@ -403,7 +404,7 @@ def get_packages(request):
                 "_id": 0,
                 "packageNo": 1,
                 "packageName": 1,
-                "department": 1
+                "outlet_code": 1
             }
         ))
         
@@ -606,7 +607,7 @@ def invest_billing_create(request):
     try:
         current_user = request.data.get('auth-user-id', "system")
         branch_code = request.data.get('auth-branch-code', 'system')
-        department_code = request.data.get('auth-department-code', 'system')
+        outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         data = {k: v for k, v in request.data.items()
@@ -725,7 +726,7 @@ def invest_billing_create(request):
         data["investBillNo"] = invest_bill_no
         data["created_by"] = current_user
         data["branch_code"] = branch_code
-        data["department_code"] = department_code
+        data["outlet_code"] = outlet_code
         data["hospital_code"] = hospital_code
         data["created_date"] = timezone.now()
         data["lastmodified_by"] = None
@@ -940,7 +941,7 @@ def delete_bill_view(request):
 @permission_classes([HasRoleAndDataPermission])
 def dept_budr_view(request):
     """
-    Returns Deleted or Edited bills for the Department Bill Update/Delete Report.
+    Returns Deleted or Edited bills for the Outlet Bill Update/Delete Report.
 
     Query params:
       report_type : "deleted" | "edited"   (required)

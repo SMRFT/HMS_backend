@@ -192,13 +192,6 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
 
 
 
-
-
-
-
-
-    
-
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import ReferenceDoctor
@@ -258,26 +251,25 @@ def get_user_permissions(request):
         diag_collection = global_db['backend_diagnostics_profile']
         user_profile = diag_collection.find_one(
             {"employeeId": employee_id},
-            {"primaryRole": 1, "additionalRoles": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "_id": 0}
         )
         
         roles = []
+        hms_pages = []
+        extra_permissions = []
         if user_profile:
             p_role = user_profile.get("primaryRole")
             a_roles = user_profile.get("additionalRoles", [])
+            hms_pages = user_profile.get("hms_pages", [])
+            
             if p_role:
                 roles.append(p_role)
             if isinstance(a_roles, list):
                 roles.extend(a_roles)
                 
         # 2. Check for 'HMS-P' and fetch extra permissions
-        extra_permissions = []
-        if "HMS-P" in roles:
-            hms_db = client['HMS']
-            access_collection = hms_db['UserPageAccess']
-            user_access = access_collection.find_one({"employeeId": employee_id})
-            if user_access:
-                extra_permissions = user_access.get("allowed_pages", [])
+        if "HMS-P" in roles and user_profile:
+            extra_permissions = user_profile.get("allowed_pages", [])
 
         # 3. Combine and return
         # Logic: If extra_permissions exist, we prioritize them over roles for HMS-specific pages.
@@ -289,7 +281,8 @@ def get_user_permissions(request):
         return Response({
             "employeeId": employee_id, 
             "allowed_pages": combined_permissions,
-            "roles": list(set(roles)) 
+            "roles": list(set(roles)),
+            "hms_pages": list(set(hms_pages)) if isinstance(hms_pages, list) else []
         }, status=200)
 
     except Exception as e:
@@ -314,13 +307,21 @@ def update_user_permissions(request):
 
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
-        db = client['HMS']
-        collection = db['UserPageAccess']
+        global_db = client['Global']
+        diag_collection = global_db['backend_diagnostics_profile']
 
-        # Upsert the permission record
-        result = collection.update_one(
+        update_fields = {
+            "allowed_pages": allowed_pages
+        }
+
+        hms_pages = request.data.get('hms_pages')
+        if isinstance(hms_pages, list):
+            update_fields["hms_pages"] = hms_pages
+
+        # Upsert the permission record into the Global database
+        result = diag_collection.update_one(
             {"employeeId": employee_id},
-            {"$set": {"allowed_pages": allowed_pages}},
+            {"$set": update_fields},
             upsert=True
         )
 
@@ -664,12 +665,16 @@ def submit_qr_registration(request):
         session_id = request.data.get('session_id')
         form_data = request.data.get('data')
         
-        if not session_id or not form_data:
-            return Response({"error": "Missing session_id or data"}, status=400)
+        if not form_data:
+            return Response({"error": "Missing data"}, status=400)
             
-        temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
+        temp_reg = None
+        if session_id:
+            temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
+            
         if not temp_reg:
-             return Response({"error": "Invalid session"}, status=404)
+            session_id = str(uuid.uuid4())
+            temp_reg = TempPatientRegistration(session_id=session_id)
              
         temp_reg.data = json.dumps(form_data)
         temp_reg.is_consumed = False
@@ -791,7 +796,7 @@ def get_sidebar_mapping(request):
 
         user_profile = diag_collection.find_one(
             {"employeeId": employee_id},
-            {"primaryRole": 1, "additionalRoles": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "_id": 0}
         )
 
         roles = []
@@ -804,11 +809,8 @@ def get_sidebar_mapping(request):
 
         # 🔹 Extra permissions (optional)
         extra_permissions = []
-        if any(r.startswith("HMS-P") for r in roles):
-            access_collection = db['UserPageAccess']
-            user_access = access_collection.find_one({"employeeId": employee_id})
-            if user_access:
-                extra_permissions = user_access.get("allowed_pages", [])
+        if any(r.startswith("HMS-P") for r in roles) and user_profile:
+            extra_permissions = user_profile.get("allowed_pages", [])
 
         allowed_actions = extra_permissions if extra_permissions else roles
 
