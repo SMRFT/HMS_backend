@@ -5,6 +5,30 @@ from .models import StoresAssetsManagement, StoresAssetsMaintainance , recycle_a
 from .serializer import StoresAssetsManagementSerializer, StoresAssetsMaintainanceSerializer, recycle_assetSerializer
 from rest_framework.permissions import AllowAny
 
+def generate_asset_id():
+    now = datetime.now()
+    if now.month <= 3:
+        fy_str = f"{(now.year - 1) % 100:02d}{now.year % 100:02d}"
+    else:
+        fy_str = f"{now.year % 100:02d}{(now.year + 1) % 100:02d}"
+    prefix = f"SH/{fy_str}/"
+    
+    last_record = StoresAssetsManagement.objects.filter(asset_id__startswith=prefix).order_by('-created_date').first()
+    
+    if last_record:
+        last_id = last_record.asset_id
+        try:
+            # Extract sequence number from "SH/2526/00001"
+            last_sequence_str = last_id.split('/')[-1]
+            last_sequence = int(last_sequence_str)
+            new_sequence = last_sequence + 1
+        except (ValueError, IndexError):
+            new_sequence = 1
+    else:
+        new_sequence = 1
+        
+    return f"{prefix}{new_sequence:05d}"
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def stores_assets_management_list_create(request):
