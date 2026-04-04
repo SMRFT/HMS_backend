@@ -106,9 +106,8 @@ def create_bill_type(request):
             'ward_request':      bool(data.get('ward_request', False)),
             'med_wise_discount': bool(data.get('med_wise_discount', False)),
             'med_dispatch':      bool(data.get('med_dispatch', False)),
-            'department_code':   str(data.get('department_code', '')).strip(),
+            'outlet_code':   str(data.get('outlet_code', '')).strip(),
             'billTypeNo':        bill_type_no,
-            'accounts_head':     str(data.get('accounts_head', '')).strip(),
             'created_at':        datetime.utcnow(),
             'created_by':        created_by,
             'branch_code':       branch_code,
@@ -148,8 +147,7 @@ def update_bill_type(request, bill_type_int):
             'bill_name', 'payment_mode',
             'centralCash', 'is_allowAdvance', 'is_active', 'is_allowDiscount',
             'sales_return', 'GST_export', 'IP_billType', 'ward_request',
-            'med_wise_discount', 'med_dispatch', 'department_code', 'accounts_head',
-            'billTypeNo',
+            'med_wise_discount', 'med_dispatch', 'outlet_code','billTypeNo',
         ]
 
         update_fields = {k: data[k] for k in allowed_keys if k in data}

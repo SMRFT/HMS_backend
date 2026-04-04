@@ -19,8 +19,8 @@ def dashboard_stats(request):
 
         # Using range avoids specific database functions that might be missing in some backends (like Djongo)
         today_new_patients = Patient.objects.filter(
-            created_at__gte=today_start,
-            created_at__lte=today_end
+            created_date__gte=today_start,
+            created_date__lte=today_end
         ).count()
 
         today_total_billings = Billing.objects.filter(
@@ -40,8 +40,8 @@ def dashboard_stats(request):
         # Get all created_at dates for patients in the last 7 days
         # We explicitly cast to list to evaluate queryset
         new_patients_dates = list(Patient.objects.filter(
-            created_at__gte=seven_days_start
-        ).values_list('created_at', flat=True))
+            created_date__gte=seven_days_start
+        ).values_list('created_date', flat=True))
 
         # Get all billed_date dates for billings in the last 7 days
         billings_dates = list(Billing.objects.filter(

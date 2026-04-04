@@ -157,12 +157,10 @@ def create_summary(request):
 
         created_by = request.data.get('auth-user-id', "system")
         branch_code = request.data.get('auth-branch-code', "system")
-        department_code = request.data.get('auth-department-code', "system")
         hospital_code = request.data.get('auth-hospital-code', "system")
 
         instance = serializer.save(            
             branch_code=branch_code,
-            department_code=department_code,
             hospital_code=hospital_code,
             created_by=created_by,
             created_date=datetime.utcnow()
@@ -964,3 +962,57 @@ def get_printsummary(request, ip_no):
         import traceback
         print(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_patient_medicines(request, ip_no):
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        pharmacy_collection = hms_db['hospital_oppharmacybill']
+
+        decoded_ip_no = unquote(ip_no)
+
+        bills = list(pharmacy_collection.find(
+            {
+                'inpatient_number': decoded_ip_no,
+                'is_active': True,
+                'is_discharge_medicine': True
+            },
+            {
+                '_id': 0,
+                'bill_no': 1,
+                'is_discharge_medicine': 1,
+                'is_regugar_medicine': 1,
+                'medicine_particulars': 1
+            }
+        ))
+
+        if not bills:
+            return Response([], status=status.HTTP_200_OK)
+
+        # Flatten all medicine_particulars across all bills
+        medicines = []
+        for bill in bills:
+            for item in bill.get('medicine_particulars', []):
+                medicines.append({
+                    'itemName': item.get('itemName', ''),
+                    'dosage': item.get('dosage', ''),
+                    'noOfDays': item.get('noOfDays', ''),
+                    'qty': item.get('qty', ''),
+                    'doseUnit': item.get('doseUnit', ''),
+                    'route': item.get('route', ''),
+                    'remark': item.get('remark', ''),
+                    'is_discharge_medicine': bill.get('is_discharge_medicine', False),
+                    'is_regular_medicine': bill.get('is_regugar_medicine', False),
+                    'bill_no': bill.get('bill_no', ''),
+                })
+
+        return Response(medicines, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
