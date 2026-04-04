@@ -19,6 +19,7 @@ from .Views import (
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type
 )
 from .Views.Stores import stores
+from .Views.Assets import assets
 
 urlpatterns = [
     # Admission URLs
@@ -220,6 +221,7 @@ urlpatterns = [
 
     # Stores URLs
     path('item-master/', stores.item_master_list_create, name='item_master_list_create'),
+    path('item-master/price-history/<str:item_id>/', stores.item_price_history, name='item_price_history'),
     path('item-master/<str:pk>/', stores.item_master_detail, name='item_master_detail'),
     
     path('department-master/', stores.department_list_create, name='department_list_create'),
@@ -241,6 +243,15 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+
+    path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
+    path('stores-assets-management/<path:pk>/', assets.stores_assets_management_detail, name='stores_assets_management_detail'),
+
+    path('stores-assets-maintainance/', assets.stores_assets_maintainance_details, name='stores_assets_maintainance_details'),
+    path('stores-assets-maintainance/<path:pk>/', assets.stores_assets_maintainance_details, name='stores_assets_maintainance_details'),
+
+    path("recycle_asset/", assets.create_recycle_asset, name="create_recycle_asset"),
+    path("recycle_asset/<path:pk>/", assets.update_recycle_asset, name="update_recycle_asset"),
     #OT Master:
     path('create_ot/', otMaster.create_ot,  name='create_ot'),
     path('list_ots/',  otMaster.list_ots,   name='list_ots'),

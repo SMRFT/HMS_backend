@@ -36,7 +36,51 @@ def generate_custom_id(model_class, id_field_name, prefix, sequence_length):
         
     return f"{base_prefix}{new_sequence:0{sequence_length}d}"
 
+def generate_custom_id_without_fy(model_class, id_field_name, prefix, sequence_length):
+    base_prefix = f"{prefix}"
+    print("base_prefix", base_prefix)
+    last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
+    print("last_record", last_record)
+    if last_record:
+        last_id = getattr(last_record, id_field_name)
+        try:
+            last_sequence = int(last_id.replace(base_prefix, ''))
+            print("last_sequence", last_sequence)
+            new_sequence = last_sequence + 1
+            print("new_sequence", new_sequence)
+        except ValueError:
+            new_sequence = 1
+    else:
+        new_sequence = 1
+        
+    return f"{base_prefix}{new_sequence:0{sequence_length}d}"
+
 # --- Item Master Views ---
+
+def generate_asset_id():
+    now = datetime.now()
+    if now.month <= 3:
+        fy_str = f"{(now.year - 1) % 100:02d}{now.year % 100:02d}"
+    else:
+        fy_str = f"{now.year % 100:02d}{(now.year + 1) % 100:02d}"
+    prefix = f"SH/{fy_str}/"
+    
+    last_record = StoresAssetsManagement.objects.filter(asset_id__startswith=prefix).order_by('-created_date').first()
+    
+    if last_record:
+        last_id = last_record.asset_id
+        try:
+            # Extract sequence number from "SH/2526/00001"
+            last_sequence_str = last_id.split('/')[-1]
+            last_sequence = int(last_sequence_str)
+            new_sequence = last_sequence + 1
+        except (ValueError, IndexError):
+            new_sequence = 1
+    else:
+        new_sequence = 1
+        
+    return f"{prefix}{new_sequence:05d}"
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def item_master_list_create(request):
@@ -82,6 +126,56 @@ def item_master_detail(request, pk):
         item.save()
         return Response({"message": "Item soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def item_price_history(request, item_id):
+    try:
+        import json
+        history = []
+        grns = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+        for grn in grns:
+            items = grn.items
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    items = []
+            if not isinstance(items, list):
+                items = []
+                
+            for item in items:
+                i_id = item.get('item_id') or item.get('id') or item.get('itemId')
+                if str(i_id) == str(item_id):
+                    # Find price rate
+                    rate_val = item.get('rate') or item.get('purchase_price') or item.get('unit_price') or item.get('price') or item.get('net_amount') or item.get('unitPrice')
+                    if rate_val is not None:
+                        try:
+                            rate = float(rate_val)
+                            history.append({
+                                "grn_number": grn.grn_number,
+                                "date": grn.date.strftime("%Y-%m-%d") if grn.date else None,
+                                "vendor_id": grn.vendor_id,
+                                "rate": rate,
+                                "quantity": item.get('quantity')
+                            })
+                        except (ValueError, TypeError):
+                            pass
+
+        if not history:
+            return Response({"history": [], "lowest": 0, "highest": 0, "average": 0})
+
+        rates = [h['rate'] for h in history]
+        return Response({
+            "history": history,
+            "lowest": round(min(rates), 2),
+            "highest": round(max(rates), 2),
+            "average": round(sum(rates) / len(rates), 2),
+        })
+
+    except Exception as e:
+        print("Error in item_price_history:", str(e))
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 # --- Department Views ---
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
@@ -94,7 +188,7 @@ def department_list_create(request):
     elif request.method == 'POST':
         data = request.data.copy()
         if not data.get('department_id'):
-            data['department_id'] = generate_custom_id(Department, 'department_id', 'DPT', 5)
+            data['department_id'] = generate_custom_id_without_fy(Department, 'department_id', 'DPT', 5)
             
         serializer = DepartmentSerializer(data=data)
         if serializer.is_valid():
@@ -140,7 +234,7 @@ def group_list_create(request):
     elif request.method == 'POST':
         data = request.data.copy()
         if not data.get('group_id'):
-            data['group_id'] = generate_custom_id(Group, 'group_id', 'GRP', 5)
+            data['group_id'] = generate_custom_id_without_fy(Group, 'group_id', 'GRP', 5)
             
         serializer = GroupSerializer(data=data)
         if serializer.is_valid():
@@ -186,7 +280,7 @@ def category_list_create(request):
     elif request.method == 'POST':
         data = request.data.copy()
         if not data.get('category_id'):
-            data['category_id'] = generate_custom_id(Category, 'category_id', 'CAT', 5)
+            data['category_id'] = generate_custom_id_without_fy(Category, 'category_id', 'CAT', 5)
             
         serializer = CategorySerializer(data=data)
         if serializer.is_valid():
@@ -232,7 +326,7 @@ def group_type_list_create(request):
     elif request.method == 'POST':
         data = request.data.copy()
         if not data.get('group_type_id'):
-            data['group_type_id'] = generate_custom_id(GroupType, 'group_type_id', 'GRPT', 5)
+            data['group_type_id'] = generate_custom_id_without_fy(GroupType, 'group_type_id', 'GRPT', 5)
             
         serializer = GroupTypeSerializer(data=data)
         if serializer.is_valid():
@@ -375,7 +469,6 @@ def stores_grn_list_create(request):
                         try:
                             item = ItemMaster.objects.get(item_id=item_id)
                             item.total_quantity += total_addition
-                            item.save()
                         except ItemMaster.DoesNotExist:
                             pass
                             
@@ -460,10 +553,13 @@ def stores_grn_detail(request, pk):
                 for item in items:
                     item_id = item.get('item_id') or item.get('id') or item.get('itemId')
                     qty = int(item.get('quantity') or 0)
-                    if item_id and qty > 0:
+                    free = int(item.get('free') or 0)
+                    total_addition = qty + free
+                    
+                    if item_id and total_addition > 0:
                         try:
                             master = ItemMaster.objects.get(item_id=str(item_id))
-                            master.total_quantity = (master.total_quantity or 0) + qty
+                            master.total_quantity = (master.total_quantity or 0) + total_addition
                             master.save()
                         except ItemMaster.DoesNotExist:
                             pass  # Item not in master — skip silently
@@ -507,10 +603,10 @@ def get_stores_intents(request):
     dept_collection = db["hospital_department"]
     item_collection = db["hospital_itemmaster"]
 
-    # ✅ Department mapping
+    # ✅ Department mapping (using ORM for robustness)
     dept_map = {
-        d["department_id"]: d["department_name"]
-        for d in dept_collection.find({"is_active": True})
+        d.department_id: d.department_name
+        for d in Department.objects.all()
     }
 
     # ✅ Item stock mapping
@@ -614,4 +710,5 @@ def soft_delete_intent(request, pk):
     obj.is_active = False
     obj.save()
 
-    return Response({"message": "Soft deleted successfully"})    
+    return Response({"message": "Soft deleted successfully"})   
+
