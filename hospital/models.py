@@ -331,12 +331,14 @@ class OPPharmacyBill(AuditModel):
 
     payment_details = models.JSONField(null=True, blank=True)
     
-    
+    is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
+    deleted_by =models.CharField(max_length=150)
 
     round_off= models.IntegerField(default=0)
     edit_history = models.JSONField(default=list, blank=True, null=True)
     cashier_id = models.CharField(max_length=50, blank=True, null=True)
+    pharmacist_id= models.CharField(max_length=50, blank=True, null=True)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):

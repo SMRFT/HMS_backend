@@ -181,7 +181,7 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-PGLBU',
          '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
          '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
-         '/_b_a_c_k_e_n_d/HMS/uhidadmissionstatus/': 'HMS-P-POPUAS',
+         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
         # Central cah counter
 

@@ -340,13 +340,13 @@ def build_edit_history(old_meds, new_meds, employee_id):
 @permission_classes([HasRoleAndDataPermission])
 def save_oppharmacy_bill(request):
     data = request.data
-    print("data",data)
+    print("data", data)
 
-    employee_id = data.get("auth-user-id")  
-    print("employee_id",employee_id)
-    
+    employee_id = data.get("auth-user-id")
+    print("employee_id", employee_id)
+
     hospital_code = data.get("auth-hospital-code")
-    print("hospital_code",hospital_code)
+    print("hospital_code", hospital_code)
 
     # ✅ STATUS NORMALIZATION (unchanged)
     status_raw = str(data.get("status", "")).strip().lower()
@@ -355,14 +355,16 @@ def save_oppharmacy_bill(request):
     elif status_raw == "billed":
         status = "Billed"
     else:
-        return Response({"success": False, "error": "Invalid status"})
+        return Response({
+            "success": False,
+            "message": "Invalid status provided"
+        })
 
-    Bill_id = data.get("Bill_id")  # Frontend sends Bill_id (note lowercase 'id')
+    Bill_id = data.get("Bill_id")
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
     department_code = "OP001"
 
-    
     fields = {
         "uhid": data.get("uhid"),
         "inpatient_number": data.get("inpatient_number"),
@@ -377,54 +379,58 @@ def save_oppharmacy_bill(request):
     }
 
     # ======================================================
-    # 🔁 PATCH (UPDATE / CONVERT) - Fixed: Ensure int(Bill_id), handle missing
-    # ======================================================
-    # ======================================================
     # 🔁 PATCH (UPDATE / CONVERT)
     # ======================================================
     if request.method == "PATCH":
         if not Bill_id:
-            return Response({"success": False, "error": "Bill_id required for updates/conversions"})
+            return Response({
+                "success": False,
+                "message": "Bill_id is required for update or conversion"
+            })
 
         try:
             record = OPPharmacyBill.objects.get(Bill_id=int(Bill_id))
         except OPPharmacyBill.DoesNotExist:
-            return Response({"success": False, "error": "Record not found"})
+            return Response({
+                "success": False,
+                "message": "Record not found"
+            })
 
         old_meds = record.medicine_particulars or []
         updated_meds = build_edit_history(old_meds, medicines, employee_id)
         adjust_blocked_stock(old_meds, updated_meds, department_code)
 
-        # Update metadata
         update_data = {**fields}
         update_data["medicine_particulars"] = updated_meds
         update_data["hospital_code"] = hospital_code
         update_data["lastmodified_by"] = employee_id
         update_data["lastmodified_date"] = datetime.utcnow()
 
-        # 🔥 CASE 3: UPDATE ESTIMATE
+        # ✅ IMPORTANT CHANGE
+        update_data["pharmacist_id"] = employee_id
+
+        # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
             update_data["billing_status"] = "Estimate"
             update_data["billing_mode"] = "ESTIMATE"
 
-        # 🔥 CASE 4: CONVERT TO BILL
+        # 🔥 CONVERT TO BILL
         elif status == "Billed":
             if not record.bill_no:
                 update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
             update_data["billing_status"] = "Billed"
             update_data["billing_mode"] = "ESTIMATE"
 
-        # ✅ NATIVE MONGO UPDATE
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
             {"$set": update_data}
         )
 
-        # Refresh for response
         record.refresh_from_db()
 
         return Response({
             "success": True,
+            "message": f"Bill updated successfully. Bill No: {record.bill_no}" if record.bill_no else "Estimate updated successfully",
             "Bill_id": record.Bill_id,
             "bill_no": record.bill_no,
             "estimate_no": record.estimate_no
@@ -434,8 +440,7 @@ def save_oppharmacy_bill(request):
     # 🆕 POST (CREATE)
     # ======================================================
     if request.method == "POST":
-        
-        # Calculate next Bill_id
+
         last = OPPharmacyBill.objects.order_by('-Bill_id').first()
         next_Bill_id = (last.Bill_id + 1) if last else 1
 
@@ -444,10 +449,12 @@ def save_oppharmacy_bill(request):
             "medicine_particulars": medicines,
             "billing_status": status,
             "created_by": employee_id,
-            "hospital_code":hospital_code,
+            "pharmacist_id": employee_id,  # ✅ IMPORTANT CHANGE
+            "hospital_code": hospital_code,
             "created_date": datetime.utcnow(),
             "bill_date": datetime.utcnow(),
             "is_deleted": False,
+          
             **fields
         }
 
@@ -459,10 +466,13 @@ def save_oppharmacy_bill(request):
                 "estimate_no": None,
                 "billing_mode": "DIRECT",
             })
+
             bill_collection.insert_one(record_doc)
             adjust_blocked_stock([], medicines, department_code)
+
             return Response({
                 "success": True,
+                "message": f"Bill created successfully. Bill No: {bill_no}",
                 "bill_no": bill_no,
                 "Bill_id": next_Bill_id
             })
@@ -475,15 +485,21 @@ def save_oppharmacy_bill(request):
                 "estimate_no": estimate_no,
                 "billing_mode": "ESTIMATE",
             })
+
             bill_collection.insert_one(record_doc)
             adjust_blocked_stock([], medicines, department_code)
+
             return Response({
                 "success": True,
+                "message": f"Estimate created successfully. Estimate No: {estimate_no}",
                 "estimate_no": estimate_no,
                 "Bill_id": next_Bill_id
             })
 
-    return Response({"success": False, "error": "Invalid request"})
+    return Response({
+        "success": False,
+        "message": "Invalid request method"
+    })
 
 
 
@@ -812,8 +828,21 @@ def convert_estimate_to_bill(request, estimate_no):
 
 
 
+
 from pymongo import MongoClient
 import os
+import ast
+
+from bson.decimal128 import Decimal128
+
+def convert_decimal(value):
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+    try:
+        return float(value)
+    except:
+        return 0.0
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
@@ -821,57 +850,54 @@ def OPPharmacy_pending_bills(request):
 
     bills = list(
         OPPharmacyBill.objects.filter(
-            billing_status__in=["Billed", "Paid"]
+            billing_status__in=["Billed", "Paid", "deleted"]
         )
     )
 
-    # ✅ Collect all UHIDs
+    # =========================================================
+    # ✅ Patient Mapping
+    # =========================================================
     uhids = [bill.uhid for bill in bills if bill.uhid]
 
-    # ✅ Fetch all patients in ONE query
     patients = Patient.objects.filter(uhid__in=uhids)
 
-    # ✅ Map UHID → Full Name
     patient_map = {
         p.uhid: f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
         for p in patients
     }
 
     # =========================================================
-    # ✅ NEW: MongoDB Connections
+    # ✅ MongoDB Connections
     # =========================================================
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
 
-    # Global DB (Doctor Profile)
     global_db = client["Global"]
     profile_collection = global_db["backend_diagnostics_profile"]
 
-    # HMS DB (Bill Type)
     hms_db = client["HMS"]
     billtype_collection = hms_db["hospital_billtype"]
 
+    # ✅ Collections
+    pharmacy_item_collection = hms_db["hospital_pharmacyitem"]
+    pharmacy_stock_collection = hms_db["hospital_pharmacystock"]
+    oppharmacy_collection = hms_db["hospital_oppharmacybill"]  # 🔥 IMPORTANT
+
     # =========================================================
-    # ✅ Collect doctor_ids & bill_types
+    # ✅ Doctor & Bill Type
     # =========================================================
     doctor_ids = list(set([bill.doctor_id for bill in bills if bill.doctor_id]))
     bill_types = list(set([int(bill.bill_type) for bill in bills if bill.bill_type]))
 
-    # =========================================================
-    # ✅ Fetch Doctor Names (ONE QUERY)
-    # =========================================================
     doctor_cursor = profile_collection.find(
         {"employeeId": {"$in": doctor_ids}},
         {"employeeId": 1, "employeeName": 1}
     )
 
     doctor_map = {
-        doc["employeeId"]: doc.get("employeeName", "")
+        str(doc["employeeId"]): doc.get("employeeName", "")
         for doc in doctor_cursor
     }
 
-    # =========================================================
-    # ✅ Fetch Bill Type Names (ONE QUERY)
-    # =========================================================
     billtype_cursor = billtype_collection.find(
         {"bill_type": {"$in": bill_types}},
         {"bill_type": 1, "bill_name": 1}
@@ -883,18 +909,128 @@ def OPPharmacy_pending_bills(request):
     }
 
     # =========================================================
-    # ✅ Attach all fields
+    # ✅ Collect item_id + batch_number FROM MONGO
+    # =========================================================
+    item_batch_set = set()
+
+    for bill in bills:
+        mongo_bill = oppharmacy_collection.find_one(
+            {"Bill_id": bill.Bill_id},
+            {"medicine_particulars": 1}
+        )
+
+        if mongo_bill and "medicine_particulars" in mongo_bill:
+            for item in mongo_bill.get("medicine_particulars", []):
+                item_id = item.get("item_id")
+                batch_number = item.get("batch_number")
+
+                if item_id and batch_number:
+                    item_batch_set.add((int(item_id), str(batch_number).strip()))
+
+    item_ids = list(set([i[0] for i in item_batch_set]))
+    batch_numbers = list(set([i[1] for i in item_batch_set]))
+
+    # =========================================================
+    # ✅ Fetch Item Names
+    # =========================================================
+    item_map = {}
+
+    if item_ids:
+        item_cursor = pharmacy_item_collection.find(
+            {"item_id": {"$in": item_ids}},
+            {"item_id": 1, "item_name": 1}
+        )
+
+        item_map = {
+            i["item_id"]: i.get("item_name", "")
+            for i in item_cursor
+        }
+
+    # =========================================================
+    # ✅ Fetch Stock Data
+    # =========================================================
+    stock_map = {}
+
+    if item_ids and batch_numbers:
+        stock_cursor = pharmacy_stock_collection.find(
+            {
+                "item_id": {"$in": item_ids},
+                "batch_number": {"$in": batch_numbers}
+            },
+            {
+                "item_id": 1,
+                "batch_number": 1,
+                "CGST_Percentage": 1,
+                "SGST_Percentage": 1,
+                "CGST_Amt": 1,
+                "SGST_Amt": 1
+            }
+        )
+
+        stock_map = {
+            (s["item_id"], str(s["batch_number"]).strip()): s
+            for s in stock_cursor
+        }
+
+    # =========================================================
+    # ✅ Final Response
     # =========================================================
     data = []
+
     for bill in bills:
         serialized = OPPharmacyBillSerializer(bill).data
 
         # Existing
         serialized["patient_name"] = patient_map.get(bill.uhid, "")
-
-        # ✅ NEW
         serialized["doctor_name"] = doctor_map.get(str(bill.doctor_id), "")
         serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type), "")
+
+        # =====================================================
+        # ✅ Fetch medicine_particulars from Mongo
+        # =====================================================
+        mongo_bill = oppharmacy_collection.find_one(
+            {"Bill_id": bill.Bill_id},
+            {"medicine_particulars": 1}
+        )
+
+        medicine_list = []
+
+        if mongo_bill and "medicine_particulars" in mongo_bill:
+            medicine_list = mongo_bill.get("medicine_particulars", [])
+
+        # =====================================================
+        # ✅ Process items
+        # =====================================================
+        if medicine_list:
+            updated_items = []
+
+            for item in medicine_list:
+                item_id = item.get("item_id")
+                batch_number = item.get("batch_number")
+
+                item_id = int(item_id) if item_id else None
+                batch_number = str(batch_number).strip() if batch_number else ""
+
+                item_name = item_map.get(item_id, "")
+                stock = stock_map.get((item_id, batch_number), {})
+
+                cgst_per = convert_decimal(stock.get("CGST_Percentage", 0))
+                sgst_per = convert_decimal(stock.get("SGST_Percentage", 0))
+                cgst_amt = convert_decimal(stock.get("CGST_Amt", 0))
+                sgst_amt = convert_decimal(stock.get("SGST_Amt", 0))
+
+                item["item_name"] = item_name
+                item["batch_number"] = batch_number
+                item["CGST_Percentage"] = cgst_per
+                item["SGST_Percentage"] = sgst_per
+                item["CGST_Amt"] = cgst_amt
+                item["SGST_Amt"] = sgst_amt
+
+                updated_items.append(item)
+
+            serialized["medicine_particulars"] = updated_items
+        else:
+            serialized["medicine_particulars"] = []
 
         data.append(serialized)
 
@@ -1016,34 +1152,49 @@ from ..models import OPPharmacyBill, PharmacyStock
 
 
 
-
-
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
 def oppharmacy_deletebill(request):
     try:
-        bill_id = request.data.get("bill_id")
-        delete_reason = request.data.get("delete_reason")
+        data = request.data
+        employee_id = data.get("auth-user-id")  # ✅ ADDED
 
-        if not bill_id or not delete_reason:
+        bill_id = data.get("bill_id")
+        delete_reason = data.get("delete_reason")
+
+        # ✅ VALIDATION
+        if not bill_id:
             return Response({
                 "status": "error",
-                "message": "bill_id and delete_reason required"
+                "message": "Bill ID is required to delete the bill.",
+                "code": "BILL_ID_MISSING"
+            }, status=400)
+
+        if not delete_reason:
+            return Response({
+                "status": "error",
+                "message": "Please provide a reason for deleting the bill.",
+                "code": "DELETE_REASON_MISSING"
             }, status=400)
 
         bill = OPPharmacyBill.objects.filter(Bill_id=bill_id).first()
 
+        # ✅ BILL NOT FOUND
         if not bill:
             return Response({
                 "status": "error",
-                "message": "Bill not found"
+                "message": f"No bill found for Bill ID: {bill_id}.",
+                "code": "BILL_NOT_FOUND"
             }, status=404)
 
-        # ✅ Prevent double delete
-        if (bill.billing_status or "").lower() == "deleted":
+        bill_no = bill.bill_no or bill_id
+
+        # ✅ ALREADY DELETED CHECK
+        if bill.billing_status and bill.billing_status.lower() == "deleted":
             return Response({
                 "status": "error",
-                "message": "Bill already deleted"
+                "message": f"Bill Number {bill_no} is already deleted.",
+                "code": "BILL_ALREADY_DELETED"
             }, status=400)
 
         medicines = bill.medicine_particulars or []
@@ -1077,7 +1228,7 @@ def oppharmacy_deletebill(request):
                         lastmodified_date=timezone.now()
                     )
 
-                # ✅ HISTORY
+                # ✅ HISTORY TRACK
                 history = med.get("edit_history", [])
                 history.append({
                     "action": "qty_deleted",
@@ -1085,7 +1236,8 @@ def oppharmacy_deletebill(request):
                     "blockedqty_change": qty,
                     "reason": delete_reason,
                     "timestamp": str(timezone.now()),
-                    "edited_by": None
+                    "edited_by": employee_id,  # ✅ UPDATED
+                    "is_deleted": True
                 })
 
                 med["edit_history"] = history
@@ -1093,7 +1245,9 @@ def oppharmacy_deletebill(request):
 
             # ✅ BILL UPDATE
             OPPharmacyBill.objects.filter(Bill_id=bill_id).update(
-                billing_status="Deleted",
+                billing_status="deleted",
+                is_deleted=True,
+                deleted_by=employee_id,  # ✅ ADDED
                 delete_reason=delete_reason,
                 medicine_particulars=updated_medicines,
                 lastmodified_date=timezone.now()
@@ -1101,16 +1255,24 @@ def oppharmacy_deletebill(request):
 
         return Response({
             "status": "success",
-            "message": "Bill deleted successfully"
+            "message": f"Bill Number {bill_no} deleted successfully.",
+            "code": "BILL_DELETED_SUCCESS",
+            "data": {
+                "bill_id": bill_id,
+                "bill_no": bill_no,
+                "billing_status": "deleted"
+            }
         }, status=200)
 
     except Exception as e:
         print("DELETE ERROR:", str(e))
         return Response({
             "status": "error",
-            "message": str(e)
+            "message": "Something went wrong while deleting the bill. Please try again.",
+            "code": "INTERNAL_SERVER_ERROR",
+            "debug": str(e)
         }, status=500)
-    
+
 
 
 from rest_framework.decorators import api_view
@@ -1301,3 +1463,36 @@ def pharmacy_medicinechart(request):
             {"error": "Something went wrong", "details": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+    
+
+
+from rest_framework.response import Response
+from rest_framework.decorators import api_view, permission_classes
+from bson import ObjectId
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def admissionstatus(request):
+
+    uhid = request.GET.get("uhid")
+
+    admission = mongo_db["hospital_admission"].find_one({"uhid": uhid})
+
+    if not admission:
+        return Response({
+            "success": True,
+            "admitted": False,
+            "data": []
+        })
+
+    # ✅ Only check is_admitted
+    admitted = admission.get("is_admitted", False)
+
+    # ✅ Convert only _id (minimal fix)
+    admission["_id"] = str(admission["_id"])
+
+    return Response({
+        "success": True,
+        "admitted": admitted,
+        "data": admission
+    })

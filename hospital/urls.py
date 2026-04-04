@@ -48,6 +48,7 @@ urlpatterns = [
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
 
 
     # Central cah counter
