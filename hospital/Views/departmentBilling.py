@@ -54,7 +54,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
         try:
             patient = Patient.objects.get(uhid=admission.uhid)
 
-            # Fetch company name if company_code exists
+            # ── Get Company Name ─────────────────────────────
             company_name = None
             if patient.company_code:
                 try:
@@ -63,22 +63,55 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 except InsuranceProvider.DoesNotExist:
                     pass
 
+            # ── Extract Room Details (Latest Active Room) ────
+            room_no = None
+            bed_no = None
+
+            if admission.room_details:
+                # Get last active room OR last entry
+                active_rooms = [r for r in admission.room_details if r.get("is_roomActive")]
+                
+                room_data = active_rooms[-1] if active_rooms else admission.room_details[-1]
+
+                room_no = room_data.get("roomNo")
+                bed_no = room_data.get("bedNo")
+
+            # ── Response ─────────────────────────────────────
             response_data = {
                 'ipNumber': admission.ipNumber,
+                'ipserial_number': admission.ipserial_number,
                 'uhid': admission.uhid,
-                'roomNo': admission.roomNo,
+
+                # Room Info (UPDATED)
+                'roomNo': room_no,
+                'bedNo': bed_no,
+                'room_details': admission.room_details,
+
+                # Admission Info
                 'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
                 'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
                 'admittingDoctor': admission.admittingDoctor,
-                'salutation': patient.salutation if hasattr(patient, 'salutation') else '',
+                'consultingDoctor': admission.consultingDoctor,
+                'packageName': admission.packageName,
+                'reasonForAdmission': admission.reasonForAdmission,
+
+                # Flags
+                'is_discharged': admission.is_discharged,
+                'is_admissionActive': admission.is_admissionActive,
+
+                # Patient Info
+                'salutation': getattr(patient, 'salutation', ''),
                 'firstName': patient.firstName,
                 'lastName': patient.lastName,
                 'age': patient.age,
                 'gender': patient.gender,
+                'mobilePhone': patient.mobilePhone,
                 'area': patient.area,
                 'city': patient.city,
                 'state': patient.state,
-                # Company fields
+                'zipcode': patient.zipcode,
+
+                # Company
                 'customer_type': patient.customer_type,
                 'company_code': patient.company_code,
                 'company_name': company_name,
@@ -87,13 +120,23 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             return Response(response_data, status=status.HTTP_200_OK)
 
         except Patient.DoesNotExist:
-            return Response({"error": "Patient not found for the given UHID"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Patient not found for the given UHID"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
     except Admission.DoesNotExist:
-        return Response({"error": "Admission record not found for the given IP Number"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"error": "Admission record not found for the given IP Number"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
     except Exception as e:
-        return Response({"error": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
+        return Response(
+            {"error": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
  
 @csrf_exempt
 @api_view(['POST'])
@@ -102,7 +145,7 @@ def estimate_billing_create(request):
     if request.method == 'POST':
         current_user = request.data.get('auth-user-id', 'system')
         branch_code = request.data.get('auth-branch-code', 'system')
-        department_code = request.data.get('auth-department-code', 'system')
+        outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         with transaction.atomic():
@@ -127,7 +170,8 @@ def estimate_billing_create(request):
             request_data['EstBillDate'] = timezone.now()   # ← server time
             request_data['created_by'] = current_user      # ← from auth header
             request_data['branch_code'] = branch_code      # ← from auth header
-            request_data['department_code'] = department_code      # ← from auth header
+            request_data['hospital_code'] = hospital_code      # ← from auth header
+            request_data['outlet_code'] = outlet_code      # ← from auth header
 
             serializer = EstimateBillingSerializer(data=request_data)
             if serializer.is_valid():
@@ -327,7 +371,7 @@ def get_bill_types(request):
                 "bill_type": 1,
                 "bill_name": 1,
                 "billTypeNo": 1,
-                "department_code": 1,
+                "outlet_code": 1,
                 "is_allowDiscount": 1,
             }
         ))
@@ -360,7 +404,7 @@ def get_packages(request):
                 "_id": 0,
                 "packageNo": 1,
                 "packageName": 1,
-                "department": 1
+                "outlet_code": 1
             }
         ))
         
@@ -563,7 +607,7 @@ def invest_billing_create(request):
     try:
         current_user = request.data.get('auth-user-id', "system")
         branch_code = request.data.get('auth-branch-code', 'system')
-        department_code = request.data.get('auth-department-code', 'system')
+        outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         data = {k: v for k, v in request.data.items()
@@ -682,7 +726,7 @@ def invest_billing_create(request):
         data["investBillNo"] = invest_bill_no
         data["created_by"] = current_user
         data["branch_code"] = branch_code
-        data["department_code"] = department_code
+        data["outlet_code"] = outlet_code
         data["hospital_code"] = hospital_code
         data["created_date"] = timezone.now()
         data["lastmodified_by"] = None
@@ -708,6 +752,8 @@ def invest_billing_create(request):
     finally:
         if mongo_client:
             mongo_client.close()
+
+
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -895,7 +941,7 @@ def delete_bill_view(request):
 @permission_classes([HasRoleAndDataPermission])
 def dept_budr_view(request):
     """
-    Returns Deleted or Edited bills for the Department Bill Update/Delete Report.
+    Returns Deleted or Edited bills for the Outlet Bill Update/Delete Report.
 
     Query params:
       report_type : "deleted" | "edited"   (required)

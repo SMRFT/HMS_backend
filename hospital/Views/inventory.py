@@ -232,9 +232,6 @@ def pharmacy_item_view(request, pk=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN — number generation helpers ONLY
 # ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# GRN — number generation helpers ONLY
-# ─────────────────────────────────────────────────────────────────────────────
 from ..models import GRN
 from ..serializers import GRNSerializer
 
@@ -438,7 +435,6 @@ def grn_view(request, pk=None):
                         sold_quantity            = 0,
                         transferred_out_quantity = 0,
                         stock_type               = "grn",
-                        stock_id                 = int(it.get("stock_id") or 0),
                         stock_ref_id             = 0,
                         grn_return_quantity      = 0,
                         grn_return_ref_id        = None,

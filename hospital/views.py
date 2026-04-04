@@ -24,25 +24,23 @@ load_dotenv()
     
 from .models import Billing, TempPatientRegistration
 
+from .models import Billing
 from .serializers import PatientSerializer
 @api_view(['GET', 'POST'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
 def patientCreateView(request):
-    # Extract audit info from headers
+    # Extract audit info from request data
     employee_id = (
         request.data.get('auth-user-id') or
         request.headers.get('auth-user-id') or
         "system"
     )
-    print("Employee ID:", employee_id)
     hospital_code = (
-        request.data.get('hospital-code') or
-        request.headers.get('hospital-code') or
+        request.data.get('auth-hospital-code') or
+        request.headers.get('auth-hospital-code') or
         "system"
     )
-    print("Hospital Code:", hospital_code)
-
     if request.method == 'GET':
         uhid = request.GET.get('uhid')
         ip_number = request.GET.get('ip_number')
@@ -82,13 +80,16 @@ def patientCreateView(request):
         if serializer.is_valid():
             print("Serializer Valid. Saving...")
             try:
-                # Set audit fields before saving
+                # Set audit fields before saving. 
+                # Per requirements: only hospital_code is needed here, not branch/outlet.
                 save_kwargs = {
                     'lastmodified_by': employee_id,
                     'hospital_code': hospital_code
                 }
                 if not serializer.instance:
                     save_kwargs['created_by'] = employee_id
+                    # Add registration date for new patients
+                    save_kwargs['registration_date'] = timezone.now().strftime("%Y-%m-%d")
                     
                 patient = serializer.save(**save_kwargs)
                 print("Patient Saved:", patient)
@@ -128,35 +129,6 @@ def patientCreateView(request):
 
 
     
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-import json
-from .models import Doctor
-from .serializers import DoctorSerializer
-
-@csrf_exempt
-def doctor_view(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            serializer = DoctorSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return JsonResponse(serializer.data, status=201)
-            return JsonResponse(serializer.errors, status=400)
-        except json.JSONDecodeError:
-            return JsonResponse({"error": "Invalid JSON data"}, status=400)
-    return JsonResponse({"error": "Method not allowed"}, status=405)
-
-
-from .models import Doctor
-from .serializers import DoctorSerializer
-@api_view(['GET'])
-def doctor_list(request):
-    doctors = Doctor.objects.all()
-    serializer = DoctorSerializer(doctors, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
-
 
 from bson import Decimal128
 # Helper function to convert Decimal128 fields to float
@@ -220,13 +192,6 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
 
 
 
-
-
-
-
-
-    
-
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import ReferenceDoctor
@@ -286,26 +251,25 @@ def get_user_permissions(request):
         diag_collection = global_db['backend_diagnostics_profile']
         user_profile = diag_collection.find_one(
             {"employeeId": employee_id},
-            {"primaryRole": 1, "additionalRoles": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "_id": 0}
         )
         
         roles = []
+        hms_pages = []
+        extra_permissions = []
         if user_profile:
             p_role = user_profile.get("primaryRole")
             a_roles = user_profile.get("additionalRoles", [])
+            hms_pages = user_profile.get("hms_pages", [])
+            
             if p_role:
                 roles.append(p_role)
             if isinstance(a_roles, list):
                 roles.extend(a_roles)
                 
         # 2. Check for 'HMS-P' and fetch extra permissions
-        extra_permissions = []
-        if "HMS-P" in roles:
-            hms_db = client['HMS']
-            access_collection = hms_db['UserPageAccess']
-            user_access = access_collection.find_one({"employeeId": employee_id})
-            if user_access:
-                extra_permissions = user_access.get("allowed_pages", [])
+        if "HMS-P" in roles and user_profile:
+            extra_permissions = user_profile.get("allowed_pages", [])
 
         # 3. Combine and return
         # Logic: If extra_permissions exist, we prioritize them over roles for HMS-specific pages.
@@ -317,7 +281,8 @@ def get_user_permissions(request):
         return Response({
             "employeeId": employee_id, 
             "allowed_pages": combined_permissions,
-            "roles": list(set(roles)) 
+            "roles": list(set(roles)),
+            "hms_pages": list(set(hms_pages)) if isinstance(hms_pages, list) else []
         }, status=200)
 
     except Exception as e:
@@ -342,13 +307,21 @@ def update_user_permissions(request):
 
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
-        db = client['HMS']
-        collection = db['UserPageAccess']
+        global_db = client['Global']
+        diag_collection = global_db['backend_diagnostics_profile']
 
-        # Upsert the permission record
-        result = collection.update_one(
+        update_fields = {
+            "allowed_pages": allowed_pages
+        }
+
+        hms_pages = request.data.get('hms_pages')
+        if isinstance(hms_pages, list):
+            update_fields["hms_pages"] = hms_pages
+
+        # Upsert the permission record into the Global database
+        result = diag_collection.update_one(
             {"employeeId": employee_id},
-            {"$set": {"allowed_pages": allowed_pages}},
+            {"$set": update_fields},
             upsert=True
         )
 
@@ -363,34 +336,47 @@ def update_user_permissions(request):
         return Response({"error": str(e)}, status=500)
 
 
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from pymongo import MongoClient
+import os
+
+
 @api_view(['GET'])
 def get_all_employees(request):
     """
-    Fetches employees from Global.backend_diagnostics_profile who have the 'HMS-P' role.
-    This ensures we only show users eligible for HMS permission management.
+    Fetch employees who have ANY role starting with 'HMS'
+    (primaryRole or additionalRoles).
     """
+
     try:
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
-        
+
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
-        
-        # Query: Find users where primaryRole is 'HMS-P' OR additionalRoles contains 'HMS-P'
+
+        # 🔥 Match roles starting with "HMS"
         query = {
             "$or": [
-                {"primaryRole": "HMS-P"},
-                {"additionalRoles": "HMS-P"}
+                {"primaryRole": {"$regex": "^HMS"}},
+                {"additionalRoles": {"$elemMatch": {"$regex": "^HMS"}}}
             ]
         }
 
         employees = list(diag_collection.find(
-            query, 
-            {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}
+            query,
+            {
+                "employeeId": 1,
+                "employeeName": 1,
+                "designation": 1,
+                "_id": 0
+            }
         ))
-        
+
+        client.close()
         return Response(employees, status=200)
-        
+
     except Exception as e:
         print(f"Error fetching employees: {e}")
         return Response({"error": str(e)}, status=500)
@@ -679,12 +665,16 @@ def submit_qr_registration(request):
         session_id = request.data.get('session_id')
         form_data = request.data.get('data')
         
-        if not session_id or not form_data:
-            return Response({"error": "Missing session_id or data"}, status=400)
+        if not form_data:
+            return Response({"error": "Missing data"}, status=400)
             
-        temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
+        temp_reg = None
+        if session_id:
+            temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
+            
         if not temp_reg:
-             return Response({"error": "Invalid session"}, status=404)
+            session_id = str(uuid.uuid4())
+            temp_reg = TempPatientRegistration(session_id=session_id)
              
         temp_reg.data = json.dumps(form_data)
         temp_reg.is_consumed = False
@@ -773,11 +763,11 @@ def consume_qr_registration(request):
 @api_view(['GET'])
 def get_sidebar_mapping(request):
     """
-    Fetches the dynamic sidebar mapping structure from MongoDB, filtered by user permissions.
+    Fetch sidebar mapping filtered by permissions
     """
+
     employee_id = request.GET.get('employeeId')
-    
-    # Handle JS "null" or "undefined" strings and empty strings
+
     if employee_id in [None, "", "null", "undefined"]:
         employee_id = None
 
@@ -788,58 +778,94 @@ def get_sidebar_mapping(request):
 
         client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
         db = client['HMS']
-        
-        # 2. Fetch all mappings (Commonly used)
+
+        # 🔹 Fetch all mappings
         mapping_collection = db['frontendendpagemapping']
-        all_groups = list(mapping_collection.find({}, {'_id': 0}).sort('order', 1)) 
-        
-        # If no valid employee_id is provided, return the full mapping (unfiltered)
+        all_groups = list(
+            mapping_collection.find({}, {'_id': 0}).sort('order', 1)
+        )
+
+        # 🔹 No employee → return all
         if not employee_id:
             client.close()
             return Response(all_groups, status=200)
 
-        # 1. Fetch user permissions (for filtering)
-        # -----------------------------------------------------------------
+        # 🔹 Fetch roles
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
-        user_profile = diag_collection.find_one({"employeeId": employee_id}, {"primaryRole": 1, "additionalRoles": 1, "_id": 0})
-        
+
+        user_profile = diag_collection.find_one(
+            {"employeeId": employee_id},
+            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "_id": 0}
+        )
+
         roles = []
         if user_profile:
-            p_role = user_profile.get("primaryRole")
-            if p_role: roles.append(p_role)
+            if user_profile.get("primaryRole"):
+                roles.append(user_profile["primaryRole"])
             roles.extend(user_profile.get("additionalRoles", []))
-            
+
+        print("ROLES:", roles)  # 🔍 debug
+
+        # 🔹 Extra permissions (optional)
         extra_permissions = []
-        if "HMS-P" in roles:
-            access_collection = db['UserPageAccess']
-            user_access = access_collection.find_one({"employeeId": employee_id})
-            if user_access:
-                extra_permissions = user_access.get("allowed_pages", [])
-        
-        # Priority: DB permissions first, then Roles
+        if any(r.startswith("HMS-P") for r in roles) and user_profile:
+            extra_permissions = user_profile.get("allowed_pages", [])
+
         allowed_actions = extra_permissions if extra_permissions else roles
-        # -----------------------------------------------------------------
-        
-        # 3. Filter mapping based on allowed_actions
+
+        print("ALLOWED:", allowed_actions)  # 🔍 debug
+
+        # ============================================================
+        # 🔥 PERMISSION EXPANSION (FIXED)
+        # ============================================================
+
+        # Step 1: Collect all permissions
+        all_permissions = set()
+        for group in all_groups:
+            for page in group.get('pages', []):
+                all_permissions.update(page.get('permissions', []))
+
+        # Step 2: Check HMS access
+        has_hms_access = any(role.startswith("HMS") for role in allowed_actions)
+
+        expanded_permissions = set()
+
+        if has_hms_access:
+            # ✅ FULL HMS ACCESS
+            for perm in all_permissions:
+                if perm.startswith("HMS"):
+                    expanded_permissions.add(perm)
+        else:
+            # ✅ Normal role logic
+            for action in allowed_actions:
+                expanded_permissions.add(action)
+
+                for perm in all_permissions:
+                    if perm.startswith(action + "-"):
+                        expanded_permissions.add(perm)
+
+        # ============================================================
+        # 🔹 FILTER SIDEBAR
+        # ============================================================
+
         filtered_groups = []
+
         for group in all_groups:
             allowed_pages = []
+
             for page in group.get('pages', []):
                 page_perms = page.get('permissions', [])
+
+                # No permission → allow
                 if not page_perms:
-                    # If no specific permissions listed, we allow it
                     allowed_pages.append(page)
                     continue
-                
-                # Check if any of the page's permissions are in user's allowed_actions
-                is_match = any(
-                    any(action.startswith(p) for action in allowed_actions)
-                    for p in page_perms
-                )
-                if is_match:
+
+                # Match
+                if set(page_perms) & expanded_permissions:
                     allowed_pages.append(page)
-            
+
             if allowed_pages:
                 new_group = group.copy()
                 new_group['pages'] = allowed_pages
@@ -847,11 +873,8 @@ def get_sidebar_mapping(request):
 
         client.close()
         return Response(filtered_groups, status=200)
+
     except Exception as e:
-        print(f"Error in get_sidebar_mapping: {e}")
-        return Response({"error": str(e)}, status=500)
-    except Exception as e:
-        print(f"Error in get_sidebar_mapping: {e}")
         import traceback
         traceback.print_exc()
         return Response({"error": str(e)}, status=500)
