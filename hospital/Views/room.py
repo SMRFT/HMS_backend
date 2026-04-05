@@ -848,7 +848,6 @@ def book_room_view(request):
                 "success": True,
                 "message": f"Room {room_number} / Bed {bed_number} reserved successfully",
                 "data": {
-                    "id": str(booking.id),
                     "ip_number": booking.ip_number,
                     "room_number": booking.room_number,
                     "bed_number": booking.bed_number,
@@ -988,20 +987,71 @@ def update_room_cleaned_view(request):
 # GET ACTIVE ADMISSION
 # ─────────────────────────────────────────────────────────────────────────────
  
+import traceback
+from datetime import datetime
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from django.utils import timezone as tz
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def parse_json_field(value):
+    """Safely parse a JSON-like field that might be a list, dict, or string."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, str):
+        import json
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+        except Exception:
+            pass
+    return []
+
+
+def generate_shifting_id(existing_shiftings):
+    """Generate a sequential shifting ID like SH001, SH002, …"""
+    max_num = 0
+    for s in existing_shiftings:
+        if isinstance(s, dict):
+            sid = str(s.get("shifting_id", ""))
+            if sid.startswith("SH") and sid[2:].isdigit():
+                max_num = max(max_num, int(sid[2:]))
+    return f"SH{str(max_num + 1).zfill(3)}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET ACTIVE ADMISSION  (updated: includes RoomBooking check)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["GET"])
 @csrf_exempt
 def get_active_admission(request):
+    """
+    Returns the active admission for a given UHID or IP Number.
+    Also checks the RoomBooking collection for a pre-reserved room
+    (is_booked=True, room_shifted=False) and includes it in the response
+    so the frontend can auto-fill the new-room fields.
+    """
     try:
         uhid      = request.GET.get("uhid",      "").strip()
         ip_number = request.GET.get("ip_number", "").strip()
- 
+
         if not uhid and not ip_number:
             return Response(
                 {"success": False, "message": "Provide UHID or IP Number"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
-        # Filter using model (no SQL)
+
+        # ── Find matching admissions ──────────────────────────────────────
         all_admissions = []
         for adm in Admission.objects.all():
             if uhid      and str(adm.uhid)     != uhid:
@@ -1009,20 +1059,20 @@ def get_active_admission(request):
             if ip_number and str(adm.ipNumber) != ip_number:
                 continue
             all_admissions.append(adm)
- 
+
         active_records = [
             adm for adm in all_admissions
             if getattr(adm, "is_admitted",        False) is True
             and getattr(adm, "is_admissionActive", False) is True
             and getattr(adm, "is_discharged",      True)  is False
         ]
- 
+
         if not active_records:
             return Response(
                 {"success": False, "message": "No active admission found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
- 
+
         def safe_sort_key(adm):
             dt = adm.admissionDateTime
             if dt is None:
@@ -1030,11 +1080,11 @@ def get_active_admission(request):
             if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
                 return tz.make_naive(dt)
             return dt
- 
+
         active_records.sort(key=safe_sort_key, reverse=True)
         admission = active_records[0]
- 
-        # Patient
+
+        # ── Patient ───────────────────────────────────────────────────────
         patient_data = {}
         try:
             patient = Patient.objects.filter(uhid=admission.uhid).first()
@@ -1050,15 +1100,15 @@ def get_active_admission(request):
                     "email":       str(patient.email      or ""),
                     "city":        str(patient.city       or ""),
                     "state":       str(patient.state      or ""),
+                    "area":        str(getattr(patient, "area",    "") or ""),
+                    "zipcode":     str(getattr(patient, "zipcode", "") or ""),
                 }
         except Exception:
             traceback.print_exc()
- 
-        # room_details
+
+        # ── Active room from room_details ─────────────────────────────────
         room_details = parse_json_field(admission.room_details)
- 
-        # active room
-        active_room = {}
+        active_room  = {}
         for r in reversed(room_details):
             if isinstance(r, dict) and r.get("is_roomActive"):
                 active_room = r
@@ -1066,13 +1116,45 @@ def get_active_admission(request):
         if not active_room and room_details:
             last = room_details[-1]
             active_room = last if isinstance(last, dict) else {}
- 
-        # Check if this admission has already been shifted
-        # (has any non-cancelled entry in roomShitingDetails)
+
+        # ── Has already been shifted? ─────────────────────────────────────
         shiftings   = parse_json_field(admission.roomShitingDetails)
         has_shifted = any(isinstance(s, dict) for s in shiftings)
-        
-        # datetime formatting
+
+        # ── Check RoomBooking for a pre-reserved room ─────────────────────
+        #    Looks for a booking where:
+        #      ip_number matches AND is_booked=True AND room_shifted=False
+        reserved_room = None
+        reserved_bed  = None
+        has_reservation = False
+        try:
+            booking = None
+
+            for rb in RoomBooking.objects.all():
+                if str(getattr(rb, "ip_number", "")).strip() != str(admission.ipNumber).strip():
+                    continue
+
+                is_booked = getattr(rb, "is_booked", False)
+                room_shifted = getattr(rb, "room_shifted", False)
+
+                # handle both boolean and string values
+                if str(is_booked).lower() != "true":
+                    continue
+
+                if str(room_shifted).lower() != "false":
+                    continue
+
+                booking = rb
+                break
+
+            if booking:
+                has_reservation = True
+                reserved_room   = str(booking.room_number or "")
+                reserved_bed    = str(booking.bed_number  or "")
+        except Exception:
+            traceback.print_exc()
+
+        # ── Admission date/time formatting ────────────────────────────────
         admission_date = admission_time = ""
         dt = admission.admissionDateTime
         if dt:
@@ -1082,7 +1164,7 @@ def get_active_admission(request):
             except Exception:
                 admission_date = str(dt)[:10]
                 admission_time = str(dt)[11:19]
- 
+
         return Response({
             "success": True,
             "data": {
@@ -1097,30 +1179,38 @@ def get_active_admission(request):
                 "roomNo":           active_room.get("roomNo", ""),
                 "bedNo":            active_room.get("bedNo",  ""),
                 "room_details":     room_details,
-                "has_shifted":      has_shifted,   # ← tells frontend to disable form
+                "has_shifted":      has_shifted,
+                # ── Reservation fields ─────────────────────────────────────
+                "has_reservation":  has_reservation,   # True if a pre-booked room exists
+                "reservedRoomNo":   reserved_room or "",
+                "reservedBedNo":    reserved_bed  or "",
+                # ── Status flags ───────────────────────────────────────────
                 "is_admitted":        getattr(admission, "is_admitted",        None),
                 "is_admissionActive": getattr(admission, "is_admissionActive", None),
                 "is_discharged":      getattr(admission, "is_discharged",      None),
                 "patient": patient_data,
             },
         }, status=status.HTTP_200_OK)
- 
+
     except Exception as e:
         traceback.print_exc()
-        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
- 
- 
+        return Response(
+            {"success": False, "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ROOM SHIFTING — GET / POST
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_view(request):
- 
+
     user_id = request.headers.get("auth-user-id", "system")
- 
+
     # ════════════════════════════════════════════════════════════════════════
     # GET — list shifting history
     # ════════════════════════════════════════════════════════════════════════
@@ -1129,19 +1219,18 @@ def room_shifting_view(request):
         to_date   = str(request.GET.get("to_date",   "")).strip()
         uhid      = str(request.GET.get("uhid",      "")).strip()
         ip_number = str(request.GET.get("ip_number", "")).strip()
- 
+
         results = []
- 
+
         for admission in Admission.objects.all():
             if not getattr(admission, "is_admitted", False):
                 continue
- 
+
             if uhid      and uhid.lower()      not in str(admission.uhid     or "").lower():
                 continue
             if ip_number and ip_number.lower() not in str(admission.ipNumber or "").lower():
                 continue
- 
-            # Patient info for display
+
             patient_name = ""
             try:
                 patient = Patient.objects.filter(uhid=admission.uhid).first()
@@ -1149,35 +1238,56 @@ def room_shifting_view(request):
                     patient_name = f"{patient.firstName or ''} {patient.lastName or ''}".strip()
             except Exception:
                 pass
- 
+
+            # Current active room (for old room display)
+            room_details = parse_json_field(admission.room_details)
+            old_room_no = old_bed_no = ""
+            for r in reversed(room_details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    old_room_no = str(r.get("roomNo", ""))
+                    old_bed_no  = str(r.get("bedNo",  ""))
+                    break
+            if not old_room_no and room_details:
+                last = room_details[-1]
+                if isinstance(last, dict):
+                    old_room_no = str(last.get("roomNo", ""))
+                    old_bed_no  = str(last.get("bedNo",  ""))
+
             shiftings = parse_json_field(admission.roomShitingDetails)
- 
+
             for shift in shiftings:
                 if not isinstance(shift, dict):
                     continue
- 
+
                 shift_date = str(shift.get("shiftingDateTime", ""))[:10]
                 if from_date and shift_date and shift_date < from_date:
                     continue
                 if to_date   and shift_date and shift_date > to_date:
                     continue
- 
+
                 results.append({
                     "uhid":             str(admission.uhid            or ""),
                     "ipNumber":         str(admission.ipNumber        or ""),
                     "ipserial_number":  str(admission.ipserial_number or ""),
                     "patient_name":     patient_name,
                     "shifting_id":      str(shift.get("shifting_id",      "")),
+                    "oldRoomNo":        str(shift.get("oldRoomNo",        old_room_no)),
+                    "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
                     "newRoomNo":        str(shift.get("newRoomNo",        "")),
                     "newBedNo":         str(shift.get("newBedNo",         "")),
                     "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+                    "startDateTime":    str(shift.get("startDateTime",    "")),
+                    "endDateTime":      str(shift.get("endDateTime",      "") or ""),
                     "shifted_by":       str(shift.get("shifted_by",       "")),
                     "is_roomActive":    bool(shift.get("is_roomActive",   False)),
                     "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
+                    "edited_from":      str(shift.get("edited_from",      "") or ""),
                 })
- 
+
+        # Sort by shiftingDateTime descending
+        results.sort(key=lambda x: x.get("shiftingDateTime", ""), reverse=True)
         return Response(results, status=status.HTTP_200_OK)
- 
+
     # ════════════════════════════════════════════════════════════════════════
     # POST — create a new shift
     # ════════════════════════════════════════════════════════════════════════
@@ -1185,7 +1295,7 @@ def room_shifting_view(request):
         ip_number = str(request.data.get("ip_number", "")).strip()
         new_room  = str(request.data.get("newRoomNo", "")).strip()
         new_bed   = str(request.data.get("newBedNo",  "")).strip()
- 
+
         if not ip_number:
             return Response(
                 {"success": False, "error": "ip_number is required"},
@@ -1196,7 +1306,7 @@ def room_shifting_view(request):
                 {"success": False, "error": "newRoomNo and newBedNo are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
+
         admission = None
         for adm in Admission.objects.all():
             if (
@@ -1206,30 +1316,27 @@ def room_shifting_view(request):
             ):
                 admission = adm
                 break
- 
+
         if not admission:
             return Response(
                 {"success": False, "error": "Admission not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
- 
-        # ── GUARD: only one active shift allowed per admission ────────────
+
+        # ── Guard: only one active shift allowed ──────────────────────────
         existing_shiftings = parse_json_field(admission.roomShitingDetails)
-        active_shiftings = [
-            s for s in existing_shiftings
-            if isinstance(s, dict)
-        ]
+        active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
 
         if active_shiftings:
             return Response(
                 {
                     "success": False,
-                    "error": "Room already shifted. Use Edit for existing shifting record.",
+                    "error": "Room already shifted. Use Edit for the existing shifting record.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
-        # ── Find current active room for oldRoomNo / oldBedNo ─────────────
+
+        # ── Old room ──────────────────────────────────────────────────────
         room_details = parse_json_field(admission.room_details)
         old_room_no  = old_bed_no = ""
         for r in reversed(room_details):
@@ -1242,61 +1349,69 @@ def room_shifting_view(request):
             if isinstance(last, dict):
                 old_room_no = str(last.get("roomNo", ""))
                 old_bed_no  = str(last.get("bedNo",  ""))
- 
-        # ── Deactivate current room in room_details ────────────────────────
+
+        # ── Deactivate current room in room_details & set endDateTime ─────
+        now_iso = timezone.now().isoformat()
         updated_room_details = []
         for room in room_details:
             if not isinstance(room, dict):
                 continue
-            obj = {
-                "roomNo":         str(room.get("roomNo",         "")),
-                "bedNo":          str(room.get("bedNo",          "")),
-                "is_roomActive":  bool(room.get("is_roomActive",  False)),
-                "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
-            }
-            if obj["is_roomActive"]:
+            obj = dict(room)
+            if obj.get("is_roomActive"):
                 obj["is_roomActive"] = False
+                obj["endDateTime"]   = now_iso   # ← track how long patient was in room
             updated_room_details.append(obj)
- 
+
         admission.room_details = updated_room_details
- 
-        # ── Build shifting entry ───────────────────────────────────────────
+
+        # ── Build new shifting entry ──────────────────────────────────────
         new_shifting_id = generate_shifting_id(existing_shiftings)
- 
+
         cleaned_shiftings = []
         for shift in existing_shiftings:
-            if not isinstance(shift, dict):
-                continue
-            cleaned_shiftings.append({
-                "shifting_id":      str(shift.get("shifting_id",      "")),
-                "newRoomNo":        str(shift.get("newRoomNo",        "")),
-                "newBedNo":         str(shift.get("newBedNo",         "")),
-                "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
-                "shifted_by":       str(shift.get("shifted_by",       "")),
-                "is_roomActive":    bool(shift.get("is_roomActive",   False)),
-                "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
-            })
- 
-        # New shift — is_roomActive: True, is_roomCleaned: False (requirement #5)
+            if isinstance(shift, dict):
+                cleaned_shiftings.append(dict(shift))
+
+        # New shift entry — startDateTime set now, endDateTime null
         cleaned_shiftings.append({
             "shifting_id":      new_shifting_id,
+            "oldRoomNo":        old_room_no,
+            "oldBedNo":         old_bed_no,
             "newRoomNo":        new_room,
             "newBedNo":         new_bed,
-            "shiftingDateTime": timezone.now().isoformat(),
+            "shiftingDateTime": now_iso,
+            "startDateTime":    now_iso,   # ← patient enters new room now
+            "endDateTime":      None,      # ← still in this room
             "shifted_by":       str(user_id),
-            "is_roomActive":    True,   # ← requirement #5
-            "is_roomCleaned":   False,  # ← requirement #5
+            "is_roomActive":    True,
+            "is_roomCleaned":   False,
         })
- 
+
         admission.roomShitingDetails = cleaned_shiftings
         admission.lastmodified_by    = str(user_id)
         admission.lastmodified_date  = timezone.now()
- 
+
         if not isinstance(admission.advance_payments, list):
             admission.advance_payments = []
- 
+
         admission.save()
- 
+
+        # ── Mark RoomBooking as shifted (if one existed) ──────────────────
+        try:
+            for rb in RoomBooking.objects.all():
+                if str(getattr(rb, "ip_number", "")).strip() != str(ip_number).strip():
+                    continue
+                if str(getattr(rb, "is_booked", "")).lower() != "true":
+                    continue
+                if str(getattr(rb, "room_shifted", "")).lower() != "false":
+                    continue
+                rb.room_shifted = True
+                rb.is_booked    = False
+                rb.save()
+                break
+        except Exception:
+            traceback.print_exc()
+
         return Response(
             {
                 "success": True,
@@ -1310,23 +1425,24 @@ def room_shifting_view(request):
             },
             status=status.HTTP_200_OK,
         )
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# PATCH /room-shifting/<ip_number>/
-# Editing creates a NEW shifting object; previous one is set is_roomActive: False
+# PATCH /room-shifting/<ip_number>/update/
+# Editing creates a NEW shifting object; previous one is set is_roomActive=False
+# and endDateTime is stamped on it.
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 @api_view(["PATCH"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_detail_view(request, ip_number):
- 
+
     user_id     = request.headers.get("auth-user-id", "system")
     shifting_id = str(request.data.get("shifting_id", "")).strip()
     new_room    = str(request.data.get("newRoomNo",   "")).strip()
     new_bed     = str(request.data.get("newBedNo",    "")).strip()
- 
+
     if not shifting_id:
         return Response(
             {"success": False, "error": "shifting_id is required"},
@@ -1337,65 +1453,70 @@ def room_shifting_detail_view(request, ip_number):
             {"success": False, "error": "newRoomNo and newBedNo are required"},
             status=status.HTTP_400_BAD_REQUEST,
         )
- 
+
     admission = None
     for adm in Admission.objects.all():
         if str(adm.ipNumber) == str(ip_number):
             admission = adm
             break
- 
+
     if not admission:
         return Response(
             {"success": False, "error": "Admission not found"},
             status=status.HTTP_404_NOT_FOUND,
         )
- 
+
     shifting_details = parse_json_field(admission.roomShitingDetails)
     room_details     = parse_json_field(admission.room_details)
- 
-    shift_found  = False
-    target_shift = None
 
-    for shift in shifting_details:
-        if isinstance(shift, dict) and str(shift.get("shifting_id", "")) == shifting_id:
-            target_shift = shift
-            shift_found = True
-            break
-
+    # Check the target shift exists
+    shift_found = any(
+        isinstance(s, dict) and str(s.get("shifting_id", "")) == shifting_id
+        for s in shifting_details
+    )
     if not shift_found:
         return Response(
             {"success": False, "error": "Shifting record not found"},
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    now_iso = timezone.now().isoformat()
+
+    # ── Mark the old shift as inactive and stamp endDateTime ─────────────
     updated_shiftings = []
+    old_room_no = old_bed_no = ""
     for shift in shifting_details:
         if not isinstance(shift, dict):
             continue
-
         obj = dict(shift)
-
         if str(obj.get("shifting_id", "")) == shifting_id:
-            obj["is_roomActive"] = False
-            obj["lastmodified_by"] = str(user_id)
-            obj["lastmodified_date"] = timezone.now().isoformat()
-
+            obj["is_roomActive"]      = False
+            obj["endDateTime"]        = now_iso   # ← how long patient was in that shifted room
+            obj["lastmodified_by"]    = str(user_id)
+            obj["lastmodified_date"]  = now_iso
+            # Capture old room for the new entry
+            old_room_no = str(obj.get("newRoomNo", ""))
+            old_bed_no  = str(obj.get("newBedNo",  ""))
         updated_shiftings.append(obj)
 
+    # ── New shifting entry ────────────────────────────────────────────────
     new_shifting_id = generate_shifting_id(updated_shiftings)
-
     updated_shiftings.append({
-        "shifting_id": new_shifting_id,
-        "newRoomNo": new_room,
-        "newBedNo": new_bed,
-        "shiftingDateTime": timezone.now().isoformat(),
-        "shifted_by": str(user_id),
-        "is_roomActive": True,
-        "is_roomCleaned": False,
-        "edited_from": shifting_id,
+        "shifting_id":      new_shifting_id,
+        "oldRoomNo":        old_room_no,
+        "oldBedNo":         old_bed_no,
+        "newRoomNo":        new_room,
+        "newBedNo":         new_bed,
+        "shiftingDateTime": now_iso,
+        "startDateTime":    now_iso,
+        "endDateTime":      None,
+        "shifted_by":       str(user_id),
+        "is_roomActive":    True,
+        "is_roomCleaned":   False,
+        "edited_from":      shifting_id,
     })
- 
-    # ── Deactivate current active room in room_details ────────────────────
+
+    # ── Deactivate current active room in room_details & stamp endDateTime ─
     updated_rooms = []
     for room in room_details:
         if not isinstance(room, dict):
@@ -1403,17 +1524,19 @@ def room_shifting_detail_view(request, ip_number):
         obj = dict(room)
         if obj.get("is_roomActive"):
             obj["is_roomActive"] = False
+            obj["endDateTime"]   = now_iso
         updated_rooms.append(obj)
- 
+
     admission.roomShitingDetails = updated_shiftings
     admission.room_details       = updated_rooms
     admission.lastmodified_by    = str(user_id)
+    admission.lastmodified_date  = timezone.now()
     admission.save()
- 
+
     return Response(
         {
             "success": True,
-            "message": "Room shifting updated (new record created)",
+            "message": "Room shifting updated — new record created",
             "data": {
                 "ipNumber":           admission.ipNumber,
                 "room_details":       admission.room_details,
@@ -1422,4 +1545,3 @@ def room_shifting_detail_view(request, ip_number):
         },
         status=status.HTTP_200_OK,
     )
- 
