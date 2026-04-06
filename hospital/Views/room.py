@@ -476,7 +476,11 @@ def room_enquiry_view(request):
         # Value: { status, patient, ip_number, is_roomCleaned, source, shifting_id }
         #
         # LOGIC:
-        #   For each active admission (is_admissionActive=True, is_discharged=False):
+        #   For each admission we care about:
+        #     - Active admissions (is_admissionActive=True, is_discharged=False)
+        #     - Cancelled/inactive admissions (is_admissionActive=False, is_discharged=False)
+        #       BUT ONLY if they have at least one uncleaned room entry.
+        #       These need to show as "Available (Not Cleaned)" until housekeeping clears them.
         #
         #   A) Find the LATEST active shifting entry (is_roomActive=True).
         #      That room/bed → Occupied.
@@ -493,18 +497,34 @@ def room_enquiry_view(request):
 
         for admission in Admission.objects.all():
 
-            if not getattr(admission, "is_admissionActive", False):
+            is_active     = bool(getattr(admission, "is_admissionActive", False))
+            is_discharged = bool(getattr(admission, "is_discharged", False))
+
+            # Always skip discharged admissions entirely
+            if is_discharged:
                 continue
-            if getattr(admission, "is_discharged", False):
-                continue
+
+            # For cancelled/inactive admissions, only process if there are
+            # uncleaned rooms — otherwise skip (no point processing them)
+            if not is_active:
+                raw_details = parse_json_field(admission.room_details)
+                raw_shifts  = parse_json_field(admission.roomShitingDetails)
+                has_uncleaned = any(
+                    not bool(e.get("is_roomCleaned", False))
+                    for e in (raw_details + raw_shifts)
+                    if isinstance(e, dict)
+                )
+                if not has_uncleaned:
+                    continue
+                # Fall through — process this cancelled admission's uncleaned rooms
 
             uhid      = str(admission.uhid or "")
             ip_number = str(admission.ipNumber or "")
             ipserial  = str(admission.ipserial_number or "")
             patient_info = patient_map.get(uhid, {})
 
-            details  = parse_json_field(admission.room_details)
-            shifts   = parse_json_field(admission.roomShitingDetails)
+            details = parse_json_field(admission.room_details)
+            shifts  = parse_json_field(admission.roomShitingDetails)
 
             # ── Validate shifts are dicts ──────────────────────────────────
             shifts = [s for s in shifts if isinstance(s, dict)]
@@ -531,15 +551,16 @@ def room_enquiry_view(request):
                 if not room_no or not bed_no:
                     continue
 
-                is_active  = bool(shift.get("is_roomActive",  False))
-                is_cleaned = bool(shift.get("is_roomCleaned", False))
+                is_room_active = bool(shift.get("is_roomActive",  False))
+                is_cleaned     = bool(shift.get("is_roomCleaned", False))
 
                 # This is the currently active room → Occupied
-                if active_shift and shift.get("shifting_id") == active_shift.get("shifting_id"):
+                # But only if the overall admission is still active
+                if is_active and active_shift and shift.get("shifting_id") == active_shift.get("shifting_id"):
                     status       = "Occupied"
                     patient_data = patient_info
                 else:
-                    # Vacated shift entry
+                    # Vacated shift entry (or cancelled admission)
                     if is_cleaned:
                         status       = "Available"
                         patient_data = {}
@@ -558,7 +579,7 @@ def room_enquiry_view(request):
                         "ip_number":      ip_number,
                         "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
-                        "is_roomActive":  is_active,   # ← ADD THIS
+                        "is_roomActive":  is_room_active,
                         "source":         "shifting",
                         "shifting_id":    str(shift.get("shifting_id", "")),
                     }
@@ -573,8 +594,8 @@ def room_enquiry_view(request):
                 if not room_no or not bed_no:
                     continue
 
-                is_active  = bool(entry.get("is_roomActive",  False))
-                is_cleaned = bool(entry.get("is_roomCleaned", False))
+                is_room_active = bool(entry.get("is_roomActive",  False))
+                is_cleaned     = bool(entry.get("is_roomCleaned", False))
 
                 if has_shifts:
                     # Patient has shifted away from original room.
@@ -586,20 +607,34 @@ def room_enquiry_view(request):
                         status       = "Available (Not Cleaned)"
                         patient_data = patient_info
                 else:
-                    # No shifts: use is_roomActive directly
-                    if is_active and not is_cleaned:
-                        status       = "Occupied"
-                        patient_data = patient_info
-                    elif not is_active and is_cleaned:
-                        status       = "Available"
-                        patient_data = {}
-                    elif not is_active and not is_cleaned:
-                        status       = "Available (Not Cleaned)"
-                        patient_data = patient_info
+                    # No shifts: determine status from flags
+                    if is_active:
+                        # Admission is still active
+                        if is_room_active and not is_cleaned:
+                            status       = "Occupied"
+                            patient_data = patient_info
+                        elif not is_room_active and is_cleaned:
+                            status       = "Available"
+                            patient_data = {}
+                        elif not is_room_active and not is_cleaned:
+                            # Room deactivated but not cleaned yet
+                            status       = "Available (Not Cleaned)"
+                            patient_data = patient_info
+                        else:
+                            # is_roomActive=True, is_roomCleaned=True (edge case) → Occupied
+                            status       = "Occupied"
+                            patient_data = patient_info
                     else:
-                        # is_active=True, is_cleaned=True (edge case) → treat as Occupied
-                        status       = "Occupied"
-                        patient_data = patient_info
+                        # Admission is cancelled/inactive
+                        # is_room_active will be False here (we passed the uncleaned guard above)
+                        if is_cleaned:
+                            status       = "Available"
+                            patient_data = {}
+                        else:
+                            # ← THIS IS THE KEY FIX
+                            # Cancelled admission + room not cleaned → must show Not Cleaned
+                            status       = "Available (Not Cleaned)"
+                            patient_data = patient_info
 
                 key = (room_no, bed_no)
                 existing = admission_map.get(key)
@@ -613,11 +648,12 @@ def room_enquiry_view(request):
                         "ip_number":      ip_number,
                         "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
-                        "is_roomActive":  is_active,   # ← ADD THIS
+                        "is_roomActive":  is_room_active,
                         "source":         "room_details",
                         "shifting_id":    "",
                     }
 
+        # ══════════════════════════════════════════════════════════════════════
         # STEP 3 — LOAD RoomBooking RESERVATIONS (Mongo-safe)
         # Key: (room_number, bed_number)
         # Only active bookings: is_booked=True, room_shifted=False
@@ -626,32 +662,31 @@ def room_enquiry_view(request):
 
         for booking in RoomBooking.objects.all():
 
-            is_booked = bool(getattr(booking, "is_booked", False))
+            is_booked    = bool(getattr(booking, "is_booked",    False))
             room_shifted = bool(getattr(booking, "room_shifted", False))
 
             if not is_booked:
                 continue
-
             if room_shifted:
                 continue
 
             room_number = str(getattr(booking, "room_number", "")).strip()
-            bed_number  = str(getattr(booking, "bed_number", "")).strip()
+            bed_number  = str(getattr(booking, "bed_number",  "")).strip()
 
             if not room_number or not bed_number:
                 continue
 
             key = (room_number, bed_number)
-
             booking_map[key] = {
                 "ip_number": str(getattr(booking, "ip_number", "") or "").strip(),
-                "uhid":      str(getattr(booking, "uhid", "") or "").strip(),
+                "uhid":      str(getattr(booking, "uhid",      "") or "").strip(),
                 "booked_at": str(
                     getattr(booking, "booked_date", None)
-                    or getattr(booking, "booked_at", None)
+                    or getattr(booking, "booked_at",  None)
                     or ""
                 ),
             }
+
         # ══════════════════════════════════════════════════════════════════════
         # STEP 4 — PROCESS ROOM LIST
         # ══════════════════════════════════════════════════════════════════════
@@ -664,7 +699,7 @@ def room_enquiry_view(request):
             if floor not in floor_map:
                 floor_map[floor] = []
 
-            beds     = parse_json_field(room.beds)
+            beds      = parse_json_field(room.beds)
             beds_data = []
 
             for bed in beds:
@@ -682,32 +717,30 @@ def room_enquiry_view(request):
                 if getattr(room, "room_blocked", False) or \
                    str(getattr(room, "room_status", "")).lower() == "blocked":
                     beds_data.append({
-                        "bed_number":    bed_number,
-                        "status":        "Maintenance",
-                        "patient":       {},
+                        "bed_number":     bed_number,
+                        "status":         "Maintenance",
+                        "patient":        {},
                         "is_roomCleaned": False,
-                        "source":        "",
-                        "shifting_id":   "",
-                        "ip_number":     "",
-                        "booking":       None,
+                        "is_roomActive":  False,
+                        "source":         "",
+                        "shifting_id":    "",
+                        "ip_number":      "",
+                        "booking":        None,
                     })
                     continue
 
                 # Check admission map first
                 info = admission_map.get(key)
-
-                # In STEP 4, replace the "Check admission map first" branch:
-
                 if info:
                     beds_data.append({
                         "bed_number":     bed_number,
-                        "status":         info.get("status", "Available"),
-                        "patient":        info.get("patient", {}),
+                        "status":         info.get("status",         "Available"),
+                        "patient":        info.get("patient",        {}),
                         "is_roomCleaned": info.get("is_roomCleaned", False),
-                        "is_roomActive":  info.get("is_roomActive", False),   # ← ADD THIS
-                        "source":         info.get("source", ""),
-                        "shifting_id":    info.get("shifting_id", ""),
-                        "ip_number":      info.get("ip_number", ""),
+                        "is_roomActive":  info.get("is_roomActive",  False),
+                        "source":         info.get("source",         ""),
+                        "shifting_id":    info.get("shifting_id",    ""),
+                        "ip_number":      info.get("ip_number",      ""),
                         "booking":        None,
                     })
                     continue
@@ -720,6 +753,7 @@ def room_enquiry_view(request):
                         "status":         "Reserved",
                         "patient":        {},
                         "is_roomCleaned": False,
+                        "is_roomActive":  False,
                         "source":         "booking",
                         "shifting_id":    "",
                         "ip_number":      booking_info.get("ip_number", ""),
@@ -727,12 +761,13 @@ def room_enquiry_view(request):
                     })
                     continue
 
-                # Truly available
+                # Truly available — not in any admission or booking
                 beds_data.append({
                     "bed_number":     bed_number,
                     "status":         "Available",
                     "patient":        {},
                     "is_roomCleaned": True,
+                    "is_roomActive":  False,
                     "source":         "",
                     "shifting_id":    "",
                     "ip_number":      "",

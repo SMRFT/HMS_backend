@@ -468,7 +468,20 @@ class GRN(AuditModel):
     def __str__(self):
         return f"{self.name} ({self.vendor_id})"
 
+class NursingStation(AuditModel):
+    ward_id = models.IntegerField(primary_key=True)
+    ward_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
 
+    def save(self, *args, **kwargs):
+        if self.ward_id is None:
+            last = NursingStation.objects.order_by('-ward_id').first()
+            self.ward_id = (last.ward_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.ward_name
+    
 class Block(AuditModel):
     block_id = models.IntegerField(primary_key=True)
     block_name = models.CharField(max_length=100)
@@ -496,6 +509,35 @@ class RoomCategory(AuditModel):
 
     def __str__(self):
         return self.name
+
+
+class RoomServiceDescription(AuditModel):
+    description_id = models.IntegerField(primary_key=True)
+    description_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.description_id is None:
+            last = RoomServiceDescription.objects.order_by('-description_id').first()
+            self.description_id = (last.description_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.description_name
+
+class RoomKitItems(AuditModel):
+    kit_id = models.IntegerField(primary_key=True)
+    kit_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.kit_id is None:
+            last = RoomKitItems.objects.order_by('-kit_id').first()
+            self.kit_id = (last.kit_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.kit_name
 
 class Room(AuditModel):
     room_number = models.CharField(max_length=10, primary_key=True)

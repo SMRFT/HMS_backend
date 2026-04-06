@@ -51,7 +51,7 @@ class GRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Room
+from .models import Block, RoomCategory, Room,NursingStation
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
         model = Block
@@ -64,6 +64,13 @@ class RoomCategorySerializer(serializers.ModelSerializer):
         model = RoomCategory
         fields = "__all__"
         read_only_fields = ["room_category_id"]
+
+
+class NursingStationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NursingStation
+        fields = "__all__"
+        read_only_fields = ["ward_id"]
 
 class RoomSerializer(serializers.ModelSerializer):
     # These fields will be handled as JSON
