@@ -13,9 +13,7 @@ PAGE_MAPPING = {
 
     # ==================== ADMISSION ====================
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
-    r'^/_b_a_c_k_e_n_d/HMS/admission/?(\?.*)?$': 'HMS-P-ADM',
-    r'^/_b_a_c_k_e_n_d/HMS/admission/[^/]+/?(\?.*)?$': 'HMS-P-ADD',
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient/[^/]+/?(\?.*)?$': 'HMS-P-OPP',
+    r'^/_b_a_c_k_e_n_d/HMS/admission/.+/?(\?.*)?$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/search-rooms/?(\?.*)?$': 'HMS-P-SRM',
 
     # ==================== PHARMACY STOCK ====================
@@ -51,6 +49,7 @@ PAGE_MAPPING = {
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
+    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
 
     # ==================== NURSING ====================
     r'^/_b_a_c_k_e_n_d/HMS/room-shiftings/?(\?.*)?$': 'HMS-P-RSHFT',
