@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from djongo.models.fields import ObjectIdField
-from .models import StoresAssetsManagement ,StoresAssetsMaintainance ,recycle_asset
+from .models import StoresAssetsManagement ,StoresAssetsmaintenance ,recycle_asset
 
 class StoresAssetsManagementSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -8,19 +8,19 @@ class StoresAssetsManagementSerializer(serializers.ModelSerializer):
         model = StoresAssetsManagement
         fields = '__all__'
 
-class StoresAssetsMaintainanceSerializer(serializers.ModelSerializer):
-    maintainance_details = serializers.ListField(
+class StoresAssetsmaintenanceSerializer(serializers.ModelSerializer):
+    maintenance_details = serializers.ListField(
         child=serializers.DictField(),
         required=False
     )
 
     class Meta:
-        model = StoresAssetsMaintainance
+        model = StoresAssetsmaintenance
         fields = '__all__'
 
-    def validate_maintainance_details(self, value):
+    def validate_maintenance_details(self, value):
         if not isinstance(value, list):
-            raise serializers.ValidationError("maintainance_details must be array of objects")
+            raise serializers.ValidationError("maintenance_details must be array of objects")
 
         for item in value:
             if not isinstance(item, dict):
@@ -29,17 +29,17 @@ class StoresAssetsMaintainanceSerializer(serializers.ModelSerializer):
         return value
 
     def to_representation(self, instance):
-        if isinstance(getattr(instance, 'maintainance_details', None), str):
+        if isinstance(getattr(instance, 'maintenance_details', None), str):
             import json
             try:
-                instance.maintainance_details = json.loads(instance.maintainance_details)
+                instance.maintenance_details = json.loads(instance.maintenance_details)
             except Exception:
-                instance.maintainance_details = []
+                instance.maintenance_details = []
 
         representation = super().to_representation(instance)
 
-        if not representation.get("maintainance_details"):
-            representation["maintainance_details"] = []
+        if not representation.get("maintenance_details"):
+            representation["maintenance_details"] = []
 
         return representation
 
