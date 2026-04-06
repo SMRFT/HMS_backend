@@ -13,6 +13,7 @@ PAGE_MAPPING = {
 
     # ==================== ADMISSION ====================
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
+    '/_b_a_c_k_e_n_d/HMS/admission/': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/admission/.+/?(\?.*)?$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/search-rooms/?(\?.*)?$': 'HMS-P-SRM',
 
