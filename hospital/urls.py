@@ -247,8 +247,8 @@ urlpatterns = [
     path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
     path('stores-assets-management/<path:pk>/', assets.stores_assets_management_detail, name='stores_assets_management_detail'),
 
-    path('stores-assets-maintainance/', assets.stores_assets_maintainance_details, name='stores_assets_maintainance_details'),
-    path('stores-assets-maintainance/<path:pk>/', assets.stores_assets_maintainance_details, name='stores_assets_maintainance_details'),
+    path('stores-assets-maintenance/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
+    path('stores-assets-maintenance/<path:pk>/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
 
     path("recycle_asset/", assets.create_recycle_asset, name="create_recycle_asset"),
     path("recycle_asset/<path:pk>/", assets.update_recycle_asset, name="update_recycle_asset"),
