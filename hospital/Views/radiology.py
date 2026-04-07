@@ -181,9 +181,9 @@ def create_scan_report(request):
     try:
         data = request.data
         user_id = data.get('auth-user-id', 'system')
-        branch_code = request.data.get('auth-branch-code', 'system')
-        department_code = request.data.get('auth-department-code', 'system')
-        hospital_code = request.data.get('auth-hospital-code', 'system')
+        branch_code = request.data.get('auth-branch-code', 'SHB001')
+        outlet_code = request.data.get('auth-outlet-code', 'OLET003')
+        hospital_code = request.data.get('auth-hospital-code', 'SH001')
         invest_bill_no = data.get('investBillNo')
 
         # Duplicate check
@@ -220,7 +220,7 @@ def create_scan_report(request):
             is_active=True,
             created_by=user_id,
             branch_code=branch_code,
-            department_code=department_code,
+            outlet_code=outlet_code,
             hospital_code=hospital_code,
         )
 

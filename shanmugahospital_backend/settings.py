@@ -121,7 +121,8 @@ AUTH_PASSWORD_VALIDATORS = [
 CORS_ALLOW_HEADERS = [
     "Authorization",
     "Content-Type",
-    "Branch-Code"
+    "Branch-Code",
+    "Outlet-Code",
 ]
 WHO_ICD_CLIENT_ID = os.getenv("WHO_ICD_CLIENT_ID")
 WHO_ICD_CLIENT_SECRET = os.getenv("WHO_ICD_CLIENT_SECRET")
