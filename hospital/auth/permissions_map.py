@@ -45,6 +45,7 @@ PAGE_MAPPING = {
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
+    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
 
     # ==================== NURSING ====================
     r'^/_b_a_c_k_e_n_d/HMS/room-shiftings/?(\?.*)?$': 'HMS-P-RSHFT',
@@ -183,7 +184,45 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/update_surgery_schedule/': 'HMS-P-OTSS',                
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSS',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSS',                
-    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',        
+
+    #Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/item-master/price-history/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/item-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/department-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/department-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/category-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/category-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-type-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-type-master/.*/': 'HMS-API-IT',
+
+    # Stores GRN:
+    '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-grn/.*/': 'HMS-P-SGRN',
+
+    # Stores Intent:
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/create/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/update/.*/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/delete/.*/': 'HMS-API-SINTENTA',
+    
+    # Stores Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-management/': 'HMS-API-SAM',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-management/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-management/.*/': 'HMS-API-SAM',
+
+    # Stores Assets Maintenance:
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/': 'HMS-API-SAMT',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-SAMT',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-SAMT',
+
+    #Recycle Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SRM',               
+    r'^/_b_a_c_k_e_n_d/HMS/recycle_asset/[^/]+/?(\?.*)?$': 'HMS-API-SRM',               
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/.*/': 'HMS-API-SRM',               
 }
 
 

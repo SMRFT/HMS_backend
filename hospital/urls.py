@@ -16,9 +16,10 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type
 )
 from .Views.Stores import stores
+from .Views.Assets import assets
 
 urlpatterns = [
     # Admission URLs
@@ -43,6 +44,9 @@ urlpatterns = [
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
+    path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
+    path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+    path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
@@ -85,6 +89,10 @@ urlpatterns = [
     path('consume-qr-registration/', views.consume_qr_registration, name='consume_qr_registration'),
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
+
+    # Customer Type URLs
+    path('customer-types/', customer_type.customer_type_list, name='customer_type_list'),
+    path('customer-types/<int:pk>/', customer_type.customer_type_detail, name='customer_type_detail'),
 
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),
@@ -216,6 +224,7 @@ urlpatterns = [
 
     # Stores URLs
     path('item-master/', stores.item_master_list_create, name='item_master_list_create'),
+    path('item-master/price-history/<str:item_id>/', stores.item_price_history, name='item_price_history'),
     path('item-master/<str:pk>/', stores.item_master_detail, name='item_master_detail'),
     
     path('department-master/', stores.department_list_create, name='department_list_create'),
@@ -237,6 +246,15 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+
+    path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
+    path('stores-assets-management/<path:pk>/', assets.stores_assets_management_detail, name='stores_assets_management_detail'),
+
+    path('stores-assets-maintenance/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
+    path('stores-assets-maintenance/<path:pk>/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
+
+    path("recycle_asset/", assets.create_recycle_asset, name="create_recycle_asset"),
+    path("recycle_asset/<path:pk>/", assets.update_recycle_asset, name="update_recycle_asset"),
     #OT Master:
     path('create_ot/', otMaster.create_ot,  name='create_ot'),
     path('list_ots/',  otMaster.list_ots,   name='list_ots'),

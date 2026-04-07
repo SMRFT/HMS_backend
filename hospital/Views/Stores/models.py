@@ -126,3 +126,4 @@ class storesIntent(AuditModel):
     
     def __str__(self):
         return f"{self.intent_id} - {self.date}"    
+

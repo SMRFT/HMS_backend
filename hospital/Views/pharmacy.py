@@ -44,113 +44,163 @@ def convert_decimals(obj):
         return float(obj.to_decimal())
     return obj
 
+
+
 @api_view(["GET"])
 # @permission_classes([HasRoleAndDataPermission])
 def get_oppharmacy_stock(request):
     try:
+        # ✅ Dynamic department (code1)
         dept_code = request.GET.get("department_code", "OP001")
+
+        # ✅ Mongo connection (code2)
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        mongo_db = client["HMS"]
 
         pipeline = [
 
-    {
-        "$match": {
-            "department_code": dept_code
-        }
-    },
+            # ✅ Filter department
+            {
+                "$match": {
+                    "department_code": dept_code
+                }
+            },
 
-    {
-        "$lookup": {
-            "from": "hospital_pharmacyitem",
-            "localField": "item_id",
-            "foreignField": "item_id",
-            "as": "item_details"
-        }
-    },
-    {
-        "$unwind": {
-            "path": "$item_details",
-            "preserveNullAndEmptyArrays": False
-        }
-    },
+            # ✅ Join item master
+            {
+                "$lookup": {
+                    "from": "hospital_pharmacyitem",
+                    "localField": "item_id",
+                    "foreignField": "item_id",
+                    "as": "item_details"
+                }
+            },
 
-    {
-        "$match": {
-            "item_details.is_blocked": False,
-            "item_details.is_active": True
-        }
-    },
+            {
+                "$unwind": {
+                    "path": "$item_details",
+                    "preserveNullAndEmptyArrays": False
+                }
+            },
 
-    {
-        "$addFields": {
-            "available_stock": {
-                "$add": [
-                    {
-                        "$subtract": [
+            # ✅ Only active items
+            {
+                "$match": {
+                    "item_details.is_blocked": False,
+                    "item_details.is_active": True
+                }
+            },
+
+            # ✅ Calculate stock + reorder level
+            {
+                "$addFields": {
+                    "available_stock": {
+                        "$add": [
                             {
                                 "$subtract": [
                                     {
                                         "$subtract": [
                                             {
                                                 "$subtract": [
-                                                    "$total_stock",
-                                                    {"$ifNull": ["$sold_quantity", 0]}
+                                                    {
+                                                        "$subtract": [
+                                                            "$total_stock",
+                                                            {"$ifNull": ["$sold_quantity", 0]}
+                                                        ]
+                                                    },
+                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
                                                 ]
                                             },
-                                            {"$ifNull": ["$transferred_out_quantity", 0]}
+                                            {"$ifNull": ["$grn_return_quantity", 0]}
                                         ]
                                     },
-                                    {"$ifNull": ["$grn_return_quantity", 0]}
+                                    {"$ifNull": ["$blocked_quantity", 0]}
                                 ]
                             },
-                            {"$ifNull": ["$blocked_quantity", 0]}
+                            {"$ifNull": ["$sales_return_quantity", 0]}
                         ]
                     },
-                    {"$ifNull": ["$sales_return_quantity", 0]}
-                ]
+
+                    # ✅ Ensure reorder_level exists
+                    "reorder_level": {
+                        "$ifNull": ["$item_details.reorder_level", 0]
+                    }
+                }
+            },
+
+            # ✅ Low stock flag
+            {
+                "$addFields": {
+                    "is_low_stock": {
+                        "$cond": {
+                            "if": {
+                                "$lte": ["$available_stock", "$reorder_level"]
+                            },
+                            "then": True,
+                            "else": False
+                        }
+                    }
+                }
+            },
+
+            # ✅ Final projection
+            {
+                "$project": {
+                    "_id": 0,
+
+                    "org_id": 1,
+                    "branch_code": 1,
+                    "department_code": 1,
+                    "item_id": 1,
+                    "batch_number": 1,
+                    "expiry_date": 1,
+                    "total_stock": 1,
+                    "mrp": 1,
+                    "grn_number": 1,
+
+                    "sold_quantity": 1,
+                    "transferred_out_quantity": 1,
+                    "sales_return_quantity": 1,
+
+                    "available_stock": 1,
+                    "reorder_level": 1,
+                    "is_low_stock": 1,
+
+                    # ✅ Item details
+                    "item_name": "$item_details.item_name",
+                    "item_last_name": "$item_details.item_last_name",
+                    "category": "$item_details.category",
+                    "hsn_code": "$item_details.hsn",
+
+                    "high_risk": "$item_details.high_risk",
+                    "look_alike": "$item_details.look_alike",
+                    "sound_alike": "$item_details.sound_alike",
+
+                    # ✅ Tax
+                    "CGST_Percentage": 1,
+                    "SGST_Percentage": 1,
+                    "CGST_Amt": 1,
+                    "SGST_Amt": 1
+                }
             }
-        }
-    },
-
-    {
-        "$project": {
-            "_id": 0,
-            "org_id": 1,
-            "branch_code": 1,
-            "department_code": 1,
-            "item_id": 1,
-            "batch_number": 1,
-            "expiry_date": 1,
-            "total_stock": 1,
-            "mrp": 1,
-            "grn_number": 1,
-            "sold_quantity": 1,
-            "transferred_out_quantity": 1,
-            "sales_return_quantity": 1,
-            "available_stock": 1,
-
-            "item_name": "$item_details.item_name",
-            "item_last_name": "$item_details.item_last_name",
-            "category": "$item_details.category",
-            "reorder_level": "$item_details.reorder_level",
-            "hsn_code": "$item_details.hsn",
-
-            "CGST_Percentage": 1,
-            "SGST_Percentage": 1,
-            "CGST_Amt": 1,
-            "SGST_Amt": 1
-        }
-    }
-]
+        ]
 
         data = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
 
-        data = convert_decimals(data)   # ✅ convert Decimal128 → float
+        # ✅ Convert Decimal128 → float
+        data = convert_decimals(data)
 
-        return JsonResponse(data, safe=False)
+        return JsonResponse({
+            "success": True,
+            "data": data
+        }, safe=False)
 
     except Exception as e:
-        print("Error:", str(e))
-        return JsonResponse({"error": str(e)}, status=500)
+        print("Error in get_oppharmacy_stock:", str(e))
+        return JsonResponse({
+            "success": False,
+            "message": str(e)
+        }, status=500)
 
 
 
@@ -532,7 +582,6 @@ def get_last_billed_uhid(request):
             "doctor_id": last_bill.doctor_id,
             "room_no": last_bill.room_no,
             "bill_type": last_bill.bill_type,
-            "bill_name": last_bill.bill_name,
             "bill_no": last_bill.bill_no,
             "bill_date": last_bill.bill_date,
         }
@@ -590,6 +639,7 @@ def save_oppharmacy_estimate(request):
         "overall_discount_type": data.get("overall_discount_type"),
         "overall_discount_value": float(data.get("overall_discount_value", 0)),
         "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
+        "round_off": float(data.get("round_off", 0)),
         "net_amount": float(data.get("net_amount", 0)),
         "medicine_particulars": medicines,
         "billing_status": "Estimate",
@@ -634,6 +684,12 @@ def get_estimate_bills(request):
         data = []
 
         for bill in bills:
+             # ✅ Get patient using UHID
+            patient = Patient.objects.filter(uhid=bill.uhid).first()
+
+            patient_name = ""
+            if patient:
+                patient_name = f"{patient.firstName} {patient.lastName}"
 
             meds = bill.medicine_particulars
 
@@ -655,8 +711,7 @@ def get_estimate_bills(request):
                     "item_name": item_name,
                     "batch_number": med.get("batch_number"),
                     "qty": med.get("qty"),
-                    "price": med.get("price") or med.get("Price") or 0,
-                    "edit_history": med.get("edit_history", [])
+                    "Price": med.get("price"),
                 })
 
             # Re-fetch patient name from Patient model
@@ -668,13 +723,14 @@ def get_estimate_bills(request):
                 "lastmodified_date": bill.lastmodified_date,
                 "created_by": bill.created_by,
                 "lastmodified_by": bill.lastmodified_by,
-                "patient_name": patient_name,
                 "bill_no": bill.bill_no,
+                "Bill_id": bill.Bill_id,
                 "estimate_no": bill.estimate_no,
                 "bill_date": bill.bill_date,
                 "uhid": bill.uhid,
                 "inpatient_number": bill.inpatient_number,
                 "bill_type": bill.bill_type,
+                "patient_name": patient_name,
                 "doctor_id": bill.doctor_id,
                 "room_no": bill.room_no,
                 "medicine_particulars": particulars,
@@ -683,6 +739,7 @@ def get_estimate_bills(request):
                 "overall_discount_value": bill.overall_discount_value,
                 "overall_discount_amount": bill.overall_discount_amount,
                 "net_amount": bill.net_amount,
+                "round_off": bill.round_off,
                 "billing_status": bill.billing_status,
                 "billing_mode": bill.billing_mode,
                 "payment_details": bill.payment_details,
@@ -750,77 +807,135 @@ def convert_estimate_to_bill(request, estimate_no):
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def OPPharmacy_pending_bills(request):
-    bills = OPPharmacyBill.objects.filter(billing_status="Billed")
-    serializer = OPPharmacyBillSerializer(bills, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
 
+    bills = list(
+        OPPharmacyBill.objects.filter(
+            billing_status__in=["Billed", "Paid"]
+        )
+    )
+
+    # ✅ Collect all UHIDs
+    uhids = [bill.uhid for bill in bills if bill.uhid]
+
+    # ✅ Fetch all patients in ONE query
+    patients = Patient.objects.filter(uhid__in=uhids)
+
+    # ✅ Map UHID → Full Name
+    patient_map = {
+        p.uhid: f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
+        for p in patients
+    }
+
+    # ✅ Attach patient_name
+    data = []
+    for bill in bills:
+        serialized = OPPharmacyBillSerializer(bill).data
+        serialized["patient_name"] = patient_map.get(bill.uhid, "")
+        data.append(serialized)
+
+    return Response(data, status=status.HTTP_200_OK)
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+
+from decimal import Decimal, InvalidOperation
+from datetime import datetime
+from pymongo import MongoClient
+import os, json
+
+from ..models import OPPharmacyBill
 
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
 def collect_oppharmacy_payment(request):
-    bill_no = request.data.get("bill_no")
-    bill_type = request.data.get("bill_type")
-    payments = request.data.get("payments", {})
+    try:
+        data = request.data
 
-    # ✅ Cashier from token
-    cashier_id = request.data.get("auth-user-id")
+        Bill_id = data.get("Bill_id")
+        uhid = data.get("uhid")
+        bill_no = data.get("bill_no")
+        payment_details = data.get("payment_details")
 
-    if not bill_no or not bill_type:
-        return Response(
-            {"error": "bill_no and bill_type are required"},
-            status=400
-        )
+        if not Bill_id or not uhid or not payment_details:
+            return Response({
+                "success": False,
+                "error": "Missing required fields"
+            })
 
-    bill = OPPharmacyBill.objects.filter(
-        bill_no=bill_no,
-        bill_type=bill_type,
-        billing_status="Billed"
-    ).order_by("-bill_date").first()
+        # ✅ TYPE FIX
+        Bill_id = int(Bill_id)
+        uhid = str(uhid).strip()
 
-    if not bill:
-        return Response(
-            {"error": "Bill not found or already paid"},
-            status=400
-        )
+        print("DEBUG:", Bill_id, uhid)
 
-    payment_amount_fields = ["cash", "cheque", "card"]
-    total_paid = Decimal("0.00")
+        # ================================
+        # ✅ CORRECT COLLECTION
+        # ================================
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
 
-    for field in payment_amount_fields:
-        try:
-            total_paid += Decimal(str(payments.get(field, 0) or 0))
-        except InvalidOperation:
-            return Response(
-                {"error": f"Invalid amount for {field}"},
-                status=400
+        bill_collection = db["hospital_oppharmacybill"]   # 🔥 FIXED
+        stock_collection = db["hospital_pharmacystock"]
+
+        # ================================
+        # ✅ DEBUG CHECK
+        # ================================
+        print("ALL BILLS:", list(bill_collection.find({}, {"Bill_id": 1, "uhid": 1})))
+
+        # ================================
+        # ✅ FETCH BILL
+        # ================================
+        bill = bill_collection.find_one({
+            "Bill_id": Bill_id,
+            "uhid": uhid
+        })
+
+        if not bill:
+            return Response({
+                "success": False,
+                "error": "Bill not found"
+            })
+
+        # ================================
+        # ✅ STOCK UPDATE
+        # ================================
+        for med in bill.get("medicine_particulars", []):
+            stock_collection.update_one(
+                {
+                    "item_id": med["item_id"],
+                    "batch_number": med["batch_number"]
+                },
+                {
+                    "$inc": {"sold_quantity": med["qty"]}
+                }
             )
 
-    if total_paid != bill.net_amount:
-        return Response(
-            {"error": "Payment amount mismatch"},
-            status=400
+        # ================================
+        # ✅ BILL UPDATE
+        # ================================
+        bill_collection.update_one(
+            {
+                "Bill_id": Bill_id,
+                "uhid": uhid
+            },
+            {
+                "$set": {
+                    "billing_status": "Paid",
+                    "payment_details": payment_details,
+                    "paid_date": datetime.utcnow()
+                }
+            }
         )
 
-    # ✅ UPDATE CORRECT FIELDS VIA PyMongo to avoid stringification
-    bill_collection.update_one(
-        {"Bill_id": bill.Bill_id},
-        {"$set": {
-            "billing_status": "Paid",
-            "payment_details": payments,
-            "cashier_id": cashier_id,
-            "lastmodified_by": cashier_id,
-            "lastmodified_date": datetime.utcnow()
-        }}
-    )
+        return Response({
+            "success": True,
+            "message": "Payment collected successfully"
+        })
 
-    return Response({
-        "success": True,
-        "message": "Payment completed successfully",
-        "bill_no": bill.bill_no,
-        "bill_type": bill.bill_type,
-        "cashier_id": cashier_id
-    })
-
-
-
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": str(e)
+        })

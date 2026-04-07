@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from djongo.models.fields import ObjectIdField
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN ,storesIntent
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN ,storesIntent 
 
 class StoresGRNSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -150,3 +150,4 @@ class StoresIntentSerializer(serializers.ModelSerializer):
                     representation[field] = []
                     
         return representation
+

@@ -207,6 +207,19 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
         model = InsuranceProvider
         fields = '__all__'
 
+from .models import CustomerType
+class CustomerTypeSerializer(serializers.ModelSerializer):
+    patient_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomerType
+        fields = '__all__'
+        read_only_fields = ["type_id"]
+
+    def get_patient_count(self, obj):
+        from .models import Patient
+        return Patient.objects.filter(customer_type=obj.type_name).count()
+
 from .models import SurgerySchedule
 
 class SurgeryScheduleSerializer(serializers.ModelSerializer):
