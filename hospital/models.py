@@ -91,20 +91,22 @@ class Patient(AuditModel):
         prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            # 2. Get last patient of the current financial year to increment
-            last_patient = Patient.objects.filter(
-                uhid__startswith=prefix
-            ).order_by('-uhid').first()
-
-            if last_patient and last_patient.uhid:
+            # 2. Get all patients of the current financial year to find the true numeric maximum.
+            # String-based sorting (order_by('-uhid')) is flawed due to inconsistent padding (e.g. S026/0006 vs S026/00007).
+            year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
+            
+            max_number = 0
+            for u in year_patients:
                 try:
                     # Expecting format "S0YY/NNNNN"
-                    last_number_str = last_patient.uhid.split('/')[-1]
-                    last_number = int(last_number_str)
+                    num_str = u.split('/')[-1]
+                    num = int(num_str)
+                    if num > max_number:
+                        max_number = num
                 except (ValueError, IndexError):
-                    last_number = 0
-            else:
-                last_number = 0
+                    continue
+            
+            last_number = max_number
             
             next_number = last_number + 1
             # 3. Format with 5-digit padding as per user requirement (S026/00001)

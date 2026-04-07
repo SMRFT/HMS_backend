@@ -1,9 +1,11 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-from .models import StoresAssetsManagement, StoresAssetsMaintainance , recycle_asset
-from .serializer import StoresAssetsManagementSerializer, StoresAssetsMaintainanceSerializer, recycle_assetSerializer
+from .models import StoresAssetsManagement, StoresAssetsmaintenance , recycle_asset
+from .serializer import StoresAssetsManagementSerializer, StoresAssetsmaintenanceSerializer, recycle_assetSerializer
 from rest_framework.permissions import AllowAny
+from datetime import datetime
+from pyauth.auth import HasRoleAndDataPermission
 
 def generate_asset_id():
     now = datetime.now()
@@ -30,8 +32,13 @@ def generate_asset_id():
     return f"{prefix}{new_sequence:05d}"
 
 @api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def stores_assets_management_list_create(request):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+    
     if request.method == 'GET':
         from_date = request.query_params.get('from_date')
         to_date = request.query_params.get('to_date')
@@ -52,7 +59,11 @@ def stores_assets_management_list_create(request):
             data['asset_id'] = generate_asset_id()
             if not data.get('barcode'):
                 data['barcode'] = data['asset_id']
-            
+        
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
         serializer = StoresAssetsManagementSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -60,8 +71,13 @@ def stores_assets_management_list_create(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def stores_assets_management_detail(request, pk):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
     try:
         item = StoresAssetsManagement.objects.filter(pk=pk).first()
         if not item:
@@ -81,6 +97,10 @@ def stores_assets_management_detail(request, pk):
         elif data.get('is_active') == True:
             data['deactivated_date'] = None
 
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
         serializer = StoresAssetsManagementSerializer(item, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -94,15 +114,15 @@ def stores_assets_management_detail(request, pk):
         item.save()
         return Response({"message": "Asset soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
-from .models import StoresAssetsMaintainance
-from .serializer import StoresAssetsMaintainanceSerializer
+from .models import StoresAssetsmaintenance
+from .serializer import StoresAssetsmaintenanceSerializer
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from datetime import datetime
 
-def generate_maintainance_id():
+def generate_maintenance_id():
     now = datetime.now()
     if now.month <= 3:
         fy_str = f"{(now.year - 1) % 100:02d}{now.year % 100:02d}"
@@ -110,7 +130,7 @@ def generate_maintainance_id():
         fy_str = f"{now.year % 100:02d}{(now.year + 1) % 100:02d}"
     prefix = f"SH/MNT/{fy_str}/"
     
-    last_record = StoresAssetsMaintainance.objects.filter(asset_id__startswith=prefix).order_by('-created_date').first()
+    last_record = StoresAssetsmaintenance.objects.filter(asset_id__startswith=prefix).order_by('-created_date').first()
     
     if last_record:
         last_id = last_record.asset_id
@@ -127,7 +147,12 @@ def generate_maintainance_id():
     return f"{prefix}{new_sequence:05d}"
 
 @api_view(['GET', 'POST', 'PATCH'])
-def stores_assets_maintainance_details(request, pk=None):
+@permission_classes([HasRoleAndDataPermission])
+def stores_assets_maintenance_details(request, pk=None):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
 
     # =========================
     # ✅ GET (with date filter)
@@ -136,7 +161,7 @@ def stores_assets_maintainance_details(request, pk=None):
         from_date = request.GET.get('from_date')
         to_date = request.GET.get('to_date')
 
-        queryset = StoresAssetsMaintainance.objects.all().order_by('-created_date')
+        queryset = StoresAssetsmaintenance.objects.all().order_by('-created_date')
 
         if from_date:
             queryset = queryset.filter(date__gte=from_date)
@@ -147,9 +172,9 @@ def stores_assets_maintainance_details(request, pk=None):
         # single or list
         if pk:
             obj = get_object_or_404(queryset, pk=pk)
-            serializer = StoresAssetsMaintainanceSerializer(obj)
+            serializer = StoresAssetsmaintenanceSerializer(obj)
         else:
-            serializer = StoresAssetsMaintainanceSerializer(queryset, many=True)
+            serializer = StoresAssetsmaintenanceSerializer(queryset, many=True)
 
         return Response(serializer.data)
 
@@ -159,11 +184,14 @@ def stores_assets_maintainance_details(request, pk=None):
     elif request.method == 'POST':
         data = request.data.copy()
         if not data.get('asset_id'):
-            data['asset_id'] = generate_maintainance_id()
+            data['asset_id'] = generate_maintenance_id()
         if not data.get('barcode'):
             data['barcode'] = data['asset_id']
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
 
-        serializer = StoresAssetsMaintainanceSerializer(data=data)
+        serializer = StoresAssetsmaintenanceSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response({
@@ -177,32 +205,35 @@ def stores_assets_maintainance_details(request, pk=None):
     # ✅ PATCH (update all fields)
     # =========================
     elif request.method == 'PATCH':
-        obj = get_object_or_404(StoresAssetsMaintainance, pk=pk)
-
+        obj = get_object_or_404(StoresAssetsmaintenance, pk=pk)
         data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
 
-        if "maintainance_details" in data:
-            new_data = data.get("maintainance_details", [])
+        if "maintenance_details" in data:
+            new_data = data.get("maintenance_details", [])
 
             if isinstance(new_data, list):
                 # Simply replace the logs array directly, as the frontend sends the *complete* modified array
-                data["maintainance_details"] = new_data
+                data["maintenance_details"] = new_data
             elif isinstance(new_data, str):
                 import json
                 try:
-                    data["maintainance_details"] = json.loads(new_data)
+                    data["maintenance_details"] = json.loads(new_data)
                 except Exception:
-                    data["maintainance_details"] = []
+                    data["maintenance_details"] = []
             else:
                 return Response(
-                    {"error": "maintainance_details must be list"},
+                    {"error": "maintenance_details must be list"},
                     status=400
                 )
 
-        serializer = StoresAssetsMaintainanceSerializer(
+        serializer = StoresAssetsmaintenanceSerializer(
             obj,
             data=data,
             partial=True  # allow updating all or partial fields
+
         )
 
         if serializer.is_valid():
@@ -239,8 +270,13 @@ def generate_recycle_id():
     return f"{prefix}{new_sequence:05d}"
 
 @api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def create_recycle_asset(request):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
     if request.method == 'GET':
         from_date = request.GET.get('from_date')
         to_date = request.GET.get('to_date')
@@ -255,6 +291,9 @@ def create_recycle_asset(request):
         data = request.data.copy()
         if not data.get('asset_id'):
             data['asset_id'] = generate_recycle_id()
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
 
         serializer = recycle_assetSerializer(data=data)
         if serializer.is_valid():
@@ -267,14 +306,23 @@ def create_recycle_asset(request):
     return Response({"error": "Invalid request method"}, status=400)
 
 @api_view(['GET', 'PATCH'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def update_recycle_asset(request, pk):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
     if request.method == 'GET':
         queryset = recycle_asset.objects.filter(is_active__in=[True]).order_by('-created_date')
         serializer = recycle_assetSerializer(queryset, many=True)
         return Response(serializer.data)
     elif request.method == 'PATCH':
         data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        
         obj = get_object_or_404(recycle_asset, pk=pk)
         serializer = recycle_assetSerializer(obj, data=data, partial=True)
         if serializer.is_valid():
