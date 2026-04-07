@@ -13,11 +13,14 @@ from django.utils import timezone as tz
 from datetime import datetime
 import traceback
 
-from ..models import Block, RoomCategory, Room, Admission,Patient, RoomBooking
+from ..models import Block, RoomCategory, Room, Admission,Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
 from ..serializers import (
     BlockSerializer,
     RoomCategorySerializer,
     RoomSerializer,
+    RoomKitItemsSerializer,
+    RoomServiceDescriptionSerializer,
+    NursingStationSerializer
 )
 
 # --------------------------------------------------
@@ -28,72 +31,130 @@ from ..serializers import (
 @csrf_exempt
 def block_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
-    # ── GET ──────────────────────────────────────────────────────────────────
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+    # ── GET ─────────────────────────────────────────────
     if request.method == "GET":
+
         if pk:
             try:
-                block = Block.objects.get(block_id=pk)
+                block = Block.objects.get(
+                    block_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
                 if not block.is_active:
                     return Response({"error": "Block not found"}, status=404)
+
             except Block.DoesNotExist:
                 return Response({"error": "Block not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Block ID"}, status=400)
 
             serializer = BlockSerializer(block)
             return Response(serializer.data)
 
-        # List – filter in Python to avoid Djongo boolean filter bug
-        all_blocks = Block.objects.all().order_by("block_id")
+        # list
+        all_blocks = Block.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("block_id")
+
         blocks = [b for b in all_blocks if b.is_active]
+
         serializer = BlockSerializer(blocks, many=True)
         return Response(serializer.data)
 
-    # ── POST ─────────────────────────────────────────────────────────────────
+
+    # ── POST ─────────────────────────────────────────────
     if request.method == "POST":
-        serializer = BlockSerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = BlockSerializer(data=data)
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
 
-    # ── PUT ──────────────────────────────────────────────────────────────────
+
+    # ── PUT ─────────────────────────────────────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Block ID required"}, status=400)
+
         try:
-            block = Block.objects.get(block_id=pk)
+            block = Block.objects.get(
+                block_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not block.is_active:
                 return Response({"error": "Block not found"}, status=404)
+
         except Block.DoesNotExist:
             return Response({"error": "Block not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Block ID"}, status=400)
 
         serializer = BlockSerializer(block, data=request.data, partial=True)
+
         if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
             return Response(serializer.data)
+
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ───────────────────────────────────────────────────────────────
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Block ID required"}, status=400)
+
         try:
-            block = Block.objects.get(block_id=pk)
+            block = Block.objects.get(
+                block_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not block.is_active:
                 return Response({"error": "Block not found"}, status=404)
+
         except Block.DoesNotExist:
             return Response({"error": "Block not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Block ID"}, status=400)
 
         block.is_active = False
-        block.lastmodified_by = user_id
+        block.lastmodified_by = employee_id
+        block.lastmodified_date = timezone.now()
         block.save()
+
         return Response({"message": "Deleted successfully"}, status=200)
         
 
@@ -105,92 +166,569 @@ def block_view(request, pk=None):
 @csrf_exempt
 def room_category_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
 
     # ── GET ─────────────────────────────────────────
     if request.method == "GET":
+
         if pk:
             try:
-                category = RoomCategory.objects.get(room_category_id=pk)
+                category = RoomCategory.objects.get(
+                    room_category_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
                 if not category.is_active:
                     return Response({"error": "Room category not found"}, status=404)
+
             except RoomCategory.DoesNotExist:
                 return Response({"error": "Room category not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Room Category ID"}, status=400)
 
             serializer = RoomCategorySerializer(category)
             return Response(serializer.data)
 
-        # List – filter in Python (Djongo boolean workaround)
-        all_categories = RoomCategory.objects.all().order_by("room_category_id")
+        # list
+        all_categories = RoomCategory.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("room_category_id")
+
         categories = [c for c in all_categories if c.is_active]
+
         serializer = RoomCategorySerializer(categories, many=True)
         return Response(serializer.data)
 
+
     # ── POST ────────────────────────────────────────
     if request.method == "POST":
-        serializer = RoomCategorySerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomCategorySerializer(data=data)
+
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
+
 
     # ── PUT ─────────────────────────────────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Room Category ID required"}, status=400)
+
         try:
-            category = RoomCategory.objects.get(room_category_id=pk)
+            category = RoomCategory.objects.get(
+                room_category_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
+
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Room Category ID"}, status=400)
 
-        serializer = RoomCategorySerializer(category, data=request.data, partial=True)
+        serializer = RoomCategorySerializer(
+            category,
+            data=request.data,
+            partial=True
+        )
+
         if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
             return Response(serializer.data)
+
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ──────────────────────────────────────
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Room Category ID required"}, status=400)
+
         try:
-            category = RoomCategory.objects.get(room_category_id=pk)
+            category = RoomCategory.objects.get(
+                room_category_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
+
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Room Category ID"}, status=400)
 
         category.is_active = False
-        category.lastmodified_by = user_id
+        category.lastmodified_by = employee_id
+        category.lastmodified_date = timezone.now()
         category.save()
+
         return Response({"message": "Deleted successfully"}, status=200)
 
 
-@api_view(["GET"])
-def room_service_description_view(request):
+# --------------------------------------------------
+# NURSING STATION
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def nursingstation_view(request, pk=None):
 
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client.HMS
-    collection = db.hospital_roomservice_description
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
-    data = list(collection.find({"is_active": True}))
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
 
-    result = []
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
 
-    for item in data:
-        result.append({
-            "description": item.get("description", "")
-        })
+    # ── GET ─────────────────────────────────────────────
+    if request.method == "GET":
 
-    return Response(result)
+        if pk:
+            try:
+                nursingstation = NursingStation.objects.get(
+                    ward_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not nursingstation.is_active:
+                    return Response({"error": "NursingStation not found"}, status=404)
+
+            except NursingStation.DoesNotExist:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+            serializer = NursingStationSerializer(nursingstation)
+            return Response(serializer.data)
+
+        # List
+        all_wards = NursingStation.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("ward_id")
+
+        wards = [w for w in all_wards if w.is_active]
+
+        serializer = NursingStationSerializer(wards, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = NursingStationSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "NursingStation ID required"}, status=400)
+
+        try:
+            nursingstation = NursingStation.objects.get(
+                ward_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not nursingstation.is_active:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+        except NursingStation.DoesNotExist:
+            return Response({"error": "NursingStation not found"}, status=404)
+
+        serializer = NursingStationSerializer(
+            nursingstation,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE ─────────────────────────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "NursingStation ID required"}, status=400)
+
+        try:
+            nursingstation = NursingStation.objects.get(
+                ward_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not nursingstation.is_active:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+        except NursingStation.DoesNotExist:
+            return Response({"error": "NursingStation not found"}, status=404)
+
+        nursingstation.is_active = False
+        nursingstation.lastmodified_by = employee_id
+        nursingstation.lastmodified_date = timezone.now()
+        nursingstation.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
+    
+
+# --------------------------------------------------
+# ROOM SERVICE DESCRIPTION
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_service_description_view(request, pk=None):
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+
+    # ── GET ─────────────────────────────────────────
+    if request.method == "GET":
+
+        if pk:
+            try:
+                roomservicedescription = RoomServiceDescription.objects.get(
+                    description_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not roomservicedescription.is_active:
+                    return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+            except RoomServiceDescription.DoesNotExist:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+            serializer = RoomServiceDescriptionSerializer(roomservicedescription)
+            return Response(serializer.data)
+
+
+        # list
+        all_description = RoomServiceDescription.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("description_id")
+
+        descriptions = [b for b in all_description if b.is_active]
+
+        serializer = RoomServiceDescriptionSerializer(descriptions, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomServiceDescriptionSerializer(data=data)
+
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "RoomServiceDescription ID required"}, status=400)
+
+        try:
+            roomservicedescription = RoomServiceDescription.objects.get(
+                description_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomservicedescription.is_active:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+        except RoomServiceDescription.DoesNotExist:
+            return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+
+        serializer = RoomServiceDescriptionSerializer(
+            roomservicedescription,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "RoomServiceDescription ID required"}, status=400)
+
+        try:
+            roomservicedescription = RoomServiceDescription.objects.get(
+                description_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomservicedescription.is_active:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+        except RoomServiceDescription.DoesNotExist:
+            return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+
+        roomservicedescription.is_active = False
+        roomservicedescription.lastmodified_by = employee_id
+        roomservicedescription.lastmodified_date = timezone.now()
+        roomservicedescription.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
+    
+
+# --------------------------------------------------
+# ROOM KIT ITEMS
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_kititems_view(request, pk=None):
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+
+    # ── GET ─────────────────────────────────────────
+    if request.method == "GET":
+
+        if pk:
+            try:
+                roomkititems = RoomKitItems.objects.get(
+                    kit_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not roomkititems.is_active:
+                    return Response({"error": "RoomKitItems not found"}, status=404)
+
+            except RoomKitItems.DoesNotExist:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+            serializer = RoomKitItemsSerializer(roomkititems)
+            return Response(serializer.data)
+
+
+        # list
+        all_roomkititems = RoomKitItems.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("kit_id")
+
+        roomkititems = [b for b in all_roomkititems if b.is_active]
+
+        serializer = RoomKitItemsSerializer(roomkititems, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomKitItemsSerializer(data=data)
+
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "RoomKitItems ID required"}, status=400)
+
+        try:
+            roomkititems = RoomKitItems.objects.get(
+                kit_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomkititems.is_active:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+        except RoomKitItems.DoesNotExist:
+            return Response({"error": "RoomKitItems not found"}, status=404)
+
+
+        serializer = RoomKitItemsSerializer(
+            roomkititems,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "RoomKitItems ID required"}, status=400)
+
+        try:
+            roomkititems = RoomKitItems.objects.get(
+                kit_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomkititems.is_active:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+        except RoomKitItems.DoesNotExist:
+            return Response({"error": "RoomKitItems not found"}, status=404)
+
+
+        roomkititems.is_active = False
+        roomkititems.lastmodified_by = employee_id
+        roomkititems.lastmodified_date = timezone.now()
+        roomkititems.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
 
 
 # --------------------------------------------------
@@ -201,14 +739,38 @@ def room_service_description_view(request):
 @csrf_exempt
 def room_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+
+    # ────────────────────────────────────────────────
+    # GET
+    # ────────────────────────────────────────────────
     if request.method == "GET":
 
         # -------- Single Room --------
         if pk:
             try:
-                room = Room.objects.get(pk=pk)
+                room = Room.objects.get(
+                    pk=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
 
                 if not room.is_active:
                     return Response({"error": "Room not found"}, status=404)
@@ -218,15 +780,27 @@ def room_view(request, pk=None):
             except Room.DoesNotExist:
                 return Response({"error": "Room not found"}, status=404)
 
+
         # -------- All Active Rooms --------
-        all_rooms = Room.objects.all()
+        all_rooms = Room.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+
         active_rooms = [room for room in all_rooms if room.is_active]
 
         return Response(RoomSerializer(active_rooms, many=True).data)
 
+
+    # ────────────────────────────────────────────────
+    # POST
+    # ────────────────────────────────────────────────
     elif request.method == "POST":
 
         data = request.data.copy()
+
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
 
         services = data.pop("services", [])
         beds = data.pop("beds", [])
@@ -234,8 +808,12 @@ def room_view(request, pk=None):
 
         room_number = data.get("room_number")
 
-        # Duplicate check (Djongo-safe)
-        existing_rooms = Room.objects.filter(room_number=room_number)
+        # Duplicate check (hospital + branch safe)
+        existing_rooms = Room.objects.filter(
+            room_number=room_number,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
 
         if any(room.is_active for room in existing_rooms):
             return Response(
@@ -248,11 +826,14 @@ def room_view(request, pk=None):
         if serializer.is_valid():
 
             room = serializer.save(
-                created_by=user_id,
-                lastmodified_by=user_id
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
             )
 
-            # Assign nested JSON fields
+            # nested JSON
             room.services = services
             room.beds = beds
             room.room_kits = room_kits
@@ -263,16 +844,25 @@ def room_view(request, pk=None):
 
         return Response(serializer.errors, status=400)
 
+
+    # ────────────────────────────────────────────────
+    # PUT
+    # ────────────────────────────────────────────────
     elif request.method == "PUT":
 
         try:
-            room = Room.objects.get(pk=pk)
+            room = Room.objects.get(
+                pk=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
+
 
         data = request.data.copy()
 
@@ -282,10 +872,14 @@ def room_view(request, pk=None):
 
         new_room_number = data.get("room_number")
 
-        # Duplicate check (exclude current room)
+        # Duplicate check
         if new_room_number and new_room_number != room.room_number:
 
-            existing_rooms = Room.objects.filter(room_number=new_room_number)
+            existing_rooms = Room.objects.filter(
+                room_number=new_room_number,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             if any(r.is_active and str(r.pk) != str(pk) for r in existing_rooms):
                 return Response(
@@ -297,7 +891,10 @@ def room_view(request, pk=None):
 
         if serializer.is_valid():
 
-            room = serializer.save(lastmodified_by=user_id)
+            room = serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
 
             if services is not None:
                 room.services = services
@@ -314,23 +911,32 @@ def room_view(request, pk=None):
 
         return Response(serializer.errors, status=400)
 
+
+    # ────────────────────────────────────────────────
+    # DELETE
+    # ────────────────────────────────────────────────
     elif request.method == "DELETE":
 
         try:
-            room = Room.objects.get(pk=pk)
+            room = Room.objects.get(
+                pk=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
 
             room.is_active = False
-            room.lastmodified_by = user_id
+            room.lastmodified_by = employee_id
+            room.lastmodified_date = timezone.now()
             room.save()
 
             return Response({"message": "Deleted successfully"})
 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-
+        
 
 import json
 from django.db.models.fields.json import JSONField

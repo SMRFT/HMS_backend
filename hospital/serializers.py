@@ -51,26 +51,71 @@ class GRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Room,NursingStation
+from .models import Block, RoomCategory, Room, NursingStation, RoomKitItems, RoomServiceDescription
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
         model = Block
         fields = "__all__"
-        read_only_fields = ["block_id"]
-
+        read_only_fields = [
+            "block_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
 
 class RoomCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = RoomCategory
         fields = "__all__"
-        read_only_fields = ["room_category_id"]
-
-
+        read_only_fields = [
+            "room_category_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+        
 class NursingStationSerializer(serializers.ModelSerializer):
     class Meta:
         model = NursingStation
         fields = "__all__"
-        read_only_fields = ["ward_id"]
+        read_only_fields = [
+            "ward_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+
+class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoomServiceDescription
+        fields = "__all__"
+        read_only_fields = [
+            "description_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+
+class RoomKitItemsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoomKitItems
+        fields = "__all__"
+        read_only_fields = [
+            "kit_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
 
 class RoomSerializer(serializers.ModelSerializer):
     # These fields will be handled as JSON

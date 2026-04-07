@@ -511,7 +511,6 @@ class RoomCategory(AuditModel):
     def __str__(self):
         return self.name
 
-
 class RoomServiceDescription(AuditModel):
     description_id = models.IntegerField(primary_key=True)
     description_name = models.CharField(max_length=100)
