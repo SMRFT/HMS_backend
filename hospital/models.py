@@ -469,7 +469,20 @@ class GRN(AuditModel):
     def __str__(self):
         return f"{self.name} ({self.vendor_id})"
 
+class NursingStation(AuditModel):
+    ward_id = models.IntegerField(primary_key=True)
+    ward_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
 
+    def save(self, *args, **kwargs):
+        if self.ward_id is None:
+            last = NursingStation.objects.order_by('-ward_id').first()
+            self.ward_id = (last.ward_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.ward_name
+    
 class Block(AuditModel):
     block_id = models.IntegerField(primary_key=True)
     block_name = models.CharField(max_length=100)
@@ -498,34 +511,69 @@ class RoomCategory(AuditModel):
     def __str__(self):
         return self.name
 
-class Room(AuditModel):
-    room_number = models.CharField(max_length=10, primary_key=True)
-    description = models.TextField(blank=True)
-    room_category = models.CharField(max_length=100)         
-    block = models.CharField(max_length=100)                 
-    floor = models.IntegerField()
-    room_type = models.CharField(max_length=20)
-    phone_extension = models.CharField(max_length=10, blank=True)
-    nursing_station = models.CharField(max_length=50, blank=True)
-    capacity = models.IntegerField(default=1)                
-    occupancy = models.IntegerField(default=0)               
-    admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_status = models.CharField(max_length=20, default="Available")
-    room_blocked = models.BooleanField(default=False)
-    blocked_reason = models.TextField(blank=True)
-    include_in_final_bill = models.BooleanField(default=True)
-    enable_luxury_tax = models.BooleanField(default=False)
+class RoomServiceDescription(AuditModel):
+    description_id = models.IntegerField(primary_key=True)
+    description_name = models.CharField(max_length=100)
     is_active = models.BooleanField(default=True)
-    services = models.JSONField(default=list, blank=True)
-    beds = models.JSONField(default=list, blank=True)
-    room_kits = models.JSONField(default=list, blank=True)
-
-    def __str__(self):
-        return self.room_number
 
     def save(self, *args, **kwargs):
-        # Ensure JSON fields are lists if not set
+        if self.description_id is None:
+            last = RoomServiceDescription.objects.order_by('-description_id').first()
+            self.description_id = (last.description_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.description_name
+
+class RoomKitItems(AuditModel):
+    kit_id = models.IntegerField(primary_key=True)
+    kit_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.kit_id is None:
+            last = RoomKitItems.objects.order_by('-kit_id').first()
+            self.kit_id = (last.kit_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.kit_name
+
+ROOM_STATUS_CHOICES = [
+    ("Available",    "Available"),
+    ("Maintenance",  "Maintenance"),
+    ("Blocked",      "Blocked"),
+]
+ 
+ 
+class Room(AuditModel):
+    room_number      = models.CharField(max_length=10, primary_key=True)
+    description      = models.TextField(blank=True)
+    room_category    = models.CharField(max_length=100)
+    block            = models.CharField(max_length=100)
+    phone_extension  = models.CharField(max_length=10, blank=True)
+    nursing_station  = models.CharField(max_length=100, blank=True)
+    capacity         = models.IntegerField(default=1)
+    occupancy        = models.IntegerField(default=0)
+    room_status      = models.CharField(
+                           max_length=20,
+                           choices=ROOM_STATUS_CHOICES,
+                           default="Available"
+                       )
+    is_active        = models.BooleanField(default=True)
+ 
+    # Nested JSON sub-documents
+    services         = models.JSONField(default=list, blank=True)
+    beds             = models.JSONField(default=list, blank=True)
+    room_kits        = models.JSONField(default=list, blank=True)
+ 
+    class Meta:
+        db_table = "room"
+ 
+    def __str__(self):
+        return self.room_number
+ 
+    def save(self, *args, **kwargs):
         if self.services is None:
             self.services = []
         if self.beds is None:
@@ -536,12 +584,12 @@ class Room(AuditModel):
 
 
 class RoomBooking(models.Model):
-    ip_number    = models.CharField(max_length=100, db_index=True)
+    ip_number     = models.CharField(max_length=10, primary_key=True)
     room_number  = models.CharField(max_length=50)
     bed_number   = models.CharField(max_length=50)
     is_booked    = models.BooleanField(default=True)
     room_shifted = models.BooleanField(default=False)   # True once patient is actually shifted
-    booked_date    = models.DateTimeField(null=True, blank=True)
+    booked_date  = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"Booking: IP={self.ip_number} | Room={self.room_number}/{self.bed_number} | shifted={self.room_shifted}"
@@ -636,6 +684,7 @@ class DischargeBilling(AuditModel):
     # ── Estimate→Bill traceability ────────────────────────────────────────────
     converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
     is_active         = models.BooleanField(default=True)
+    next_visit_date   = models.DateField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
         if self.discharge_id is None:

@@ -57,15 +57,23 @@ urlpatterns = [
 
     path('room-category/', room.room_category_view, name='room_category_list_create'),
     path('room-category/<str:pk>/', room.room_category_view, name='room_category_update_delete'),
+
+    path('nursingstation/', room.nursingstation_view, name='nursingstation_list_create'),
+    path('nursingstation/<str:pk>/', room.nursingstation_view, name='nursingstationupdate_delete'),
+
+    path('roomservice-description/', room.room_service_description_view, name='room_service_description_view_list_create'),
+    path('roomservice-description/<str:pk>/', room.room_service_description_view, name='room_service_description_view_update_delete'),
+
+    path('room-kititems/', room.room_kititems_view, name='room_kititems_list_create'),
+    path('room-kititems/<str:pk>/', room.room_kititems_view, name='room_kititems_update_delete'),
     
     path('room/', room.room_view, name='room_list_create'),
     path('room/<str:pk>/', room.room_view, name='room_update_delete'),
-    
-    path('roomservice-description/', room.room_service_description_view, name='roomservice_list'),
 
     path("room-enquiry/",       room.room_enquiry_view,       name="room_enquiry"),
     path("update-room-cleaned/", room.update_room_cleaned_view, name="update_room_cleaned"),
     path("book-room/",          room.book_room_view,           name="book_room"),
+
     path('get_active_admission/', room.get_active_admission, name='get_active_admission'), 
     path("room-shifting/",                    room.room_shifting_view,        name="room_shifting"),
     path("room-shifting/<path:ip_number>/update/", room.room_shifting_detail_view, name="room_shifting_detail"),

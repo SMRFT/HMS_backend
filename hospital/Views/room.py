@@ -13,11 +13,14 @@ from django.utils import timezone as tz
 from datetime import datetime
 import traceback
 
-from ..models import Block, RoomCategory, Room, Admission,Patient, RoomBooking
+from ..models import Block, RoomCategory, Room, Admission,Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
 from ..serializers import (
     BlockSerializer,
     RoomCategorySerializer,
     RoomSerializer,
+    RoomKitItemsSerializer,
+    RoomServiceDescriptionSerializer,
+    NursingStationSerializer
 )
 
 # --------------------------------------------------
@@ -28,72 +31,130 @@ from ..serializers import (
 @csrf_exempt
 def block_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
-    # ── GET ──────────────────────────────────────────────────────────────────
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+    # ── GET ─────────────────────────────────────────────
     if request.method == "GET":
+
         if pk:
             try:
-                block = Block.objects.get(block_id=pk)
+                block = Block.objects.get(
+                    block_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
                 if not block.is_active:
                     return Response({"error": "Block not found"}, status=404)
+
             except Block.DoesNotExist:
                 return Response({"error": "Block not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Block ID"}, status=400)
 
             serializer = BlockSerializer(block)
             return Response(serializer.data)
 
-        # List – filter in Python to avoid Djongo boolean filter bug
-        all_blocks = Block.objects.all().order_by("block_id")
+        # list
+        all_blocks = Block.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("block_id")
+
         blocks = [b for b in all_blocks if b.is_active]
+
         serializer = BlockSerializer(blocks, many=True)
         return Response(serializer.data)
 
-    # ── POST ─────────────────────────────────────────────────────────────────
+
+    # ── POST ─────────────────────────────────────────────
     if request.method == "POST":
-        serializer = BlockSerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = BlockSerializer(data=data)
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
 
-    # ── PUT ──────────────────────────────────────────────────────────────────
+
+    # ── PUT ─────────────────────────────────────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Block ID required"}, status=400)
+
         try:
-            block = Block.objects.get(block_id=pk)
+            block = Block.objects.get(
+                block_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not block.is_active:
                 return Response({"error": "Block not found"}, status=404)
+
         except Block.DoesNotExist:
             return Response({"error": "Block not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Block ID"}, status=400)
 
         serializer = BlockSerializer(block, data=request.data, partial=True)
+
         if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
             return Response(serializer.data)
+
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ───────────────────────────────────────────────────────────────
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Block ID required"}, status=400)
+
         try:
-            block = Block.objects.get(block_id=pk)
+            block = Block.objects.get(
+                block_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not block.is_active:
                 return Response({"error": "Block not found"}, status=404)
+
         except Block.DoesNotExist:
             return Response({"error": "Block not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Block ID"}, status=400)
 
         block.is_active = False
-        block.lastmodified_by = user_id
+        block.lastmodified_by = employee_id
+        block.lastmodified_date = timezone.now()
         block.save()
+
         return Response({"message": "Deleted successfully"}, status=200)
         
 
@@ -105,232 +166,755 @@ def block_view(request, pk=None):
 @csrf_exempt
 def room_category_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
 
     # ── GET ─────────────────────────────────────────
     if request.method == "GET":
+
         if pk:
             try:
-                category = RoomCategory.objects.get(room_category_id=pk)
+                category = RoomCategory.objects.get(
+                    room_category_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
                 if not category.is_active:
                     return Response({"error": "Room category not found"}, status=404)
+
             except RoomCategory.DoesNotExist:
                 return Response({"error": "Room category not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Room Category ID"}, status=400)
 
             serializer = RoomCategorySerializer(category)
             return Response(serializer.data)
 
-        # List – filter in Python (Djongo boolean workaround)
-        all_categories = RoomCategory.objects.all().order_by("room_category_id")
+        # list
+        all_categories = RoomCategory.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("room_category_id")
+
         categories = [c for c in all_categories if c.is_active]
+
         serializer = RoomCategorySerializer(categories, many=True)
         return Response(serializer.data)
 
+
     # ── POST ────────────────────────────────────────
     if request.method == "POST":
-        serializer = RoomCategorySerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomCategorySerializer(data=data)
+
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
+
 
     # ── PUT ─────────────────────────────────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Room Category ID required"}, status=400)
+
         try:
-            category = RoomCategory.objects.get(room_category_id=pk)
+            category = RoomCategory.objects.get(
+                room_category_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
+
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Room Category ID"}, status=400)
 
-        serializer = RoomCategorySerializer(category, data=request.data, partial=True)
+        serializer = RoomCategorySerializer(
+            category,
+            data=request.data,
+            partial=True
+        )
+
         if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
             return Response(serializer.data)
+
         return Response(serializer.errors, status=400)
 
-    # ── DELETE ──────────────────────────────────────
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Room Category ID required"}, status=400)
+
         try:
-            category = RoomCategory.objects.get(room_category_id=pk)
+            category = RoomCategory.objects.get(
+                room_category_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
+
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Room Category ID"}, status=400)
 
         category.is_active = False
-        category.lastmodified_by = user_id
+        category.lastmodified_by = employee_id
+        category.lastmodified_date = timezone.now()
         category.save()
+
         return Response({"message": "Deleted successfully"}, status=200)
 
 
-@api_view(["GET"])
-def room_service_description_view(request):
+# --------------------------------------------------
+# NURSING STATION
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def nursingstation_view(request, pk=None):
 
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client.HMS
-    collection = db.hospital_roomservice_description
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
-    data = list(collection.find({"is_active": True}))
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
 
-    result = []
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
 
-    for item in data:
-        result.append({
-            "description": item.get("description", "")
-        })
+    # ── GET ─────────────────────────────────────────────
+    if request.method == "GET":
 
-    return Response(result)
+        if pk:
+            try:
+                nursingstation = NursingStation.objects.get(
+                    ward_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not nursingstation.is_active:
+                    return Response({"error": "NursingStation not found"}, status=404)
+
+            except NursingStation.DoesNotExist:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+            serializer = NursingStationSerializer(nursingstation)
+            return Response(serializer.data)
+
+        # List
+        all_wards = NursingStation.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("ward_id")
+
+        wards = [w for w in all_wards if w.is_active]
+
+        serializer = NursingStationSerializer(wards, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = NursingStationSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "NursingStation ID required"}, status=400)
+
+        try:
+            nursingstation = NursingStation.objects.get(
+                ward_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not nursingstation.is_active:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+        except NursingStation.DoesNotExist:
+            return Response({"error": "NursingStation not found"}, status=404)
+
+        serializer = NursingStationSerializer(
+            nursingstation,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE ─────────────────────────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "NursingStation ID required"}, status=400)
+
+        try:
+            nursingstation = NursingStation.objects.get(
+                ward_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not nursingstation.is_active:
+                return Response({"error": "NursingStation not found"}, status=404)
+
+        except NursingStation.DoesNotExist:
+            return Response({"error": "NursingStation not found"}, status=404)
+
+        nursingstation.is_active = False
+        nursingstation.lastmodified_by = employee_id
+        nursingstation.lastmodified_date = timezone.now()
+        nursingstation.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
+    
+
+# --------------------------------------------------
+# ROOM SERVICE DESCRIPTION
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_service_description_view(request, pk=None):
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+
+    # ── GET ─────────────────────────────────────────
+    if request.method == "GET":
+
+        if pk:
+            try:
+                roomservicedescription = RoomServiceDescription.objects.get(
+                    description_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not roomservicedescription.is_active:
+                    return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+            except RoomServiceDescription.DoesNotExist:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+            serializer = RoomServiceDescriptionSerializer(roomservicedescription)
+            return Response(serializer.data)
+
+
+        # list
+        all_description = RoomServiceDescription.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("description_id")
+
+        descriptions = [b for b in all_description if b.is_active]
+
+        serializer = RoomServiceDescriptionSerializer(descriptions, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomServiceDescriptionSerializer(data=data)
+
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "RoomServiceDescription ID required"}, status=400)
+
+        try:
+            roomservicedescription = RoomServiceDescription.objects.get(
+                description_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomservicedescription.is_active:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+        except RoomServiceDescription.DoesNotExist:
+            return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+
+        serializer = RoomServiceDescriptionSerializer(
+            roomservicedescription,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "RoomServiceDescription ID required"}, status=400)
+
+        try:
+            roomservicedescription = RoomServiceDescription.objects.get(
+                description_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomservicedescription.is_active:
+                return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+        except RoomServiceDescription.DoesNotExist:
+            return Response({"error": "RoomServiceDescription not found"}, status=404)
+
+
+        roomservicedescription.is_active = False
+        roomservicedescription.lastmodified_by = employee_id
+        roomservicedescription.lastmodified_date = timezone.now()
+        roomservicedescription.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
+    
+
+# --------------------------------------------------
+# ROOM KIT ITEMS
+# --------------------------------------------------
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def room_kititems_view(request, pk=None):
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("auth-branch-code") or
+        "system"
+    )
+
+
+    # ── GET ─────────────────────────────────────────
+    if request.method == "GET":
+
+        if pk:
+            try:
+                roomkititems = RoomKitItems.objects.get(
+                    kit_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
+                if not roomkititems.is_active:
+                    return Response({"error": "RoomKitItems not found"}, status=404)
+
+            except RoomKitItems.DoesNotExist:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+            serializer = RoomKitItemsSerializer(roomkititems)
+            return Response(serializer.data)
+
+
+        # list
+        all_roomkititems = RoomKitItems.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("kit_id")
+
+        roomkititems = [b for b in all_roomkititems if b.is_active]
+
+        serializer = RoomKitItemsSerializer(roomkititems, many=True)
+        return Response(serializer.data)
+
+
+    # ── POST ─────────────────────────────────────────
+    if request.method == "POST":
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = RoomKitItemsSerializer(data=data)
+
+        if serializer.is_valid():
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
+            return Response(serializer.data, status=201)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── PUT ─────────────────────────────────────────
+    if request.method == "PUT":
+
+        if not pk:
+            return Response({"error": "RoomKitItems ID required"}, status=400)
+
+        try:
+            roomkititems = RoomKitItems.objects.get(
+                kit_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomkititems.is_active:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+        except RoomKitItems.DoesNotExist:
+            return Response({"error": "RoomKitItems not found"}, status=404)
+
+
+        serializer = RoomKitItemsSerializer(
+            roomkititems,
+            data=request.data,
+            partial=True
+        )
+
+        if serializer.is_valid():
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
+            return Response(serializer.data)
+
+        return Response(serializer.errors, status=400)
+
+
+    # ── DELETE (SOFT DELETE) ─────────────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "RoomKitItems ID required"}, status=400)
+
+        try:
+            roomkititems = RoomKitItems.objects.get(
+                kit_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
+            if not roomkititems.is_active:
+                return Response({"error": "RoomKitItems not found"}, status=404)
+
+        except RoomKitItems.DoesNotExist:
+            return Response({"error": "RoomKitItems not found"}, status=404)
+
+
+        roomkititems.is_active = False
+        roomkititems.lastmodified_by = employee_id
+        roomkititems.lastmodified_date = timezone.now()
+        roomkititems.save()
+
+        return Response({"message": "Deleted successfully"}, status=200)
 
 
 # --------------------------------------------------
 # ROOM (with Nested Beds, Services, Kits)
 # --------------------------------------------------
-@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+def _get_auth(request):
+    """Extract auth headers from either request.data or request.headers."""
+    def pick(key):
+        return (
+            request.data.get(key)
+            or request.headers.get(key)
+            or "system"
+        )
+    return pick("auth-user-id"), pick("auth-hospital-code"), pick("auth-branch-code")
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(["GET", "POST", "PUT", "DELETE"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_view(request, pk=None):
-
-    user_id = request.headers.get("auth-user-id", "system")
-
+ 
+    employee_id, hospital_code, branch_code = _get_auth(request)
+ 
+    # ── GET ──────────────────────────────────────────────────────────────────
     if request.method == "GET":
-
-        # -------- Single Room --------
+ 
         if pk:
             try:
-                room = Room.objects.get(pk=pk)
-
+                room = Room.objects.get(
+                    pk=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                )
                 if not room.is_active:
                     return Response({"error": "Room not found"}, status=404)
-
                 return Response(RoomSerializer(room).data)
-
             except Room.DoesNotExist:
                 return Response({"error": "Room not found"}, status=404)
-
-        # -------- All Active Rooms --------
-        all_rooms = Room.objects.all()
-        active_rooms = [room for room in all_rooms if room.is_active]
-
-        return Response(RoomSerializer(active_rooms, many=True).data)
-
+ 
+        all_rooms = Room.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+        )
+        active = [r for r in all_rooms if r.is_active]
+        return Response(RoomSerializer(active, many=True).data)
+ 
+    # ── POST ─────────────────────────────────────────────────────────────────
     elif request.method == "POST":
-
+ 
         data = request.data.copy()
-
-        services = data.pop("services", [])
-        beds = data.pop("beds", [])
+        data["hospital_code"] = hospital_code
+        data["branch_code"]   = branch_code
+ 
+        # Pop nested lists before main serializer validation
+        services  = data.pop("services",  [])
+        beds      = data.pop("beds",      [])
         room_kits = data.pop("room_kits", [])
-
+ 
         room_number = data.get("room_number")
-
-        # Duplicate check (Djongo-safe)
-        existing_rooms = Room.objects.filter(room_number=room_number)
-
-        if any(room.is_active for room in existing_rooms):
+ 
+        # Duplicate check
+        existing = Room.objects.filter(
+            room_number=room_number,
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+        )
+        if any(r.is_active for r in existing):
             return Response(
                 {"error": "Room with this room number already exists"},
-                status=400
+                status=400,
             )
-
+ 
         serializer = RoomSerializer(data=data)
-
-        if serializer.is_valid():
-
-            room = serializer.save(
-                created_by=user_id,
-                lastmodified_by=user_id
-            )
-
-            # Assign nested JSON fields
-            room.services = services
-            room.beds = beds
-            room.room_kits = room_kits
-
-            room.save()
-
-            return Response(RoomSerializer(room).data, status=201)
-
-        return Response(serializer.errors, status=400)
-
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+ 
+        room = serializer.save(
+            created_by=employee_id,
+            created_date=timezone.now(),
+            lastmodified_by=employee_id,
+            lastmodified_date=timezone.now(),
+            is_active=True,
+        )
+ 
+        # Persist nested JSON (already validated by serializer validators
+        # if passed through data; here we store directly after popping above)
+        room.services  = services
+        room.beds      = _derive_bed_statuses(beds)
+        room.room_kits = room_kits
+        room.save()
+ 
+        return Response(RoomSerializer(room).data, status=201)
+ 
+    # ── PUT ──────────────────────────────────────────────────────────────────
     elif request.method == "PUT":
-
+ 
         try:
-            room = Room.objects.get(pk=pk)
-
+            room = Room.objects.get(
+                pk=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+            )
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
-
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-
+ 
         data = request.data.copy()
-
-        services = data.pop("services", None)
-        beds = data.pop("beds", None)
+ 
+        services  = data.pop("services",  None)
+        beds      = data.pop("beds",      None)
         room_kits = data.pop("room_kits", None)
-
+ 
         new_room_number = data.get("room_number")
-
-        # Duplicate check (exclude current room)
+ 
+        # Duplicate check when room number is being changed
         if new_room_number and new_room_number != room.room_number:
-
-            existing_rooms = Room.objects.filter(room_number=new_room_number)
-
-            if any(r.is_active and str(r.pk) != str(pk) for r in existing_rooms):
+            existing = Room.objects.filter(
+                room_number=new_room_number,
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+            )
+            if any(r.is_active and str(r.pk) != str(pk) for r in existing):
                 return Response(
                     {"error": "Room with this room number already exists"},
-                    status=400
+                    status=400,
                 )
-
+ 
         serializer = RoomSerializer(room, data=data, partial=True)
-
-        if serializer.is_valid():
-
-            room = serializer.save(lastmodified_by=user_id)
-
-            if services is not None:
-                room.services = services
-
-            if beds is not None:
-                room.beds = beds
-
-            if room_kits is not None:
-                room.room_kits = room_kits
-
-            room.save()
-
-            return Response(RoomSerializer(room).data)
-
-        return Response(serializer.errors, status=400)
-
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+ 
+        room = serializer.save(
+            lastmodified_by=employee_id,
+            lastmodified_date=timezone.now(),
+        )
+ 
+        # Only update nested lists if explicitly sent in the request
+        if services is not None:
+            room.services = services
+        if beds is not None:
+            room.beds = _derive_bed_statuses(beds)
+        if room_kits is not None:
+            room.room_kits = room_kits
+ 
+        room.save()
+        return Response(RoomSerializer(room).data)
+ 
+    # ── DELETE ───────────────────────────────────────────────────────────────
     elif request.method == "DELETE":
-
+ 
         try:
-            room = Room.objects.get(pk=pk)
-
+            room = Room.objects.get(
+                pk=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+            )
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
-
-            room.is_active = False
-            room.lastmodified_by = user_id
+ 
+            room.is_active         = False
+            room.lastmodified_by   = employee_id
+            room.lastmodified_date = timezone.now()
             room.save()
-
             return Response({"message": "Deleted successfully"})
-
+ 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-
+ 
+ 
+# ─── Utility ─────────────────────────────────────────────────────────────────
+ 
+def _derive_bed_statuses(beds):
+    """
+    Ensures every bed dict has bed_status derived from its `blocked` flag.
+    Called before persisting to the JSONField.
+    """
+    if not isinstance(beds, list):
+        return []
+    for bed in beds:
+        blocked = bool(bed.get("blocked", False))
+        bed["blocked"]    = blocked
+        bed["bed_status"] = "Blocked" if blocked else "Available"
+    return beds
+        
 
 import json
 from django.db.models.fields.json import JSONField
@@ -469,42 +1053,38 @@ def room_enquiry_view(request):
                 "mobilePhone": str(patient.mobilePhone or ""),
             }
 
-        # ══════════════════════════════════════════════════════════════════════
-        # STEP 2 — BUILD ADMISSION MAP
-        #
-        # Key  : (room_no, bed_no)
-        # Value: { status, patient, ip_number, is_roomCleaned, source, shifting_id }
-        #
-        # LOGIC:
-        #   For each active admission (is_admissionActive=True, is_discharged=False):
-        #
-        #   A) Find the LATEST active shifting entry (is_roomActive=True).
-        #      That room/bed → Occupied.
-        #      All OTHER shifting entries with is_roomActive=False:
-        #        - is_roomCleaned=True  → Available
-        #        - is_roomCleaned=False → Available (Not Cleaned)
-        #
-        #   B) room_details entry:
-        #      If ANY shifting exists, the original room is vacated.
-        #      Apply same cleaned logic for original room.
-        #      If NO shifting exists, use room_details is_roomActive to determine status.
-        # ══════════════════════════════════════════════════════════════════════
         admission_map = {}
 
         for admission in Admission.objects.all():
 
-            if not getattr(admission, "is_admissionActive", False):
+            is_active     = bool(getattr(admission, "is_admissionActive", False))
+            is_discharged = bool(getattr(admission, "is_discharged", False))
+
+            # Always skip discharged admissions entirely
+            if is_discharged:
                 continue
-            if getattr(admission, "is_discharged", False):
-                continue
+
+            # For cancelled/inactive admissions, only process if there are
+            # uncleaned rooms — otherwise skip (no point processing them)
+            if not is_active:
+                raw_details = parse_json_field(admission.room_details)
+                raw_shifts  = parse_json_field(admission.roomShitingDetails)
+                has_uncleaned = any(
+                    not bool(e.get("is_roomCleaned", False))
+                    for e in (raw_details + raw_shifts)
+                    if isinstance(e, dict)
+                )
+                if not has_uncleaned:
+                    continue
+                # Fall through — process this cancelled admission's uncleaned rooms
 
             uhid      = str(admission.uhid or "")
             ip_number = str(admission.ipNumber or "")
             ipserial  = str(admission.ipserial_number or "")
             patient_info = patient_map.get(uhid, {})
 
-            details  = parse_json_field(admission.room_details)
-            shifts   = parse_json_field(admission.roomShitingDetails)
+            details = parse_json_field(admission.room_details)
+            shifts  = parse_json_field(admission.roomShitingDetails)
 
             # ── Validate shifts are dicts ──────────────────────────────────
             shifts = [s for s in shifts if isinstance(s, dict)]
@@ -531,15 +1111,16 @@ def room_enquiry_view(request):
                 if not room_no or not bed_no:
                     continue
 
-                is_active  = bool(shift.get("is_roomActive",  False))
-                is_cleaned = bool(shift.get("is_roomCleaned", False))
+                is_room_active = bool(shift.get("is_roomActive",  False))
+                is_cleaned     = bool(shift.get("is_roomCleaned", False))
 
                 # This is the currently active room → Occupied
-                if active_shift and shift.get("shifting_id") == active_shift.get("shifting_id"):
+                # But only if the overall admission is still active
+                if is_active and active_shift and shift.get("shifting_id") == active_shift.get("shifting_id"):
                     status       = "Occupied"
                     patient_data = patient_info
                 else:
-                    # Vacated shift entry
+                    # Vacated shift entry (or cancelled admission)
                     if is_cleaned:
                         status       = "Available"
                         patient_data = {}
@@ -558,7 +1139,7 @@ def room_enquiry_view(request):
                         "ip_number":      ip_number,
                         "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
-                        "is_roomActive":  is_active,   # ← ADD THIS
+                        "is_roomActive":  is_room_active,
                         "source":         "shifting",
                         "shifting_id":    str(shift.get("shifting_id", "")),
                     }
@@ -573,8 +1154,8 @@ def room_enquiry_view(request):
                 if not room_no or not bed_no:
                     continue
 
-                is_active  = bool(entry.get("is_roomActive",  False))
-                is_cleaned = bool(entry.get("is_roomCleaned", False))
+                is_room_active = bool(entry.get("is_roomActive",  False))
+                is_cleaned     = bool(entry.get("is_roomCleaned", False))
 
                 if has_shifts:
                     # Patient has shifted away from original room.
@@ -586,20 +1167,34 @@ def room_enquiry_view(request):
                         status       = "Available (Not Cleaned)"
                         patient_data = patient_info
                 else:
-                    # No shifts: use is_roomActive directly
-                    if is_active and not is_cleaned:
-                        status       = "Occupied"
-                        patient_data = patient_info
-                    elif not is_active and is_cleaned:
-                        status       = "Available"
-                        patient_data = {}
-                    elif not is_active and not is_cleaned:
-                        status       = "Available (Not Cleaned)"
-                        patient_data = patient_info
+                    # No shifts: determine status from flags
+                    if is_active:
+                        # Admission is still active
+                        if is_room_active and not is_cleaned:
+                            status       = "Occupied"
+                            patient_data = patient_info
+                        elif not is_room_active and is_cleaned:
+                            status       = "Available"
+                            patient_data = {}
+                        elif not is_room_active and not is_cleaned:
+                            # Room deactivated but not cleaned yet
+                            status       = "Available (Not Cleaned)"
+                            patient_data = patient_info
+                        else:
+                            # is_roomActive=True, is_roomCleaned=True (edge case) → Occupied
+                            status       = "Occupied"
+                            patient_data = patient_info
                     else:
-                        # is_active=True, is_cleaned=True (edge case) → treat as Occupied
-                        status       = "Occupied"
-                        patient_data = patient_info
+                        # Admission is cancelled/inactive
+                        # is_room_active will be False here (we passed the uncleaned guard above)
+                        if is_cleaned:
+                            status       = "Available"
+                            patient_data = {}
+                        else:
+                            # ← THIS IS THE KEY FIX
+                            # Cancelled admission + room not cleaned → must show Not Cleaned
+                            status       = "Available (Not Cleaned)"
+                            patient_data = patient_info
 
                 key = (room_no, bed_no)
                 existing = admission_map.get(key)
@@ -613,11 +1208,12 @@ def room_enquiry_view(request):
                         "ip_number":      ip_number,
                         "ipserial":       ipserial,
                         "is_roomCleaned": is_cleaned,
-                        "is_roomActive":  is_active,   # ← ADD THIS
+                        "is_roomActive":  is_room_active,
                         "source":         "room_details",
                         "shifting_id":    "",
                     }
 
+        # ══════════════════════════════════════════════════════════════════════
         # STEP 3 — LOAD RoomBooking RESERVATIONS (Mongo-safe)
         # Key: (room_number, bed_number)
         # Only active bookings: is_booked=True, room_shifted=False
@@ -626,32 +1222,31 @@ def room_enquiry_view(request):
 
         for booking in RoomBooking.objects.all():
 
-            is_booked = bool(getattr(booking, "is_booked", False))
+            is_booked    = bool(getattr(booking, "is_booked",    False))
             room_shifted = bool(getattr(booking, "room_shifted", False))
 
             if not is_booked:
                 continue
-
             if room_shifted:
                 continue
 
             room_number = str(getattr(booking, "room_number", "")).strip()
-            bed_number  = str(getattr(booking, "bed_number", "")).strip()
+            bed_number  = str(getattr(booking, "bed_number",  "")).strip()
 
             if not room_number or not bed_number:
                 continue
 
             key = (room_number, bed_number)
-
             booking_map[key] = {
                 "ip_number": str(getattr(booking, "ip_number", "") or "").strip(),
-                "uhid":      str(getattr(booking, "uhid", "") or "").strip(),
+                "uhid":      str(getattr(booking, "uhid",      "") or "").strip(),
                 "booked_at": str(
                     getattr(booking, "booked_date", None)
-                    or getattr(booking, "booked_at", None)
+                    or getattr(booking, "booked_at",  None)
                     or ""
                 ),
             }
+
         # ══════════════════════════════════════════════════════════════════════
         # STEP 4 — PROCESS ROOM LIST
         # ══════════════════════════════════════════════════════════════════════
@@ -664,7 +1259,7 @@ def room_enquiry_view(request):
             if floor not in floor_map:
                 floor_map[floor] = []
 
-            beds     = parse_json_field(room.beds)
+            beds      = parse_json_field(room.beds)
             beds_data = []
 
             for bed in beds:
@@ -682,32 +1277,30 @@ def room_enquiry_view(request):
                 if getattr(room, "room_blocked", False) or \
                    str(getattr(room, "room_status", "")).lower() == "blocked":
                     beds_data.append({
-                        "bed_number":    bed_number,
-                        "status":        "Maintenance",
-                        "patient":       {},
+                        "bed_number":     bed_number,
+                        "status":         "Maintenance",
+                        "patient":        {},
                         "is_roomCleaned": False,
-                        "source":        "",
-                        "shifting_id":   "",
-                        "ip_number":     "",
-                        "booking":       None,
+                        "is_roomActive":  False,
+                        "source":         "",
+                        "shifting_id":    "",
+                        "ip_number":      "",
+                        "booking":        None,
                     })
                     continue
 
                 # Check admission map first
                 info = admission_map.get(key)
-
-                # In STEP 4, replace the "Check admission map first" branch:
-
                 if info:
                     beds_data.append({
                         "bed_number":     bed_number,
-                        "status":         info.get("status", "Available"),
-                        "patient":        info.get("patient", {}),
+                        "status":         info.get("status",         "Available"),
+                        "patient":        info.get("patient",        {}),
                         "is_roomCleaned": info.get("is_roomCleaned", False),
-                        "is_roomActive":  info.get("is_roomActive", False),   # ← ADD THIS
-                        "source":         info.get("source", ""),
-                        "shifting_id":    info.get("shifting_id", ""),
-                        "ip_number":      info.get("ip_number", ""),
+                        "is_roomActive":  info.get("is_roomActive",  False),
+                        "source":         info.get("source",         ""),
+                        "shifting_id":    info.get("shifting_id",    ""),
+                        "ip_number":      info.get("ip_number",      ""),
                         "booking":        None,
                     })
                     continue
@@ -720,6 +1313,7 @@ def room_enquiry_view(request):
                         "status":         "Reserved",
                         "patient":        {},
                         "is_roomCleaned": False,
+                        "is_roomActive":  False,
                         "source":         "booking",
                         "shifting_id":    "",
                         "ip_number":      booking_info.get("ip_number", ""),
@@ -727,12 +1321,13 @@ def room_enquiry_view(request):
                     })
                     continue
 
-                # Truly available
+                # Truly available — not in any admission or booking
                 beds_data.append({
                     "bed_number":     bed_number,
                     "status":         "Available",
                     "patient":        {},
                     "is_roomCleaned": True,
+                    "is_roomActive":  False,
                     "source":         "",
                     "shifting_id":    "",
                     "ip_number":      "",
@@ -848,7 +1443,6 @@ def book_room_view(request):
                 "success": True,
                 "message": f"Room {room_number} / Bed {bed_number} reserved successfully",
                 "data": {
-                    "id": str(booking.id),
                     "ip_number": booking.ip_number,
                     "room_number": booking.room_number,
                     "bed_number": booking.bed_number,
@@ -988,20 +1582,71 @@ def update_room_cleaned_view(request):
 # GET ACTIVE ADMISSION
 # ─────────────────────────────────────────────────────────────────────────────
  
+import traceback
+from datetime import datetime
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from django.utils import timezone as tz
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def parse_json_field(value):
+    """Safely parse a JSON-like field that might be a list, dict, or string."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, str):
+        import json
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+        except Exception:
+            pass
+    return []
+
+
+def generate_shifting_id(existing_shiftings):
+    """Generate a sequential shifting ID like SH001, SH002, …"""
+    max_num = 0
+    for s in existing_shiftings:
+        if isinstance(s, dict):
+            sid = str(s.get("shifting_id", ""))
+            if sid.startswith("SH") and sid[2:].isdigit():
+                max_num = max(max_num, int(sid[2:]))
+    return f"SH{str(max_num + 1).zfill(3)}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET ACTIVE ADMISSION  (updated: includes RoomBooking check)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["GET"])
 @csrf_exempt
 def get_active_admission(request):
+    """
+    Returns the active admission for a given UHID or IP Number.
+    Also checks the RoomBooking collection for a pre-reserved room
+    (is_booked=True, room_shifted=False) and includes it in the response
+    so the frontend can auto-fill the new-room fields.
+    """
     try:
         uhid      = request.GET.get("uhid",      "").strip()
         ip_number = request.GET.get("ip_number", "").strip()
- 
+
         if not uhid and not ip_number:
             return Response(
                 {"success": False, "message": "Provide UHID or IP Number"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
-        # Filter using model (no SQL)
+
+        # ── Find matching admissions ──────────────────────────────────────
         all_admissions = []
         for adm in Admission.objects.all():
             if uhid      and str(adm.uhid)     != uhid:
@@ -1009,20 +1654,20 @@ def get_active_admission(request):
             if ip_number and str(adm.ipNumber) != ip_number:
                 continue
             all_admissions.append(adm)
- 
+
         active_records = [
             adm for adm in all_admissions
             if getattr(adm, "is_admitted",        False) is True
             and getattr(adm, "is_admissionActive", False) is True
             and getattr(adm, "is_discharged",      True)  is False
         ]
- 
+
         if not active_records:
             return Response(
                 {"success": False, "message": "No active admission found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
- 
+
         def safe_sort_key(adm):
             dt = adm.admissionDateTime
             if dt is None:
@@ -1030,11 +1675,11 @@ def get_active_admission(request):
             if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
                 return tz.make_naive(dt)
             return dt
- 
+
         active_records.sort(key=safe_sort_key, reverse=True)
         admission = active_records[0]
- 
-        # Patient
+
+        # ── Patient ───────────────────────────────────────────────────────
         patient_data = {}
         try:
             patient = Patient.objects.filter(uhid=admission.uhid).first()
@@ -1050,15 +1695,15 @@ def get_active_admission(request):
                     "email":       str(patient.email      or ""),
                     "city":        str(patient.city       or ""),
                     "state":       str(patient.state      or ""),
+                    "area":        str(getattr(patient, "area",    "") or ""),
+                    "zipcode":     str(getattr(patient, "zipcode", "") or ""),
                 }
         except Exception:
             traceback.print_exc()
- 
-        # room_details
+
+        # ── Active room from room_details ─────────────────────────────────
         room_details = parse_json_field(admission.room_details)
- 
-        # active room
-        active_room = {}
+        active_room  = {}
         for r in reversed(room_details):
             if isinstance(r, dict) and r.get("is_roomActive"):
                 active_room = r
@@ -1066,13 +1711,45 @@ def get_active_admission(request):
         if not active_room and room_details:
             last = room_details[-1]
             active_room = last if isinstance(last, dict) else {}
- 
-        # Check if this admission has already been shifted
-        # (has any non-cancelled entry in roomShitingDetails)
+
+        # ── Has already been shifted? ─────────────────────────────────────
         shiftings   = parse_json_field(admission.roomShitingDetails)
         has_shifted = any(isinstance(s, dict) for s in shiftings)
-        
-        # datetime formatting
+
+        # ── Check RoomBooking for a pre-reserved room ─────────────────────
+        #    Looks for a booking where:
+        #      ip_number matches AND is_booked=True AND room_shifted=False
+        reserved_room = None
+        reserved_bed  = None
+        has_reservation = False
+        try:
+            booking = None
+
+            for rb in RoomBooking.objects.all():
+                if str(getattr(rb, "ip_number", "")).strip() != str(admission.ipNumber).strip():
+                    continue
+
+                is_booked = getattr(rb, "is_booked", False)
+                room_shifted = getattr(rb, "room_shifted", False)
+
+                # handle both boolean and string values
+                if str(is_booked).lower() != "true":
+                    continue
+
+                if str(room_shifted).lower() != "false":
+                    continue
+
+                booking = rb
+                break
+
+            if booking:
+                has_reservation = True
+                reserved_room   = str(booking.room_number or "")
+                reserved_bed    = str(booking.bed_number  or "")
+        except Exception:
+            traceback.print_exc()
+
+        # ── Admission date/time formatting ────────────────────────────────
         admission_date = admission_time = ""
         dt = admission.admissionDateTime
         if dt:
@@ -1082,7 +1759,7 @@ def get_active_admission(request):
             except Exception:
                 admission_date = str(dt)[:10]
                 admission_time = str(dt)[11:19]
- 
+
         return Response({
             "success": True,
             "data": {
@@ -1097,30 +1774,38 @@ def get_active_admission(request):
                 "roomNo":           active_room.get("roomNo", ""),
                 "bedNo":            active_room.get("bedNo",  ""),
                 "room_details":     room_details,
-                "has_shifted":      has_shifted,   # ← tells frontend to disable form
+                "has_shifted":      has_shifted,
+                # ── Reservation fields ─────────────────────────────────────
+                "has_reservation":  has_reservation,   # True if a pre-booked room exists
+                "reservedRoomNo":   reserved_room or "",
+                "reservedBedNo":    reserved_bed  or "",
+                # ── Status flags ───────────────────────────────────────────
                 "is_admitted":        getattr(admission, "is_admitted",        None),
                 "is_admissionActive": getattr(admission, "is_admissionActive", None),
                 "is_discharged":      getattr(admission, "is_discharged",      None),
                 "patient": patient_data,
             },
         }, status=status.HTTP_200_OK)
- 
+
     except Exception as e:
         traceback.print_exc()
-        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
- 
- 
+        return Response(
+            {"success": False, "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ROOM SHIFTING — GET / POST
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_view(request):
- 
+
     user_id = request.headers.get("auth-user-id", "system")
- 
+
     # ════════════════════════════════════════════════════════════════════════
     # GET — list shifting history
     # ════════════════════════════════════════════════════════════════════════
@@ -1129,19 +1814,18 @@ def room_shifting_view(request):
         to_date   = str(request.GET.get("to_date",   "")).strip()
         uhid      = str(request.GET.get("uhid",      "")).strip()
         ip_number = str(request.GET.get("ip_number", "")).strip()
- 
+
         results = []
- 
+
         for admission in Admission.objects.all():
             if not getattr(admission, "is_admitted", False):
                 continue
- 
+
             if uhid      and uhid.lower()      not in str(admission.uhid     or "").lower():
                 continue
             if ip_number and ip_number.lower() not in str(admission.ipNumber or "").lower():
                 continue
- 
-            # Patient info for display
+
             patient_name = ""
             try:
                 patient = Patient.objects.filter(uhid=admission.uhid).first()
@@ -1149,35 +1833,56 @@ def room_shifting_view(request):
                     patient_name = f"{patient.firstName or ''} {patient.lastName or ''}".strip()
             except Exception:
                 pass
- 
+
+            # Current active room (for old room display)
+            room_details = parse_json_field(admission.room_details)
+            old_room_no = old_bed_no = ""
+            for r in reversed(room_details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    old_room_no = str(r.get("roomNo", ""))
+                    old_bed_no  = str(r.get("bedNo",  ""))
+                    break
+            if not old_room_no and room_details:
+                last = room_details[-1]
+                if isinstance(last, dict):
+                    old_room_no = str(last.get("roomNo", ""))
+                    old_bed_no  = str(last.get("bedNo",  ""))
+
             shiftings = parse_json_field(admission.roomShitingDetails)
- 
+
             for shift in shiftings:
                 if not isinstance(shift, dict):
                     continue
- 
+
                 shift_date = str(shift.get("shiftingDateTime", ""))[:10]
                 if from_date and shift_date and shift_date < from_date:
                     continue
                 if to_date   and shift_date and shift_date > to_date:
                     continue
- 
+
                 results.append({
                     "uhid":             str(admission.uhid            or ""),
                     "ipNumber":         str(admission.ipNumber        or ""),
                     "ipserial_number":  str(admission.ipserial_number or ""),
                     "patient_name":     patient_name,
                     "shifting_id":      str(shift.get("shifting_id",      "")),
+                    "oldRoomNo":        str(shift.get("oldRoomNo",        old_room_no)),
+                    "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
                     "newRoomNo":        str(shift.get("newRoomNo",        "")),
                     "newBedNo":         str(shift.get("newBedNo",         "")),
                     "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+                    "startDateTime":    str(shift.get("startDateTime",    "")),
+                    "endDateTime":      str(shift.get("endDateTime",      "") or ""),
                     "shifted_by":       str(shift.get("shifted_by",       "")),
                     "is_roomActive":    bool(shift.get("is_roomActive",   False)),
                     "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
+                    "edited_from":      str(shift.get("edited_from",      "") or ""),
                 })
- 
+
+        # Sort by shiftingDateTime descending
+        results.sort(key=lambda x: x.get("shiftingDateTime", ""), reverse=True)
         return Response(results, status=status.HTTP_200_OK)
- 
+
     # ════════════════════════════════════════════════════════════════════════
     # POST — create a new shift
     # ════════════════════════════════════════════════════════════════════════
@@ -1185,7 +1890,7 @@ def room_shifting_view(request):
         ip_number = str(request.data.get("ip_number", "")).strip()
         new_room  = str(request.data.get("newRoomNo", "")).strip()
         new_bed   = str(request.data.get("newBedNo",  "")).strip()
- 
+
         if not ip_number:
             return Response(
                 {"success": False, "error": "ip_number is required"},
@@ -1196,7 +1901,7 @@ def room_shifting_view(request):
                 {"success": False, "error": "newRoomNo and newBedNo are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
+
         admission = None
         for adm in Admission.objects.all():
             if (
@@ -1206,30 +1911,27 @@ def room_shifting_view(request):
             ):
                 admission = adm
                 break
- 
+
         if not admission:
             return Response(
                 {"success": False, "error": "Admission not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
- 
-        # ── GUARD: only one active shift allowed per admission ────────────
+
+        # ── Guard: only one active shift allowed ──────────────────────────
         existing_shiftings = parse_json_field(admission.roomShitingDetails)
-        active_shiftings = [
-            s for s in existing_shiftings
-            if isinstance(s, dict)
-        ]
+        active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
 
         if active_shiftings:
             return Response(
                 {
                     "success": False,
-                    "error": "Room already shifted. Use Edit for existing shifting record.",
+                    "error": "Room already shifted. Use Edit for the existing shifting record.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
- 
-        # ── Find current active room for oldRoomNo / oldBedNo ─────────────
+
+        # ── Old room ──────────────────────────────────────────────────────
         room_details = parse_json_field(admission.room_details)
         old_room_no  = old_bed_no = ""
         for r in reversed(room_details):
@@ -1242,61 +1944,69 @@ def room_shifting_view(request):
             if isinstance(last, dict):
                 old_room_no = str(last.get("roomNo", ""))
                 old_bed_no  = str(last.get("bedNo",  ""))
- 
-        # ── Deactivate current room in room_details ────────────────────────
+
+        # ── Deactivate current room in room_details & set endDateTime ─────
+        now_iso = timezone.now().isoformat()
         updated_room_details = []
         for room in room_details:
             if not isinstance(room, dict):
                 continue
-            obj = {
-                "roomNo":         str(room.get("roomNo",         "")),
-                "bedNo":          str(room.get("bedNo",          "")),
-                "is_roomActive":  bool(room.get("is_roomActive",  False)),
-                "is_roomCleaned": bool(room.get("is_roomCleaned", False)),
-            }
-            if obj["is_roomActive"]:
+            obj = dict(room)
+            if obj.get("is_roomActive"):
                 obj["is_roomActive"] = False
+                obj["endDateTime"]   = now_iso   # ← track how long patient was in room
             updated_room_details.append(obj)
- 
+
         admission.room_details = updated_room_details
- 
-        # ── Build shifting entry ───────────────────────────────────────────
+
+        # ── Build new shifting entry ──────────────────────────────────────
         new_shifting_id = generate_shifting_id(existing_shiftings)
- 
+
         cleaned_shiftings = []
         for shift in existing_shiftings:
-            if not isinstance(shift, dict):
-                continue
-            cleaned_shiftings.append({
-                "shifting_id":      str(shift.get("shifting_id",      "")),
-                "newRoomNo":        str(shift.get("newRoomNo",        "")),
-                "newBedNo":         str(shift.get("newBedNo",         "")),
-                "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
-                "shifted_by":       str(shift.get("shifted_by",       "")),
-                "is_roomActive":    bool(shift.get("is_roomActive",   False)),
-                "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
-            })
- 
-        # New shift — is_roomActive: True, is_roomCleaned: False (requirement #5)
+            if isinstance(shift, dict):
+                cleaned_shiftings.append(dict(shift))
+
+        # New shift entry — startDateTime set now, endDateTime null
         cleaned_shiftings.append({
             "shifting_id":      new_shifting_id,
+            "oldRoomNo":        old_room_no,
+            "oldBedNo":         old_bed_no,
             "newRoomNo":        new_room,
             "newBedNo":         new_bed,
-            "shiftingDateTime": timezone.now().isoformat(),
+            "shiftingDateTime": now_iso,
+            "startDateTime":    now_iso,   # ← patient enters new room now
+            "endDateTime":      None,      # ← still in this room
             "shifted_by":       str(user_id),
-            "is_roomActive":    True,   # ← requirement #5
-            "is_roomCleaned":   False,  # ← requirement #5
+            "is_roomActive":    True,
+            "is_roomCleaned":   False,
         })
- 
+
         admission.roomShitingDetails = cleaned_shiftings
         admission.lastmodified_by    = str(user_id)
         admission.lastmodified_date  = timezone.now()
- 
+
         if not isinstance(admission.advance_payments, list):
             admission.advance_payments = []
- 
+
         admission.save()
- 
+
+        # ── Mark RoomBooking as shifted (if one existed) ──────────────────
+        try:
+            for rb in RoomBooking.objects.all():
+                if str(getattr(rb, "ip_number", "")).strip() != str(ip_number).strip():
+                    continue
+                if str(getattr(rb, "is_booked", "")).lower() != "true":
+                    continue
+                if str(getattr(rb, "room_shifted", "")).lower() != "false":
+                    continue
+                rb.room_shifted = True
+                rb.is_booked    = False
+                rb.save()
+                break
+        except Exception:
+            traceback.print_exc()
+
         return Response(
             {
                 "success": True,
@@ -1310,23 +2020,24 @@ def room_shifting_view(request):
             },
             status=status.HTTP_200_OK,
         )
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# PATCH /room-shifting/<ip_number>/
-# Editing creates a NEW shifting object; previous one is set is_roomActive: False
+# PATCH /room-shifting/<ip_number>/update/
+# Editing creates a NEW shifting object; previous one is set is_roomActive=False
+# and endDateTime is stamped on it.
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 @api_view(["PATCH"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_detail_view(request, ip_number):
- 
+
     user_id     = request.headers.get("auth-user-id", "system")
     shifting_id = str(request.data.get("shifting_id", "")).strip()
     new_room    = str(request.data.get("newRoomNo",   "")).strip()
     new_bed     = str(request.data.get("newBedNo",    "")).strip()
- 
+
     if not shifting_id:
         return Response(
             {"success": False, "error": "shifting_id is required"},
@@ -1337,65 +2048,70 @@ def room_shifting_detail_view(request, ip_number):
             {"success": False, "error": "newRoomNo and newBedNo are required"},
             status=status.HTTP_400_BAD_REQUEST,
         )
- 
+
     admission = None
     for adm in Admission.objects.all():
         if str(adm.ipNumber) == str(ip_number):
             admission = adm
             break
- 
+
     if not admission:
         return Response(
             {"success": False, "error": "Admission not found"},
             status=status.HTTP_404_NOT_FOUND,
         )
- 
+
     shifting_details = parse_json_field(admission.roomShitingDetails)
     room_details     = parse_json_field(admission.room_details)
- 
-    shift_found  = False
-    target_shift = None
 
-    for shift in shifting_details:
-        if isinstance(shift, dict) and str(shift.get("shifting_id", "")) == shifting_id:
-            target_shift = shift
-            shift_found = True
-            break
-
+    # Check the target shift exists
+    shift_found = any(
+        isinstance(s, dict) and str(s.get("shifting_id", "")) == shifting_id
+        for s in shifting_details
+    )
     if not shift_found:
         return Response(
             {"success": False, "error": "Shifting record not found"},
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    now_iso = timezone.now().isoformat()
+
+    # ── Mark the old shift as inactive and stamp endDateTime ─────────────
     updated_shiftings = []
+    old_room_no = old_bed_no = ""
     for shift in shifting_details:
         if not isinstance(shift, dict):
             continue
-
         obj = dict(shift)
-
         if str(obj.get("shifting_id", "")) == shifting_id:
-            obj["is_roomActive"] = False
-            obj["lastmodified_by"] = str(user_id)
-            obj["lastmodified_date"] = timezone.now().isoformat()
-
+            obj["is_roomActive"]      = False
+            obj["endDateTime"]        = now_iso   # ← how long patient was in that shifted room
+            obj["lastmodified_by"]    = str(user_id)
+            obj["lastmodified_date"]  = now_iso
+            # Capture old room for the new entry
+            old_room_no = str(obj.get("newRoomNo", ""))
+            old_bed_no  = str(obj.get("newBedNo",  ""))
         updated_shiftings.append(obj)
 
+    # ── New shifting entry ────────────────────────────────────────────────
     new_shifting_id = generate_shifting_id(updated_shiftings)
-
     updated_shiftings.append({
-        "shifting_id": new_shifting_id,
-        "newRoomNo": new_room,
-        "newBedNo": new_bed,
-        "shiftingDateTime": timezone.now().isoformat(),
-        "shifted_by": str(user_id),
-        "is_roomActive": True,
-        "is_roomCleaned": False,
-        "edited_from": shifting_id,
+        "shifting_id":      new_shifting_id,
+        "oldRoomNo":        old_room_no,
+        "oldBedNo":         old_bed_no,
+        "newRoomNo":        new_room,
+        "newBedNo":         new_bed,
+        "shiftingDateTime": now_iso,
+        "startDateTime":    now_iso,
+        "endDateTime":      None,
+        "shifted_by":       str(user_id),
+        "is_roomActive":    True,
+        "is_roomCleaned":   False,
+        "edited_from":      shifting_id,
     })
- 
-    # ── Deactivate current active room in room_details ────────────────────
+
+    # ── Deactivate current active room in room_details & stamp endDateTime ─
     updated_rooms = []
     for room in room_details:
         if not isinstance(room, dict):
@@ -1403,17 +2119,19 @@ def room_shifting_detail_view(request, ip_number):
         obj = dict(room)
         if obj.get("is_roomActive"):
             obj["is_roomActive"] = False
+            obj["endDateTime"]   = now_iso
         updated_rooms.append(obj)
- 
+
     admission.roomShitingDetails = updated_shiftings
     admission.room_details       = updated_rooms
     admission.lastmodified_by    = str(user_id)
+    admission.lastmodified_date  = timezone.now()
     admission.save()
- 
+
     return Response(
         {
             "success": True,
-            "message": "Room shifting updated (new record created)",
+            "message": "Room shifting updated — new record created",
             "data": {
                 "ipNumber":           admission.ipNumber,
                 "room_details":       admission.room_details,
@@ -1422,4 +2140,3 @@ def room_shifting_detail_view(request, ip_number):
         },
         status=status.HTTP_200_OK,
     )
- 

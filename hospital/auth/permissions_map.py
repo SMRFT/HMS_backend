@@ -13,8 +13,7 @@ PAGE_MAPPING = {
 
     # ==================== ADMISSION ====================
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
-    '/_b_a_c_k_e_n_d/HMS/admission/': 'HMS-P-ADM',
-    r'^/_b_a_c_k_e_n_d/HMS/admission/.+/?(\?.*)?$': 'HMS-P-ADM',
+    r'^/_b_a_c_k_e_n_d/HMS/admission/?(\?.*)?$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/search-rooms/?(\?.*)?$': 'HMS-P-SRM',
 
     # ==================== PHARMACY STOCK ====================
@@ -33,19 +32,33 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/vendor/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendor/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
 
+
     # ==================== ROOMS ====================
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
     r'^/_b_a_c_k_e_n_d/HMS/block/[0-9]+/?(\?.*)?$': 'HMS-P-BLKD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room-category/?(\?.*)?$': 'HMS-P-RCAT',
-    r'^/_b_a_c_k_e_n_d/HMS/room-category/[0-9]+/?(\?.*)?$': 'HMS-P-RCATD',
+    r'^/_b_a_c_k_e_n_d/HMS/room-category/[^/]+/?(\?.*)?$': 'HMS-P-RCATD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room/?(\?.*)?$': 'HMS-P-RM',
-    r'^/_b_a_c_k_e_n_d/HMS/room/[0-9]+/?(\?.*)?$': 'HMS-P-RMD',
-    r'^/_b_a_c_k_e_n_d/HMS/bed/?(\?.*)?$': 'HMS-P-BED',
-    r'^/_b_a_c_k_e_n_d/HMS/bed/[0-9]+/?(\?.*)?$': 'HMS-P-BEDD',
-    r'^/_b_a_c_k_e_n_d/HMS/service/?(\?.*)?$': 'HMS-P-SRV',
-    r'^/_b_a_c_k_e_n_d/HMS/service/[0-9]+/?(\?.*)?$': 'HMS-P-SRVD',
+    r'^/_b_a_c_k_e_n_d/HMS/room/[^/]+/?(\?.*)?$': 'HMS-P-RMD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/nursingstation/?(\?.*)?$': 'HMS-P-NS',
+    r'^/_b_a_c_k_e_n_d/HMS/nursingstation/[^/]+/?(\?.*)?$': 'HMS-P-NSD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/roomservice-description/?(\?.*)?$': 'HMS-P-RSD',
+    r'^/_b_a_c_k_e_n_d/HMS/roomservice-description/[^/]+/?(\?.*)?$': 'HMS-P-RSDD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/room-kititems/?(\?.*)?$': 'HMS-P-RKIT',
+    r'^/_b_a_c_k_e_n_d/HMS/room-kititems/[^/]+/?(\?.*)?$': 'HMS-P-RKITD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room-enquiry/?(\?.*)?$': 'HMS-P-RENQ',
+    r'^/_b_a_c_k_e_n_d/HMS/update-room-cleaned/?(\?.*)?$': 'HMS-P-RCLN',
+    r'^/_b_a_c_k_e_n_d/HMS/book-room/?(\?.*)?$': 'HMS-P-BROOM',
+
+    r'^/_b_a_c_k_e_n_d/HMS/get_active_admission/?(\?.*)?$': 'HMS-P-GADM',
     r'^/_b_a_c_k_e_n_d/HMS/room-shifting/?(\?.*)?$': 'HMS-P-RSHFT',
+    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/.+/update/?(\?.*)?$': 'HMS-P-RSHFTD',
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',

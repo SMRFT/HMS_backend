@@ -389,9 +389,9 @@ def grn_view(request, pk=None):
             from ..models import PharmacyStock
 
             DEPT_CODE_MAP = {
-                "MEDICINE_PURCHASE":    "OP001",
-                "MEDICINE_PURCHASE_IP": "IP001",
-                "OPENING_STOCK_DRUG":   "DP001",
+                "MEDICINE_PURCHASE":    "OLET002",
+                "MEDICINE_PURCHASE_IP": "OLET001",
+                "OPENING_STOCK_DRUG":   "",
             }
             department_code = DEPT_CODE_MAP.get(saved.purchase_category, "PHARMACY")
             assigned_grn_no = saved.grn_number
