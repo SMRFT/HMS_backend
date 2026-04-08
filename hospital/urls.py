@@ -223,6 +223,7 @@ urlpatterns = [
     re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
     path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
     path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
+    path('get-all-outlets/', views.get_all_outlets, name='get_all_outlets'),
     
     # Insurance Provider URLs
     path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
