@@ -58,38 +58,66 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             company_name = None
             if patient.company_code:
                 try:
-                    insurance = InsuranceProvider.objects.get(company_code=patient.company_code)
+                    insurance = InsuranceProvider.objects.get(
+                        company_code=patient.company_code
+                    )
                     company_name = insurance.company_name
                 except InsuranceProvider.DoesNotExist:
                     pass
 
-            # ── Extract Room Details (Latest Active Room) ────
+            # ── Get Latest Room / Bed Details ───────────────
             room_no = None
             bed_no = None
 
-            if admission.room_details:
-                # Get last active room OR last entry
-                active_rooms = [r for r in admission.room_details if r.get("is_roomActive")]
-                
-                room_data = active_rooms[-1] if active_rooms else admission.room_details[-1]
+            # 1. First check latest active room shifting details
+            if admission.roomShitingDetails:
+                active_shift_rooms = [
+                    r for r in admission.roomShitingDetails
+                    if r.get("is_roomActive") is True
+                ]
 
-                room_no = room_data.get("roomNo")
-                bed_no = room_data.get("bedNo")
+                if active_shift_rooms:
+                    latest_shift = active_shift_rooms[-1]
 
-            # ── Response ─────────────────────────────────────
+                    room_no = latest_shift.get("newRoomNo")
+                    bed_no = latest_shift.get("newBedNo")
+
+            # 2. Fallback to room_details if no active shift room found
+            if room_no is None and admission.room_details:
+                active_rooms = [
+                    r for r in admission.room_details
+                    if r.get("is_roomActive") is True
+                ]
+
+                if active_rooms:
+                    latest_room = active_rooms[-1]
+                else:
+                    latest_room = admission.room_details[-1]
+
+                room_no = latest_room.get("roomNo")
+                bed_no = latest_room.get("bedNo")
+
+            # ── Response ────────────────────────────────────
             response_data = {
                 'ipNumber': admission.ipNumber,
                 'ipserial_number': admission.ipserial_number,
                 'uhid': admission.uhid,
 
-                # Room Info (UPDATED)
+                # Latest Room Info
                 'roomNo': room_no,
                 'bedNo': bed_no,
                 'room_details': admission.room_details,
+                'roomShitingDetails': getattr(admission, 'roomShitingDetails', []),
 
                 # Admission Info
-                'admissionDate': admission.admissionDateTime.strftime("%Y-%m-%d") if admission.admissionDateTime else None,
-                'admissionTime': admission.admissionDateTime.strftime("%H:%M") if admission.admissionDateTime else None,
+                'admissionDate': (
+                    admission.admissionDateTime.strftime("%Y-%m-%d")
+                    if admission.admissionDateTime else None
+                ),
+                'admissionTime': (
+                    admission.admissionDateTime.strftime("%H:%M")
+                    if admission.admissionDateTime else None
+                ),
                 'admittingDoctor': admission.admittingDoctor,
                 'consultingDoctor': admission.consultingDoctor,
                 'packageName': admission.packageName,
@@ -98,6 +126,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 # Flags
                 'is_discharged': admission.is_discharged,
                 'is_admissionActive': admission.is_admissionActive,
+                'is_admitted': getattr(admission, 'is_admitted', False),
 
                 # Patient Info
                 'salutation': getattr(patient, 'salutation', ''),
@@ -111,7 +140,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 'state': patient.state,
                 'zipcode': patient.zipcode,
 
-                # Company
+                # Company Info
                 'customer_type': patient.customer_type,
                 'company_code': patient.company_code,
                 'company_name': company_name,

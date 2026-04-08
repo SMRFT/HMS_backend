@@ -145,8 +145,6 @@ urlpatterns = [
     path('doctor_schedule/<str:employee_id>/', doctormaster.doctor_schedule_detail, name='doctor_schedule_detail'),
     path('doctor_schedule_upsert/<str:employee_id>/', doctormaster.doctor_schedule_upsert, name='doctor_schedule_upsert'),
 
-    path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
-    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
 
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
@@ -284,6 +282,7 @@ urlpatterns = [
     path("update_schedule_status/",  surgeryschedule.update_schedule_status, name='update_schedule_status'),
     path("list_diagnosis/",  surgeryschedule.list_diagnosis, name='list_diagnosis'),    
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
+    path('get_ippharmacy_stock/', surgeryschedule.get_ippharmacy_stock, name='get_ippharmacy_stock'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
 
 ]

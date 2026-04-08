@@ -11,6 +11,8 @@ import os
 from pymongo import MongoClient
 from pymongo import MongoClient
 import pytz
+from datetime import datetime
+from ..models import PharmacyBilling
 
 
 client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -524,61 +526,376 @@ def list_diagnosis(request):
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
         )
+   
     
+from bson.decimal128 import Decimal128
+from django.http import JsonResponse
+
+def convert_decimals(obj):
+    if isinstance(obj, list):
+        return [convert_decimals(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, Decimal128):
+        return float(obj.to_decimal())
+    return obj
 
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
+def get_ippharmacy_stock(request):
+    try:
+        # ✅ Dynamic department (code1)
+        outlet_code = request.GET.get("outlet_code", "OLET001")
+
+        # ✅ Mongo connection (code2)
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        mongo_db = client["HMS"]
+
+        pipeline = [
+
+            # ✅ Filter department
+            {
+                "$match": {
+                    "outlet_code": outlet_code
+                }
+            },
+
+            # ✅ Join item master
+            {
+                "$lookup": {
+                    "from": "hospital_pharmacyitem",
+                    "localField": "item_id",
+                    "foreignField": "item_id",
+                    "as": "item_details"
+                }
+            },
+
+            {
+                "$unwind": {
+                    "path": "$item_details",
+                    "preserveNullAndEmptyArrays": False
+                }
+            },
+
+            # ✅ Only active items
+            {
+                "$match": {
+                    "item_details.is_blocked": False,
+                    "item_details.is_active": True
+                }
+            },
+
+            # ✅ Calculate stock + reorder level
+            {
+                "$addFields": {
+                    "available_stock": {
+                        "$add": [
+                            {
+                                "$subtract": [
+                                    {
+                                        "$subtract": [
+                                            {
+                                                "$subtract": [
+                                                    {
+                                                        "$subtract": [
+                                                            "$total_stock",
+                                                            {"$ifNull": ["$sold_quantity", 0]}
+                                                        ]
+                                                    },
+                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
+                                                ]
+                                            },
+                                            {"$ifNull": ["$grn_return_quantity", 0]}
+                                        ]
+                                    },
+                                    {"$ifNull": ["$blocked_quantity", 0]}
+                                ]
+                            },
+                            {"$ifNull": ["$sales_return_quantity", 0]}
+                        ]
+                    },
+
+                    # ✅ Ensure reorder_level exists
+                    "reorder_level": {
+                        "$ifNull": ["$item_details.reorder_level", 0]
+                    }
+                }
+            },
+
+            # ✅ Low stock flag
+            {
+                "$addFields": {
+                    "is_low_stock": {
+                        "$cond": {
+                            "if": {
+                                "$lte": ["$available_stock", "$reorder_level"]
+                            },
+                            "then": True,
+                            "else": False
+                        }
+                    }
+                }
+            },
+
+            # ✅ Final projection
+            {
+                "$project": {
+                    "_id": 0,
+
+                    "org_id": 1,
+                    "branch_code": 1,
+                    "department_code": 1,
+                    "item_id": 1,
+                    "batch_number": 1,
+                    "expiry_date": 1,
+                    "total_stock": 1,
+                    "mrp": 1,
+                    "grn_number": 1,
+
+                    "sold_quantity": 1,
+                    "transferred_out_quantity": 1,
+                    "sales_return_quantity": 1,
+
+                    "available_stock": 1,
+                    "reorder_level": 1,
+                    "is_low_stock": 1,
+
+                    # ✅ Item details
+                    "item_name": "$item_details.item_name",
+                    "item_last_name": "$item_details.item_last_name",
+                    "category": "$item_details.category",
+                    "hsn_code": "$item_details.hsn",
+
+                    "high_risk": "$item_details.high_risk",
+                    "look_alike": "$item_details.look_alike",
+                    "sound_alike": "$item_details.sound_alike",
+
+                    # ✅ Tax
+                    "CGST_Percentage": 1,
+                    "SGST_Percentage": 1,
+                    "CGST_Amt": 1,
+                    "SGST_Amt": 1
+                }
+            }
+        ]
+
+        data = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
+
+        # ✅ Convert Decimal128 → float
+        data = convert_decimals(data)
+
+        return JsonResponse({
+            "success": True,
+            "data": data
+        }, safe=False)
+
+    except Exception as e:
+        print("Error in get_oppharmacy_stock:", str(e))
+        return JsonResponse({
+            "success": False,
+            "message": str(e)
+        }, status=500)
+
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def save_ot_medicine_ward_request(request):
+    """
+    Save OT medicine ward request using PharmacyBilling model.
+    Bill_id is auto-generated in PharmacyBilling.save()
+    """
+
+    try:
+        data = request.data
+
+        current_user = data.get("auth-user-id", "system")
+        branch_code = data.get("auth-branch-code", "system")
+        hospital_code = data.get("auth-hospital-code", "system")
+        # outlet_code = data.get("auth-outlet-code", "OLET001")
+
+        medicine_particulars = data.get("medicine_particulars", [])
+        total_amount = round(float(data.get("total_amount", 0)), 2)
+
+        # Remove fields that should not be stored in medicine_particulars
+        STRIP_FIELDS = {
+            "edit_history",
+            "billType",
+            "billTypeNo",
+            "billTypeName",
+            "total_stock",
+            "price",
+            "expiry_date",
+        }
+
+        cleaned_medicines = []
+
+        for med in medicine_particulars:
+            cleaned = {
+                key: value
+                for key, value in med.items()
+                if key not in STRIP_FIELDS
+            }
+
+            # Ensure required/default fields exist
+            cleaned.setdefault("remark", "")
+            cleaned.setdefault("dose", "")
+            cleaned.setdefault("doseUnit", "")
+            cleaned.setdefault("route", "")
+            cleaned.setdefault("dosage", "")
+            cleaned.setdefault("noOfDays", "")
+            cleaned.setdefault("qty", cleaned.get("quantity", 0))
+            cleaned.setdefault("quantity", cleaned.get("qty", 0))
+
+            cleaned_medicines.append(cleaned)
+
+        # Save through model instead of direct mongo insert
+        bill = PharmacyBilling.objects.create(
+            branch_code=branch_code,
+            hospital_code=hospital_code,
+            outlet_code="OLET001",
+
+            created_by=current_user,
+            created_date=timezone.now(),
+
+            ward_request_date=timezone.now(),
+            is_ward_request=True,
+            bill_date=None,
+            bill_no="",
+            estimate_no="",
+
+            uhid=data.get("uhid", ""),
+            inpatient_number=data.get("ipNumber", ""),
+
+            bill_type=18,
+            doctor_id=data.get("doctor_id", ""),
+            room_no=data.get("wardName", ""),
+
+            medicine_particulars=cleaned_medicines,
+
+            total_amount=total_amount,
+
+            overall_discount_type="percent",
+            overall_discount_value=0.0,
+            overall_discount_amount=0.0,
+
+            net_amount=total_amount,
+
+            billing_mode="WARD REQUEST",
+            billing_status="Pending",
+            payment_mode="Credit",
+
+            payment_details={},
+
+            is_deleted=False,
+            delete_reason="",
+            deleted_by="",
+
+            round_off=0,
+            edit_history=[],
+
+            cashier_id="",
+        )
+
+        return Response(
+            {
+                "success": True,
+                "message": "OT medicine ward request saved successfully",
+                "bill_id": bill.Bill_id,
+                "billing_status": bill.billing_status,
+            },
+            status=200,
+        )
+
+    except Exception as e:
+        return Response(
+            {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            },
+            status=500,
+        )
+    
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 def get_ot_medicine_ward_requests(request):
     try:
         uhid = request.query_params.get("uhid")
         ip_number = request.query_params.get("ipNumber")
-        
+
         if not uhid:
-            return Response({"success": False, "error": "UHID is required"}, status=400)
-            
-        # Fetch from OPPharmacyBill where is_ward_request=True using PyMongo
+            return Response(
+                {
+                    "success": False,
+                    "error": "UHID is required"
+                },
+                status=400
+            )
+
         query_params = {
             "uhid": uhid,
             "is_ward_request": True
         }
+
         if ip_number:
             query_params["inpatient_number"] = ip_number
-            
-        ward_req_collection = hms_db["hospital_oppharmacybill"]
-        requests_data = list(ward_req_collection.find(query_params).sort("created_date", -1))
 
-        # ── Fetch all relevant bill_types in one query ──────────────────────
-        bill_types = {doc.get("bill_type") for doc in requests_data if doc.get("bill_type")}
-        billtype_collection = hms_db["hospital_billtype"]
-        billtype_map = {
-            bt["bill_type"]: bt.get("bill_name", "")
-            for bt in billtype_collection.find(
-                {"bill_type": {"$in": list(bill_types)}},
-                {"bill_type": 1, "bill_name": 1, "_id": 0}
-            )
+        ward_req_collection = hms_db["hospital_pharmacybilling"]
+
+        requests_data = list(
+            ward_req_collection.find(query_params).sort("ward_request_date", -1)
+        )
+
+        # Fetch bill type names
+        bill_types = {
+            doc.get("bill_type")
+            for doc in requests_data
+            if doc.get("bill_type") is not None
         }
-        # ────────────────────────────────────────────────────────────────────
-        
+
+        billtype_map = {}
+
+        if bill_types:
+            billtype_collection = hms_db["hospital_billtype"]
+
+            billtype_map = {
+                bt.get("bill_type"): bt.get("bill_name", "")
+                for bt in billtype_collection.find(
+                    {"bill_type": {"$in": list(bill_types)}},
+                    {"bill_type": 1, "bill_name": 1, "_id": 0}
+                )
+            }
+
         formatted_data = []
+        ist = pytz.timezone("Asia/Kolkata")
+
         for doc in requests_data:
             items = doc.get("medicine_particulars", [])
+
+            # If medicine_particulars is stored as string, convert to list
             if isinstance(items, str):
-                import json
                 try:
                     items = json.loads(items)
-                except json.JSONDecodeError:
+                except Exception:
                     items = []
 
             medicines = []
+
             for itm in items:
+                # Handle if medicine item itself is a stringified JSON
                 if isinstance(itm, str):
-                    import json
                     try:
                         itm = json.loads(itm)
                     except Exception:
                         continue
+
                 if not isinstance(itm, dict):
                     continue
+
                 medicines.append({
                     "item_id": itm.get("item_id", ""),
                     "name": itm.get("itemName", itm.get("item_name", "")),
@@ -589,121 +906,67 @@ def get_ot_medicine_ward_requests(request):
                     "dose": itm.get("dose", ""),
                     "doseUnit": itm.get("doseUnit", ""),
                     "route": itm.get("route", ""),
-                    "instruction": itm.get("instruction", "")
+                    "instruction": itm.get("instruction", ""),
+                    "remark": itm.get("remark", "")
                 })
 
-            # ── Resolve bill_name from the pre-fetched map ──────────────────
             bill_type = doc.get("bill_type")
             bill_name = billtype_map.get(bill_type, "")
-            # ────────────────────────────────────────────────────────────────
+
+            # Convert Mongo UTC datetime to IST
+            ward_request_date = doc.get("ward_request_date")
+
+            req_date = ""
+            req_time = ""
+
+            if ward_request_date:
+                if ward_request_date.tzinfo is None:
+                    ward_request_date = pytz.utc.localize(ward_request_date)
+
+                ward_request_date = ward_request_date.astimezone(ist)
+
+                req_date = ward_request_date.strftime("%d-%m-%Y")
+                req_time = ward_request_date.strftime("%I:%M %p")
 
             formatted_doc = {
-                "id": str(doc["_id"]),
+                "id": str(doc.get("_id")),
+                "bill_id": doc.get("Bill_id", ""),
                 "uhid": doc.get("uhid", ""),
                 "ipNumber": doc.get("inpatient_number", ""),
                 "patientName": doc.get("patient_name", ""),
                 "billType": bill_type,
-                "billName": bill_name,          # ← resolved from hospital_billtype
-                "reqDate": doc.get("created_date").strftime("%d-%m-%Y") if doc.get("created_date") else "",
-                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
+                "billName": bill_name,
+                "reqDate": req_date,
+                "reqTime": req_time,
                 "userName": doc.get("created_by", ""),
                 "requestNo": doc.get("estimate_no", ""),
                 "doctor": doc.get("doctor", ""),
                 "doctorName": doc.get("doctor_id", ""),
+                "wardName": doc.get("room_no", ""),
+                "billingStatus": doc.get("billing_status", ""),
+                "billingMode": doc.get("billing_mode", ""),
                 "medicines": medicines,
-                "total_amount": doc.get("total_amount", 0)
+                "total_amount": doc.get("total_amount", 0),
+                "net_amount": doc.get("net_amount", 0)
             }
+
             formatted_data.append(formatted_doc)
 
-        return Response({
-            "success": True,
-            "data": formatted_data
-        })
+        return Response(
+            {
+                "success": True,
+                "count": len(formatted_data),
+                "data": formatted_data
+            },
+            status=200
+        )
 
-    except Exception as e:
-        return Response({"success": False, "error": str(e)}, status=500)
-
-
-@api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
-def save_ot_medicine_ward_request(request):
-    """
-    Save an OT medicine ward request to hospital_oppharmacybill.
- 
-    All billing meta (bill_type=18, billing_status, billing_mode, is_ward_request,
-    is_regular_medicine, is_discharge_medicine) are set server-side.
-    The frontend only sends: uhid, ipNumber, wardName, doctor_id,
-    medicine_particulars (with remark per item), total_amount, surgeryRef.
-    """
-    try:
-        data          = request.data
-        current_user  = data.get("auth-user-id",       "system")
-        branch_code   = data.get("auth-branch-code",   "system")
-        hospital_code = data.get("auth-hospital-code", "SH001")
- 
-        medicine_particulars = data.get("medicine_particulars", [])
-        total_amount         = round(float(data.get("total_amount", 0)), 2)
- 
-        # ── Clean medicine items — keep only what the ward needs ──────────────
-        # Fields sent by frontend: item_id, itemName, qty, quantity, price,
-        #                          noOfDays, dosage, dose, doseUnit, route, remark
-        # Fields to strip (handled by billing at bill-generation time):
-        STRIP_FIELDS = {
-            "edit_history", "billType", "billTypeNo", "billTypeName",
-            "total_stock", "price", "expiry_date",
-        }
- 
-        cleaned_medicines = []
-        for med in medicine_particulars:
-            cleaned = {k: v for k, v in med.items() if k not in STRIP_FIELDS}
-            # Ensure remark is always present (even if empty string)
-            cleaned.setdefault("remark", "")
-            cleaned_medicines.append(cleaned)
- 
-        ist     = pytz.timezone("Asia/Kolkata")
-        now_ist = datetime.now(ist)
- 
-        bill_doc = {
-            "branch_code":   branch_code,
-            "hospital_code": hospital_code,
-            "outlet_code":   "OLET001",
-            "created_by":   current_user,
-            "created_date": now_ist,
-            "bill_no":      "",
-            "estimate_no":  "",
-            "bill_date":    "",
-            "uhid":              data.get("uhid"),
-            "inpatient_number":  data.get("ipNumber"),
-            "bill_type":         18,           
-            "billing_status":    "Pending",
-            "billing_mode":      "Credit",
-            "is_ward_request":   True,
-            "is_discharge_medicine": False,
-            "is_regugar_medicine":   True,     
-            "is_active":         True,
-            "doctor_id":  data.get("doctor_id"),
-            "room_no":    data.get("wardName", ""),
-            "medicine_particulars": cleaned_medicines,
-            "total_amount":              total_amount,
-            "net_amount":                total_amount,
-            "overall_discount_amount":   0.0,
-            "overall_discount_type":     "percent",
-            "overall_discount_value":    0.0,
-        }
- 
-        collection = hms_db["hospital_oppharmacybill"]
-        result     = collection.insert_one(bill_doc)
- 
-        client.close()
- 
-        return Response({
-            "success": True,
-            "message": "OT medicine ward request saved successfully",
-            "id":      str(result.inserted_id),
-        })
- 
     except Exception as e:
         return Response(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
-            status=500,
+            {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            },
+            status=500
         )

@@ -292,6 +292,50 @@ class PharmacyItem(AuditModel):
 # Correctly using djongo models below
 from django.utils import timezone
 
+class PharmacyBilling(AuditModel):
+
+    Bill_id = models.IntegerField(primary_key=True)
+    bill_no = models.CharField(max_length=50, blank=True, null=True)
+    estimate_no = models.CharField(max_length=50, blank=True, null=True)
+    bill_date = models.DateTimeField(blank=True, null=True)
+    uhid = models.CharField(max_length=50)
+    inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    bill_type = models.IntegerField(max_length=200, blank=True, null=True)
+    doctor_id = models.CharField(max_length=50, blank=True, null=True)
+    room_no = models.CharField(max_length=20, blank=True, null=True)
+    medicine_particulars = models.JSONField(default=list)
+    total_amount = models.FloatField(default=0)
+    overall_discount_type = models.CharField(
+        max_length=10,
+        default="percent"
+    )
+    overall_discount_value = models.FloatField(default=0)
+    overall_discount_amount = models.FloatField(default=0)
+    net_amount = models.FloatField(default=0)
+    billing_status = models.CharField(max_length=20)
+    billing_mode = models.CharField(max_length=20)
+    payment_details = models.JSONField(null=True, blank=True)
+    is_deleted= models.BooleanField(default=False)
+    delete_reason = models.TextField(null=True, blank=True)
+    deleted_by =models.CharField(max_length=150)
+    round_off= models.IntegerField(default=0)
+    edit_history = models.JSONField(default=list, blank=True, null=True)
+    cashier_id = models.CharField(max_length=50, blank=True, null=True)
+    is_ward_request = models.BooleanField(default=False)
+    ward_request_date = models.DateTimeField(blank=True, null=True)
+    payment_mode = models.CharField(max_length=100, blank=True, null=True)
+
+    # :white_check_mark: AUTO-INCREMENT LOGIC
+    def save(self, *args, **kwargs):
+        if not self.Bill_id:
+            last = PharmacyBilling.objects.order_by('-Bill_id').first()
+            self.Bill_id = (last.Bill_id + 1) if last else 1
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.billing_status} - {self.patient_name}"
+
 class OPPharmacyBill(AuditModel):
 
     Bill_id = models.IntegerField(primary_key=True)
