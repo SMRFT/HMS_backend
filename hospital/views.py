@@ -266,30 +266,30 @@ def get_user_permissions(request):
         diag_collection = global_db['backend_diagnostics_profile']
         user_profile = diag_collection.find_one(
             {"employeeId": employee_id},
-            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "hms_outlets": 1, "_id": 0}
         )
         
+        # 1. Fetch data from user profile
         roles = []
         hms_pages = []
-        extra_permissions = []
+        allowed_pages = None
+        
         if user_profile:
             p_role = user_profile.get("primaryRole")
             a_roles = user_profile.get("additionalRoles", [])
             hms_pages = user_profile.get("hms_pages", [])
+            allowed_pages = user_profile.get("allowed_pages")
+            hms_outlets = user_profile.get("hms_outlets", [])
             
             if p_role:
                 roles.append(p_role)
             if isinstance(a_roles, list):
                 roles.extend(a_roles)
-                
-        # 2. Check for 'HMS-P' and fetch extra permissions
-        if "HMS-P" in roles and user_profile:
-            extra_permissions = user_profile.get("allowed_pages", [])
 
-        # 3. Combine and return
-        # Logic: If extra_permissions exist, we prioritize them over roles for HMS-specific pages.
-        if extra_permissions:
-            combined_permissions = list(set(extra_permissions))
+        # 2. Determine combined permissions
+        # Priority: explicit 'allowed_pages' (dict or list) -> fallback to 'roles'
+        if allowed_pages is not None:
+            combined_permissions = allowed_pages
         else:
             combined_permissions = list(set(roles))
         
@@ -297,7 +297,8 @@ def get_user_permissions(request):
             "employeeId": employee_id, 
             "allowed_pages": combined_permissions,
             "roles": list(set(roles)),
-            "hms_pages": list(set(hms_pages)) if isinstance(hms_pages, list) else []
+            "hms_pages": list(set(hms_pages)) if isinstance(hms_pages, list) else [],
+            "hms_outlets": list(set(hms_outlets)) if isinstance(hms_outlets, list) else []
         }, status=200)
 
     except Exception as e:
@@ -317,8 +318,8 @@ def update_user_permissions(request):
         if not employee_id:
             return Response({"error": "Employee ID is required"}, status=400)
         
-        if allowed_pages is None or not isinstance(allowed_pages, list):
-            return Response({"error": "allowed_pages must be a list"}, status=400)
+        if allowed_pages is None or (not isinstance(allowed_pages, list) and not isinstance(allowed_pages, dict)):
+            return Response({"error": "allowed_pages must be a list or dictionary"}, status=400)
 
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_host)
@@ -332,6 +333,10 @@ def update_user_permissions(request):
         hms_pages = request.data.get('hms_pages')
         if isinstance(hms_pages, list):
             update_fields["hms_pages"] = hms_pages
+
+        hms_outlets = request.data.get('hms_outlets')
+        if isinstance(hms_outlets, list):
+            update_fields["hms_outlets"] = hms_outlets
 
         # Upsert the permission record into the Global database
         result = diag_collection.update_one(
@@ -839,7 +844,11 @@ def get_sidebar_mapping(request):
         all_permissions = set()
         for group in all_groups:
             for page in group.get('pages', []):
-                all_permissions.update(page.get('permissions', []))
+                perms = page.get('permissions', [])
+                if isinstance(perms, dict):
+                    all_permissions.update(perms.values())
+                else:
+                    all_permissions.update(perms)
 
         # Step 2: Check HMS access
         has_hms_access = any(role.startswith("HMS") for role in allowed_actions)
@@ -870,15 +879,28 @@ def get_sidebar_mapping(request):
             allowed_pages = []
 
             for page in group.get('pages', []):
-                page_perms = page.get('permissions', [])
+                # 🔹 Outlet Filter
+                page_outlet = page.get('outlet_code')
+                request_outlet = request.headers.get('Outlet-Code')
+                
+                # If page restricted to specific outlet, skip if doesn't match
+                if page_outlet and page_outlet != request_outlet:
+                    continue
 
+                page_perms = page.get('permissions', [])
+                
                 # No permission → allow
                 if not page_perms:
                     allowed_pages.append(page)
                     continue
 
                 # Match
-                if set(page_perms) & expanded_permissions:
+                if isinstance(page_perms, dict):
+                    perm_values = set(page_perms.values())
+                else:
+                    perm_values = set(page_perms)
+
+                if not perm_values or (perm_values & expanded_permissions):
                     allowed_pages.append(page)
 
             if allowed_pages:
@@ -919,8 +941,29 @@ def update_sidebar_mapping(request):
             
         client.close()
         return Response({"message": "Sidebar mapping updated successfully."}, status=200)
+        
     except Exception as e:
         print(f"Error in update_sidebar_mapping: {e}")
         import traceback
         traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+
+@api_view(['GET'])
+def get_all_outlets(request):
+    """
+    Fetch all available outlets from the HMS database.
+    """
+    try:
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        if not mongo_host:
+            return Response({"error": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
+        db = client['HMS']
+        collection = db['hospital_outlets']
+        
+        outlets = list(collection.find({}, {'_id': 0}))
+        client.close()
+        return Response(outlets, status=200)
+    except Exception as e:
         return Response({"error": str(e)}, status=500)
