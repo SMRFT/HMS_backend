@@ -539,34 +539,41 @@ class RoomKitItems(AuditModel):
     def __str__(self):
         return self.kit_name
 
+ROOM_STATUS_CHOICES = [
+    ("Available",    "Available"),
+    ("Maintenance",  "Maintenance"),
+    ("Blocked",      "Blocked"),
+]
+ 
+ 
 class Room(AuditModel):
-    room_number = models.CharField(max_length=10, primary_key=True)
-    description = models.TextField(blank=True)
-    room_category = models.CharField(max_length=100)         
-    block = models.CharField(max_length=100)                 
-    floor = models.IntegerField()
-    room_type = models.CharField(max_length=20)
-    phone_extension = models.CharField(max_length=10, blank=True)
-    nursing_station = models.CharField(max_length=50, blank=True)
-    capacity = models.IntegerField(default=1)                
-    occupancy = models.IntegerField(default=0)               
-    admission_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_advance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    room_status = models.CharField(max_length=20, default="Available")
-    room_blocked = models.BooleanField(default=False)
-    blocked_reason = models.TextField(blank=True)
-    include_in_final_bill = models.BooleanField(default=True)
-    enable_luxury_tax = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    services = models.JSONField(default=list, blank=True)
-    beds = models.JSONField(default=list, blank=True)
-    room_kits = models.JSONField(default=list, blank=True)
-
+    room_number      = models.CharField(max_length=10, primary_key=True)
+    description      = models.TextField(blank=True)
+    room_category    = models.CharField(max_length=100)
+    block            = models.CharField(max_length=100)
+    phone_extension  = models.CharField(max_length=10, blank=True)
+    nursing_station  = models.CharField(max_length=100, blank=True)
+    capacity         = models.IntegerField(default=1)
+    occupancy        = models.IntegerField(default=0)
+    room_status      = models.CharField(
+                           max_length=20,
+                           choices=ROOM_STATUS_CHOICES,
+                           default="Available"
+                       )
+    is_active        = models.BooleanField(default=True)
+ 
+    # Nested JSON sub-documents
+    services         = models.JSONField(default=list, blank=True)
+    beds             = models.JSONField(default=list, blank=True)
+    room_kits        = models.JSONField(default=list, blank=True)
+ 
+    class Meta:
+        db_table = "room"
+ 
     def __str__(self):
         return self.room_number
-
+ 
     def save(self, *args, **kwargs):
-        # Ensure JSON fields are lists if not set
         if self.services is None:
             self.services = []
         if self.beds is None:

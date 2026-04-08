@@ -734,208 +734,186 @@ def room_kititems_view(request, pk=None):
 # --------------------------------------------------
 # ROOM (with Nested Beds, Services, Kits)
 # --------------------------------------------------
-@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+def _get_auth(request):
+    """Extract auth headers from either request.data or request.headers."""
+    def pick(key):
+        return (
+            request.data.get(key)
+            or request.headers.get(key)
+            or "system"
+        )
+    return pick("auth-user-id"), pick("auth-hospital-code"), pick("auth-branch-code")
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(["GET", "POST", "PUT", "DELETE"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_view(request, pk=None):
-
-    employee_id = (
-        request.data.get('auth-user-id') or
-        request.headers.get('auth-user-id') or
-        "system"
-    )
-
-    hospital_code = (
-        request.data.get("auth-hospital-code") or
-        request.headers.get("auth-hospital-code") or
-        "system"
-    )
-
-    branch_code = (
-        request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
-        "system"
-    )
-
-
-    # ────────────────────────────────────────────────
-    # GET
-    # ────────────────────────────────────────────────
+ 
+    employee_id, hospital_code, branch_code = _get_auth(request)
+ 
+    # ── GET ──────────────────────────────────────────────────────────────────
     if request.method == "GET":
-
-        # -------- Single Room --------
+ 
         if pk:
             try:
                 room = Room.objects.get(
                     pk=pk,
                     hospital_code=hospital_code,
-                    branch_code=branch_code
+                    branch_code=branch_code,
                 )
-
                 if not room.is_active:
                     return Response({"error": "Room not found"}, status=404)
-
                 return Response(RoomSerializer(room).data)
-
             except Room.DoesNotExist:
                 return Response({"error": "Room not found"}, status=404)
-
-
-        # -------- All Active Rooms --------
+ 
         all_rooms = Room.objects.filter(
             hospital_code=hospital_code,
-            branch_code=branch_code
+            branch_code=branch_code,
         )
-
-        active_rooms = [room for room in all_rooms if room.is_active]
-
-        return Response(RoomSerializer(active_rooms, many=True).data)
-
-
-    # ────────────────────────────────────────────────
-    # POST
-    # ────────────────────────────────────────────────
+        active = [r for r in all_rooms if r.is_active]
+        return Response(RoomSerializer(active, many=True).data)
+ 
+    # ── POST ─────────────────────────────────────────────────────────────────
     elif request.method == "POST":
-
+ 
         data = request.data.copy()
-
         data["hospital_code"] = hospital_code
-        data["branch_code"] = branch_code
-
-        services = data.pop("services", [])
-        beds = data.pop("beds", [])
+        data["branch_code"]   = branch_code
+ 
+        # Pop nested lists before main serializer validation
+        services  = data.pop("services",  [])
+        beds      = data.pop("beds",      [])
         room_kits = data.pop("room_kits", [])
-
+ 
         room_number = data.get("room_number")
-
-        # Duplicate check (hospital + branch safe)
-        existing_rooms = Room.objects.filter(
+ 
+        # Duplicate check
+        existing = Room.objects.filter(
             room_number=room_number,
             hospital_code=hospital_code,
-            branch_code=branch_code
+            branch_code=branch_code,
         )
-
-        if any(room.is_active for room in existing_rooms):
+        if any(r.is_active for r in existing):
             return Response(
                 {"error": "Room with this room number already exists"},
-                status=400
+                status=400,
             )
-
+ 
         serializer = RoomSerializer(data=data)
-
-        if serializer.is_valid():
-
-            room = serializer.save(
-                created_by=employee_id,
-                created_date=timezone.now(),
-                lastmodified_by=employee_id,
-                lastmodified_date=timezone.now(),
-                is_active=True
-            )
-
-            # nested JSON
-            room.services = services
-            room.beds = beds
-            room.room_kits = room_kits
-
-            room.save()
-
-            return Response(RoomSerializer(room).data, status=201)
-
-        return Response(serializer.errors, status=400)
-
-
-    # ────────────────────────────────────────────────
-    # PUT
-    # ────────────────────────────────────────────────
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+ 
+        room = serializer.save(
+            created_by=employee_id,
+            created_date=timezone.now(),
+            lastmodified_by=employee_id,
+            lastmodified_date=timezone.now(),
+            is_active=True,
+        )
+ 
+        # Persist nested JSON (already validated by serializer validators
+        # if passed through data; here we store directly after popping above)
+        room.services  = services
+        room.beds      = _derive_bed_statuses(beds)
+        room.room_kits = room_kits
+        room.save()
+ 
+        return Response(RoomSerializer(room).data, status=201)
+ 
+    # ── PUT ──────────────────────────────────────────────────────────────────
     elif request.method == "PUT":
-
+ 
         try:
             room = Room.objects.get(
                 pk=pk,
                 hospital_code=hospital_code,
-                branch_code=branch_code
+                branch_code=branch_code,
             )
-
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
-
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
-
-
+ 
         data = request.data.copy()
-
-        services = data.pop("services", None)
-        beds = data.pop("beds", None)
+ 
+        services  = data.pop("services",  None)
+        beds      = data.pop("beds",      None)
         room_kits = data.pop("room_kits", None)
-
+ 
         new_room_number = data.get("room_number")
-
-        # Duplicate check
+ 
+        # Duplicate check when room number is being changed
         if new_room_number and new_room_number != room.room_number:
-
-            existing_rooms = Room.objects.filter(
+            existing = Room.objects.filter(
                 room_number=new_room_number,
                 hospital_code=hospital_code,
-                branch_code=branch_code
+                branch_code=branch_code,
             )
-
-            if any(r.is_active and str(r.pk) != str(pk) for r in existing_rooms):
+            if any(r.is_active and str(r.pk) != str(pk) for r in existing):
                 return Response(
                     {"error": "Room with this room number already exists"},
-                    status=400
+                    status=400,
                 )
-
+ 
         serializer = RoomSerializer(room, data=data, partial=True)
-
-        if serializer.is_valid():
-
-            room = serializer.save(
-                lastmodified_by=employee_id,
-                lastmodified_date=timezone.now()
-            )
-
-            if services is not None:
-                room.services = services
-
-            if beds is not None:
-                room.beds = beds
-
-            if room_kits is not None:
-                room.room_kits = room_kits
-
-            room.save()
-
-            return Response(RoomSerializer(room).data)
-
-        return Response(serializer.errors, status=400)
-
-
-    # ────────────────────────────────────────────────
-    # DELETE
-    # ────────────────────────────────────────────────
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+ 
+        room = serializer.save(
+            lastmodified_by=employee_id,
+            lastmodified_date=timezone.now(),
+        )
+ 
+        # Only update nested lists if explicitly sent in the request
+        if services is not None:
+            room.services = services
+        if beds is not None:
+            room.beds = _derive_bed_statuses(beds)
+        if room_kits is not None:
+            room.room_kits = room_kits
+ 
+        room.save()
+        return Response(RoomSerializer(room).data)
+ 
+    # ── DELETE ───────────────────────────────────────────────────────────────
     elif request.method == "DELETE":
-
+ 
         try:
             room = Room.objects.get(
                 pk=pk,
                 hospital_code=hospital_code,
-                branch_code=branch_code
+                branch_code=branch_code,
             )
-
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
-
-            room.is_active = False
-            room.lastmodified_by = employee_id
+ 
+            room.is_active         = False
+            room.lastmodified_by   = employee_id
             room.lastmodified_date = timezone.now()
             room.save()
-
             return Response({"message": "Deleted successfully"})
-
+ 
         except Room.DoesNotExist:
             return Response({"error": "Room not found"}, status=404)
+ 
+ 
+# ─── Utility ─────────────────────────────────────────────────────────────────
+ 
+def _derive_bed_statuses(beds):
+    """
+    Ensures every bed dict has bed_status derived from its `blocked` flag.
+    Called before persisting to the JSONField.
+    """
+    if not isinstance(beds, list):
+        return []
+    for bed in beds:
+        blocked = bool(bed.get("blocked", False))
+        bed["blocked"]    = blocked
+        bed["bed_status"] = "Blocked" if blocked else "Available"
+    return beds
         
 
 import json
@@ -1075,30 +1053,6 @@ def room_enquiry_view(request):
                 "mobilePhone": str(patient.mobilePhone or ""),
             }
 
-        # ══════════════════════════════════════════════════════════════════════
-        # STEP 2 — BUILD ADMISSION MAP
-        #
-        # Key  : (room_no, bed_no)
-        # Value: { status, patient, ip_number, is_roomCleaned, source, shifting_id }
-        #
-        # LOGIC:
-        #   For each admission we care about:
-        #     - Active admissions (is_admissionActive=True, is_discharged=False)
-        #     - Cancelled/inactive admissions (is_admissionActive=False, is_discharged=False)
-        #       BUT ONLY if they have at least one uncleaned room entry.
-        #       These need to show as "Available (Not Cleaned)" until housekeeping clears them.
-        #
-        #   A) Find the LATEST active shifting entry (is_roomActive=True).
-        #      That room/bed → Occupied.
-        #      All OTHER shifting entries with is_roomActive=False:
-        #        - is_roomCleaned=True  → Available
-        #        - is_roomCleaned=False → Available (Not Cleaned)
-        #
-        #   B) room_details entry:
-        #      If ANY shifting exists, the original room is vacated.
-        #      Apply same cleaned logic for original room.
-        #      If NO shifting exists, use room_details is_roomActive to determine status.
-        # ══════════════════════════════════════════════════════════════════════
         admission_map = {}
 
         for admission in Admission.objects.all():
