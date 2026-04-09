@@ -7,6 +7,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from pyauth.auth import HasRoleAndDataPermission
 from ..models import Admission, Room, Patient, InsuranceProvider, RoomBooking
+from ..serializers import AdmissionSerializer
 import traceback
 import json
 from datetime import datetime
@@ -14,20 +15,39 @@ from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 # IP Number Preview  →  GET /next-ip-number/
 # ──────────────────────────────────────────────────────────────────────────────
-
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_next_ip_number(request):
     try:
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+        branch_code = (
+            request.data.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
+            "system"
+        )
+        outlet_code = (
+            request.data.get("auth-outlet-code") or
+            request.headers.get("Outlet-Code") or
+            "system"
+        )
+
         now   = datetime.now()
         year  = now.year
         month = now.month
         fy    = (year - 2001) if month < 4 else (year - 2000)
         prefix = f"S{fy:03d}"
-
         max_num = 500000
-        for adm in Admission.objects.all():
+
+        for adm in Admission.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code
+        ):
             ip = adm.ipNumber or ""
             if "/" in ip:
                 try:
@@ -37,29 +57,62 @@ def get_next_ip_number(request):
                 except Exception:
                     continue
 
-        return JsonResponse({"success": True, "next_ipNumber": f"{prefix}/{max_num + 1:06d}"})
+        return JsonResponse({
+            "success": True,
+            "next_ipNumber": f"{prefix}/{max_num + 1:06d}"
+        })
+
     except Exception as e:
         traceback.print_exc()
         return JsonResponse({"success": False, "error": str(e)}, status=500)
 
 
 def parse_json_field(value):
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    if value is None:
-        return []
+    if isinstance(value, list):   return value
+    if isinstance(value, dict):   return [value]
+    if value is None:             return []
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-            if isinstance(parsed, dict):
-                return [parsed]
+            if isinstance(parsed, list): return parsed
+            if isinstance(parsed, dict): return [parsed]
         except Exception:
             return []
     return []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FIX: Build a patient lookup map keyed by uhid, filtered by hospital_code only
+# ──────────────────────────────────────────────────────────────────────────────
+def _build_patient_map(hospital_code):
+    """
+    Returns dict: { uhid_str -> patient_dict }
+    Patients are fetched by hospital_code only (branch_code is null for patients).
+    """
+    patient_map = {}
+    for patient in Patient.objects.filter(hospital_code=hospital_code):
+        key = str(patient.uhid or "").strip()
+        if not key:
+            continue
+        patient_map[key] = {
+            "uhid":        key,
+            "salutation":  str(patient.salutation  or ""),
+            "firstName":   str(patient.firstName   or ""),
+            "middleName":  getattr(patient, "middleName", "") or "",
+            "lastName":    str(patient.lastName    or ""),
+            "age":         str(patient.age         or ""),
+            "gender":      str(patient.gender      or ""),
+            "mobilePhone": str(patient.mobilePhone or ""),
+            "permanent_address": str(getattr(patient, "permanent_address", "") or ""),
+            "area":        str(getattr(patient, "area",    "") or ""),
+            "zipcode":     str(getattr(patient, "zipcode", "") or ""),
+            "city":        str(getattr(patient, "city",    "") or ""),
+            "state":       str(getattr(patient, "state",   "") or ""),
+            "customerType":      str(getattr(patient, "customer_type", "") or getattr(patient, "customerType", "") or ""),
+            "insuranceCompanyName": "",  # resolved separately if needed
+            "company_code": str(getattr(patient, "company_code", "") or ""),
+        }
+    return patient_map
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,67 +123,46 @@ def parse_json_field(value):
 @csrf_exempt
 def search_rooms(request):
     try:
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+
         result = []
 
-        # ─────────────────────────────────────────────
-        # PATIENT LOOKUP MAP
-        # ─────────────────────────────────────────────
-        patient_map = {}
+        # ── Patient lookup (hospital_code only) ──────────────────────────────
+        patient_map = _build_patient_map(hospital_code)
 
-        for patient in Patient.objects.all():
-            patient_map[str(patient.uhid or "")] = {
-                "uhid": str(patient.uhid or ""),
-                "patientname": f"{patient.firstName or ''} {patient.lastName or ''}".strip(),
-                "age": str(patient.age or ""),
-                "gender": str(patient.gender or ""),
-                "mobilePhone": str(patient.mobilePhone or ""),
-            }
-
-        # ─────────────────────────────────────────────
-        # ROOM STATUS MAP
-        # Key = (room_no, bed_no)
-        # ─────────────────────────────────────────────
+        # ── Admission map ────────────────────────────────────────────────────
         admission_map = {}
 
         for admission in Admission.objects.all():
-
-            # Skip only discharged admissions
             if bool(getattr(admission, "is_discharged", False)):
                 continue
 
             details = parse_json_field(getattr(admission, "room_details", []))
             shifts  = parse_json_field(getattr(admission, "roomShitingDetails", []))
-
             details = [d for d in details if isinstance(d, dict)]
-            shifts  = [s for s in shifts if isinstance(s, dict)]
+            shifts  = [s for s in shifts  if isinstance(s, dict)]
 
-            # Ignore completely inactive admissions that have no uncleared room
             has_unclean_room = any(
                 not bool(x.get("is_roomCleaned", False))
                 for x in (details + shifts)
             )
-
             if (
                 not bool(getattr(admission, "is_admissionActive", False))
                 and not has_unclean_room
             ):
                 continue
 
-            uhid = str(getattr(admission, "uhid", "") or "")
+            uhid      = str(getattr(admission, "uhid",     "") or "").strip()
             ip_number = str(getattr(admission, "ipNumber", "") or "")
+            patient_info = patient_map.get(uhid, {"uhid": uhid})
 
-            patient_info = patient_map.get(uhid, {})
-
-            # ─────────────────────────────────────────────
-            # FIND ACTIVE SHIFT (CURRENT ROOM)
-            # ─────────────────────────────────────────────
+            # Find active shift
             active_shift = None
-
-            active_shifts = [
-                s for s in shifts
-                if bool(s.get("is_roomActive", False))
-            ]
-
+            active_shifts = [s for s in shifts if bool(s.get("is_roomActive", False))]
             if active_shifts:
                 try:
                     active_shift = max(
@@ -140,165 +172,105 @@ def search_rooms(request):
                 except Exception:
                     active_shift = active_shifts[-1]
 
-            # ─────────────────────────────────────────────
-            # HANDLE ROOM SHIFT HISTORY
-            # ─────────────────────────────────────────────
             for shift in shifts:
                 room_no = str(shift.get("newRoomNo", "")).strip()
-                bed_no  = str(shift.get("newBedNo", "")).strip()
-
+                bed_no  = str(shift.get("newBedNo",  "")).strip()
                 if not room_no or not bed_no:
                     continue
-
-                is_active  = bool(shift.get("is_roomActive", False))
+                is_active  = bool(shift.get("is_roomActive",  False))
                 is_cleaned = bool(shift.get("is_roomCleaned", False))
 
-                # Active shifted room
                 if active_shift and shift == active_shift:
-                    status = "Occupied"
-                    patient_data = patient_info
-
+                    status = "Occupied"; patient_data = patient_info
+                elif is_cleaned:
+                    status = "Available"; patient_data = {}
                 else:
-                    if is_cleaned:
-                        status = "Available"
-                        patient_data = {}
-                    else:
-                        status = "Available - Not Cleaned"
-                        patient_data = patient_info
+                    status = "Available - Not Cleaned"; patient_data = patient_info
 
-                key = (room_no, bed_no)
-
+                key      = (room_no, bed_no)
                 existing = admission_map.get(key)
-
                 if (
                     existing is None
                     or status == "Occupied"
                     or existing.get("status") != "Occupied"
                 ):
                     admission_map[key] = {
-                        "status": status,
-                        "patient": patient_data,
+                        "status": status, "patient": patient_data,
                         "ip_number": ip_number,
-                        "is_roomActive": is_active,
-                        "is_roomCleaned": is_cleaned,
+                        "is_roomActive": is_active, "is_roomCleaned": is_cleaned,
                         "source": "roomShitingDetails",
                     }
 
-            # ─────────────────────────────────────────────
-            # HANDLE ORIGINAL room_details
-            # ─────────────────────────────────────────────
             has_shifts = len(shifts) > 0
-
             for entry in details:
                 room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo", "")).strip()
-
+                bed_no  = str(entry.get("bedNo",  "")).strip()
                 if not room_no or not bed_no:
                     continue
-
-                is_active  = bool(entry.get("is_roomActive", False))
+                is_active  = bool(entry.get("is_roomActive",  False))
                 is_cleaned = bool(entry.get("is_roomCleaned", False))
 
                 if has_shifts:
-                    # Once shifted, original room is no longer occupied
                     if is_cleaned:
-                        status = "Available"
-                        patient_data = {}
+                        status = "Available"; patient_data = {}
                     else:
-                        status = "Available - Not Cleaned"
-                        patient_data = patient_info
-
+                        status = "Available - Not Cleaned"; patient_data = patient_info
                 else:
                     if is_active:
-                        status = "Occupied"
-                        patient_data = patient_info
+                        status = "Occupied"; patient_data = patient_info
+                    elif is_cleaned:
+                        status = "Available"; patient_data = {}
                     else:
-                        if is_cleaned:
-                            status = "Available"
-                            patient_data = {}
-                        else:
-                            status = "Available - Not Cleaned"
-                            patient_data = patient_info
+                        status = "Available - Not Cleaned"; patient_data = patient_info
 
-                key = (room_no, bed_no)
-
+                key      = (room_no, bed_no)
                 existing = admission_map.get(key)
-
                 if existing is None:
                     admission_map[key] = {
-                        "status": status,
-                        "patient": patient_data,
+                        "status": status, "patient": patient_data,
                         "ip_number": ip_number,
-                        "is_roomActive": is_active,
-                        "is_roomCleaned": is_cleaned,
+                        "is_roomActive": is_active, "is_roomCleaned": is_cleaned,
                         "source": "room_details",
                     }
-                else:
-                    # Occupied always wins over other states
-                    if (
-                        existing.get("status") != "Occupied"
-                        and status == "Occupied"
-                    ):
-                        admission_map[key] = {
-                            "status": status,
-                            "patient": patient_data,
-                            "ip_number": ip_number,
-                            "is_roomActive": is_active,
-                            "is_roomCleaned": is_cleaned,
-                            "source": "room_details",
-                        }
+                elif existing.get("status") != "Occupied" and status == "Occupied":
+                    admission_map[key] = {
+                        "status": status, "patient": patient_data,
+                        "ip_number": ip_number,
+                        "is_roomActive": is_active, "is_roomCleaned": is_cleaned,
+                        "source": "room_details",
+                    }
 
-        # ─────────────────────────────────────────────
-        # BOOKING MAP
-        # ─────────────────────────────────────────────
+        # ── Booking map ──────────────────────────────────────────────────────
         booking_map = {}
-
         for booking in RoomBooking.objects.all():
-
-            is_booked = bool(getattr(booking, "is_booked", False))
-            room_shifted = bool(getattr(booking, "room_shifted", False))
-
-            if not is_booked or room_shifted:
+            if not bool(getattr(booking, "is_booked", False)) or bool(getattr(booking, "room_shifted", False)):
                 continue
-
             room_no = str(getattr(booking, "room_number", "") or "").strip()
-            bed_no  = str(getattr(booking, "bed_number", "") or "").strip()
-
+            bed_no  = str(getattr(booking, "bed_number",  "") or "").strip()
             if not room_no or not bed_no:
                 continue
-
             booking_map[(room_no, bed_no)] = {
                 "ip_number": str(getattr(booking, "ip_number", "") or "").strip(),
-                "uhid": str(getattr(booking, "uhid", "") or "").strip(),
+                "uhid":      str(getattr(booking, "uhid",      "") or "").strip(),
             }
 
-        # ─────────────────────────────────────────────
-        # FILTERS
-        # ─────────────────────────────────────────────
-        room_number_filter = str(request.GET.get("room_number", "")).strip()
+        # ── Filters ──────────────────────────────────────────────────────────
+        room_number_filter = str(request.GET.get("room_number",   "")).strip()
         category_filter    = str(request.GET.get("room_category", "")).strip()
-        block_filter       = str(request.GET.get("block", "")).strip()
-        floor_filter       = str(request.GET.get("floor", "")).strip()
+        block_filter       = str(request.GET.get("block",         "")).strip()
+        floor_filter       = str(request.GET.get("floor",         "")).strip()
 
-        # ─────────────────────────────────────────────
-        # BUILD FINAL ROOM LIST
-        # ─────────────────────────────────────────────
+        # ── Build result ─────────────────────────────────────────────────────
         for room in Room.objects.all():
-
             if not bool(getattr(room, "is_active", False)):
                 continue
-
             room_no = str(getattr(room, "room_number", "")).strip()
-
             if room_number_filter and room_number_filter.lower() not in room_no.lower():
                 continue
-
             if category_filter and str(getattr(room, "room_category", "")).strip() != category_filter:
                 continue
-
             if block_filter and str(getattr(room, "block", "")).strip() != block_filter:
                 continue
-
             if floor_filter:
                 try:
                     if int(getattr(room, "floor", 0)) != int(floor_filter):
@@ -307,148 +279,170 @@ def search_rooms(request):
                     continue
 
             beds_data = []
-
             beds = parse_json_field(getattr(room, "beds", []))
-
             for bed in beds:
-
                 if not isinstance(bed, dict):
                     continue
-
                 bed_number = str(bed.get("bed_number", "")).strip()
-
                 if not bed_number:
                     continue
-
                 key = (room_no, bed_number)
-
-                # Room blocked / maintenance
                 if (
                     bool(getattr(room, "room_blocked", False))
                     or str(getattr(room, "room_status", "")).strip().lower() == "blocked"
                 ):
                     beds_data.append({
-                        "bed_number": bed_number,
-                        "status": "Maintenance",
-                        "patient": {},
-                        "ip_number": "",
-                        "booking": None,
-                        "is_roomActive": False,
-                        "is_roomCleaned": True,
+                        "bed_number": bed_number, "status": "Maintenance",
+                        "patient": {}, "ip_number": "", "booking": None,
+                        "is_roomActive": False, "is_roomCleaned": True,
                     })
                     continue
-
-                # Admission status
                 info = admission_map.get(key)
-
                 if info:
                     beds_data.append({
                         "bed_number": bed_number,
-                        "status": info.get("status", "Available"),
-                        "patient": info.get("patient", {}),
-                        "ip_number": info.get("ip_number", ""),
-                        "booking": None,
-                        "is_roomActive": info.get("is_roomActive", False),
+                        "status":       info.get("status",       "Available"),
+                        "patient":      info.get("patient",      {}),
+                        "ip_number":    info.get("ip_number",    ""),
+                        "booking":      None,
+                        "is_roomActive":  info.get("is_roomActive",  False),
                         "is_roomCleaned": info.get("is_roomCleaned", False),
                     })
                     continue
-
-                # Reserved booking
                 booking_info = booking_map.get(key)
-
                 if booking_info:
                     beds_data.append({
-                        "bed_number": bed_number,
-                        "status": "Reserved",
-                        "patient": {},
-                        "ip_number": booking_info.get("ip_number", ""),
+                        "bed_number": bed_number, "status": "Reserved",
+                        "patient": {}, "ip_number": booking_info.get("ip_number", ""),
                         "booking": booking_info,
-                        "is_roomActive": False,
-                        "is_roomCleaned": True,
+                        "is_roomActive": False, "is_roomCleaned": True,
                     })
                     continue
-
-                # Default available bed
                 beds_data.append({
-                    "bed_number": bed_number,
-                    "status": "Available",
-                    "patient": {},
-                    "ip_number": "",
-                    "booking": None,
-                    "is_roomActive": False,
-                    "is_roomCleaned": True,
+                    "bed_number": bed_number, "status": "Available",
+                    "patient": {}, "ip_number": "", "booking": None,
+                    "is_roomActive": False, "is_roomCleaned": True,
                 })
 
             result.append({
-                "room_number": room_no,
-                "room_type": str(getattr(room, "room_type", "") or ""),
+                "room_number":   room_no,
+                "room_type":     str(getattr(room, "room_type",     "") or ""),
                 "room_category": str(getattr(room, "room_category", "") or ""),
-                "block": str(getattr(room, "block", "") or ""),
-                "floor": getattr(room, "floor", ""),
-                "beds": beds_data,
+                "block":         str(getattr(room, "block",         "") or ""),
+                "floor":         getattr(room, "floor", ""),
+                "beds":          beds_data,
             })
 
         return Response(result, status=200)
 
     except Exception as exc:
         traceback.print_exc()
-        return Response(
-            {
-                "success": False,
-                "error": f"Search rooms failed: {str(exc)}"
-            },
-            status=500
-        )
+        return Response({"success": False, "error": f"Search rooms failed: {str(exc)}"}, status=500)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Admissions List / Create  →  GET/POST /admission/
+# FIX: Enrich a single admission dict with patient data (hospital_code only)
 # ──────────────────────────────────────────────────────────────────────────────
+def _enrich_with_patient(adm_data, hospital_code):
+    """
+    Given a serialized admission dict, look up the patient by uhid+hospital_code
+    and merge patient fields into the dict. Returns the enriched dict.
+    """
+    uhid = str(adm_data.get("uhid") or "").strip()
+    if not uhid:
+        return adm_data
 
+    try:
+        pt = Patient.objects.filter(hospital_code=hospital_code, uhid=uhid).first()
+        if not pt:
+            return adm_data
+
+        # Resolve insurance name
+        ins_name = ""
+        company_code = str(getattr(pt, "company_code", "") or "")
+        if company_code:
+            try:
+                prov = InsuranceProvider.objects.get(company_code=company_code)
+                ins_name = prov.company_name
+            except Exception:
+                ins_name = company_code
+
+        adm_data["salutation"]            = pt.salutation  or ""
+        adm_data["firstName"]             = pt.firstName   or ""
+        adm_data["middleName"]            = getattr(pt, "middleName", "") or ""
+        adm_data["lastName"]              = pt.lastName    or ""
+        adm_data["age"]                   = pt.age
+        adm_data["gender"]                = pt.gender      or ""
+        adm_data["mobilePhone"]           = pt.mobilePhone or ""
+        adm_data["permanent_address"]     = getattr(pt, "permanent_address", "") or ""
+        adm_data["area"]                  = getattr(pt, "area",    "") or ""
+        adm_data["zipcode"]               = getattr(pt, "zipcode", "") or ""
+        adm_data["city"]                  = getattr(pt, "city",    "") or ""
+        adm_data["state"]                 = getattr(pt, "state",   "") or ""
+        adm_data["customerType"]          = str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or "")
+        adm_data["insuranceCompanyName"]  = ins_name
+        adm_data["company_code"]          = company_code
+
+    except Exception:
+        pass
+
+    return adm_data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ADMISSION  →  GET + POST /admission/
+# ──────────────────────────────────────────────────────────────────────────────
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_view(request):
 
-    # ── GET ─────────────────────────────────────────────────────────────────
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        "system"
+    )
+    outlet_code = (
+        request.data.get("auth-outlet-code") or
+        request.headers.get("Outlet-Code") or
+        "system"
+    )
+
+    # ─────────────────────────────────────────────
+    # GET
+    # ─────────────────────────────────────────────
     if request.method == 'GET':
         try:
             from_date_str = request.GET.get('from_date', '').strip()
             to_date_str   = request.GET.get('to_date',   '').strip()
-            status_filter = request.GET.get('status', '').strip()
+            status_filter = request.GET.get('status',    '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
 
             from_date = None
             to_date   = None
             if from_date_str:
-                try:
-                    from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
-                except ValueError:
-                    pass
+                try: from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+                except: pass
             if to_date_str:
-                try:
-                    to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
-                except ValueError:
-                    pass
+                try: to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+                except: pass
 
-            all_admissions = list(Admission.objects.all())
-            uhids = list({adm.uhid for adm in all_admissions if adm.uhid})
-            patient_map = {p.uhid: p for p in Patient.objects.filter(uhid__in=uhids)}
-
-            insurance_cache = {}
-            def get_insurance_name(company_code):
-                if not company_code:
-                    return ''
-                if company_code not in insurance_cache:
-                    try:
-                        prov = InsuranceProvider.objects.get(company_code=company_code)
-                        insurance_cache[company_code] = prov.company_name
-                    except InsuranceProvider.DoesNotExist:
-                        insurance_cache[company_code] = company_code
-                return insurance_cache[company_code]
-
-            data = []
-
-            for adm in all_admissions:
+            admissions = []
+            for adm in Admission.objects.filter(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code
+            ):
                 if status_filter == 'Admitted':
                     if not (adm.is_admitted and not adm.is_discharged):
                         continue
@@ -459,182 +453,136 @@ def admission_view(request):
                 if from_date or to_date:
                     adm_date = None
                     if adm.admissionDateTime:
-                        try:
-                            adm_date = adm.admissionDateTime.date()
-                        except Exception:
-                            pass
+                        try: adm_date = adm.admissionDateTime.date()
+                        except: pass
                     if adm_date:
-                        if from_date and adm_date < from_date:
-                            continue
-                        if to_date and adm_date > to_date:
-                            continue
+                        if from_date and adm_date < from_date: continue
+                        if to_date   and adm_date > to_date:   continue
                     else:
                         continue
 
                 if doctor_filter and doctor_filter.lower() not in (adm.admittingDoctor or '').lower():
                     continue
 
-                room_details = adm.room_details if isinstance(adm.room_details, list) else []
+                admissions.append(adm)
 
-                room_shifting_details = (
-                    adm.roomShitingDetails
-                    if isinstance(getattr(adm, 'roomShitingDetails', None), list)
-                    else []
-                )
+            # FIX: Serialise and then enrich each admission with patient data
+            serializer = AdmissionSerializer(admissions, many=True)
+            enriched   = []
+            for adm_data in serializer.data:
+                enriched.append(_enrich_with_patient(dict(adm_data), hospital_code))
 
-                # ── Get current (active) room from room_details history
-                current_room = next(
-                    (r for r in reversed(room_details) if isinstance(r, dict) and r.get('is_roomActive')),
-                    room_details[0] if room_details else {}
-                )
-
-                pt = patient_map.get(adm.uhid)
-                salutation    = (pt.salutation  or '') if pt else ''
-                first_name    = (pt.firstName   or '') if pt else ''
-                last_name     = (pt.lastName    or '') if pt else ''
-                age           = pt.age               if pt else None
-                gender        = (pt.gender      or '') if pt else ''
-                mobile        = (pt.mobilePhone or '') if pt else ''
-                address       = (pt.permanent_address or '') if pt else ''
-                area          = (pt.area        or '') if pt else ''
-                zipcode       = (pt.zipcode     or '') if pt else ''
-                city          = (pt.city        or '') if pt else ''
-                state         = (pt.state       or '') if pt else ''
-                customer_type = (pt.customer_type or '') if pt else ''
-                company_code  = (pt.company_code  or '') if pt else ''
-                insurance_name = get_insurance_name(company_code) if pt else ''
-
-                data.append({
-                    "id":                   str(adm.pk),
-                    "uhid":                 adm.uhid or '',
-                    "ipNumber":             adm.ipNumber or '',
-                    "admissionDateTime":    adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
-                    "admittingDoctor":      adm.admittingDoctor or '',
-                    "consultingDoctor":     adm.consultingDoctor or '',
-                    "packageName":          adm.packageName or '',
-                    "roomNo":               current_room.get("roomNo", ''),
-                    "bedNo":                current_room.get("bedNo", ''),
-                    "reasonForAdmission":   adm.reasonForAdmission or '',
-                    "mlc_type":             adm.mlc_type or '',
-                    "mlc_remarks":          adm.mlc_remarks or '',
-                    "advance_payments":     adm.advance_payments if isinstance(adm.advance_payments, list) else [],
-                    "is_advanceActive":     bool(adm.is_advanceActive),
-                    "is_admissionActive":   bool(adm.is_admissionActive),
-                    "is_discharged":        bool(adm.is_discharged),
-                    "is_admitted":          bool(adm.is_admitted),
-
-                    # full room history
-                    "room_details":         room_details,
-
-                    # full room shifting history
-                    "roomShitingDetails":   room_shifting_details,
-
-                    "salutation":           salutation,
-                    "firstName":            first_name,
-                    "lastName":             last_name,
-                    "age":                  age,
-                    "gender":               gender,
-                    "mobilePhone":          mobile,
-                    "permanent_address":    address,
-                    "area":                 area,
-                    "zipcode":              zipcode,
-                    "city":                 city,
-                    "state":                state,
-                    "customerType":         customer_type,
-                    "insuranceCompanyName": insurance_name,
-                    "company_code":         company_code,
-                    "ipserial_number":      adm.ipserial_number,
-                })
-
-            return JsonResponse({"success": True, "data": data}, safe=False)
+            return JsonResponse({"success": True, "data": enriched})
 
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"error": str(e)}, status=500)
 
-    # ── POST ─────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # POST
+    # ─────────────────────────────────────────────
     elif request.method == 'POST':
         try:
             data = {k: request.data.get(k) for k in request.data}
-
             uhid = str(data.get('uhid', '')).strip()
+
             if not uhid:
                 return JsonResponse({"error": "UHID is required"}, status=400)
 
-            # ── Check existing ACTIVE admission for this UHID ─────────────
-            existing = None
-            for adm in Admission.objects.filter(uhid=uhid):
-                if adm.is_admitted and not adm.is_discharged:
-                    existing = adm
-                    break
+            # Active admission check
+            for adm in Admission.objects.filter(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code
+            ):
+                if adm.uhid == uhid and adm.is_admitted and not adm.is_discharged:
+                    return JsonResponse({
+                        "error": "Patient already admitted",
+                        "already_admitted": True,
+                        "ipNumber": adm.ipNumber
+                    }, status=400)
 
-            if existing:
-                return JsonResponse({
-                    "error": f"Patient already has an active admission.",
-                    "already_admitted": True,
-                    "ipNumber": existing.ipNumber,
-                    "admissionDateTime": existing.admissionDateTime.isoformat() if existing.admissionDateTime else None,
-                    "roomNo": _get_current_room(existing).get("roomNo", ""),
-                    "bedNo":  _get_current_room(existing).get("bedNo",  ""),
-                }, status=400)
+            admission_dt = parse_datetime(
+                str(data.get('admissionDateTime') or '')
+            ) or timezone.now()
 
-            admission_dt = parse_datetime(str(data.get('admissionDateTime') or '')) or timezone.now()
-
-            now_dt = datetime.now()
-            fy = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
-            prefix = f"S{fy:03d}"
+            # Generate IP
+            now_dt  = datetime.now()
+            fy      = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
+            prefix  = f"S{fy:03d}"
             max_num = 500000
-            for adm in Admission.objects.all():
+
+            for adm in Admission.objects.filter(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code
+            ):
                 ip = adm.ipNumber or ""
                 if "/" in ip:
                     try:
                         p, n = ip.split("/")
                         if p == prefix:
                             max_num = max(max_num, int(n))
-                    except Exception:
-                        continue
-            ip_number = f"{prefix}/{max_num + 1:06d}"
+                    except: pass
 
-            # ── Room detail entry #1 with startDateTime, endDateTime=None ─
-            now_iso = datetime.now().isoformat()
+            ip_number = f"{prefix}/{max_num + 1:06d}"
+            now_iso   = datetime.now().isoformat()
+
             room_details = [{
                 "room_entry_id":  1,
                 "roomNo":         str(data.get("roomNo") or ""),
-                "bedNo":          str(data.get("bedNo") or ""),
+                "bedNo":          str(data.get("bedNo")  or ""),
                 "is_roomActive":  True,
                 "is_roomCleaned": False,
                 "startDateTime":  now_iso,
                 "endDateTime":    None,
             }]
 
+            # FIX: Store packageNo (not packageName)
+            package_no   = data.get('packageNo')   or None
+            package_name = data.get('packageName') or ""
+
             adm = Admission.objects.create(
                 uhid=uhid,
                 ipNumber=ip_number,
                 admissionDateTime=admission_dt,
+
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code,
+
                 admittingDoctor=str(data.get('admittingDoctor') or ""),
-                consultingDoctor=data.get('consultingDoctor') or None,
-                packageName=data.get('packageName') or None,
+                consultingDoctor=data.get('consultingDoctor'),
+
+                # FIX: store both packageNo and packageName
+                packageNo=package_no,
+                packageName=package_name,
+
                 room_details=room_details,
                 roomShitingDetails=[],
                 advance_payments=[],
-                reasonForAdmission=data.get('reasonForAdmission') or None,
-                mlc_type=data.get('mlc_type') or None,
-                mlc_remarks=data.get('mlc_remarks') or None,
+
+                reasonForAdmission=data.get('reasonForAdmission'),
+
                 is_admissionActive=True,
                 is_advanceActive=False,
                 is_discharged=False,
                 is_admitted=True,
+
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
             )
+
+            # FIX: Enrich response with patient data
+            serializer = AdmissionSerializer(adm)
+            adm_data   = _enrich_with_patient(dict(serializer.data), hospital_code)
 
             return JsonResponse({
                 "success": True,
                 "message": "Admission created successfully",
-                "data": {
-                    "id":           str(adm.pk),
-                    "uhid":         adm.uhid,
-                    "ipNumber":     adm.ipNumber,
-                    "room_details": adm.room_details,
-                }
+                "data":    adm_data,
             }, status=201)
 
         except Exception as e:
@@ -655,267 +603,162 @@ def _get_current_room(adm):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Admission Detail  →  GET/PUT/DELETE /admission/<ip_number>/
+# ADMISSION DETAIL  →  GET + PUT + DELETE /admission/<ipNumber>/
 # ──────────────────────────────────────────────────────────────────────────────
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_detail(request, ipNumber):
     try:
-        try:
-            adm = Admission.objects.get(pk=ipNumber)
-        except Admission.DoesNotExist:
-            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
+        employee_id = (
+            request.data.get('auth-user-id') or
+            request.headers.get('auth-user-id') or
+            "system"
+        )
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+        branch_code = (
+            request.data.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
+            "system"
+        )
+        outlet_code = (
+            request.data.get("auth-outlet-code") or
+            request.headers.get("Outlet-Code") or
+            "system"
+        )
 
+        # Mongo-safe get
+        adm = None
+        for a in Admission.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code
+        ):
+            if str(a.ipNumber) == str(ipNumber):
+                adm = a
+                break
+
+        if not adm:
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
         if not adm.is_admitted:
             return JsonResponse({'success': False, 'error': 'Admission inactive'}, status=404)
-
-        employee_id = request.headers.get('auth-user-id', 'system')
 
         def safe_list(val):
             return val if isinstance(val, list) else []
 
+        # FIX: Patient lookup uses hospital_code only
         def _patient_block(uhid):
             try:
-                pt = Patient.objects.get(uhid=uhid)
-                ins_name = ''
-                if pt.company_code:
+                uhid = str(uhid).strip()
+                if not uhid:
+                    return {}
+                pt = Patient.objects.filter(hospital_code=hospital_code, uhid=uhid).first()
+                if not pt:
+                    return {}
+                ins_name = ""
+                if getattr(pt, 'company_code', None):
                     try:
                         prov = InsuranceProvider.objects.get(company_code=pt.company_code)
                         ins_name = prov.company_name
                     except:
-                        ins_name = pt.company_code or ''
+                        ins_name = pt.company_code or ""
                 return {
-                    'salutation':          pt.salutation or '',
-                    'firstName':           pt.firstName or '',
-                    'lastName':            pt.lastName or '',
-                    'age':                 pt.age,
-                    'gender':              pt.gender or '',
-                    'mobilePhone':         pt.mobilePhone or '',
-                    'city':                pt.city or '',
-                    'state':               pt.state or '',
+                    'salutation':           pt.salutation  or "",
+                    'firstName':            pt.firstName   or "",
+                    'middleName':           getattr(pt, "middleName", "") or "",
+                    'lastName':             pt.lastName    or "",
+                    'age':                  pt.age,
+                    'gender':               pt.gender      or "",
+                    'mobilePhone':          pt.mobilePhone or "",
+                    'permanent_address':    getattr(pt, "permanent_address", "") or "",
+                    'area':                 getattr(pt, "area",    "") or "",
+                    'zipcode':              getattr(pt, "zipcode", "") or "",
+                    'city':                 getattr(pt, "city",    "") or "",
+                    'state':                getattr(pt, "state",   "") or "",
+                    'customerType':         str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or ""),
                     'insuranceCompanyName': ins_name,
+                    'company_code':         getattr(pt, "company_code", "") or "",
                 }
-            except:
+            except Exception:
                 return {}
 
         def _build_result(adm):
-            room_details = safe_list(adm.room_details)
+            room_details         = safe_list(adm.room_details)
             room_shifting_details = safe_list(adm.roomShitingDetails)
-            current_room = _get_current_room(adm)
+            current_room         = _get_current_room(adm)
 
             return {
-                'id': str(adm.pk),
-                'ipNumber': adm.ipNumber,
-                'uhid': adm.uhid,
+                'id':                str(adm.pk),
+                'ipNumber':          adm.ipNumber,
+                'uhid':              adm.uhid,
                 'admissionDateTime': adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
-                'admittingDoctor': adm.admittingDoctor or '',
-                'consultingDoctor': adm.consultingDoctor or '',
-                'packageName': adm.packageName or '',
-
-                # current active room details
-                'roomNo': current_room.get('roomNo', ''),
-                'bedNo': current_room.get('bedNo', ''),
-
-                'reasonForAdmission': adm.reasonForAdmission or '',
-                'mlc_type': adm.mlc_type or '',
-                'mlc_remarks': adm.mlc_remarks or '',
-
-                'advance_payments': safe_list(adm.advance_payments),
-
+                'admittingDoctor':   adm.admittingDoctor  or "",
+                'consultingDoctor':  adm.consultingDoctor or "",
+                # FIX: return both packageNo and packageName
+                'packageNo':         getattr(adm, 'packageNo',   None),
+                'packageName':       getattr(adm, 'packageName', "") or "",
+                'roomNo':            current_room.get('roomNo', ''),
+                'bedNo':             current_room.get('bedNo',  ''),
+                'reasonForAdmission': adm.reasonForAdmission or "",
+                'mlc_type':          adm.mlc_type    or "",
+                'mlc_remarks':       adm.mlc_remarks or "",
+                'advance_payments':  safe_list(adm.advance_payments),
                 'is_admissionActive': bool(adm.is_admissionActive),
-                'is_advanceActive': bool(adm.is_advanceActive),
-                'is_admitted': bool(adm.is_admitted),
-                'is_discharged': bool(adm.is_discharged),
-
-                'ipserial_number': adm.ipserial_number,
-
-                # full room history
-                'room_details': room_details,
-
-                # full shifting history
+                'is_advanceActive':   bool(adm.is_advanceActive),
+                'is_admitted':        bool(adm.is_admitted),
+                'is_discharged':      bool(adm.is_discharged),
+                'ipserial_number':    adm.ipserial_number,
+                'room_details':       room_details,
                 'roomShitingDetails': room_shifting_details,
-
-                **_patient_block(adm.uhid),
+                **_patient_block(str(adm.uhid or "")),
             }
 
-        # ── GET ───────────────────────────────────────────────────────────
+        # ── GET ──────────────────────────────────────────────────────────────
         if request.method == 'GET':
             return JsonResponse({"success": True, "data": _build_result(adm)})
 
-        # ── PUT ───────────────────────────────────────────────────────────
+        # ── PUT ──────────────────────────────────────────────────────────────
         elif request.method == 'PUT':
             data = request.data
 
             def get_val(v):
                 return v[0] if isinstance(v, list) else v
 
-            # ── Simple fields ─────────────────────────────────────────────
-            fields = ['admittingDoctor', 'consultingDoctor', 'packageName',
-                      'reasonForAdmission', 'mlc_type', 'mlc_remarks']
-            for f in fields:
+            for f in ['admittingDoctor', 'consultingDoctor', 'reasonForAdmission', 'mlc_type', 'mlc_remarks']:
                 if f in data:
                     val = get_val(data.get(f))
                     setattr(adm, f, str(val) if val else "")
 
-            # ── Room change logic ─────────────────────────────────────────
-            new_room = str(get_val(data.get("roomNo", "")) or "")
-            new_bed  = str(get_val(data.get("bedNo",  "")) or "")
+            # FIX: update packageNo and packageName
+            if 'packageNo' in data:
+                val = get_val(data.get('packageNo'))
+                adm.packageNo = val if val else None
+            if 'packageName' in data:
+                val = get_val(data.get('packageName'))
+                adm.packageName = str(val) if val else ""
 
-            if new_room or new_bed:
-                room_details = safe_list(adm.room_details)
-                now_iso = datetime.now().isoformat()
-
-                # Find the currently active room entry
-                current_idx = None
-                for idx in range(len(room_details) - 1, -1, -1):
-                    if isinstance(room_details[idx], dict) and room_details[idx].get("is_roomActive"):
-                        current_idx = idx
-                        break
-
-                if current_idx is not None:
-                    current_entry = room_details[current_idx]
-                    current_room_no = str(current_entry.get("roomNo", ""))
-                    current_bed_no  = str(current_entry.get("bedNo",  ""))
-
-                    # ── Only create a new entry if room/bed actually changed
-                    if current_room_no != new_room or current_bed_no != new_bed:
-                        # Close off the previous active room entry
-                        room_details[current_idx]["is_roomActive"]  = False
-                        room_details[current_idx]["is_roomCleaned"] = False
-                        room_details[current_idx]["endDateTime"]     = now_iso
-
-                        # Compute next entry id
-                        max_id = max(
-                            (int(r.get("room_entry_id", 0)) for r in room_details if isinstance(r, dict)),
-                            default=0
-                        )
-
-                        # Append new active room entry
-                        room_details.append({
-                            "room_entry_id":  max_id + 1,
-                            "roomNo":         new_room,
-                            "bedNo":          new_bed,
-                            "is_roomActive":  True,
-                            "is_roomCleaned": False,
-                            "startDateTime":  now_iso,
-                            "endDateTime":    None,
-                        })
-                    else:
-                        # Same room — just ensure it's marked active (no duplicate entry)
-                        room_details[current_idx]["is_roomActive"] = True
-
-                else:
-                    # No existing active room; start fresh
-                    max_id = max(
-                        (int(r.get("room_entry_id", 0)) for r in room_details if isinstance(r, dict)),
-                        default=0
-                    )
-                    room_details.append({
-                        "room_entry_id":  max_id + 1,
-                        "roomNo":         new_room,
-                        "bedNo":          new_bed,
-                        "is_roomActive":  True,
-                        "is_roomCleaned": False,
-                        "startDateTime":  now_iso,
-                        "endDateTime":    None,
-                    })
-
-                adm.room_details = room_details
-
-            # ── File ──────────────────────────────────────────────────────
-            if 'mlc_doc' in request.FILES:
-                adm.mlc_doc = str(request.FILES['mlc_doc'].name)
-
-            # ── Normalize ─────────────────────────────────────────────────
-            adm.room_details       = safe_list(adm.room_details)
-            adm.roomShitingDetails = safe_list(adm.roomShitingDetails)
-            adm.advance_payments   = safe_list(adm.advance_payments)
-
-            if hasattr(adm, 'lastmodified_by'):
-                adm.lastmodified_by = str(employee_id)
-
+            adm.lastmodified_by   = employee_id
+            adm.lastmodified_date = timezone.now()
             adm.save()
 
             return JsonResponse({
                 "success": True,
                 "message": "Updated successfully",
-                "data": _build_result(adm)
+                "data":    _build_result(adm)
             })
 
-        # ── DELETE (soft) ─────────────────────────────────────────────────
+        # ── DELETE ────────────────────────────────────────────────────────────
         elif request.method == 'DELETE':
-            data = request.data
-            now_iso = datetime.now().isoformat()
-
             adm.is_admissionActive = False
-            adm.is_admitted = False
-
-            # ─────────────────────────────────────────────
-            # Close all room_details entries
-            # ─────────────────────────────────────────────
-            cleaned_rooms = []
-
-            if isinstance(adm.room_details, list):
-                for room in adm.room_details:
-                    if isinstance(room, dict):
-                        entry = dict(room)
-
-                        # If currently active, deactivate it
-                        if entry.get("is_roomActive"):
-                            entry["is_roomActive"] = False
-
-                        # Close open room period
-                        if not entry.get("endDateTime"):
-                            entry["endDateTime"] = now_iso
-
-                        cleaned_rooms.append(entry)
-
-            adm.room_details = cleaned_rooms
-
-            # ─────────────────────────────────────────────
-            # Close all roomShitingDetails entries
-            # ─────────────────────────────────────────────
-            cleaned_shifts = []
-
-            if isinstance(adm.roomShitingDetails, list):
-                for shift in adm.roomShitingDetails:
-                    if isinstance(shift, dict):
-                        entry = dict(shift)
-
-                        # If currently active, deactivate it
-                        if entry.get("is_roomActive"):
-                            entry["is_roomActive"] = False
-
-                        # Close open shifting period
-                        if not entry.get("endDateTime"):
-                            entry["endDateTime"] = now_iso
-
-                        cleaned_shifts.append(entry)
-
-            adm.roomShitingDetails = cleaned_shifts
-
-            if hasattr(adm, 'cancelled_by'):
-                adm.cancelled_by = employee_id
-
-            if hasattr(adm, 'cancellation_reason'):
-                adm.cancellation_reason = data.get("cancellationReason", "")
-
-            if hasattr(adm, 'lastmodified_by'):
-                adm.lastmodified_by = employee_id
-
-            adm.advance_payments = (
-                adm.advance_payments
-                if isinstance(adm.advance_payments, list)
-                else []
-            )
-
+            adm.is_admitted        = False
+            adm.lastmodified_by    = employee_id
+            adm.lastmodified_date  = timezone.now()
             adm.save()
-
-            return JsonResponse({
-                "success": True,
-                "message": "Admission cancelled successfully"
-            })
+            return JsonResponse({"success": True, "message": "Admission cancelled successfully"})
 
     except Exception as e:
         traceback.print_exc()
@@ -925,7 +768,6 @@ def admission_detail(request, ipNumber):
 # ──────────────────────────────────────────────────────────────────────────────
 # Advance  →  POST /admission/<ip_number>/add-advance/
 # ──────────────────────────────────────────────────────────────────────────────
-
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
@@ -998,8 +840,7 @@ def add_advance(request, ip_number):
         current_room = _get_current_room(adm)
 
         return JsonResponse({
-            'success': True,
-            'message': 'Advance added!',
+            'success': True, 'message': 'Advance added!',
             'data': {
                 'id':               str(adm.pk),
                 'uhid':             adm.uhid,
@@ -1008,7 +849,7 @@ def add_advance(request, ip_number):
                 'advance_payments': adm.advance_payments or [],
                 'is_advanceActive': adm.is_advanceActive,
                 'roomNo':           current_room.get('roomNo', ''),
-                'bedNo':            current_room.get('bedNo', ''),
+                'bedNo':            current_room.get('bedNo',  ''),
             },
             'bill': {
                 'bill_number':   bill_number,
@@ -1032,7 +873,6 @@ def add_advance(request, ip_number):
 # ──────────────────────────────────────────────────────────────────────────────
 # Finance Update  →  PUT /admission/<ip_number>/finance/
 # ──────────────────────────────────────────────────────────────────────────────
-
 @api_view(['PUT'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
@@ -1049,10 +889,8 @@ def update_advance_finance(request, ip_number):
 
         for field in ('creditLimit', 'advance', 'ip_advance'):
             if field in data and data[field] not in (None, ''):
-                try:
-                    setattr(adm, field, Decimal(str(data[field])))
-                except InvalidOperation:
-                    pass
+                try: setattr(adm, field, Decimal(str(data[field])))
+                except InvalidOperation: pass
 
         payments = adm.advance_payments if isinstance(adm.advance_payments, list) else []
         if payments:
@@ -1066,10 +904,10 @@ def update_advance_finance(request, ip_number):
             'id':               str(adm.pk),
             'uhid':             adm.uhid,
             'ipNumber':         adm.ipNumber,
-            'advance':          float(adm.advance) if adm.advance is not None else None,
-            'ip_advance':       float(adm.ip_advance) if adm.ip_advance is not None else None,
+            'advance':          float(adm.advance)       if adm.advance       is not None else None,
+            'ip_advance':       float(adm.ip_advance)    if adm.ip_advance    is not None else None,
             'total_advance':    float(adm.total_advance) if adm.total_advance is not None else None,
-            'creditLimit':      float(adm.creditLimit) if adm.creditLimit is not None else None,
+            'creditLimit':      float(adm.creditLimit)   if adm.creditLimit   is not None else None,
             'advance_payments': adm.advance_payments or [],
         }})
 
@@ -1081,7 +919,6 @@ def update_advance_finance(request, ip_number):
 # ──────────────────────────────────────────────────────────────────────────────
 # Advance List  →  GET /advances/
 # ──────────────────────────────────────────────────────────────────────────────
-
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
@@ -1093,23 +930,16 @@ def list_advances(request):
         ip_filter     = request.GET.get('ip_number',  '').strip()
 
         qs = Admission.objects.filter(is_admitted=True)
-        if uhid_filter:
-            qs = qs.filter(uhid__icontains=uhid_filter)
-        if ip_filter:
-            qs = qs.filter(ipNumber__icontains=ip_filter)
+        if uhid_filter: qs = qs.filter(uhid__icontains=uhid_filter)
+        if ip_filter:   qs = qs.filter(ipNumber__icontains=ip_filter)
 
-        from_date = None
-        to_date   = None
+        from_date = to_date = None
         if from_date_str:
-            try:
-                from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
-            except ValueError:
-                pass
+            try: from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+            except ValueError: pass
         if to_date_str:
-            try:
-                to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
-            except ValueError:
-                pass
+            try: to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+            except ValueError: pass
 
         uhids    = list(qs.values_list('uhid', flat=True))
         patients = {p.uhid: p for p in Patient.objects.filter(uhid__in=uhids)}
@@ -1117,9 +947,8 @@ def list_advances(request):
         rows = []
         for adm in qs:
             payments = adm.advance_payments if isinstance(adm.advance_payments, list) else []
-            pt = patients.get(adm.uhid)
+            pt       = patients.get(adm.uhid)
             patient_name = f"{pt.firstName or ''} {pt.lastName or ''}".strip() if pt else adm.uhid
-
             current_room = _get_current_room(adm)
 
             for p in payments:
@@ -1127,13 +956,10 @@ def list_advances(request):
                 if from_date or to_date:
                     try:
                         pd = datetime.fromisoformat(paid_date_str).date()
-                        if from_date and pd < from_date:
-                            continue
-                        if to_date and pd > to_date:
-                            continue
+                        if from_date and pd < from_date: continue
+                        if to_date   and pd > to_date:   continue
                     except Exception:
                         pass
-
                 rows.append({
                     'bill_date':         paid_date_str[:10] if paid_date_str else '',
                     'bill_number':       p.get('bill_number', ''),

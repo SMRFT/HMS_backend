@@ -45,7 +45,7 @@ def block_view(request, pk=None):
 
     branch_code = (
         request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
         "system"
     )
 
@@ -180,7 +180,7 @@ def room_category_view(request, pk=None):
 
     branch_code = (
         request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
         "system"
     )
 
@@ -322,7 +322,7 @@ def nursingstation_view(request, pk=None):
 
     branch_code = (
         request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
         "system"
     )
 
@@ -461,7 +461,7 @@ def room_service_description_view(request, pk=None):
 
     branch_code = (
         request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
         "system"
     )
 
@@ -607,7 +607,7 @@ def room_kititems_view(request, pk=None):
 
     branch_code = (
         request.data.get("auth-branch-code") or
-        request.headers.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
         "system"
     )
 
@@ -1049,7 +1049,7 @@ def room_enquiry_view(request):
 
         branch_code = (
             request.data.get("auth-branch-code") or
-            request.headers.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
             "system"
         )
 
@@ -1278,7 +1278,26 @@ def room_enquiry_view(request):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def book_room_view(request):
+
     try:
+        employee_id = (
+            request.data.get('auth-user-id') or
+            request.headers.get('auth-user-id') or
+            "system"
+        )
+
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+
+        branch_code = (
+            request.data.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
+            "system"
+        )
+
         ip_number   = str(request.data.get("ip_number", "")).strip()
         room_number = str(request.data.get("room_number", "")).strip()
         bed_number  = str(request.data.get("bed_number", "")).strip()
@@ -1296,11 +1315,14 @@ def book_room_view(request):
             )
 
         # ─────────────────────────────────────────────
-        # Find Admission by ip_number
+        # Find Admission (Mongo safe)
         # ─────────────────────────────────────────────
         admission = None
 
-        for adm in Admission.objects.all():
+        for adm in Admission.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ):
             if str(adm.ipNumber).strip() == ip_number:
                 admission = adm
                 break
@@ -1315,11 +1337,14 @@ def book_room_view(request):
             )
 
         # ─────────────────────────────────────────────
-        # Mongo-safe duplicate check
+        # Duplicate check (Mongo safe)
         # ─────────────────────────────────────────────
         existing_booking = None
 
-        for booking in RoomBooking.objects.all():
+        for booking in RoomBooking.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ):
             if (
                 str(booking.room_number).strip() == room_number and
                 str(booking.bed_number).strip() == bed_number and
@@ -1342,14 +1367,24 @@ def book_room_view(request):
             )
 
         # ─────────────────────────────────────────────
-        # Create booking document
+        # Create Booking
         # ─────────────────────────────────────────────
         booking = RoomBooking(
             ip_number=ip_number,
             room_number=room_number,
             bed_number=bed_number,
+
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+
             is_booked=True,
             room_shifted=False,
+
+            created_by=employee_id,
+            created_date=timezone.now(),
+            lastmodified_by=employee_id,
+            lastmodified_date=timezone.now(),
+
             booked_date=timezone.now(),
         )
 
