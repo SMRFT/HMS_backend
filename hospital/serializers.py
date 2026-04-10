@@ -125,26 +125,16 @@ class RoomSerializer(serializers.ModelSerializer):
  
     class Meta:
         model  = Room
-        fields = [
-            "room_number",
-            "description",
-            "room_category",
-            "block",
-            "phone_extension",
-            "nursing_station",
-            "capacity",
-            "occupancy",
-            "room_status",
-            "is_active",
-            "services",
-            "beds",
-            "room_kits",
+        fields = "__all__"
+        read_only_fields = [
+            "kit_id",
             "created_by",
             "created_date",
             "lastmodified_by",
             "lastmodified_date",
+            "is_active"
         ]
-        read_only_fields = ["created_date", "lastmodified_date"]
+
  
     # ── Field-level validators ────────────────────────────────────────────────
  

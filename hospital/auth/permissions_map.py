@@ -1,5 +1,4 @@
 PAGE_MAPPING = {
-
     r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
@@ -69,11 +68,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
+    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
     '/_b_a_c_k_e_n_d/HMS/investBilling/': 'HMS-P-IB',                 
@@ -130,7 +129,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
 
     #Doctor Master: 
-    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DLD',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
 

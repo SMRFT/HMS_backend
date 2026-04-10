@@ -611,9 +611,6 @@ class Room(AuditModel):
     beds             = models.JSONField(default=list, blank=True)
     room_kits        = models.JSONField(default=list, blank=True)
  
-    class Meta:
-        db_table = "room"
- 
     def __str__(self):
         return self.room_number
  
@@ -627,7 +624,7 @@ class Room(AuditModel):
         super().save(*args, **kwargs)
 
 
-class RoomBooking(models.Model):
+class RoomBooking(AuditModel):
     ip_number     = models.CharField(max_length=10, primary_key=True)
     room_number  = models.CharField(max_length=50)
     bed_number   = models.CharField(max_length=50)

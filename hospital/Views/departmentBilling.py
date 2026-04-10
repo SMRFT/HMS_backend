@@ -26,14 +26,35 @@ from pymongo import MongoClient, ReturnDocument
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def op_patient_detail_by_uhid(request, uhid):
-    try:
-        patient = Patient.objects.get(uhid=uhid)
-        serializer = PatientSerializer(patient)
-        data = dict(serializer.data)  # ← convert to mutable dict
 
-        if data.get('company_code'):
+    try:
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+
+        # Mongo safe get
+        patient = None
+        for p in Patient.objects.filter(hospital_code=hospital_code):
+            if str(p.uhid) == str(uhid):
+                patient = p
+                break
+
+        if not patient:
+            return Response({"error": "Patient not found"}, status=404)
+
+        serializer = PatientSerializer(patient)
+        data = dict(serializer.data)
+
+        # Insurance name
+        company_code = (data.get('company_code') or "").strip()
+
+        if company_code:
             try:
-                insurance = InsuranceProvider.objects.get(company_code=data['company_code'].strip())
+                insurance = InsuranceProvider.objects.get(
+                    company_code=company_code
+                )
                 data['company_name'] = insurance.company_name
             except InsuranceProvider.DoesNotExist:
                 data['company_name'] = None
@@ -41,8 +62,12 @@ def op_patient_detail_by_uhid(request, uhid):
             data['company_name'] = None
 
         return Response(data)
-    except Patient.DoesNotExist:
-        return Response({"error": "Patient not found"}, status=404)
+
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=500
+        )
 
 
 @api_view(['GET'])
@@ -416,36 +441,53 @@ def get_bill_types(request):
             "details": str(e)
         }, status=500)
     
+    
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_packages(request):
-    """Fetch all active packages from hospital_package collection"""
+
     try:
-        # Connect to MongoDB
+        hospital_code = (
+            request.data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            "system"
+        )
+        branch_code   = request.headers.get("branch-code", "system")
+        outlet_code   = request.headers.get("outlet-code", "system")
+
+        print("hospital_code:", hospital_code)
+        print("branch_code:", branch_code)
+        print("outlet_code:", outlet_code)
+
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
         collection = db['hospital_package']
 
-        # Fetch all active packages
         packages = list(collection.find(
-            {"is_active": True},
+            {
+                "is_active": True,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet_code": outlet_code
+            },
             {
                 "_id": 0,
                 "packageNo": 1,
-                "packageName": 1,
-                "outlet_code": 1
+                "packageName": 1
             }
         ))
-        
-        # Close the MongoDB connection
+
         client.close()
 
-        return JsonResponse({"packages": packages}, safe=True)
-    
+        return JsonResponse({
+            "success": True,
+            "packages": packages
+        }, safe=False)
+
     except Exception as e:
         return JsonResponse({
-            "error": "An error occurred while fetching packages",
-            "details": str(e)
+            "success": False,
+            "error": str(e)
         }, status=500)
 
 
