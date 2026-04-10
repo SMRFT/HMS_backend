@@ -897,6 +897,9 @@ class VelavanInvoice(AuditModel):
     total_discount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
     net_invoice_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
     quotation_rate = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    is_approved = models.BooleanField(default=False)
+    approved_by = models.CharField(max_length=255, blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
         ordering = ['-created_date']
