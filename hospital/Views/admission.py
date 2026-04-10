@@ -722,8 +722,11 @@ def admission_detail(request, ipNumber):
         elif request.method == 'PUT':
 
             data = request.data
-            def get_val(v): return v[0] if isinstance(v, list) else v
 
+            def get_val(v):
+                return v[0] if isinstance(v, list) else v
+
+            # Normal field updates
             for f in [
                 'admittingDoctor',
                 'consultingDoctor',
@@ -738,6 +741,37 @@ def admission_detail(request, ipNumber):
             if 'packageNo' in data:
                 val = get_val(data.get('packageNo'))
                 adm.packageName = str(val) if val else ""
+
+            # Update active room_details entry directly
+            new_room_no = str(get_val(data.get("roomNo")) or "").strip()
+            new_bed_no = str(get_val(data.get("bedNo")) or "").strip()
+
+            if new_room_no or new_bed_no:
+                room_details = parse_json_field(adm.room_details)
+
+                if not isinstance(room_details, list):
+                    room_details = []
+
+                active_room = next(
+                    (
+                        room for room in room_details
+                        if isinstance(room, dict) and room.get("is_roomActive")
+                    ),
+                    None
+                )
+
+                if active_room:
+                    if new_room_no:
+                        active_room["roomNo"] = new_room_no
+
+                    if new_bed_no:
+                        active_room["bedNo"] = new_bed_no
+
+                    active_room["lastmodified_by"] = employee_id
+                    active_room["lastmodified_date"] = timezone.now().isoformat()
+
+                # Always assign back a list, never None
+                adm.room_details = room_details
 
             adm.lastmodified_by = employee_id
             adm.lastmodified_date = timezone.now()
