@@ -24,10 +24,10 @@ from .Views.Assets import assets
 urlpatterns = [
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
-    path('admission/', admission.admission_view, name='admission'),
-    path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
-    path('search-rooms/', admission.search_rooms, name='search-rooms'), 
-    path('admission/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
+    path('admission-list/', admission.admission_view, name='admission'),
+    path('admission-detail/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
+    path('admission-room-search/', admission.search_rooms, name='search-rooms'), 
+    path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
 
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
