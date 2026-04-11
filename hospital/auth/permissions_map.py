@@ -180,7 +180,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VINR',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VINR',  
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',     
-    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINA',     
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve(?:/[^/]+)+/$': 'HMS-P-VINA',     
 
     #OT Master:
     '/_b_a_c_k_e_n_d/HMS/create_ot/': 'HMS-P-OTM',               
