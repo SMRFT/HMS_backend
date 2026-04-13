@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 import os
 from datetime import datetime, timedelta
-from ..models import Admission, OPPharmacyBill
+from ..models import Admission, PharmacyBilling
 from ..serializers import AdmissionSerializer
 from django.conf import settings
 from django.db import DatabaseError

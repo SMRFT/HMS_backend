@@ -44,12 +44,12 @@ class PharmacyStockSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 from rest_framework import serializers
-from .models import OPPharmacyBill
+from .models import PharmacyBilling
 
-class OPPharmacyBillSerializer(serializers.ModelSerializer):
+class PharmacyBillingSerializer(serializers.ModelSerializer):
 
     class Meta:
-        model = OPPharmacyBill
+        model = PharmacyBilling
         fields = "__all__"
 
 from .models import GRN
@@ -199,13 +199,6 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         model = ReferenceDoctor
         fields = '__all__'
 
-
-from .models import OPPharmacyBill
-class OPPharmacyBillSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = OPPharmacyBill
-        fields = '__all__'
 
 from .models import Billing
 class BillingSerializer(serializers.ModelSerializer):
