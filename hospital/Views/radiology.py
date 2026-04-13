@@ -94,7 +94,14 @@ def get_investigations(request):
         filtered_records = []
         for record in billing_records:
             try:
-                items = json.loads(record.get('item', '[]'))
+                items = record.get('item', [])
+
+                # If still string (old data), convert
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
             except (json.JSONDecodeError, TypeError):
                 items = []
             matched_items = [i for i in items if i.get('billTypeNo') == bill_type_no]
