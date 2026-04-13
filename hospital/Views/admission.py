@@ -199,6 +199,7 @@ def search_rooms(request):
             request.data.get("auth-hospital-code") or
             request.headers.get("auth-hospital-code") or "system"
         )
+        print('room',hospital_code)
         result = []
         patient_map   = _build_patient_map(hospital_code)
         admission_map = {}
@@ -403,6 +404,7 @@ def admission_view(request):
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
     outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
+    print("*****************",employee_id,hospital_code,branch_code,outlet_code)
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
@@ -752,6 +754,9 @@ def admission_detail(request, ipNumber):
                 if not isinstance(room_details, list):
                     room_details = []
 
+                now_iso = timezone.now().isoformat()
+
+                # STEP 1: Find active room
                 active_room = next(
                     (
                         room for room in room_details
@@ -760,17 +765,37 @@ def admission_detail(request, ipNumber):
                     None
                 )
 
+                # STEP 2: Close existing active room
                 if active_room:
-                    if new_room_no:
-                        active_room["roomNo"] = new_room_no
-
-                    if new_bed_no:
-                        active_room["bedNo"] = new_bed_no
-
+                    active_room["is_roomActive"] = False
+                    active_room["endDateTime"] = now_iso
                     active_room["lastmodified_by"] = employee_id
-                    active_room["lastmodified_date"] = timezone.now().isoformat()
+                    active_room["lastmodified_date"] = now_iso
 
-                # Always assign back a list, never None
+                    prev_room_no = active_room.get("roomNo", "")
+                    prev_bed_no = active_room.get("bedNo", "")
+                else:
+                    prev_room_no = ""
+                    prev_bed_no = ""
+
+                # STEP 3: Create new room entry
+                new_entry = {
+                    "room_entry_id": len(room_details) + 1,
+                    "roomNo": new_room_no or prev_room_no,
+                    "bedNo": new_bed_no or prev_bed_no,
+                    "is_roomActive": True,
+                    "is_roomCleaned": False,
+                    "startDateTime": now_iso,
+                    "endDateTime": None,
+                    "created_by": employee_id,
+                    "created_date": now_iso,
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": now_iso
+                }
+
+                room_details.append(new_entry)
+
+                # STEP 4: Assign back
                 adm.room_details = room_details
 
             adm.lastmodified_by = employee_id
