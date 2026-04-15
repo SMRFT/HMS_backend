@@ -20,8 +20,7 @@ from django.db.models import Max
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 
 # Models & Serializers
-from ..models import Patient, PharmacyStock, OPPharmacyBill, PharmacyItem
-from ..serializers import OPPharmacyBillSerializer
+from ..models import Patient, PharmacyStock, PharmacyItem
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -51,7 +50,7 @@ def convert_decimals(obj):
 def get_oppharmacy_stock(request):
     try:
         # ✅ Dynamic department (code1)
-        dept_code = request.GET.get("department_code", "OP001")
+        dept_code = request.GET.get("department_code", "")
 
         # ✅ Mongo connection (code2)
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -62,7 +61,7 @@ def get_oppharmacy_stock(request):
             # ✅ Filter department
             {
                 "$match": {
-                    "department_code": dept_code
+                    "outlet_code": dept_code
                 }
             },
 
@@ -845,7 +844,7 @@ from datetime import datetime
 from pymongo import MongoClient
 import os, json
 
-from ..models import OPPharmacyBill
+
 
 
 @api_view(["POST"])

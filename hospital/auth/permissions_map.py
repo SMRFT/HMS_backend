@@ -6,6 +6,19 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_master/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_master/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_order/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/update_diet_status/?(\?.*)?$': 'HMS-P-AIN',
+    
+
+    
+
 
 
     # ==================== ADMISSION ====================
@@ -129,7 +142,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
 
     #Doctor Master: 
-    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DLD',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
 
