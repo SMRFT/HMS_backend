@@ -463,16 +463,21 @@ def get_bill_types(request):
 
         query = {"is_active": True}
 
-        if branch_code:
-            query["branch_code"] = branch_code
-
-        if outlet_code:
-            query["outlet_code"] = outlet_code
-
         if hospital_code:
             query["hospital_code"] = hospital_code
 
-        print("QUERY:", query)  # 🔍 Debug
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # ✅ FIX: include empty outlet also
+        if outlet_code:
+            query["$or"] = [
+                {"outlet_code": outlet_code},
+                {"outlet_code": ""},
+                {"outlet_code": {"$exists": False}}
+            ]
+
+        print("QUERY:", query)
 
         bill_types = list(collection.find(
             query,
@@ -493,7 +498,7 @@ def get_bill_types(request):
     except Exception as e:
         return JsonResponse({
             "error": str(e)
-        }, status=500)   
+        }, status=500)
     
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
