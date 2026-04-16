@@ -293,103 +293,51 @@ class PharmacyItem(AuditModel):
 from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
-
     Bill_id = models.IntegerField(primary_key=True)
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
     uhid = models.CharField(max_length=50)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    bill_type = models.IntegerField(max_length=200, blank=True, null=True)
+    bill_type = models.CharField(max_length=200, blank=True, null=True)  # Changed from IntegerField
+    bill_type_no = models.CharField(max_length=50, blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
-    room_no = models.CharField(max_length=20, blank=True, null=True)
-    medicine_particulars = models.JSONField(default=list)
+    medicine_particulars = models.JSONField(default=list, blank=True)
     total_amount = models.FloatField(default=0)
-    overall_discount_type = models.CharField(
-        max_length=10,
-        default="percent"
-    )
+    overall_discount_type = models.CharField(max_length=10, default="percent")
     overall_discount_value = models.FloatField(default=0)
     overall_discount_amount = models.FloatField(default=0)
     net_amount = models.FloatField(default=0)
     billing_status = models.CharField(max_length=20)
     billing_mode = models.CharField(max_length=20)
-    payment_details = models.JSONField(null=True, blank=True)
-    is_deleted= models.BooleanField(default=False)
+    payment_details = models.JSONField(default=dict, blank=True)
+    is_deleted = models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
-    deleted_by =models.CharField(max_length=150)
-    round_off= models.IntegerField(default=0)
-    edit_history = models.JSONField(default=list, blank=True, null=True)
+    deleted_by = models.CharField(max_length=150, blank=True, null=True)
+    round_off = models.IntegerField(default=0)
+    edit_history = models.JSONField(default=list, blank=True)
     cashier_id = models.CharField(max_length=50, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
 
-    # :white_check_mark: AUTO-INCREMENT LOGIC
+
+
     def save(self, *args, **kwargs):
         if not self.Bill_id:
             last = PharmacyBilling.objects.order_by('-Bill_id').first()
             self.Bill_id = (last.Bill_id + 1) if last else 1
+        
+        if self.is_ward_request and not self.ward_request_date:
+            self.ward_request_date = timezone.now()
 
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"
+        return f"{self.Bill_id} - {self.uhid}"
 
-class OPPharmacyBill(AuditModel):
 
-    Bill_id = models.IntegerField(primary_key=True)
-
-    bill_no = models.CharField(max_length=50, blank=True, null=True)
-    estimate_no = models.CharField(max_length=50, blank=True, null=True)
-
-    bill_date = models.DateTimeField(auto_now_add=True)
-
-    uhid = models.CharField(max_length=50)
-
-    inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-
-    bill_type = models.CharField(max_length=200, blank=True, null=True)
-
-    doctor_id = models.CharField(max_length=50, blank=True, null=True)
-
-    room_no = models.CharField(max_length=20, blank=True, null=True)
-
-    medicine_particulars = models.JSONField(default=list)
-
-    total_amount = models.FloatField(default=0)
-
-    overall_discount_type = models.CharField(
-        max_length=10,
-        default="percent"
-    )
-
-    overall_discount_value = models.FloatField(default=0)
-
-    overall_discount_amount = models.FloatField(default=0)
-
-    net_amount = models.FloatField(default=0)
-
-    billing_status = models.CharField(max_length=20)
-
-    billing_mode = models.CharField(max_length=20)
-
-    payment_details = models.JSONField(null=True, blank=True)
-
-    round_off= models.IntegerField(default=0)
-    edit_history = models.JSONField(default=list, blank=True, null=True)
-    cashier_id = models.CharField(max_length=50, blank=True, null=True)
-
-    # :white_check_mark: AUTO-INCREMENT LOGIC
-    def save(self, *args, **kwargs):
-        if not self.Bill_id:
-            last = OPPharmacyBill.objects.order_by('-Bill_id').first()
-            self.Bill_id = (last.Bill_id + 1) if last else 1
-
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"
 
         
 class PharmacyStock(AuditModel):
@@ -1013,8 +961,7 @@ class VelavanItems(AuditModel):
     hsn = models.CharField(max_length=20, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
-    class Meta:
-        db_table = 'hospital_velavan_items'
+
     def __str__(self):
         return self.itemName
     
@@ -1101,3 +1048,56 @@ class SurgerySchedule(AuditModel):
     class Meta:
         ordering = ["-scheduled_date"]
  
+
+
+class PatientDietOrder(AuditModel):
+    STATUS_CHOICES = [
+        ("Ordered",   "Ordered"),
+        ("Received",  "Received"),
+        ("Delivered", "Delivered"),
+        ("Cancelled", "Cancelled"),
+    ]
+    MEAL_TIME_CHOICES = [
+        ("Breakfast", "Breakfast"),
+        ("Lunch",     "Lunch"),
+        ("Dinner",    "Dinner"),
+        ("Snacks",    "Snacks"),
+    ]
+
+    diet_id              = models.AutoField(primary_key=True)
+    uhid                 = models.CharField(max_length=50)
+    inpatient_number     = models.CharField(max_length=50, null=True, blank=True)
+    patient_name         = models.CharField(max_length=200, null=True, blank=True)
+    ward_name            = models.CharField(max_length=100, null=True, blank=True)
+    room_no              = models.CharField(max_length=50, null=True, blank=True)
+    food_items           = models.TextField(null=True, blank=True)
+
+    diet_type            = models.CharField(max_length=100)          # e.g. "Normal Diet"
+    special_diet_note    = models.CharField(max_length=500, null=True, blank=True)  # when diet_type=="Special Diet"
+
+    meal_time            = models.CharField(max_length=20, choices=MEAL_TIME_CHOICES, default="Lunch")
+
+    extra_items          = models.TextField(default="[]")            # JSON array [{item, qty}]
+    attender_count       = models.IntegerField(default=0)
+
+    special_instructions = models.TextField(null=True, blank=True)
+
+    status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Ordered")
+    ordered_by           = models.CharField(max_length=100, null=True, blank=True)
+    order_date           = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.uhid} – {self.diet_type} ({self.meal_time}) [{self.status}]"
+
+
+class DietMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    diet_name        = models.CharField(max_length=100, unique=True)
+    morning_items    = models.TextField(null=True, blank=True)
+    afternoon_items  = models.TextField(null=True, blank=True)
+    evening_items    = models.TextField(null=True, blank=True)
+    dinner_items     = models.TextField(null=True, blank=True)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.diet_name

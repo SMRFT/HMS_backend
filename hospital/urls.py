@@ -16,7 +16,8 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
+    DietOrder
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -156,6 +157,7 @@ urlpatterns = [
     path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
     path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
     path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("update_medicine_ward_request/", NursingStation.update_medicine_ward_request, name="update_medicine_ward_request"),
     path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
     path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
     path("get_radiology_ward_requests/", NursingStation.get_radiology_ward_requests, name="get_radiology_ward_requests"),
@@ -286,5 +288,13 @@ urlpatterns = [
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
     path('get_ippharmacy_stock/', surgeryschedule.get_ippharmacy_stock, name='get_ippharmacy_stock'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
+
+    # Diet / Food Ordering:
+    path("save_diet_order/",    DietOrder.save_diet_order,    name="save_diet_order"),
+    path("get_diet_orders/",    DietOrder.get_diet_orders,    name="get_diet_orders"),
+    path("update_diet_status/", DietOrder.update_diet_status, name="update_diet_status"),
+    path("get_all_diet_orders/", DietOrder.get_all_diet_orders, name="get_all_diet_orders"),
+    path("get_diet_master/",    DietOrder.get_diet_master,    name="get_diet_master"),
+    path("save_diet_master/",   DietOrder.save_diet_master,   name="save_diet_master"),
 
 ]

@@ -242,12 +242,7 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import OPPharmacyBill
-class OPPharmacyBillSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = OPPharmacyBill
-        fields = '__all__'
+
 
 from .models import Billing
 class BillingSerializer(serializers.ModelSerializer):
