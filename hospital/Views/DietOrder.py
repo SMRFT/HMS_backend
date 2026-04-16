@@ -76,7 +76,7 @@ def save_diet_order(request):
 # ─── Get Diet Orders for a patient ────────────────────────────────────────────
 @csrf_exempt
 @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
+@permission_classes([HasRoleAndDataPermission])
 def get_diet_orders(request):
     try:
         uhid       = request.GET.get("uhid", "")
@@ -138,7 +138,7 @@ def get_diet_orders(request):
 # ─── Update Diet Order Status ──────────────────────────────────────────────────
 @csrf_exempt
 @api_view(["POST", "PATCH"])
-# @permission_classes([IsAuthenticated])
+@permission_classes([HasRoleAndDataPermission])
 def update_diet_status(request):
     try:
         data     = request.data
@@ -219,7 +219,7 @@ def get_diet_master(request):
 
 @csrf_exempt
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def save_diet_master(request):
     try:
         data       = request.data
@@ -290,7 +290,7 @@ def save_diet_master(request):
 # ─── Comprehensive Diet Order Report ──────────────────────────────────────────
 @csrf_exempt
 @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
+@permission_classes([HasRoleAndDataPermission])
 def get_all_diet_orders(request):
     try:
         from_date = request.GET.get("from_date")
