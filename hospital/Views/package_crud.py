@@ -32,7 +32,7 @@ def serialize_doc(doc):
 # ════════════════════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_packages(request):
     """
     Return all active packages.
@@ -96,7 +96,7 @@ def get_packages(request):
 
 
 @api_view(['POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def create_package(request):
     """
     Create a new package.
@@ -108,6 +108,8 @@ def create_package(request):
     try:
         client, db = get_hms_db()
         collection = db['hospital_package']
+        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
 
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         created_by = data.pop('auth-user-id', 'system')
@@ -140,8 +142,8 @@ def create_package(request):
             "is_active":       bool(data.get('is_active', True)),
             "created_by":      created_by,
             "created_date":    datetime.utcnow(),
-            "lastmodified_by": created_by,
-            "lastmodified_date": datetime.utcnow(),
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
         }
 
         result = collection.insert_one(doc)
@@ -166,7 +168,7 @@ def create_package(request):
 # ════════════════════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_package(request, package_no):
     """Retrieve a single package by packageNo."""
     client = None
@@ -189,7 +191,7 @@ def get_package(request, package_no):
 
 
 @api_view(['PATCH'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def update_package(request, package_no):
     """
     Update an existing package by packageNo.
@@ -242,7 +244,7 @@ def update_package(request, package_no):
 
 
 @api_view(['PATCH'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def delete_package(request, package_no):
     """Soft-delete a package (sets is_active=False)."""
     client = None

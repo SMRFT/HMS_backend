@@ -26,20 +26,26 @@ from pymongo import MongoClient, ReturnDocument
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def op_patient_detail_by_uhid(request, uhid):
-
     try:
-        hospital_code = (
-            request.data.get("auth-hospital-code") or
-            request.headers.get("auth-hospital-code") or
-            "system"
-        )
 
-        # Mongo safe get
-        patient = None
-        for p in Patient.objects.filter(hospital_code=hospital_code):
-            if str(p.uhid) == str(uhid):
-                patient = p
-                break
+        branch_code = request.data.get('auth-branch-code')
+        hospital_code = request.data.get('auth-hospital-code')
+
+        # Build filter
+        query = {}
+
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # Add UHID filter
+        query["uhid"] = str(uhid)
+
+        print("PATIENT QUERY:", query)
+
+        # Direct query (NO LOOP ❌)
+        patient = Patient.objects.filter(**query).first()
 
         if not patient:
             return Response({"error": "Patient not found"}, status=404)
@@ -51,146 +57,152 @@ def op_patient_detail_by_uhid(request, uhid):
         company_code = (data.get('company_code') or "").strip()
 
         if company_code:
-            try:
-                insurance = InsuranceProvider.objects.get(
-                    company_code=company_code
-                )
-                data['company_name'] = insurance.company_name
-            except InsuranceProvider.DoesNotExist:
-                data['company_name'] = None
+            insurance = InsuranceProvider.objects.filter(
+                company_code=company_code
+            ).first()
+
+            data['company_name'] = (
+                insurance.company_name if insurance else None
+            )
         else:
             data['company_name'] = None
 
         return Response(data)
 
     except Exception as e:
-        return Response(
-            {"error": str(e)},
-            status=500
-        )
-
+        return Response({"error": str(e)}, status=500)
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def ip_patient_detail_by_ipNumber(request, ipNumber):
     try:
-        admission = Admission.objects.get(ipNumber=ipNumber)
+        # ✅ Get auth codes (reuse helper)
+        branch_code = request.data.get('auth-branch-code')
+        hospital_code = request.data.get('auth-hospital-code')
 
-        try:
-            patient = Patient.objects.get(uhid=admission.uhid)
+        # ✅ Build admission query
+        admission_query = {"ipNumber": ipNumber}
 
-            # ── Get Company Name ─────────────────────────────
-            company_name = None
-            if patient.company_code:
-                try:
-                    insurance = InsuranceProvider.objects.get(
-                        company_code=patient.company_code
-                    )
-                    company_name = insurance.company_name
-                except InsuranceProvider.DoesNotExist:
-                    pass
+        if hospital_code:
+            admission_query["hospital_code"] = hospital_code
+        if branch_code:
+            admission_query["branch_code"] = branch_code
+        print("ADMISSION QUERY:", admission_query)
 
-            # ── Get Latest Room / Bed Details ───────────────
-            room_no = None
-            bed_no = None
+        # ✅ Fetch admission (NO .get ❌)
+        admission = Admission.objects.filter(**admission_query).first()
 
-            # 1. First check latest active room shifting details
-            if admission.roomShitingDetails:
-                active_shift_rooms = [
-                    r for r in admission.roomShitingDetails
-                    if r.get("is_roomActive") is True
-                ]
+        if not admission:
+            return Response(
+                {"error": "Admission record not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-                if active_shift_rooms:
-                    latest_shift = active_shift_rooms[-1]
+        # ✅ Build patient query
+        patient_query = {"uhid": admission.uhid}
 
-                    room_no = latest_shift.get("newRoomNo")
-                    bed_no = latest_shift.get("newBedNo")
+        if hospital_code:
+            patient_query["hospital_code"] = hospital_code
+        if branch_code:
+            patient_query["branch_code"] = branch_code
 
-            # 2. Fallback to room_details if no active shift room found
-            if room_no is None and admission.room_details:
-                active_rooms = [
-                    r for r in admission.room_details
-                    if r.get("is_roomActive") is True
-                ]
+        print("PATIENT QUERY:", patient_query)
 
-                if active_rooms:
-                    latest_room = active_rooms[-1]
-                else:
-                    latest_room = admission.room_details[-1]
+        patient = Patient.objects.filter(**patient_query).first()
 
-                room_no = latest_room.get("roomNo")
-                bed_no = latest_room.get("bedNo")
-
-            # ── Response ────────────────────────────────────
-            response_data = {
-                'ipNumber': admission.ipNumber,
-                'ipserial_number': admission.ipserial_number,
-                'uhid': admission.uhid,
-
-                # Latest Room Info
-                'roomNo': room_no,
-                'bedNo': bed_no,
-                'room_details': admission.room_details,
-                'roomShitingDetails': getattr(admission, 'roomShitingDetails', []),
-
-                # Admission Info
-                'admissionDate': (
-                    admission.admissionDateTime.strftime("%Y-%m-%d")
-                    if admission.admissionDateTime else None
-                ),
-                'admissionTime': (
-                    admission.admissionDateTime.strftime("%H:%M")
-                    if admission.admissionDateTime else None
-                ),
-                'admittingDoctor': admission.admittingDoctor,
-                'consultingDoctor': admission.consultingDoctor,
-                'packageName': admission.packageName,
-                'reasonForAdmission': admission.reasonForAdmission,
-
-                # Flags
-                'is_discharged': admission.is_discharged,
-                'is_admissionActive': admission.is_admissionActive,
-                'is_admitted': getattr(admission, 'is_admitted', False),
-
-                # Patient Info
-                'salutation': getattr(patient, 'salutation', ''),
-                'firstName': patient.firstName,
-                'lastName': patient.lastName,
-                'age': patient.age,
-                'gender': patient.gender,
-                'mobilePhone': patient.mobilePhone,
-                'area': patient.area,
-                'city': patient.city,
-                'state': patient.state,
-                'zipcode': patient.zipcode,
-
-                # Company Info
-                'customer_type': patient.customer_type,
-                'company_code': patient.company_code,
-                'company_name': company_name,
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
-
-        except Patient.DoesNotExist:
+        if not patient:
             return Response(
                 {"error": "Patient not found for the given UHID"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-    except Admission.DoesNotExist:
-        return Response(
-            {"error": "Admission record not found for the given IP Number"},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        # ── Company Name ─────────────────────────────
+        company_name = None
+        if patient.company_code:
+            insurance = InsuranceProvider.objects.filter(
+                company_code=patient.company_code
+            ).first()
+
+            if insurance:
+                company_name = insurance.company_name
+
+        # ── Latest Room / Bed Details ───────────────
+        room_no = None
+        bed_no = None
+
+        if admission.roomShitingDetails:
+            active_shift_rooms = [
+                r for r in admission.roomShitingDetails
+                if r.get("is_roomActive") is True
+            ]
+
+            if active_shift_rooms:
+                latest_shift = active_shift_rooms[-1]
+                room_no = latest_shift.get("newRoomNo")
+                bed_no = latest_shift.get("newBedNo")
+
+        if room_no is None and admission.room_details:
+            active_rooms = [
+                r for r in admission.room_details
+                if r.get("is_roomActive") is True
+            ]
+
+            latest_room = active_rooms[-1] if active_rooms else admission.room_details[-1]
+
+            room_no = latest_room.get("roomNo")
+            bed_no = latest_room.get("bedNo")
+
+        # ── Response ───────────────────────────────
+        response_data = {
+            'ipNumber': admission.ipNumber,
+            'ipserial_number': admission.ipserial_number,
+            'uhid': admission.uhid,
+
+            'roomNo': room_no,
+            'bedNo': bed_no,
+            'room_details': admission.room_details,
+            'roomShitingDetails': getattr(admission, 'roomShitingDetails', []),
+
+            'admissionDate': (
+                admission.admissionDateTime.strftime("%Y-%m-%d")
+                if admission.admissionDateTime else None
+            ),
+            'admissionTime': (
+                admission.admissionDateTime.strftime("%H:%M")
+                if admission.admissionDateTime else None
+            ),
+            'admittingDoctor': admission.admittingDoctor,
+            'consultingDoctor': admission.consultingDoctor,
+            'packageName': admission.packageName,
+            'reasonForAdmission': admission.reasonForAdmission,
+
+            'is_discharged': admission.is_discharged,
+            'is_admissionActive': admission.is_admissionActive,
+            'is_admitted': getattr(admission, 'is_admitted', False),
+
+            'salutation': getattr(patient, 'salutation', ''),
+            'firstName': patient.firstName,
+            'lastName': patient.lastName,
+            'age': patient.age,
+            'gender': patient.gender,
+            'mobilePhone': patient.mobilePhone,
+            'area': patient.area,
+            'city': patient.city,
+            'state': patient.state,
+            'zipcode': patient.zipcode,
+
+            'customer_type': patient.customer_type,
+            'company_code': patient.company_code,
+            'company_name': company_name,
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
     except Exception as e:
         return Response(
             {"error": f"An error occurred: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-        
+        )       
  
 @csrf_exempt
 @api_view(['POST'])
@@ -234,41 +246,34 @@ def estimate_billing_create(request):
 
             return Response(serializer.errors, status=400)
 
+def serialize_val(val):
+    """Make a single value JSON-safe."""
+    if isinstance(val, Decimal128):
+        return float(val.to_decimal())
+    if isinstance(val, ObjectId):
+        return str(val)
+    if isinstance(val, datetime):
+        return val.isoformat()
+    return val
+
+
+def serialize_doc(doc):
+    """Recursively convert Mongo document to JSON-safe dict."""
+    if isinstance(doc, dict):
+        return {k: serialize_doc(v) for k, v in doc.items()}
+    if isinstance(doc, list):
+        return [serialize_doc(i) for i in doc]
+    return serialize_val(doc)
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def estimate_billing_list(request):
-    """
-    Returns active estimate bills with all filters applied server-side.
-
-    Query params:
-      fromDate    : YYYY-MM-DD
-      toDate      : YYYY-MM-DD
-      billType    : numeric bill_type id  (e.g. 10)
-      doctor      : exact doctor name
-      uhid        : partial/prefix match
-      patientType : "IP" | "OP"  (blank = ALL)
-    """
-
-    def serialize_val(val):
-        """Make a single value JSON-safe."""
-        if isinstance(val, Decimal128):
-            return float(val.to_decimal())
-        if isinstance(val, ObjectId):
-            return str(val)
-        if isinstance(val, datetime):
-            return val.isoformat()
-        return val
-
-    def serialize_doc(doc):
-        if isinstance(doc, dict):
-            return {k: serialize_doc(v) for k, v in doc.items()}
-        if isinstance(doc, list):
-            return [serialize_doc(i) for i in doc]
-        return serialize_val(doc)
-
     try:
-        # ── Read query params ──────────────────────────────────────────────────
+        branch_code = request.data.get('auth-branch-code')
+        outlet_code = request.data.get('auth-outlet-code')
+        hospital_code = request.data.get('auth-hospital-code')
+
+        # ── Read query params ────────────────────────────────────────────────
         from_date_str  = request.GET.get('fromDate', '').strip()
         to_date_str    = request.GET.get('toDate', '').strip()
         bill_type_param = request.GET.get('billType', '').strip()
@@ -282,14 +287,24 @@ def estimate_billing_list(request):
         patient_collection  = db['hospital_patient']
         billtype_collection = db['hospital_billtype']
 
-        # ── Build MongoDB query directly (skip ORM entirely) ──────────────────
+        # ── Base Query ───────────────────────────────────────────────────────
         query = {"is_active": {"$nin": [False, 0, "false", "False"]}}
 
-        # Date filter on EstBillDate
+        # ✅ Apply auth filters
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        print("ESTIMATE QUERY:", query)
+
+        # ── Date filter ──────────────────────────────────────────────────────
         if from_date_str and to_date_str:
             try:
                 start = datetime.strptime(from_date_str, "%Y-%m-%d")
-                end   = datetime.strptime(to_date_str,   "%Y-%m-%d").replace(
+                end   = datetime.strptime(to_date_str, "%Y-%m-%d").replace(
                     hour=23, minute=59, second=59, microsecond=999999
                 )
                 query["EstBillDate"] = {"$gte": start, "$lte": end}
@@ -300,9 +315,7 @@ def estimate_billing_list(request):
                     status=400,
                 )
 
-        # Bill type filter — match both int and string variants because
-        # Django serializers may store bill_type as "10" (str) or 10 (int)
-        # depending on the model field type. Use $in to cover both.
+        # ── Bill type filter ─────────────────────────────────────────────────
         if bill_type_param:
             try:
                 int_val = int(bill_type_param)
@@ -310,15 +323,15 @@ def estimate_billing_list(request):
             except (ValueError, TypeError):
                 query["bill_type"] = {"$in": [bill_type_param]}
 
-        # Doctor filter — exact match
+        # ── Doctor filter ────────────────────────────────────────────────────
         if doctor_param:
             query["doctor"] = doctor_param
 
-        # UHID filter — partial / case-insensitive
+        # ── UHID filter ──────────────────────────────────────────────────────
         if uhid_param:
             query["uhid"] = {"$regex": uhid_param, "$options": "i"}
 
-        # Patient type filter — IP has non-empty ipNumber, OP does not
+        # ── Patient type filter ──────────────────────────────────────────────
         if patient_type == "IP":
             query["ipNumber"] = {"$exists": True, "$ne": "", "$nin": [None]}
         elif patient_type == "OP":
@@ -328,70 +341,100 @@ def estimate_billing_list(request):
                 {"ipNumber": None},
             ]
 
+        # ── Fetch data ───────────────────────────────────────────────────────
         data = list(estimate_collection.find(query).sort("_id", -1))
 
-        # ── Batch-cache patient details (avoid N+1) ────────────────────────────
+        # ── Patient Cache (WITH AUTH FILTER) ─────────────────────────────────
         uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
         patient_cache = {}
+
         if uhids:
+            patient_query = {"uhid": {"$in": list(uhids)}}
+
+            # ✅ Apply auth filters to patient query
+            if hospital_code:
+                patient_query["hospital_code"] = hospital_code
+            if branch_code:
+                patient_query["branch_code"] = branch_code
+
             patients = patient_collection.find(
-                {"uhid": {"$in": list(uhids)}},
-                {"_id": 0, "uhid": 1, "salutation": 1,
-                 "firstName": 1, "lastName": 1, "age": 1, "gender": 1},
+                patient_query,
+                {
+                    "_id": 0,
+                    "uhid": 1,
+                    "salutation": 1,
+                    "firstName": 1,
+                    "lastName": 1,
+                    "age": 1,
+                    "gender": 1
+                }
             )
+
             for p in patients:
                 patient_cache[p["uhid"]] = p
 
-        # ── Batch-cache bill type names ────────────────────────────────────────
-        # bill_type may be stored as int OR string in hospital_estimatebilling
-        # depending on Django serializer. Normalise everything to int for lookup.
+        # ── Bill Type Cache (WITH AUTH FILTER) ───────────────────────────────
         bill_type_ids = set()
+
         for doc in data:
             bt = doc.get("bill_type")
-            if bt is not None and bt != "":
+            if bt:
                 try:
                     bill_type_ids.add(int(bt))
-                except (ValueError, TypeError):
+                except:
                     pass
 
-        bill_type_cache = {}  # keyed by int
+        bill_type_cache = {}
+
         if bill_type_ids:
+            bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
+
+            # ✅ Apply auth filters
+            if hospital_code:
+                bt_query["hospital_code"] = hospital_code
+            if branch_code:
+                bt_query["branch_code"] = branch_code
+            if outlet_code:
+                bt_query["outlet_code"] = outlet_code
+
             bt_docs = billtype_collection.find(
-                {"bill_type": {"$in": list(bill_type_ids)}},
-                {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1},
+                bt_query,
+                {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
             )
+
             for bt in bt_docs:
                 bill_type_cache[int(bt["bill_type"])] = {
-                    "bill_name":  bt.get("bill_name", ""),
-                    "billTypeNo": bt.get("billTypeNo", ""),
+                    "bill_name": bt.get("bill_name", ""),
+                    "billTypeNo": bt.get("billTypeNo", "")
                 }
 
-        # ── Enrich each document ───────────────────────────────────────────────
+        # ── Enrich Data ──────────────────────────────────────────────────────
         result = []
-        for doc in data:
-            # Patient info
-            uhid    = doc.get("uhid", "")
-            patient = patient_cache.get(uhid, {})
-            doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"]  = patient.get("firstName", "")
-            doc["lastName"]   = patient.get("lastName", "")
-            doc["age"]        = patient.get("age", "")
-            doc["gender"]     = patient.get("gender", "")
 
-            # Bill type name
+        for doc in data:
+            uhid = doc.get("uhid", "")
+            patient = patient_cache.get(uhid, {})
+
+            doc["salutation"] = patient.get("salutation", "")
+            doc["firstName"] = patient.get("firstName", "")
+            doc["lastName"] = patient.get("lastName", "")
+            doc["age"] = patient.get("age", "")
+            doc["gender"] = patient.get("gender", "")
+
             try:
                 bt_key = int(doc.get("bill_type", 0))
-            except (ValueError, TypeError):
+            except:
                 bt_key = 0
+
             bt_info = bill_type_cache.get(bt_key, {})
-            doc["bill_name"]  = bt_info.get("bill_name", "")
+
+            doc["bill_name"] = bt_info.get("bill_name", "")
             doc["billTypeNo"] = bt_info.get("billTypeNo", "")
 
-            # Parse item JSON string if needed
             if isinstance(doc.get("item"), str):
                 try:
                     doc["item"] = json.loads(doc["item"])
-                except json.JSONDecodeError:
+                except:
                     doc["item"] = []
 
             result.append(serialize_doc(doc))
@@ -406,20 +449,38 @@ def estimate_billing_list(request):
             status=500,
         )
 
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_bill_types(request):
-    """Fetch bill types from hospital_billtype collection"""
     try:
-        # Connect to MongoDB
+        branch_code = request.data.get('auth-branch-code')
+        outlet_code = request.data.get('auth-outlet-code')
+        hospital_code = request.data.get('auth-hospital-code')
+
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
         collection = db['hospital_billtype']
 
-        # Fetch all active bill types
+        query = {"is_active": True}
+
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # ✅ FIX: include empty outlet also
+        if outlet_code:
+            query["$or"] = [
+                {"outlet_code": outlet_code},
+                {"outlet_code": ""},
+                {"outlet_code": {"$exists": False}}
+            ]
+
+        print("QUERY:", query)
+
         bill_types = list(collection.find(
-            {"is_active": True},
+            query,
             {
                 "_id": 0,
                 "bill_type": 1,
@@ -429,47 +490,43 @@ def get_bill_types(request):
                 "is_allowDiscount": 1,
             }
         ))
-        
-        # Close the MongoDB connection
+
         client.close()
 
-        return JsonResponse({"billTypes": bill_types}, safe=True)
-    
+        return JsonResponse({"billTypes": bill_types}, safe=False)
+
     except Exception as e:
         return JsonResponse({
-            "error": "An error occurred while fetching bill types",
-            "details": str(e)
+            "error": str(e)
         }, status=500)
-    
     
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_packages(request):
-
     try:
-        hospital_code = (
-            request.data.get("auth-hospital-code") or
-            request.headers.get("auth-hospital-code") or
-            "system"
-        )
-        branch_code   = request.headers.get("branch-code", "system")
-        outlet_code   = request.headers.get("outlet-code", "system")
-
-        print("hospital_code:", hospital_code)
-        print("branch_code:", branch_code)
-        print("outlet_code:", outlet_code)
+        branch_code = request.data.get('auth-branch-code')
+        outlet_code = request.data.get('auth-outlet-code')
+        hospital_code = request.data.get('auth-hospital-code')
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
         collection = db['hospital_package']
 
+        # ✅ Base query
+        query = {"is_active": True}
+
+        # ✅ Apply auth filters dynamically
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        print("PACKAGE QUERY:", query)
+
         packages = list(collection.find(
-            {
-                "is_active": True,
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code
-            },
+            query,
             {
                 "_id": 0,
                 "packageNo": 1,
@@ -489,7 +546,6 @@ def get_packages(request):
             "success": False,
             "error": str(e)
         }, status=500)
-
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
@@ -687,16 +743,22 @@ def invest_billing_create(request):
         # ── Normalize item field ───────────────────────────────
         def normalize_item(item):
             if isinstance(item, list):
-                return json.dumps(item)
+                return item   # ✅ keep as list
+
             elif isinstance(item, str):
                 try:
                     parsed = json.loads(item)
+
+                    # Handle double-string case
                     if isinstance(parsed, str):
                         parsed = json.loads(parsed)
-                    return json.dumps(parsed)
+
+                    return parsed if isinstance(parsed, list) else []
+
                 except (json.JSONDecodeError, TypeError):
-                    return json.dumps([])
-            return json.dumps([])
+                    return []
+
+            return []
 
         if "item" in data:
             data["item"] = normalize_item(data["item"])
@@ -731,7 +793,7 @@ def invest_billing_create(request):
 
         data["investBillDate"] = timezone.now()
 
-        # ───────────────── UPDATE ──────────────────────────────
+       # ───────────────── UPDATE ──────────────────────────────
         existing_invest_bill_no = data.get("investBillNo")
         if existing_invest_bill_no:
 
@@ -752,24 +814,44 @@ def invest_billing_create(request):
                     {"error": "editRemarks is required when editing a bill."},
                     status=drf_status.HTTP_400_BAD_REQUEST
                 )
+            # ── Build history snapshot with only old values of changed fields ─────
+            fields_to_ignore = {"_id", "history", "investBillNo", "lastmodified_by",
+                                "lastmodified_date", "editRemarks", "created_by",
+                                "created_date", "branch_code", "outlet_code", "hospital_code"}
+
+            changed_fields = {}
+            for key, new_value in data.items():
+                if key in fields_to_ignore:
+                    continue
+                old_value = existing_record.get(key)
+                if old_value != new_value:
+                    changed_fields[key] = old_value   # ← only old value
+
+            history_edit = {
+                "modified_date": timezone.now(),
+                "modified_by": current_user,
+                "editRemarks": edit_remarks,
+                "changes": changed_fields
+            }
 
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
-            data["editRemarks"] = edit_remarks   # store flat on the document
+            data.pop("editRemarks", None)   # ← remove from top-level
             data.pop("investBillNo", None)
 
             invest_collection.update_one(
                 {"_id": existing_record["_id"]},
-                {"$set": data}
+                {
+                    "$set": data,
+                    "$push": {"history": history_edit}
+                }
             )
 
             return Response(
                 {"message": "Billing updated successfully!",
-                 "investBillNo": existing_invest_bill_no},
+                "investBillNo": existing_invest_bill_no},
                 status=drf_status.HTTP_200_OK
             )
-
-
         # ───────────────── CREATE ──────────────────────────────
 
         # Financial Year Logic
@@ -831,7 +913,6 @@ def invest_billing_create(request):
 def billing_report_view(request):
 
     def serialize_doc(doc):
-        """Recursively convert MongoDB types to JSON-serializable types."""
         if isinstance(doc, dict):
             return {k: serialize_doc(v) for k, v in doc.items()}
         elif isinstance(doc, list):
@@ -842,10 +923,13 @@ def billing_report_view(request):
             return str(doc)
         elif isinstance(doc, datetime):
             return doc.isoformat()
-        else:
-            return doc
+        return doc
 
     try:
+        branch_code = request.data.get('auth-branch-code', 'system')
+        outlet_code = request.data.get('auth-outlet-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
 
@@ -853,9 +937,20 @@ def billing_report_view(request):
         bill_type_collection = db['hospital_billtype']
         patient_collection = db['hospital_patient']
 
+        # ── Base Query ─────────────────────────────────────────
         query = {"is_active": True}
 
-        # ── Date filter ────────────────────────────────────────────────────────
+        # ✅ Apply auth filters
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        print("BILLING QUERY:", query)
+
+        # ── Date filter ────────────────────────────────────────
         start_date = request.GET.get('start_date')
         end_date = request.GET.get('end_date')
 
@@ -867,91 +962,133 @@ def billing_report_view(request):
                 )
                 query["investBillDate"] = {"$gte": start, "$lte": end}
             except ValueError:
-                return JsonResponse({"error": "Invalid date format. Use YYYY-MM-DD."}, status=400)
+                return JsonResponse({"error": "Invalid date format"}, status=400)
 
-        # ── Bill type filter ───────────────────────────────────────────────────
+        # ── Bill type filter ───────────────────────────────────
         bill_type_param = request.GET.get('billType')
         if bill_type_param:
             try:
                 query["bill_type"] = int(bill_type_param)
-            except (ValueError, TypeError):
+            except:
                 query["bill_type"] = bill_type_param
 
-        # ── Doctor filter ──────────────────────────────────────────────────────
+        # ── Doctor filter ──────────────────────────────────────
         doctor_param = request.GET.get('doctor')
         if doctor_param:
             query["doctor"] = doctor_param
 
-        # ── UHID filter (partial / prefix match) ──────────────────────────────
+        # ── UHID filter ────────────────────────────────────────
         uhid_param = request.GET.get('uhid')
         if uhid_param:
             query["uhid"] = {"$regex": uhid_param, "$options": "i"}
 
-        # ── Patient type filter (IP / OP) ──────────────────────────────────────
+        # ── Patient type filter ────────────────────────────────
         patient_type_param = request.GET.get('patientType')
         if patient_type_param == 'IP':
-            # IP patients have a non-empty ipNumber
             query["ipNumber"] = {"$exists": True, "$ne": "", "$nin": [None]}
         elif patient_type_param == 'OP':
-            # OP patients have no ipNumber or it is blank/null
             query["$or"] = [
                 {"ipNumber": {"$exists": False}},
                 {"ipNumber": ""},
                 {"ipNumber": None},
             ]
 
+        # ── Fetch data ─────────────────────────────────────────
         data = list(collection.find(query))
 
-        # ── Cache bill types to avoid repeated DB calls ────────────────────────
+        # ── Batch Patient Cache (OPTIMIZED) ────────────────────
+        uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
+        patient_cache = {}
+
+        if uhids:
+            patient_query = {"uhid": {"$in": list(uhids)}}
+
+            # ✅ Apply auth filters
+            if hospital_code:
+                patient_query["hospital_code"] = hospital_code
+            if branch_code:
+                patient_query["branch_code"] = branch_code
+
+            patients = patient_collection.find(
+                patient_query,
+                {
+                    "_id": 0,
+                    "uhid": 1,
+                    "salutation": 1,
+                    "firstName": 1,
+                    "lastName": 1,
+                    "age": 1,
+                    "gender": 1
+                }
+            )
+
+            for p in patients:
+                patient_cache[p["uhid"]] = p
+
+        # ── Batch Bill Type Cache (OPTIMIZED) ──────────────────
+        bill_type_ids = set()
+
+        for doc in data:
+            bt = doc.get("bill_type")
+            if bt:
+                try:
+                    bill_type_ids.add(int(bt))
+                except:
+                    pass
+
         bill_type_cache = {}
 
+        if bill_type_ids:
+            bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
+
+            # ✅ Apply auth filters
+            if hospital_code:
+                bt_query["hospital_code"] = hospital_code
+            if branch_code:
+                bt_query["branch_code"] = branch_code
+            if outlet_code:
+                bt_query["outlet_code"] = outlet_code
+
+            bt_docs = bill_type_collection.find(
+                bt_query,
+                {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
+            )
+
+            for bt in bt_docs:
+                bill_type_cache[int(bt["bill_type"])] = {
+                    "bill_name": bt.get("bill_name", ""),
+                    "billTypeNo": bt.get("billTypeNo", "")
+                }
+
+        # ── Enrich Data ────────────────────────────────────────
         result = []
+
         for doc in data:
 
-            # Resolve bill_name using bill_type as integer
-            bill_type = doc.get("bill_type")
-            if bill_type:
-                if bill_type not in bill_type_cache:
-                    try:
-                        bill_type_doc = bill_type_collection.find_one(
-                            {"bill_type": int(bill_type)},
-                            {"_id": 0, "bill_name": 1, "billTypeNo": 1}
-                        )
-                        if bill_type_doc:
-                            bill_type_cache[bill_type] = {
-                                "bill_name": bill_type_doc.get("bill_name", ""),
-                                "billTypeNo": bill_type_doc.get("billTypeNo", ""),
-                            }
-                        else:
-                            bill_type_cache[bill_type] = {"bill_name": "", "billTypeNo": ""}
-                    except (ValueError, TypeError):
-                        bill_type_cache[bill_type] = {"bill_name": "", "billTypeNo": ""}
+            # Patient
+            patient = patient_cache.get(doc.get("uhid"), {})
+            doc["salutation"] = patient.get("salutation", "")
+            doc["firstName"] = patient.get("firstName", "")
+            doc["lastName"] = patient.get("lastName", "")
+            doc["age"] = patient.get("age", "")
+            doc["gender"] = patient.get("gender", "")
 
-                doc["bill_name"] = bill_type_cache[bill_type]["bill_name"]
-                doc["billTypeNo"] = bill_type_cache[bill_type]["billTypeNo"]
-            else:
-                doc["bill_name"] = ""
-                doc["billTypeNo"] = ""
+            # Bill type
+            try:
+                bt_key = int(doc.get("bill_type", 0))
+            except:
+                bt_key = 0
 
-            # Parse item if it's a JSON string
+            bt_info = bill_type_cache.get(bt_key, {})
+            doc["bill_name"] = bt_info.get("bill_name", "")
+            doc["billTypeNo"] = bt_info.get("billTypeNo", "")
+
+            # Parse items
             if isinstance(doc.get("item"), str):
                 try:
                     doc["item"] = json.loads(doc["item"])
-                except json.JSONDecodeError:
+                except:
                     doc["item"] = []
-
-            # Fetch patient details
-            uhid = doc.get("uhid")
-            if uhid:
-                patient = patient_collection.find_one({"uhid": uhid})
-                if patient:
-                    doc["salutation"] = patient.get("salutation", "")
-                    doc["firstName"] = patient.get("firstName", "")
-                    doc["lastName"] = patient.get("lastName", "")
-                    doc["age"] = patient.get("age", "")
-                    doc["gender"] = patient.get("gender", "")
-                else:
-                    doc["salutation"] = doc["firstName"] = doc["lastName"] = doc["age"] = doc["gender"] = ""
 
             result.append(serialize_doc(doc))
 
@@ -962,7 +1099,10 @@ def billing_report_view(request):
         return JsonResponse(result, safe=False)
 
     except Exception as e:
-        return JsonResponse({"error": "Failed to generate billing report", "details": str(e)}, status=500)
+        return JsonResponse(
+            {"error": "Failed to generate billing report", "details": str(e)},
+            status=500
+        )
     
 
 @api_view(['PATCH'])
@@ -1011,14 +1151,6 @@ def delete_bill_view(request):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def dept_budr_view(request):
-    """
-    Returns Deleted or Edited bills for the Outlet Bill Update/Delete Report.
-
-    Query params:
-      report_type : "deleted" | "edited"   (required)
-      start_date  : YYYY-MM-DD
-      end_date    : YYYY-MM-DD
-    """
 
     def serialize_doc(doc):
         if isinstance(doc, dict):
@@ -1046,35 +1178,36 @@ def dept_budr_view(request):
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
 
-        # HMS db — billing data
-        hms_db               = client['HMS']
+        # DBs
+        hms_db     = client['HMS']
+        global_db  = client['Global']
+
         collection           = hms_db['hospital_investbilling']
         bill_type_collection = hms_db['hospital_billtype']
+        outlet_collection    = hms_db['hospital_outlets']   # ✅ NEW
 
-        # Global db — employee profiles for name resolution
-        global_db            = client['Global']
         profile_collection   = global_db['backend_diagnostics_profile']
 
-        # ── Build query ────────────────────────────────────────────────────────
+        # ── Query setup ─────────────────────────────
         if report_type == 'deleted':
             query = {
                 "is_active": False,
                 "deletedAt": {"$exists": True},
             }
             date_field      = "deletedAt"
-            actor_id_field  = "deletedBy"       # employeeId stored here
-            actor_name_out  = "deletedByName"   # resolved name written here
+            actor_id_field  = "deletedBy"
+            actor_name_out  = "deletedByName"
         else:
             query = {
                 "is_active": True,
                 "lastmodified_by": {"$ne": None, "$exists": True},
-                "editRemarks": {"$exists": True},
+                "history": {"$exists": True},
             }
             date_field      = "lastmodified_date"
             actor_id_field  = "lastmodified_by"
             actor_name_out  = "lastmodified_by_name"
 
-        # ── Date filter ────────────────────────────────────────────────────────
+        # ── Date filter ─────────────────────────────
         if start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
@@ -1091,15 +1224,14 @@ def dept_budr_view(request):
 
         data = list(collection.find(query))
 
-        # ── Collect unique employee IDs to resolve in one batch ────────────────
-        # Avoids N separate DB calls — fetch all needed profiles at once.
+        # ── Employee mapping ───────────────────────
         actor_ids = {
             str(doc.get(actor_id_field, "")).strip()
             for doc in data
             if doc.get(actor_id_field)
         }
 
-        employee_cache = {}  # { "60002": "Najma", ... }
+        employee_cache = {}
         if actor_ids:
             profiles = profile_collection.find(
                 {"employeeId": {"$in": list(actor_ids)}},
@@ -1108,12 +1240,31 @@ def dept_budr_view(request):
             for p in profiles:
                 employee_cache[str(p.get("employeeId", "")).strip()] = p.get("employeeName", "")
 
-        # ── Cache bill type names ──────────────────────────────────────────────
+        # ── Bill type cache ────────────────────────
         bill_type_cache = {}
 
+        # ── Outlet mapping (NEW) ───────────────────
+        outlet_codes = {
+            str(doc.get("outlet_code", "")).strip()
+            for doc in data
+            if doc.get("outlet_code")
+        }
+
+        outlet_cache = {}
+        if outlet_codes:
+            outlets = outlet_collection.find(
+                {"outlet_code": {"$in": list(outlet_codes)}},
+                {"_id": 0, "outlet_code": 1, "outlet_name": 1}
+            )
+            for o in outlets:
+                outlet_cache[str(o.get("outlet_code", "")).strip()] = o.get("outlet_name", "")
+
+        # ── Process data ───────────────────────────
         result = []
+
         for doc in data:
-            # Resolve bill type name
+
+            # Bill type
             bill_type = doc.get("bill_type")
             if bill_type:
                 if bill_type not in bill_type_cache:
@@ -1123,10 +1274,10 @@ def dept_budr_view(request):
                             {"_id": 0, "bill_name": 1, "billTypeNo": 1},
                         )
                         bill_type_cache[bill_type] = {
-                            "bill_name":  bt_doc.get("bill_name", "")  if bt_doc else "",
+                            "bill_name":  bt_doc.get("bill_name", "") if bt_doc else "",
                             "billTypeNo": bt_doc.get("billTypeNo", "") if bt_doc else "",
                         }
-                    except (ValueError, TypeError):
+                    except:
                         bill_type_cache[bill_type] = {"bill_name": "", "billTypeNo": ""}
 
                 doc["bill_name"]  = bill_type_cache[bill_type]["bill_name"]
@@ -1135,10 +1286,13 @@ def dept_budr_view(request):
                 doc["bill_name"]  = ""
                 doc["billTypeNo"] = ""
 
-            # Resolve actor name from employee cache
+            # Employee name
             actor_id = str(doc.get(actor_id_field, "")).strip()
             doc[actor_name_out] = employee_cache.get(actor_id, actor_id or "")
-            # ^ falls back to the raw ID if no profile found, never returns blank
+
+            # ✅ Outlet name (NEW)
+            outlet_code = str(doc.get("outlet_code", "")).strip()
+            doc["outlet_name"] = outlet_cache.get(outlet_code, "")
 
             result.append(serialize_doc(doc))
 

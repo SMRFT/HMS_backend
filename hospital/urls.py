@@ -175,18 +175,18 @@ urlpatterns = [
     path('packages/delete/<int:package_no>/', package_crud.delete_package, name='delete_package'),
 
     #Investigation Price Master:
-    path('investigation-prices_get/', investigation_price.get_investigation_prices),
-    path('investigation-prices/create/', investigation_price.create_investigation_price),
-    path('investigation-prices/update/<str:bill_type_no>/',investigation_price.update_investigation_price),
-    path('investigation-prices/delete/<str:bill_type_no>/',investigation_price.delete_investigation_price),
-    
+    path('investigation-prices_get/', investigation_price.get_investigation_prices, name='get_investigation_prices'),
+    path('investigation-prices/create/', investigation_price.create_investigation_price, name='create_investigation_price'),
+    path('investigation-prices/update/<str:bill_type_no>/', investigation_price.update_investigation_price, name='update_investigation_price'),
+    path('investigation-prices/delete/<str:bill_type_no>/', investigation_price.delete_investigation_price, name='delete_investigation_price'),
+
     #Bil Type Master:
-    path('bill-types_get/', billType.get_bill_types),
-    path('bill-types/create/', billType.create_bill_type),
-    path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type),
-    path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type),
-    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
-    
+    path('bill-types_get/', billType.get_bill_types, name='get_bill_types'),
+    path('bill-types/create/', billType.create_bill_type, name='create_bill_type'),
+    path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type, name='update_bill_type'),
+    path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type, name='delete_bill_type'),
+    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices, name='patch_bill_type_prices'),
+
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
 

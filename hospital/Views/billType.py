@@ -42,21 +42,40 @@ def get_bill_types(request):
         client, db = get_hms_db()
         collection = db['hospital_billtype']
 
-        # Always exclude soft-deleted records
+        # ✅ Get auth codes
+        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+
+        # ✅ Base query (exclude soft deleted)
         query = {'deleted_at': {'$exists': False}}
+
+        # ✅ Apply ONLY hospital + branch filter
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # 🔍 Search filter
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
-                {'bill_name':      {'$regex': search, '$options': 'i'}},
-                {'billTypeNo':     {'$regex': search, '$options': 'i'}},
+                {'bill_name':  {'$regex': search, '$options': 'i'}},
+                {'billTypeNo': {'$regex': search, '$options': 'i'}},
             ]
 
-        records = [serialize_doc(r) for r in collection.find(query).sort('bill_name', 1)]
+        print("BILL TYPE QUERY:", query)  # debug
+
+        records = [
+            serialize_doc(r)
+            for r in collection.find(query).sort('bill_name', 1)
+        ]
+
         return Response({'records': records}, status=status.HTTP_200_OK)
 
     except Exception as e:
         logger.exception("get_bill_types failed")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     finally:
         if client:
             client.close()

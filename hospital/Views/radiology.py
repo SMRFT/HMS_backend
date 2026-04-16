@@ -51,6 +51,7 @@ def _parse_slot_datetime(raw):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_investigations(request):
+
     bill_type_no = request.GET.get('billTypeNo')
     from_date = request.GET.get('from_date')
     to_date = request.GET.get('to_date')
@@ -59,6 +60,10 @@ def get_investigations(request):
     if not bill_type_no:
         return JsonResponse({'error': 'billTypeNo query parameter is required'}, status=400)
 
+    # ✅ ADD THIS (auth)
+    branch_code = request.data.get('auth-branch-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db = client['HMS']
     invest_billing_collection = db['hospital_investbilling']
@@ -66,8 +71,15 @@ def get_investigations(request):
     patient_collection = db['hospital_patient']
 
     try:
-        # ── 1. Fetch billing records ─────────────────────────────────────────
+        # ── 1. Fetch billing records ─────────────────────────
         billing_filter = {'is_active': True}
+
+        # ✅ ADD THIS BLOCK
+        if hospital_code:
+            billing_filter["hospital_code"] = hospital_code
+        if branch_code:
+            billing_filter["branch_code"] = branch_code
+
         if invest_bill_no_filter:
             billing_filter['investBillNo'] = invest_bill_no_filter
 
@@ -77,61 +89,98 @@ def get_investigations(request):
                 try:
                     date_filter['$gte'] = datetime.strptime(from_date, '%Y-%m-%d')
                 except ValueError:
-                    return JsonResponse({'error': 'Invalid from_date format. Use YYYY-MM-DD'}, status=400)
+                    return JsonResponse({'error': 'Invalid from_date format'}, status=400)
+
             if to_date:
                 try:
                     to_date_obj = datetime.strptime(to_date, '%Y-%m-%d')
                     date_filter['$lte'] = to_date_obj + timedelta(days=1) - timedelta(seconds=1)
                 except ValueError:
-                    return JsonResponse({'error': 'Invalid to_date format. Use YYYY-MM-DD'}, status=400)
+                    return JsonResponse({'error': 'Invalid to_date format'}, status=400)
+
             billing_filter['investBillDate'] = date_filter
 
+        print("BILLING FILTER:", billing_filter)
+
         billing_records = list(invest_billing_collection.find(billing_filter, {'_id': 0}))
+
         if not billing_records:
             return JsonResponse([], safe=False)
 
-        # ── 2. Filter by billTypeNo inside item JSON ─────────────────────────
+        # ── 2. Filter by billTypeNo ─────────────────────────
         filtered_records = []
+
         for record in billing_records:
             try:
-                items = json.loads(record.get('item', '[]'))
-            except (json.JSONDecodeError, TypeError):
+                items = record.get('item', [])
+
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
+            except:
                 items = []
+
             matched_items = [i for i in items if i.get('billTypeNo') == bill_type_no]
+
             if not matched_items:
                 continue
+
             record['_matched_items'] = matched_items
             filtered_records.append(record)
 
         if not filtered_records:
             return JsonResponse([], safe=False)
 
-        # ── 3. Fetch active reports keyed by (investBillNo, itemName) ────────
+        # ── 3. Reports ─────────────────────────
         bill_nos = [r['investBillNo'] for r in filtered_records if r.get('investBillNo')]
-        ct_reports = list(ct_report_collection.find(
-            {'investBillNo': {'$in': bill_nos}, 'is_active': True},
-            {'_id': 0}
-        ))
+
+        report_filter = {
+            'investBillNo': {'$in': bill_nos},
+            'is_active': True
+        }
+
+        # ✅ ADD THIS BLOCK
+        if hospital_code:
+            report_filter["hospital_code"] = hospital_code
+        if branch_code:
+            report_filter["branch_code"] = branch_code
+
+        ct_reports = list(ct_report_collection.find(report_filter, {'_id': 0}))
+
         report_map = {}
         for r in ct_reports:
             bill = r.get('investBillNo')
             item_name = r.get('itemName', '')
-            if bill:
-                for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date', 'approved_date', 'deleted_date']:
-                    if field in r and isinstance(r[field], datetime):
-                        r[field] = r[field].isoformat()
-                report_map[(bill, item_name)] = r
 
-        # ── 4. Fetch patient details ─────────────────────────────────────────
+            for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date', 'approved_date', 'deleted_date']:
+                if field in r and isinstance(r[field], datetime):
+                    r[field] = r[field].isoformat()
+
+            report_map[(bill, item_name)] = r
+
+        # ── 4. Patient ─────────────────────────
         uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid')})
+
+        patient_filter = {'uhid': {'$in': uhid_list}}
+
+        # ✅ ADD THIS BLOCK
+        if hospital_code:
+            patient_filter["hospital_code"] = hospital_code
+        if branch_code:
+            patient_filter["branch_code"] = branch_code
+
         patients = list(patient_collection.find(
-            {'uhid': {'$in': uhid_list}},
+            patient_filter,
             {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'lastName': 1, 'age': 1, 'gender': 1}
         ))
+
         patient_map = {p['uhid']: p for p in patients}
 
-        # ── 5. Build result rows (one per matched item) ──────────────────────
+        # ── 5. Build result ─────────────────────────
         result = []
+
         for record in filtered_records:
             invest_bill_no = record.get('investBillNo')
             if not invest_bill_no:
@@ -157,19 +206,21 @@ def get_investigations(request):
             for item in matched_items:
                 item_name = item.get('itemName', '')
                 report = report_map.get((invest_bill_no, item_name))
+
                 row = base.copy()
                 row['itemName'] = item_name
                 row['report'] = report
                 row['hasReport'] = report is not None
+
                 result.append(row)
 
         return JsonResponse(result, safe=False)
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
     finally:
         client.close()
-
 
 # ─── POST: Create scan report (with optional slot_DateTime) ───────────────────
 

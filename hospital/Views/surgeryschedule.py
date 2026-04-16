@@ -289,8 +289,12 @@ def create_surgery_schedule(request):
 @permission_classes([HasRoleAndDataPermission])
 def list_surgery_schedules(request):
     try:
+        # ✅ Get auth codes
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
         from_date_str = request.GET.get("from_date", "")
-        to_date_str   = request.GET.get("to_date",   "")
+        to_date_str   = request.GET.get("to_date", "")
 
         def parse_date(s):
             if not s:
@@ -312,8 +316,18 @@ def list_surgery_schedules(request):
         from_date = parse_date(from_date_str)
         to_date   = parse_date(to_date_str)
 
-        all_records = list(SurgerySchedule.objects.all().values())
+        # ✅ Apply DB-level filter FIRST (IMPORTANT for performance)
+        queryset = SurgerySchedule.objects.all()
 
+        if hospital_code:
+            queryset = queryset.filter(hospital_code=hospital_code)
+
+        if branch_code:
+            queryset = queryset.filter(branch_code=branch_code)
+
+        all_records = list(queryset.values())
+
+        # ── Date filter (your existing logic) ─────────────────
         if from_date or to_date:
             def in_range(d):
                 if d is None:
@@ -328,12 +342,13 @@ def list_surgery_schedules(request):
             for r in all_records:
                 scheduled_date = coerce_date(r.get("scheduled_date"))
                 postponed_date = coerce_date(r.get("postponed_date"))
+
                 if in_range(scheduled_date) or in_range(postponed_date):
                     filtered.append(r)
         else:
             filtered = all_records
 
-        # ONE bulk enrich call — not N individual calls
+        # ✅ Bulk enrich (unchanged)
         enriched = _enrich_bulk(filtered)
 
         return Response({"success": True, "data": enriched})
@@ -342,7 +357,6 @@ def list_surgery_schedules(request):
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
         )
-
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
