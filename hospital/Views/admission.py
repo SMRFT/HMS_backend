@@ -699,7 +699,6 @@ def admission_detail(request, ipNumber):
                 'advance_payments': advance_payments,
 
                 'is_admissionActive': bool(adm.is_admissionActive),
-                'is_advanceActive': bool(adm.is_advanceActive),
                 'is_admitted': bool(adm.is_admitted),
                 'is_discharged': bool(adm.is_discharged),
 
@@ -850,4 +849,124 @@ def admission_detail(request, ipNumber):
         return JsonResponse({
             'success': False,
             'error': str(e)
+        }, status=500)
+    
+
+
+@api_view(['POST', 'PUT', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def admission_advance(request, ipNumber):
+    try:
+        # ✅ SAME HEADER LOGIC AS admission_detail
+        employee_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
+        hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
+        branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
+        outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
+
+        # ✅ STRICT FILTER (VERY IMPORTANT)
+        adm = Admission.objects.filter(
+            ipNumber=str(ipNumber),
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+        ).first()
+
+        if not adm:
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
+
+        # ✅ Parse safely
+        advance_payments = parse_json_field(adm.advance_payments)
+        if not isinstance(advance_payments, list):
+            advance_payments = []
+
+        now_iso = timezone.now().isoformat()
+
+        # ================= ADD =================
+        if request.method == 'POST':
+
+            amount = request.data.get('amount')
+            payment_mode = request.data.get('paymentMode', '')
+
+            if not amount:
+                return JsonResponse({'success': False, 'error': 'amount is required'}, status=400)
+
+            new_entry = {
+                "advance_id": f"ADV{len(advance_payments)+1}",
+                "amount": str(amount),
+                "paymentMode": payment_mode,
+                "is_active": True,
+                "created_by": employee_id,
+                "created_date": now_iso,
+                "lastmodified_by": employee_id,
+                "lastmodified_date": now_iso
+            }
+
+            advance_payments.append(new_entry)
+
+            adm.advance_payments = advance_payments
+            adm.lastmodified_by = employee_id
+            adm.lastmodified_date = timezone.now()
+            adm.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Advance added",
+                "data": new_entry
+            })
+
+        # ================= EDIT =================
+        elif request.method == 'PUT':
+
+            updated_list = request.data.get("advance_payments", [])
+
+            if not isinstance(updated_list, list):
+                return JsonResponse({'success': False, 'error': 'Invalid format'}, status=400)
+
+            adm.advance_payments = updated_list
+            adm.lastmodified_by = employee_id
+            adm.lastmodified_date = timezone.now()
+            adm.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Advance list updated",
+                "data": updated_list
+            })
+
+        # ================= CANCEL =================
+        elif request.method == 'DELETE':
+
+            advance_id = request.data.get('advance_id')
+
+            if not advance_id:
+                return JsonResponse({'success': False, 'error': 'advance_id is required'}, status=400)
+
+            entry = next(
+                (a for a in advance_payments if a.get("advance_id") == advance_id and a.get("is_active")),
+                None
+            )
+
+            if not entry:
+                return JsonResponse({'success': False, 'error': 'Advance not found'}, status=404)
+
+            entry['is_active'] = False
+            entry['cancelled_by'] = employee_id
+            entry['cancelled_date'] = now_iso
+
+            adm.advance_payments = advance_payments
+            adm.lastmodified_by = employee_id
+            adm.lastmodified_date = timezone.now()
+            adm.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Advance cancelled"
+            })
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({
+            "success": False,
+            "error": str(e)
         }, status=500)

@@ -39,6 +39,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-list/?(\?.*)?$': 'HMS-P-ADML',
     r'^/_b_a_c_k_e_n_d/HMS/admission-detail/.+/?(\?.*)?$': 'HMS-P-ADMD',
     r'^/_b_a_c_k_e_n_d/HMS/admission-room-search/?(\?.*)?$': 'HMS-P-SRM',
+    r'^/_b_a_c_k_e_n_d/HMS/admission-advance/.+/?(\?.*)?$': 'HMS-P-AA',
 
     # ==================== PHARMACY STOCK ====================
     r'^/_b_a_c_k_e_n_d/HMS/ip-pharmacy-stock/?(\?.*)?$': 'HMS-P-IPPS',
@@ -62,7 +63,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
 
     # ==================== NURSING ====================
-    r'^/_b_a_c_k_e_n_d/HMS/room-shiftings/?(\?.*)?$': 'HMS-P-RSHFT',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
