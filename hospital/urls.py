@@ -28,7 +28,8 @@ urlpatterns = [
     path('admission-detail/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
     path('admission-room-search/', admission.search_rooms, name='search-rooms'), 
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
-    path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance'),
+    path('admission-advance/',             admission.admission_advance, name='admission_advance_list'),
+    path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
 
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
