@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 import os
 from datetime import datetime, timedelta
-from ..models import Admission, OPPharmacyBill
+from ..models import Admission, PharmacyBilling, PharmacyItem
 from ..serializers import AdmissionSerializer
 from django.conf import settings
 from django.db import DatabaseError
@@ -617,83 +617,228 @@ def remove_individual_test_from_lab_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_medicine_ward_requests(request):
     try:
         uhid = request.query_params.get("uhid")
         ip_number = request.query_params.get("ipNumber")
-        
+        outlet_code = request.query_params.get("outlet_code")
+
         if not uhid:
             return Response({"success": False, "error": "UHID is required"}, status=400)
-            
-        # Fetch from OPPharmacyBill where is_ward_request=True using PyMongo
-        query_params = {
-            "uhid": uhid,
-            "is_ward_request": True
-        }
+
+        # Build query
+        query_params = {"uhid": uhid, "is_ward_request": True}
         if ip_number:
             query_params["inpatient_number"] = ip_number
-            
-        ward_req_collection = mongo_db["hospital_oppharmacybill"]
-        requests_data = list(ward_req_collection.find(query_params).sort("bill_date", -1))
-        
+        if outlet_code:
+            query_params["outlet_code"] = outlet_code
+
+        # Fetch billing records
+        requests_data = list(
+            PharmacyBilling.objects.filter(**query_params).values().order_by("-bill_date")
+        )
+
+        # --- Batch-load item names ---
+        all_item_ids = set()
+        for doc in requests_data:
+            for itm in (doc.get("medicine_particulars") or []):
+                if isinstance(itm, dict) and itm.get("item_id"):
+                    try:
+                        all_item_ids.add(int(itm["item_id"]))
+                    except (ValueError, TypeError):
+                        pass
+        item_name_map = {
+            i.item_id: i.item_name
+            for i in PharmacyItem.objects.filter(item_id__in=all_item_ids)
+        }
+
         formatted_data = []
         for doc in requests_data:
-            # medicine_particulars is already a native list because we save it directly via PyMongo
-            # However, older data might still possess string encoding
+            import json
             items = doc.get("medicine_particulars", [])
             if isinstance(items, str):
-                import json
                 try:
                     items = json.loads(items)
-                except json.JSONDecodeError:
+                except Exception:
                     items = []
 
             medicines = []
-            for itm in items:
+            for itm in (items or []):
                 if isinstance(itm, str):
-                    import json
                     try:
                         itm = json.loads(itm)
                     except Exception:
                         continue
                 if not isinstance(itm, dict):
                     continue
+
+                try:
+                    item_id_int = int(itm.get("item_id", 0))
+                except (ValueError, TypeError):
+                    item_id_int = 0
+
                 medicines.append({
                     "item_id": itm.get("item_id", ""),
-                    "name": itm.get("itemName", itm.get("item_name", "")),
-                    "quantity": itm.get("quantity", itm.get("qty", 1)),
-                    "doctor": itm.get("doctor", ""),
+                    "item_name": item_name_map.get(item_id_int, ""),
+                    "batch_number": itm.get("batch_number", ""),
+                    "quantity": itm.get("quantity", itm.get("qty", 0)),
                     "dosage": itm.get("dosage", ""),
                     "noOfDays": itm.get("noOfDays", ""),
                     "dose": itm.get("dose", ""),
-                    "doseUnit": itm.get("doseUnit", ""),
-                    "route": itm.get("route", ""),
-                    "instruction": itm.get("instruction", "")
+                    "doseunit": itm.get("doseunit", ""),
+                    "instruction": itm.get("instruction", ""),
+                    "is_deleted": itm.get("is_deleted", False),
+                    "edit_history": itm.get("edit_history", []),
                 })
 
-            formatted_doc = {
-                "id": str(doc["_id"]),
+            formatted_data.append({
+                "Bill_id": doc.get("Bill_id"),
+                "reqId": str(doc.get("Bill_id")),
                 "uhid": doc.get("uhid", ""),
                 "ipNumber": doc.get("inpatient_number", ""),
-                "patientName": doc.get("patient_name", ""),
                 "billType": doc.get("bill_type", ""),
-                "billName": doc.get("bill_name", ""),
-                "reqDate": doc.get("bill_date").strftime("%d-%m-%Y") if doc.get("bill_date") else "",
-                "reqTime": doc.get("bill_date").strftime("%I:%M %p") if doc.get("bill_date") else "",
-                "userName": doc.get("created_by", ""),
-                "requestNo": doc.get("estimate_no", ""),
-                "doctor": doc.get("doctor", ""),
-                "doctorName": doc.get("doctor_id", ""),
+                "billTypeNo": doc.get("bill_type_no", ""),
+                "billName": doc.get("bill_type_no", ""),
+                "reqDate": (\
+                    (lambda dt: dt.astimezone(pytz.timezone("Asia/Kolkata")).strftime("%d-%m-%Y"))(
+                        doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
+                    )
+                ) if (
+                    doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
+                ) else "",
+                "reqTime": (
+                    (lambda dt: dt.astimezone(pytz.timezone("Asia/Kolkata")).strftime("%I:%M %p"))(
+                        doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
+                    )
+                ) if (
+                    doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
+                ) else "",
+                "status": doc.get("billing_status", "Pending"),
+                "doctor": doc.get("doctor_id", ""),
+                "outlet_code": doc.get("outlet_code", ""),
                 "medicines": medicines,
-                "total_amount": doc.get("total_amount", 0)
-            }
-            formatted_data.append(formatted_doc)
+                "total_amount": doc.get("total_amount", 0),
+            })
 
-        return Response({
-            "success": True,
-            "data": formatted_data
-        })
+        return Response({"success": True, "data": formatted_data})
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+def update_medicine_ward_request(request):
+    """
+    Patch individual medicines inside an existing ward request.
+    Supports:
+      - Soft-deleting a medicine (is_deleted: true)
+      - Changing qty / dosage with an audit trail in edit_history
+    """
+    import traceback
+    try:
+        data = request.data
+        bill_id = data.get("Bill_id")
+        updated_medicines = data.get("medicine_particulars", [])
+        changed_by = data.get("auth-user-id", "system")
+
+        if not bill_id:
+            return Response({"success": False, "error": "Bill_id is required"}, status=400)
+
+        try:
+            bill = PharmacyBilling.objects.get(Bill_id=bill_id)
+        except PharmacyBilling.DoesNotExist:
+            return Response({"success": False, "error": "Ward request not found"}, status=404)
+
+        if bill.billing_status in ["Billed", "Cancelled"]:
+            return Response(
+                {"success": False, "error": f"Cannot edit a {bill.billing_status} request"},
+                status=400,
+            )
+
+        existing = list(bill.medicine_particulars or [])
+
+        # Build a lookup map keyed by (item_id, batch_number)
+        existing_map = {}
+        for idx, itm in enumerate(existing):
+            if not isinstance(itm, dict):
+                continue
+            key = (str(itm.get("item_id", "")), str(itm.get("batch_number", "")))
+            existing_map[key] = (idx, itm)
+
+        changed_at = timezone.now().isoformat()
+
+        for incoming in updated_medicines:
+            if not isinstance(incoming, dict):
+                continue
+            key = (str(incoming.get("item_id", "")), str(incoming.get("batch_number", "")))
+            if key not in existing_map:
+                continue
+
+            idx, current = existing_map[key]
+            audit_entry = {}
+
+            # --- Handle soft delete ---
+            if incoming.get("is_deleted") and not current.get("is_deleted"):
+                current["is_deleted"] = True
+                audit_entry = {
+                    "changed_by": changed_by,
+                    "changed_at": changed_at,
+                    "action": "deleted",
+                }
+
+            else:
+                # --- Handle qty change ---
+                old_qty = current.get("quantity", current.get("qty", 0))
+                new_qty = incoming.get("quantity", old_qty)
+                # --- Handle dosage change ---
+                old_dosage = current.get("dosage", "")
+                new_dosage = incoming.get("dosage", old_dosage)
+
+                qty_changed = str(old_qty) != str(new_qty)
+                dosage_changed = old_dosage != new_dosage
+
+                if qty_changed or dosage_changed:
+                    audit_entry = {
+                        "changed_by": changed_by,
+                        "changed_at": changed_at,
+                        "action": "edited",
+                    }
+                    if qty_changed:
+                        audit_entry["old_qty"] = old_qty
+                        audit_entry["new_qty"] = new_qty
+                        current["quantity"] = new_qty
+                    if dosage_changed:
+                        audit_entry["old_dosage"] = old_dosage
+                        audit_entry["new_dosage"] = new_dosage
+                        current["dosage"] = new_dosage
+
+            if audit_entry:
+                eh = current.get("edit_history", [])
+                if not isinstance(eh, list):
+                    eh = []
+                eh.append(audit_entry)
+                current["edit_history"] = eh
+
+            existing[idx] = current
+
+        bill.medicine_particulars = existing
+
+        # Recalculate totals from non-deleted items
+        new_total = sum(
+            float(itm.get("quantity", itm.get("qty", 0))) * float(itm.get("price", 0))
+            for itm in existing
+            if isinstance(itm, dict) and not itm.get("is_deleted")
+        )
+        bill.total_amount = round(new_total, 2)
+        bill.net_amount = round(new_total, 2)
+        bill.lastmodified_by = changed_by
+        bill.save()
+
+        return Response({"success": True, "message": "Ward request updated successfully"})
 
     except Exception as e:
         print(traceback.format_exc())
@@ -701,18 +846,18 @@ def get_medicine_ward_requests(request):
 
 
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def save_medicine_ward_request(request):
     try:
         data = request.data
+        print(data)
         current_user = data.get('auth-user-id', "system")
         branch_code = data.get('auth-branch-code', 'system')
+        hospital_code = data.get('auth-hospital-code', 'system')
+        outlet_code = data.get('outlet_code', 'system')
         
-        request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
-        
-        # Extract medicines and totals (round to 2 digits)
         medicine_particulars = data.get("medicine_particulars", [])
-        total_amount = round(float(data.get("total_amount", 0)), 2)
+        total_amount = round(float(data.get("total_amount") or 0), 2)
         
         # --- Doctor & Patient Settings ---
         doctor_id = data.get("doctor_id", data.get("doctor", ""))
@@ -725,70 +870,51 @@ def save_medicine_ward_request(request):
                 lname = admission["patient_details"].get("lastName", "")
                 patient_name = f"{fname} {lname}".strip()
 
-        bill_type = data.get("bill_type", "")
-        bill_type_no = data.get("billTypeNo", "")
-        collection = mongo_db["hospital_oppharmacybill"]
-        
-        # Calculate next Bill_id
-        last_bill = collection.find_one({}, sort=[("Bill_id", -1)])
-        next_Bill_id = (int(last_bill.get("Bill_id", 0)) + 1) if last_bill and "Bill_id" in last_bill else 1
+        # Strip item names from particulars before saving as per user request
+        cleaned_particulars = []
+        for item in (medicine_particulars or []):
+            cleaned_item = {
+                "item_id": item.get("item_id"),
+                "quantity": item.get("quantity", item.get("qty", 0)),
+                "dosage": item.get("dosage", ""),
+                "noOfDays": item.get("noOfDays", ""),
+                "dose": item.get("dose", ""),
+                "doseunit": item.get("doseunit", ""),
+                "batch_number": item.get("batch_number", ""),
+                "instruction": item.get("instruction", "")
+            }
+            cleaned_particulars.append(cleaned_item)
 
-        # Clean up unnecessary fields from medicine_particulars for ward request
-        for med in medicine_particulars:
-            med.pop("edit_history", None)
-            med.pop("billType", None)
-            med.pop("billTypeNo", None)
-            med.pop("billTypeName", None)
-            med.pop("total_stock", None)
-            med.pop("price", None)
-            med.pop("expiry_date", None)
-            med.pop("itemName", None)
-            med.pop("doctor", None)
-            
-        from datetime import datetime
-        import pytz
-        ist = pytz.timezone("Asia/Kolkata")
-        now_ist = datetime.now(ist)
-        
-        # Create Ward Request document for PyMongo insert (To allow native BSON arrays)
-        bill_doc = {
-            "Bill_id": next_Bill_id,
-            "bill_no": "", 
-            "estimate_no": "",
-            "patient_name": patient_name,
-            "uhid": data.get("uhid"),
-            "inpatient_number": data.get("ipNumber"),
-            "bill_type": bill_type,
-            "bill_type_no": bill_type_no,
-            "doctor_id": data.get("doctor_id"),
-            "doctor": data.get("doctor"),
-            "room_no": data.get("wardName", ""),
-            "medicine_particulars": medicine_particulars, # Native List
-            "total_amount": total_amount,
-            "net_amount": total_amount,
-            "overall_discount_amount": 0.0,
-            "overall_discount_type": "percent",
-            "overall_discount_value": 0.0,
-            "billing_status": "Pending",
-            "billing_mode": "WARD REQUEST",
-            "is_ward_request": True,
-            "is_active": True,
-            "created_by": current_user,
-            "branch_code": branch_code,
-            "bill_date": now_ist
-            # Note: edit_history is deliberately removed for ward requests
-        }
-        
-        # Insert into hospital_oppharmacybill natively to avoid Djongo JSONField stringification
-        result = collection.insert_one(bill_doc)
+        # Create Bill via Django Model (Handles auto-increment and defaults)
+        bill = PharmacyBilling(
+            uhid=data.get("uhid"),
+            inpatient_number=data.get("ipNumber"),
+            bill_type=data.get("bill_type"),
+            bill_type_no=data.get("billTypeNo"),
+            doctor_id=data.get("doctor_id"),
+            medicine_particulars=cleaned_particulars,
+            total_amount=total_amount,
+            net_amount=total_amount,
+            billing_status="Pending",
+            billing_mode="WARD REQUEST",
+            payment_details={},
+            edit_history=[],
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            created_by=current_user,
+            is_ward_request=True
+        )
+        bill.save()
         
         return Response({
             "success": True,
             "message": "Medicine ward request saved successfully",
-            "id": str(result.inserted_id)
+            "id": bill.Bill_id
         })
         
     except Exception as e:
+        import traceback
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
 
