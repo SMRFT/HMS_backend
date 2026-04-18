@@ -172,7 +172,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',
 
 
-    # PHARMACY STOCK   
+    # PHARMACY STOCK 
+        '/_b_a_c_k_e_n_d/HMS/patient_details/': 'HMS-P-PPD',  
         '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
         '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
@@ -182,12 +183,18 @@ PAGE_MAPPING = {
          '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
          '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
          '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
+            '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
+          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
+          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-PIPA',
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
         # Central cah counter
 
         '/_b_a_c_k_e_n_d/HMS/cashcountershiftdetails/': 'HMS-P-PCCSD',
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-PGAS',
+        '/_b_a_c_k_e_n_d/HMS/cashcounter_outlet/': 'HMS-P-CCO',
+
 
 }
 
