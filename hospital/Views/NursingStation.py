@@ -221,7 +221,7 @@ import os
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
 DB_NAME = "HMS"
-COLLECTION_NAME = "hospital_Wards"
+COLLECTION_NAME = "hospital_nursingstation"
 
 client = MongoClient(MONGO_URI)
 mongo_db = client[DB_NAME]
@@ -255,6 +255,43 @@ def get_wards_list(request):
             "success": False,
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(["GET"])
+def get_location_mapping(request):
+    """
+    Returns a complete mapping of all rooms to their blocks, categories, and nursing stations.
+    Used for perfect bidirectional filtering on the frontend.
+    """
+    try:
+        rooms = list(mongo_db["hospital_room"].find(
+            {"is_active": True},
+            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+        ))
+        
+        # Pre-fetch ID mappings to avoid repeated lookups
+        blocks_map = {b["block_name"]: str(b["block_id"]) for b in mongo_db["hospital_block"].find({}, {"block_name": 1, "block_id": 1})}
+        cats_map = {c["category_name"]: str(c["room_category_id"]) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1})}
+        wards_map = {w["ward_name"]: str(w["_id"]) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1})}
+
+        enriched = []
+        for r in rooms:
+            b_name = r.get("block")
+            c_name = r.get("room_category")
+            s_name = r.get("nursing_station")
+            
+            enriched.append({
+                "room_no": r.get("room_number"),
+                "block": b_name,
+                "block_id": blocks_map.get(b_name),
+                "category": c_name,
+                "room_category_id": cats_map.get(c_name),
+                "nursing_station": s_name,
+                "nursing_station_id": wards_map.get(s_name)
+            })
+            
+        return Response({"success": True, "data": enriched})
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)
 
 
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -875,7 +912,7 @@ def save_medicine_ward_request(request):
         for item in (medicine_particulars or []):
             cleaned_item = {
                 "item_id": item.get("item_id"),
-                "quantity": item.get("quantity", item.get("qty", 0)),
+                "qty": item.get("quantity", item.get("qty", 0)),
                 "dosage": item.get("dosage", ""),
                 "noOfDays": item.get("noOfDays", ""),
                 "dose": item.get("dose", ""),
