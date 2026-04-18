@@ -32,13 +32,13 @@ def serialize_doc(doc):
 # ════════════════════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_packages(request):
     """
     Return all active packages.
     Optional query params:
-        ?department=<name>
-        ?search=<term>        (searches packageName, department)
+        ?outlet=<name>
+        ?search=<term>        (searches packageName, outlet)
         ?is_active=true|false  (default: true only)
     """
     client = None
@@ -48,23 +48,42 @@ def get_packages(request):
 
         query = {"is_active": True}
 
-        # Filter: department
-        department = request.query_params.get('department', '').strip()
-        if department:
-            query['department'] = {'$regex': department, '$options': 'i'}
+        # Filter: Outlet
+        outlet = request.query_params.get('outlet', '').strip()
+        if outlet:
+            query['outlet'] = {'$regex': outlet, '$options': 'i'}
 
         # Filter: free-text search
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
                 {'packageName': {'$regex': search, '$options': 'i'}},
-                {'department':  {'$regex': search, '$options': 'i'}},
+                {'outlet':  {'$regex': search, '$options': 'i'}},
             ]
 
         packages = [serialize_doc(p) for p in collection.find(query, {"_id": 1, "packageNo": 1,
-            "packageName": 1, "department": 1, "department_code": 1,
+            "packageName": 1, "outlet_code": 1,
             "totalPrice": 1, "is_active": 1, "items": 1,
             "created_date": 1, "lastmodified_date": 1})]
+
+        # ── Fetch all outlet_names in one query ─────────────────────────────
+        outlet_codes = {p.get("outlet_code") for p in packages if p.get("outlet_code")}
+        outlet_map = {}
+        if outlet_codes:
+            outlets_collection = db["hospital_outlets"]
+            outlet_map = {
+                o["outlet_code"]: o.get("outlet_name", "")
+                for o in outlets_collection.find(
+                    {"outlet_code": {"$in": list(outlet_codes)}},
+                    {"outlet_code": 1, "outlet_name": 1, "_id": 0}
+                )
+            }
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── Inject outlet_name into each package ────────────────────────────
+        for pkg in packages:
+            pkg["outlet_name"] = outlet_map.get(pkg.get("outlet_code"), "")
+        # ────────────────────────────────────────────────────────────────────
 
         return Response(packages, status=status.HTTP_200_OK)
 
@@ -77,7 +96,7 @@ def get_packages(request):
 
 
 @api_view(['POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def create_package(request):
     """
     Create a new package.
@@ -89,6 +108,8 @@ def create_package(request):
     try:
         client, db = get_hms_db()
         collection = db['hospital_package']
+        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
 
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         created_by = data.pop('auth-user-id', 'system')
@@ -116,14 +137,13 @@ def create_package(request):
             "packageNo":       next_no,
             "packageName":     data.get('packageName', '').strip(),
             "items":           sanitized_items,
-            "department":      data.get('department', '').strip(),
-            "department_code": data.get('department_code', '').strip(),
+            "outlet_code": data.get('outlet_code', '').strip(),
             "totalPrice":      str(data.get('totalPrice', '0.00')),
             "is_active":       bool(data.get('is_active', True)),
             "created_by":      created_by,
             "created_date":    datetime.utcnow(),
-            "lastmodified_by": created_by,
-            "lastmodified_date": datetime.utcnow(),
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
         }
 
         result = collection.insert_one(doc)
@@ -148,7 +168,7 @@ def create_package(request):
 # ════════════════════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_package(request, package_no):
     """Retrieve a single package by packageNo."""
     client = None
@@ -171,7 +191,7 @@ def get_package(request, package_no):
 
 
 @api_view(['PATCH'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def update_package(request, package_no):
     """
     Update an existing package by packageNo.
@@ -224,7 +244,7 @@ def update_package(request, package_no):
 
 
 @api_view(['PATCH'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def delete_package(request, package_no):
     """Soft-delete a package (sets is_active=False)."""
     client = None
@@ -358,28 +378,28 @@ def get_lab_items(request):
             client.close()
 
 @api_view(['GET'])
-def get_departments(request):
+def get_outlets(request):
    
     client = None
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        db = client['Global']
-        collection = db['backend_diagnostics_Departments']
+        db = client['HMS']
+        collection = db['hospital_outlets']
 
-        departments = []
+        outlets = []
         for doc in collection.find(
             {"is_active": True},
-            {"_id": 0, "department_code": 1, "department_name": 1}
+            {"_id": 0, "outlet_code": 1, "outlet_name": 1}
         ):
-            departments.append({
-                "department_code": doc.get("department_code", ""),
-                "department_name": doc.get("department_name", ""),
+            outlets.append({
+                "outlet_code": doc.get("outlet_code", ""),
+                "outlet_name": doc.get("outlet_name", ""),
             })
 
-        return Response({"departments": departments}, status=status.HTTP_200_OK)
+        return Response({"outlets": outlets}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        logger.exception("get_departments failed")
+        logger.exception("get_outlets failed")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     finally:
         if client:

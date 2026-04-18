@@ -9,7 +9,8 @@ https://docs.djangoproject.com/en/3.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/3.2/ref/settings/
 """
-
+import os
+import certifi
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,7 +26,7 @@ SECRET_KEY = 'django-insecure-4vrkav1_!gyd3g)8bw6+a=4#&4y9ake$s08601jt3=5q+fh%ns
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['test.shinova.in']
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -82,8 +83,7 @@ WHO_BASE_URL = "https://id.who.int/icd/release/11/2023-01/mms"
 # Database
 # https://docs.djangoproject.com/en/3.2/ref/settings/#databases
 
-import os
-import certifi
+
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',

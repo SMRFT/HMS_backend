@@ -37,11 +37,10 @@ class VendorSerializer(serializers.ModelSerializer):
 
 from .models import PharmacyStock
 class PharmacyStockSerializer(serializers.ModelSerializer):
-    stock_id = serializers.IntegerField(read_only=True)
-
     class Meta:
-        model  = PharmacyStock
+        model = PharmacyStock
         fields = "__all__"
+        read_only_fields = ["stock_id"]
 
 from rest_framework import serializers
 from .models import PharmacyBilling
@@ -60,83 +59,146 @@ class GRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Block, RoomCategory, Room
+from .models import Block, RoomCategory, Room, NursingStation, RoomKitItems, RoomServiceDescription
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
         model = Block
         fields = "__all__"
-        read_only_fields = ["block_id"]
-
+        read_only_fields = [
+            "block_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
 
 class RoomCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = RoomCategory
         fields = "__all__"
-        read_only_fields = ["room_category_id"]
+        read_only_fields = [
+            "room_category_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+
+class NursingStationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NursingStation
+        fields = "__all__"
+        read_only_fields = [
+            "ward_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+
+class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoomServiceDescription
+        fields = "__all__"
+        read_only_fields = [
+            "description_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
+
+class RoomKitItemsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoomKitItems
+        fields = "__all__"
+        read_only_fields = [
+            "kit_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
+        ]
 
 class RoomSerializer(serializers.ModelSerializer):
-    # These fields will be handled as JSON
-    services = serializers.JSONField(required=False, allow_null=True, default=list)
-    beds = serializers.JSONField(required=False, allow_null=True, default=list)
+ 
+    services  = serializers.JSONField(required=False, allow_null=True, default=list)
+    beds      = serializers.JSONField(required=False, allow_null=True, default=list)
     room_kits = serializers.JSONField(required=False, allow_null=True, default=list)
-
+ 
     class Meta:
-        model = Room
-        fields = [
-            'room_number',
-            'description',
-            'room_category',
-            'block',
-            'floor',
-            'phone_extension',
-            'nursing_station',
-            'capacity',
-            'admission_fee',
-            'room_advance',
-            'room_type',
-            'room_blocked',
-            'blocked_reason',
-            'is_active',
-            'services',
-            'beds',
-            'room_kits',
-            'created_by',
-            'created_date',
-            'lastmodified_by',
-            'lastmodified_date',
+        model  = Room
+        fields = "__all__"
+        read_only_fields = [
+            "kit_id",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "is_active"
         ]
-        read_only_fields = ['id', 'created_date', 'lastmodified_date']
 
+ 
+    # ── Field-level validators ────────────────────────────────────────────────
+ 
+    def validate_room_status(self, value):
+        allowed = {"Available", "Maintenance", "Blocked"}
+        if value and value not in allowed:
+            raise serializers.ValidationError(
+                f"room_status must be one of: {', '.join(sorted(allowed))}"
+            )
+        return value or "Available"
+ 
+    def validate_capacity(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError("Capacity must be at least 1.")
+        return value
+ 
     def validate_services(self, value):
-        """Validate services array"""
         if value is None:
             return []
         if not isinstance(value, list):
-            raise serializers.ValidationError("Services must be a list")
+            raise serializers.ValidationError("Services must be a list.")
         return value
-
+ 
     def validate_beds(self, value):
-        """Validate beds array"""
         if value is None:
             return []
         if not isinstance(value, list):
-            raise serializers.ValidationError("Beds must be a list")
+            raise serializers.ValidationError("Beds must be a list.")
+        for i, bed in enumerate(value):
+            if not isinstance(bed, dict):
+                raise serializers.ValidationError(f"Bed at index {i} must be an object.")
+            if not bed.get("bed_number", "").strip():
+                raise serializers.ValidationError(
+                    f"Bed at index {i} is missing 'bed_number'."
+                )
+            # Ensure bed_status is set correctly from blocked flag
+            blocked = bool(bed.get("blocked", False))
+            bed["blocked"] = blocked
+            bed["bed_status"] = "Blocked" if blocked else "Available"
+            if blocked and not bed.get("blocked_reason", "").strip():
+                raise serializers.ValidationError(
+                    f"Bed '{bed['bed_number']}' is blocked but has no blocking reason."
+                )
         return value
-
+ 
     def validate_room_kits(self, value):
-        """Validate room_kits array"""
         if value is None:
             return []
         if not isinstance(value, list):
-            raise serializers.ValidationError("Room kits must be a list")
+            raise serializers.ValidationError("Room kits must be a list.")
         return value
     
 
 from .models import Admission
-from .models import Admission, Patient
 
 class AdmissionSerializer(serializers.ModelSerializer):
-
     patient_details = serializers.SerializerMethodField()
 
     class Meta:
@@ -151,11 +213,10 @@ class AdmissionSerializer(serializers.ModelSerializer):
         return None 
 
 
-from .models import DischargeDetail
-class DischargeDetailSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+from .models import DischargeBilling
+class DischargeBillingSerializer(serializers.ModelSerializer):
     class Meta:
-        model = DischargeDetail
+        model = DischargeBilling
         fields = '__all__'
 
 
@@ -166,17 +227,6 @@ class PatientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Patient
         fields = '__all__'
-
-
-from .models import Doctor
-class DoctorSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(read_only=True)
-
-    class Meta:
-        model = Doctor
-        fields = '__all__'
-
-
 
 
 from .models import Summary
@@ -223,4 +273,129 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cashcountershiftdetails
         fields = '__all__'
+
+
+from .models import CustomerType
+class CustomerTypeSerializer(serializers.ModelSerializer):
+    patient_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomerType
+        fields = '__all__'
+        read_only_fields = ["type_id"]
+
+    def get_patient_count(self, obj):
+        from .models import Patient
+        return Patient.objects.filter(customer_type=obj.type_name).count()
+
+from .models import SurgerySchedule
+
+class SurgeryScheduleSerializer(serializers.ModelSerializer):
+    """
+    Used for READ responses (list, retrieve, after create/update).
+    All audit/system fields are read-only — never accepted from the client.
+    """
+
+    class Meta:
+        model  = SurgerySchedule
+        fields = "__all__"
+        read_only_fields = [
+            "reference_no",
+            "status",
+            "is_active",
+            "is_postponed",
+            "postponed_date",
+            "post_startTime",
+            "post_endTime",
+            "created_by",
+            "created_date",
+            "lastmodified_by",
+            "lastmodified_date",
+            "branch_code",
+            "hospital_code",
+        ]
+
+
+class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
+ 
+    class Meta:
+        model  = SurgerySchedule
+        fields = [
+            "ip_number",
+            "ot_id",
+            "surgery_name",
+            "surgeon_id",
+            "scheduled_date",
+            "startTime",
+            "endTime",
+            "surgery_type",
+            "is_emergency",
+            "anaesthetist_id",
+            "anesthesia_id",
+            "diagnosis",
+            "remarks",
+            "additional_anaesthetists",
+            "additional_doctors",
+            "is_pack_request_CSSD",
+            "is_pack_return_CSSD",
+        ]
+
+    # ── Field-level validation ─────────────────────────────────────────────
+    def validate_ip_number(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("IP Number is required.")
+        return value.strip()
+
+    def validate_ot_id(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Operation Theater is required.")
+        return value.strip()
+
+    def validate_surgery_name(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Surgery Name is required.")
+        return value.strip()
+
+    def validate_surgeon_id(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Scheduled Surgeon is required.")
+        return value.strip()
+
+    def validate_scheduled_date(self, value):
+        if not value:
+            raise serializers.ValidationError("Scheduled Date is required.")
+        return value
+
+    def validate_additional_anaesthetists(self, value):
+        """Accept dict or JSON string; always store as JSON string."""
+        import json
+        if isinstance(value, dict):
+            return json.dumps(value)
+        if isinstance(value, str):
+            try:
+                json.loads(value)   # validate it's parseable
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("Must be a valid JSON object string.")
+        return value
+
+    def validate_additional_doctors(self, value):
+        import json
+        if isinstance(value, dict):
+            return json.dumps(value)
+        if isinstance(value, str):
+            try:
+                json.loads(value)
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("Must be a valid JSON object string.")
+        return value
+
+    # ── Object-level validation ────────────────────────────────────────────
+    def validate(self, attrs):
+        start = attrs.get("startTime")
+        end   = attrs.get("endTime")
+        if start and end and end <= start:
+            raise serializers.ValidationError(
+                {"endTime": "End time must be after start time."}
+            )
+        return attrs
 

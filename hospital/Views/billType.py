@@ -42,21 +42,40 @@ def get_bill_types(request):
         client, db = get_hms_db()
         collection = db['hospital_billtype']
 
-        # Always exclude soft-deleted records
+        # ✅ Get auth codes
+        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+
+        # ✅ Base query (exclude soft deleted)
         query = {'deleted_at': {'$exists': False}}
+
+        # ✅ Apply ONLY hospital + branch filter
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # 🔍 Search filter
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
-                {'bill_name':      {'$regex': search, '$options': 'i'}},
-                {'billTypeNo':     {'$regex': search, '$options': 'i'}},
+                {'bill_name':  {'$regex': search, '$options': 'i'}},
+                {'billTypeNo': {'$regex': search, '$options': 'i'}},
             ]
 
-        records = [serialize_doc(r) for r in collection.find(query).sort('bill_name', 1)]
+        print("BILL TYPE QUERY:", query)  # debug
+
+        records = [
+            serialize_doc(r)
+            for r in collection.find(query).sort('bill_name', 1)
+        ]
+
         return Response({'records': records}, status=status.HTTP_200_OK)
 
     except Exception as e:
         logger.exception("get_bill_types failed")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     finally:
         if client:
             client.close()
@@ -106,9 +125,8 @@ def create_bill_type(request):
             'ward_request':      bool(data.get('ward_request', False)),
             'med_wise_discount': bool(data.get('med_wise_discount', False)),
             'med_dispatch':      bool(data.get('med_dispatch', False)),
-            'department_code':   str(data.get('department_code', '')).strip(),
+            'outlet_code':   str(data.get('outlet_code', '')).strip(),
             'billTypeNo':        bill_type_no,
-            'accounts_head':     str(data.get('accounts_head', '')).strip(),
             'created_at':        datetime.utcnow(),
             'created_by':        created_by,
             'branch_code':       branch_code,
@@ -148,8 +166,7 @@ def update_bill_type(request, bill_type_int):
             'bill_name', 'payment_mode',
             'centralCash', 'is_allowAdvance', 'is_active', 'is_allowDiscount',
             'sales_return', 'GST_export', 'IP_billType', 'ward_request',
-            'med_wise_discount', 'med_dispatch', 'department_code', 'accounts_head',
-            'billTypeNo',
+            'med_wise_discount', 'med_dispatch', 'outlet_code','billTypeNo',
         ]
 
         update_fields = {k: data[k] for k in allowed_keys if k in data}

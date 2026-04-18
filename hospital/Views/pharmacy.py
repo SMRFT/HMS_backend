@@ -788,9 +788,6 @@ def get_active_estimates(request):
 
 
 
-from ..models import PharmacyItem
-import json
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
@@ -827,17 +824,22 @@ def get_estimate_bills(request):
 
             for med in meds:
                 item_id = med.get("item_id")
-                batch_no = med.get("batch_number")
-
+                
+                # Fetch name since it is no longer stored in medicine_particulars array
                 item = PharmacyItem.objects.filter(item_id=item_id).first()
+                item_name = item.item_name if item else ""
 
                 particulars.append({
                     "item_id": item_id,
-                    "item_name": item.item_name if item else "",
-                    "batch_number": batch_no,
+                    "item_name": item_name,
+                    "batch_number": med.get("batch_number"),
                     "qty": med.get("qty"),
                     "Price": med.get("price"),
                 })
+
+            # Re-fetch patient name from Patient model
+            patient = Patient.objects.filter(uhid=bill.uhid).first()
+            patient_name = patient.patient_name if patient else ""
 
             data.append({
                 "created_date": bill.created_date,

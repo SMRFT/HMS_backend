@@ -232,9 +232,6 @@ def pharmacy_item_view(request, pk=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN — number generation helpers ONLY
 # ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# GRN — number generation helpers ONLY
-# ─────────────────────────────────────────────────────────────────────────────
 from ..models import GRN
 from ..serializers import GRNSerializer
 
@@ -392,9 +389,9 @@ def grn_view(request, pk=None):
             from ..models import PharmacyStock
 
             DEPT_CODE_MAP = {
-                "MEDICINE_PURCHASE":    "OP001",
-                "MEDICINE_PURCHASE_IP": "IP001",
-                "OPENING_STOCK_DRUG":   "DP001",
+                "MEDICINE_PURCHASE":    "OLET002",
+                "MEDICINE_PURCHASE_IP": "OLET001",
+                "OPENING_STOCK_DRUG":   "",
             }
             department_code = DEPT_CODE_MAP.get(saved.purchase_category, "PHARMACY")
             assigned_grn_no = saved.grn_number
@@ -438,7 +435,6 @@ def grn_view(request, pk=None):
                         sold_quantity            = 0,
                         transferred_out_quantity = 0,
                         stock_type               = "grn",
-                        stock_id                 = int(it.get("stock_id") or 0),
                         stock_ref_id             = 0,
                         grn_return_quantity      = 0,
                         grn_return_ref_id        = None,

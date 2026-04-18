@@ -1,22 +1,33 @@
 PAGE_MAPPING = {
-
-    r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-ADM',
+    r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
-    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_list/?(\?.*)?$': 'HMS-P-AIN',
-    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
-    r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-AIN',
+
+
+
+    
+    r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+    r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_master/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_master/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_order/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/update_diet_status/?(\?.*)?$': 'HMS-P-DO',
+    
+
+    
+
 
 
     # ==================== ADMISSION ====================
-    r'^/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/?(\?.*)?$': 'HMS-P-DLD',
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/admission/?(\?.*)?$': 'HMS-P-ADM',
-    r'^/_b_a_c_k_e_n_d/HMS/admission/[^/]+/?(\?.*)?$': 'HMS-P-ADD',
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient/[^/]+/?(\?.*)?$': 'HMS-P-OPP',
     r'^/_b_a_c_k_e_n_d/HMS/search-rooms/?(\?.*)?$': 'HMS-P-SRM',
 
     # ==================== PHARMACY STOCK ====================
@@ -35,23 +46,38 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/vendor/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendor/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
 
+
     # ==================== ROOMS ====================
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
     r'^/_b_a_c_k_e_n_d/HMS/block/[0-9]+/?(\?.*)?$': 'HMS-P-BLKD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room-category/?(\?.*)?$': 'HMS-P-RCAT',
-    r'^/_b_a_c_k_e_n_d/HMS/room-category/[0-9]+/?(\?.*)?$': 'HMS-P-RCATD',
+    r'^/_b_a_c_k_e_n_d/HMS/room-category/[^/]+/?(\?.*)?$': 'HMS-P-RCATD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room/?(\?.*)?$': 'HMS-P-RM',
-    r'^/_b_a_c_k_e_n_d/HMS/room/[0-9]+/?(\?.*)?$': 'HMS-P-RMD',
-    r'^/_b_a_c_k_e_n_d/HMS/bed/?(\?.*)?$': 'HMS-P-BED',
-    r'^/_b_a_c_k_e_n_d/HMS/bed/[0-9]+/?(\?.*)?$': 'HMS-P-BEDD',
-    r'^/_b_a_c_k_e_n_d/HMS/service/?(\?.*)?$': 'HMS-P-SRV',
-    r'^/_b_a_c_k_e_n_d/HMS/service/[0-9]+/?(\?.*)?$': 'HMS-P-SRVD',
+    r'^/_b_a_c_k_e_n_d/HMS/room/[^/]+/?(\?.*)?$': 'HMS-P-RMD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/nursingstation/?(\?.*)?$': 'HMS-P-NS',
+    r'^/_b_a_c_k_e_n_d/HMS/nursingstation/[^/]+/?(\?.*)?$': 'HMS-P-NSD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/roomservice-description/?(\?.*)?$': 'HMS-P-RSD',
+    r'^/_b_a_c_k_e_n_d/HMS/roomservice-description/[^/]+/?(\?.*)?$': 'HMS-P-RSDD',
+
+    r'^/_b_a_c_k_e_n_d/HMS/room-kititems/?(\?.*)?$': 'HMS-P-RKIT',
+    r'^/_b_a_c_k_e_n_d/HMS/room-kititems/[^/]+/?(\?.*)?$': 'HMS-P-RKITD',
+
     r'^/_b_a_c_k_e_n_d/HMS/room-enquiry/?(\?.*)?$': 'HMS-P-RENQ',
+    r'^/_b_a_c_k_e_n_d/HMS/update-room-cleaned/?(\?.*)?$': 'HMS-P-RCLN',
+    r'^/_b_a_c_k_e_n_d/HMS/book-room/?(\?.*)?$': 'HMS-P-BROOM',
+
+    r'^/_b_a_c_k_e_n_d/HMS/get_active_admission/?(\?.*)?$': 'HMS-P-GADM',
     r'^/_b_a_c_k_e_n_d/HMS/room-shifting/?(\?.*)?$': 'HMS-P-RSHFT',
+    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/.+/update/?(\?.*)?$': 'HMS-P-RSHFTD',
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
+    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
 
     # ==================== NURSING ====================
     r'^/_b_a_c_k_e_n_d/HMS/room-shiftings/?(\?.*)?$': 'HMS-P-RSHFT',
@@ -59,11 +85,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
+    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
     '/_b_a_c_k_e_n_d/HMS/investBilling/': 'HMS-P-IB',                 
@@ -73,54 +99,54 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/delete-bill/': 'HMS-P-IB',       
 
     #Investigation Reports (CT):
-    r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-P-ICT',                
-    '/_b_a_c_k_e_n_d/HMS/scan-reports/': 'HMS-P-ICT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan_reports/?(\?.*)?$': 'HMS-P-ICT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan_reports(?:/[^/]+)+/$': 'HHMS-P-ICT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-P-ICT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-P-ICT',  
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-P-ICT',  
+    r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-P-CT',                
+    '/_b_a_c_k_e_n_d/HMS/scan-reports/': 'HMS-P-CT',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan_reports/?(\?.*)?$': 'HMS-P-CT',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan_reports(?:/[^/]+)+/$': 'HHMS-P-CT',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-P-CTA',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-P-CTD',  
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-P-CTE',  
 
     #Investigation Reports (MRI):
-    '/_b_a_c_k_e_n_d/HMS/mri_investigations/': 'HMS-P-IMRI',                 
-    '/_b_a_c_k_e_n_d/HMS/mri-reports/': 'HMS-P-IMRI',                 
-    '/_b_a_c_k_e_n_d/HMS/mri_reports/': 'HMS-P-IMRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri_reports/(?:/[^/]+)+/$': 'HMS-P-IMRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/approve(?:/[^/]+)+/$': 'HMS-P-IMRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/delete(?:/[^/]+)+/$': 'HMS-P-IMRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/edit(?:/[^/]+)+/$': 'HMS-P-IMRI', 
+    '/_b_a_c_k_e_n_d/HMS/mri_investigations/': 'HMS-P-MRI',                 
+    '/_b_a_c_k_e_n_d/HMS/mri-reports/': 'HMS-P-MRI',                 
+    '/_b_a_c_k_e_n_d/HMS/mri_reports/': 'HMS-P-MRI',                 
+    r'^/_b_a_c_k_e_n_d/HMS/mri_reports/(?:/[^/]+)+/$': 'HMS-P-MRI',                 
+    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/approve(?:/[^/]+)+/$': 'HMS-P-MRIA',                 
+    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/delete(?:/[^/]+)+/$': 'HMS-P-MRID',                 
+    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/edit(?:/[^/]+)+/$': 'HMS-P-MRIE', 
 
     #Investigation Reports (USG):
-    '/_b_a_c_k_e_n_d/HMS/usg_investigations/': 'HMS-P-IUSG',               
-    '/_b_a_c_k_e_n_d/HMS/usg-reports/': 'HMS-P-IUSG',                 
-    '/_b_a_c_k_e_n_d/HMS/usg_reports/': 'HMS-P-IUSG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg_reports/(?:/[^/]+)+/$': 'HMS-P-IUSG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/approve(?:/[^/]+)+/$': 'HMS-P-IUSG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/delete(?:/[^/]+)+/$': 'HMS-P-IUSG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/edit(?:/[^/]+)+/$': 'HMS-P-IUSG',  
+    '/_b_a_c_k_e_n_d/HMS/usg_investigations/': 'HMS-P-USG',               
+    '/_b_a_c_k_e_n_d/HMS/usg-reports/': 'HMS-P-USG',                 
+    '/_b_a_c_k_e_n_d/HMS/usg_reports/': 'HMS-P-USG',                 
+    r'^/_b_a_c_k_e_n_d/HMS/usg_reports/(?:/[^/]+)+/$': 'HMS-P-USG',                 
+    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/approve(?:/[^/]+)+/$': 'HMS-P-USGA',                 
+    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/delete(?:/[^/]+)+/$': 'HMS-P-USGD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/edit(?:/[^/]+)+/$': 'HMS-P-USGE',  
 
     #Investigation Reports (X-Ray):
-    '/_b_a_c_k_e_n_d/HMS/x_ray_investigations/': 'HMS-P-IXRAY',              
-    '/_b_a_c_k_e_n_d/HMS/x_ray-reports/': 'HMS-P-IXRAY',                 
-    '/_b_a_c_k_e_n_d/HMS/x_ray_reports/': 'HMS-P-IXRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray_reports/(?:/[^/]+)+/$': 'HMS-P-IXRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/approve(?:/[^/]+)+/$': 'HMS-P-IXRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/delete(?:/[^/]+)+/$': 'HMS-P-IXRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/edit(?:/[^/]+)+/$': 'HMS-P-IXRAY',
+    '/_b_a_c_k_e_n_d/HMS/x_ray_investigations/': 'HMS-P-XRAY',              
+    '/_b_a_c_k_e_n_d/HMS/x_ray-reports/': 'HMS-P-XRAY',                 
+    '/_b_a_c_k_e_n_d/HMS/x_ray_reports/': 'HMS-P-XRAY',                 
+    r'^/_b_a_c_k_e_n_d/HMS/x_ray_reports/(?:/[^/]+)+/$': 'HMS-P-XRAY',                 
+    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/approve(?:/[^/]+)+/$': 'HMS-P-XRAYA',                 
+    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/delete(?:/[^/]+)+/$': 'HMS-P-XRAYD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/edit(?:/[^/]+)+/$': 'HMS-P-XRAYE',
 
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
     '/_b_a_c_k_e_n_d/HMS/summary-type/': 'HMS-P-SUM',                  
     '/_b_a_c_k_e_n_d/HMS/summaries/create/': 'HMS-P-SUM',                  
-    r'^/_b_a_c_k_e_n_d/HMS/approve-summary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
-    r'^/_b_a_c_k_e_n_d/HMS/delete-summary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/approve-summary(?:/[^/]+)+/$': 'HMS-P-SUMA',                  
+    r'^/_b_a_c_k_e_n_d/HMS/delete-summary(?:/[^/]+)+/$': 'HMS-P-SUMD',                  
     r'^/_b_a_c_k_e_n_d/HMS/get-editsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
-    r'^/_b_a_c_k_e_n_d/HMS/update-summary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/update-summary(?:/[^/]+)+/$': 'HMS-P-SUME',                  
     r'^/_b_a_c_k_e_n_d/HMS/patient-investigations(?:/[^/]+)+/$': 'HMS-P-SUM', 
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
 
     #Doctor Master: 
-    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-P-DRM',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
 
@@ -131,22 +157,22 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/packages_crud/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/packages/create/': 'HMS-P-IPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-IPKG',     
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-IPKGE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-IPKGD',     
 
     #Bill Type Master:
     '/_b_a_c_k_e_n_d/HMS/bill-types_get/': 'HMS-P-BT',                  
     '/_b_a_c_k_e_n_d/HMS/bill-types/create/': 'HMS-P-BT',                  
     '/_b_a_c_k_e_n_d/HMS/investigation-price/patch-bill-type/': 'HMS-P-BT',       
     r'^/_b_a_c_k_e_n_d/HMS/bill-types_get/?(\?.*)?$': 'HMS-P-BT',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-BT',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-BT',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-BTE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-BTD',                  
 
     #Investigation Prices:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices_get/': 'HMS-P-IP',                  
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/create/': 'HMS-P-IP',                        
-    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update(?:/[^/]+)+/$': 'HMS-P-IP',                  
-    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete(?:/[^/]+)+/$': 'HMS-P-IP',  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update(?:/[^/]+)+/$': 'HMS-P-IPE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete(?:/[^/]+)+/$': 'HMS-P-IPD',  
 
     #Report:
     r'^/_b_a_c_k_e_n_d/HMS/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',   
@@ -169,33 +195,72 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/velavan/invoices/': 'HMS-P-VIN',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VINR',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VINR',  
-    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINR',     
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve(?:/[^/]+)+/$': 'HMS-P-VINA',     
 
+    #OT Master:
+    '/_b_a_c_k_e_n_d/HMS/create_ot/': 'HMS-P-OTM',               
+    '/_b_a_c_k_e_n_d/HMS/list_ots/': 'HMS-P-OTM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/update_ot(?:/[^/]+)+/$': 'HMS-P-OTM',               
+    r'^/_b_a_c_k_e_n_d/HMS/delete_ot(?:/[^/]+)+/$': 'HMS-P-OTM',  
 
-    # PHARMACY STOCK 
-        '/_b_a_c_k_e_n_d/HMS/patient_details/': 'HMS-P-PPD',  
-        '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
-        '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
-        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
-        '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
-        '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
-        '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-PGLBU',
-         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
-         '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
-         '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
-          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
-            '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
-          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
-          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-PIPA',
-         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
+    #Anesthesia Master:
+    '/_b_a_c_k_e_n_d/HMS/create_anes/': 'HMS-P-AM',               
+    '/_b_a_c_k_e_n_d/HMS/list_anes/': 'HMS-P-AM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/update_anes(?:/[^/]+)+/$': 'HMS-P-AM',               
+    r'^/_b_a_c_k_e_n_d/HMS/delete_anes(?:/[^/]+)+/$': 'HMS-P-AM', 
 
-        # Central cah counter
+    #Surgery Schedule:
+    '/_b_a_c_k_e_n_d/HMS/create_surgery_schedule/': 'HMS-P-OTSS',               
+    r'^/_b_a_c_k_e_n_d/HMS/list_surgery_schedules/?(\?.*)?$': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/get_surgery_schedule/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/update_surgery_schedule/': 'HMS-P-OTSSE',                
+    '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
+    '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',                
+    r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
+    r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
+    r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
+    r'^/_b_a_c_k_e_n_d/HMS/get_ippharmacy_stock/?(\?.*)?$': 'HMS-P-OTMB',  
+    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',    
 
-        '/_b_a_c_k_e_n_d/HMS/cashcountershiftdetails/': 'HMS-P-PCCSD',
-        '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-PGAS',
-        '/_b_a_c_k_e_n_d/HMS/cashcounter_outlet/': 'HMS-P-CCO',
+    #Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/item-master/price-history/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/item-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/department-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/department-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/category-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/category-master/.*/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-type-master/': 'HMS-API-IT',
+    '/_b_a_c_k_e_n_d/HMS/group-type-master/.*/': 'HMS-API-IT',
 
+    # Stores GRN:
+    '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-grn/.*/': 'HMS-P-SGRN',
 
+    # Stores Intent:
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/create/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/update/.*/': 'HMS-API-SINTENT',
+    '/_b_a_c_k_e_n_d/HMS/stores-intent/delete/.*/': 'HMS-API-SINTENTA',
+    
+    # Stores Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-management/': 'HMS-API-SAM',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-management/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-management/.*/': 'HMS-API-SAM',
+
+    # Stores Assets Maintenance:
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/': 'HMS-API-SAMT',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-SAMT',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-SAMT',
+
+    #Recycle Assets Management:
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SRM',               
+    r'^/_b_a_c_k_e_n_d/HMS/recycle_asset/[^/]+/?(\?.*)?$': 'HMS-API-SRM',               
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/.*/': 'HMS-API-SRM',               
 }
 
 
