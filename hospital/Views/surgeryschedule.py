@@ -560,6 +560,9 @@ def get_ippharmacy_stock(request):
     try:
         # ✅ Dynamic department (code1)
         outlet_code = request.GET.get("outlet_code", "OLET001")
+        search = request.GET.get("search", "").strip()
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
 
         # ✅ Mongo connection (code2)
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -567,10 +570,12 @@ def get_ippharmacy_stock(request):
 
         pipeline = [
 
-            # ✅ Filter department
+            # ✅ Filter at DB level (VERY IMPORTANT)
             {
                 "$match": {
-                    "outlet_code": outlet_code
+                    "outlet_code": outlet_code,
+                    "branch_code": branch_code,
+                    "hospital_code": hospital_code
                 }
             },
 
@@ -585,13 +590,10 @@ def get_ippharmacy_stock(request):
             },
 
             {
-                "$unwind": {
-                    "path": "$item_details",
-                    "preserveNullAndEmptyArrays": False
-                }
+                "$unwind": "$item_details"
             },
 
-            # ✅ Only active items
+            # ✅ Filter active items
             {
                 "$match": {
                     "item_details.is_blocked": False,
@@ -599,7 +601,19 @@ def get_ippharmacy_stock(request):
                 }
             },
 
-            # ✅ Calculate stock + reorder level
+            # ✅ 🔥 SEARCH FILTER (DB LEVEL)
+            *( [
+                {
+                    "$match": {
+                        "item_details.item_name": {
+                            "$regex": f"^{search}",   # anchored = faster
+                            "$options": "i"
+                        }
+                    }
+                }
+            ] if search else [] ),
+
+            # ✅ Calculate stock
             {
                 "$addFields": {
                     "available_stock": {
@@ -628,8 +642,6 @@ def get_ippharmacy_stock(request):
                             {"$ifNull": ["$sales_return_quantity", 0]}
                         ]
                     },
-
-                    # ✅ Ensure reorder_level exists
                     "reorder_level": {
                         "$ifNull": ["$item_details.reorder_level", 0]
                     }
@@ -640,56 +652,28 @@ def get_ippharmacy_stock(request):
             {
                 "$addFields": {
                     "is_low_stock": {
-                        "$cond": {
-                            "if": {
-                                "$lte": ["$available_stock", "$reorder_level"]
-                            },
-                            "then": True,
-                            "else": False
-                        }
+                        "$lte": ["$available_stock", "$reorder_level"]
                     }
                 }
             },
 
-            # ✅ Final projection
+            # ✅ Return only needed fields (performance boost)
             {
                 "$project": {
                     "_id": 0,
-
-                    "org_id": 1,
-                    "branch_code": 1,
-                    "department_code": 1,
                     "item_id": 1,
                     "batch_number": 1,
                     "expiry_date": 1,
                     "total_stock": 1,
                     "mrp": 1,
-                    "grn_number": 1,
-
-                    "sold_quantity": 1,
-                    "transferred_out_quantity": 1,
-                    "sales_return_quantity": 1,
-
                     "available_stock": 1,
-                    "reorder_level": 1,
-                    "is_low_stock": 1,
-
-                    # ✅ Item details
-                    "item_name": "$item_details.item_name",
-                    "item_last_name": "$item_details.item_last_name",
-                    "category": "$item_details.category",
-                    "hsn_code": "$item_details.hsn",
-
-                    "high_risk": "$item_details.high_risk",
-                    "look_alike": "$item_details.look_alike",
-                    "sound_alike": "$item_details.sound_alike",
-
-                    # ✅ Tax
-                    "CGST_Percentage": 1,
-                    "SGST_Percentage": 1,
-                    "CGST_Amt": 1,
-                    "SGST_Amt": 1
+                    "item_name": "$item_details.item_name"
                 }
+            },
+
+            # ✅ LIMIT (VERY IMPORTANT for search)
+            {
+                "$limit": 20
             }
         ]
 
@@ -760,7 +744,6 @@ def save_ot_medicine_ward_request(request):
             cleaned.setdefault("dosage", "")
             cleaned.setdefault("noOfDays", "")
             cleaned.setdefault("qty", cleaned.get("quantity", 0))
-            cleaned.setdefault("quantity", cleaned.get("qty", 0))
 
             cleaned_medicines.append(cleaned)
 
@@ -807,7 +790,6 @@ def save_ot_medicine_ward_request(request):
             deleted_by="",
 
             round_off=0,
-            edit_history=[],
 
             cashier_id="",
         )
@@ -843,10 +825,7 @@ def get_ot_medicine_ward_requests(request):
 
         if not uhid:
             return Response(
-                {
-                    "success": False,
-                    "error": "UHID is required"
-                },
+                {"success": False, "error": "UHID is required"},
                 status=400
             )
 
@@ -858,13 +837,66 @@ def get_ot_medicine_ward_requests(request):
         if ip_number:
             query_params["inpatient_number"] = ip_number
 
+        # ✅ Two DB connections
+        hms_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = hms_client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        global_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db = global_client[os.getenv("GLOBAL_DB_NAME", "Global")]
+
         ward_req_collection = hms_db["hospital_pharmacybilling"]
 
         requests_data = list(
             ward_req_collection.find(query_params).sort("ward_request_date", -1)
         )
 
-        # Fetch bill type names
+        # ✅ -------------------------------
+        # STEP 1: Collect all item_ids
+        # ✅ -------------------------------
+        all_item_ids = set()
+
+        for doc in requests_data:
+            items = doc.get("medicine_particulars", [])
+
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except:
+                    items = []
+
+            for itm in items:
+                if isinstance(itm, str):
+                    try:
+                        itm = json.loads(itm)
+                    except:
+                        continue
+
+                if isinstance(itm, dict):
+                    item_id = itm.get("item_id")
+                    if item_id:
+                        all_item_ids.add(item_id)
+
+        # ✅ -------------------------------
+        # STEP 2: Fetch item names in one query
+        # ✅ -------------------------------
+        item_map = {}
+
+        if all_item_ids:
+            item_collection = hms_db["hospital_pharmacyitem"]
+
+            item_docs = item_collection.find(
+                {"item_id": {"$in": list(all_item_ids)}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            )
+
+            item_map = {
+                item["item_id"]: item.get("item_name", "")
+                for item in item_docs
+            }
+
+        # ✅ -------------------------------
+        # STEP 3: Fetch bill type names
+        # ✅ -------------------------------
         bill_types = {
             doc.get("bill_type")
             for doc in requests_data
@@ -884,36 +916,66 @@ def get_ot_medicine_ward_requests(request):
                 )
             }
 
+        # ✅ -------------------------------
+        # STEP 4: Fetch doctor names from Global DB
+        # ✅ -------------------------------
+        all_doctor_ids = {
+            str(doc.get("doctor_id"))
+            for doc in requests_data
+            if doc.get("doctor_id")
+        }
+
+        doctor_map = {}
+
+        if all_doctor_ids:
+            diagnostics_collection = global_db["backend_diagnostics_profile"]
+
+            doctor_docs = diagnostics_collection.find(
+                {"employeeId": {"$in": list(all_doctor_ids)}},
+                {"employeeId": 1, "employeeName": 1, "_id": 0}
+            )
+
+            doctor_map = {
+                doc["employeeId"]: doc.get("employeeName", "")
+                for doc in doctor_docs
+            }
+
+        # ✅ -------------------------------
+        # STEP 5: Format response
+        # ✅ -------------------------------
         formatted_data = []
         ist = pytz.timezone("Asia/Kolkata")
 
         for doc in requests_data:
             items = doc.get("medicine_particulars", [])
 
-            # If medicine_particulars is stored as string, convert to list
             if isinstance(items, str):
                 try:
                     items = json.loads(items)
-                except Exception:
+                except:
                     items = []
 
             medicines = []
 
             for itm in items:
-                # Handle if medicine item itself is a stringified JSON
                 if isinstance(itm, str):
                     try:
                         itm = json.loads(itm)
-                    except Exception:
+                    except:
                         continue
 
                 if not isinstance(itm, dict):
                     continue
 
+                item_id = itm.get("item_id")
+
                 medicines.append({
-                    "item_id": itm.get("item_id", ""),
-                    "name": itm.get("itemName", itm.get("item_name", "")),
-                    "quantity": itm.get("quantity", itm.get("qty", 1)),
+                    "item_id": item_id,
+                    "name": item_map.get(
+                        item_id,
+                        itm.get("itemName", itm.get("item_name", ""))
+                    ),
+                    "qty": itm.get("qty", 1),
                     "doctor": itm.get("doctor", ""),
                     "dosage": itm.get("dosage", ""),
                     "noOfDays": itm.get("noOfDays", ""),
@@ -927,9 +989,12 @@ def get_ot_medicine_ward_requests(request):
             bill_type = doc.get("bill_type")
             bill_name = billtype_map.get(bill_type, "")
 
-            # Convert Mongo UTC datetime to IST
-            ward_request_date = doc.get("ward_request_date")
+            # ✅ Doctor name lookup
+            doctor_id = str(doc.get("doctor_id", ""))
+            doctor_name = doctor_map.get(doctor_id, doc.get("doctor", ""))
 
+            # ✅ Date conversion
+            ward_request_date = doc.get("ward_request_date")
             req_date = ""
             req_time = ""
 
@@ -954,8 +1019,8 @@ def get_ot_medicine_ward_requests(request):
                 "reqTime": req_time,
                 "userName": doc.get("created_by", ""),
                 "requestNo": doc.get("estimate_no", ""),
-                "doctor": doc.get("doctor", ""),
-                "doctorName": doc.get("doctor_id", ""),
+                "doctorName": doctor_name,          # ✅ Resolved from Global DB
+                "doctor_id": doctor_id,
                 "wardName": doc.get("room_no", ""),
                 "billingStatus": doc.get("billing_status", ""),
                 "billingMode": doc.get("billing_mode", ""),
@@ -965,6 +1030,9 @@ def get_ot_medicine_ward_requests(request):
             }
 
             formatted_data.append(formatted_doc)
+
+        hms_client.close()
+        global_client.close()
 
         return Response(
             {
@@ -984,3 +1052,157 @@ def get_ot_medicine_ward_requests(request):
             },
             status=500
         )
+
+
+@api_view(["PUT"])
+@permission_classes([HasRoleAndDataPermission])
+def update_ot_medicine_ward_request(request):
+    """
+    Update OT medicine ward request using Bill_id (NOT ObjectId)
+    Only allowed when billing_status == "Pending"
+    """
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        data = request.data
+        current_user = data.get("auth-user-id", "system")
+
+        # ✅ GET bill_id instead of record_id
+        bill_id = data.get("bill_id")
+
+        if bill_id is None:
+            return Response(
+                {"success": False, "message": "Bill_id is required"},
+                status=400
+            )
+
+        try:
+            bill_id = int(bill_id)
+        except:
+            return Response(
+                {"success": False, "message": "Bill_id must be a number"},
+                status=400
+            )
+
+        collection = hms_db["hospital_pharmacybilling"]
+
+        # ✅ Fetch using Bill_id
+        existing = collection.find_one({"Bill_id": bill_id})
+
+        if not existing:
+            return Response(
+                {"success": False, "message": "Record not found"},
+                status=404
+            )
+
+        # ✅ Check status
+        if existing.get("billing_status", "Pending") != "Pending":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Cannot edit a record with status '{existing.get('billing_status')}'"
+                },
+                status=400
+            )
+
+        medicine_particulars = data.get("medicine_particulars", [])
+        total_amount = round(float(data.get("total_amount", 0)), 2)
+
+        # ✅ Clean medicines
+        STRIP_FIELDS = {
+            "edit_history", "billType", "billTypeNo", "billTypeName",
+            "total_stock", "price", "expiry_date",
+        }
+
+        cleaned_medicines = []
+        for med in medicine_particulars:
+            cleaned = {k: v for k, v in med.items() if k not in STRIP_FIELDS}
+            cleaned.setdefault("remark", "")
+            cleaned_medicines.append(cleaned)
+
+
+        update_fields = {
+            "medicine_particulars": cleaned_medicines,
+            "total_amount": total_amount,
+            "net_amount": total_amount,
+            "lastmodified_by": current_user,
+            "lastmodified_date": timezone.now(),
+        }
+
+        # ✅ Update doctor if present
+        if data.get("doctor_id"):
+            update_fields["doctor_id"] = data["doctor_id"]
+
+        # ✅ Update using Bill_id
+        collection.update_one(
+            {"Bill_id": bill_id},
+            {"$set": update_fields}
+        )
+
+        client.close()
+
+        return Response({
+            "success": True,
+            "message": "OT medicine ward request updated successfully",
+        })
+
+    except Exception as e:
+        return Response(
+            {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            },
+            status=500
+        )
+
+@api_view(["PUT"])
+@permission_classes([HasRoleAndDataPermission])
+def delete_ot_medicine_ward_request(request):
+    """
+    Soft-delete: sets is_ward_request = False
+    Only allowed when billing_status == "Pending"
+    """
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        data = request.data
+        current_user = data.get("auth-user-id", "system")
+
+        bill_id = data.get("bill_id")
+        if bill_id is None:
+            return Response({"success": False, "message": "bill_id is required"}, status=400)
+
+        try:
+            bill_id = int(bill_id)
+        except:
+            return Response({"success": False, "message": "bill_id must be a number"}, status=400)
+
+        collection = hms_db["hospital_pharmacybilling"]
+        existing = collection.find_one({"Bill_id": bill_id})
+
+        if not existing:
+            return Response({"success": False, "message": "Record not found"}, status=404)
+
+        if existing.get("billing_status", "Pending") != "Pending":
+            return Response(
+                {"success": False, "message": f"Cannot delete a record with status '{existing.get('billing_status')}'"},
+                status=400
+            )
+
+        collection.update_one(
+            {"Bill_id": bill_id},
+            {"$set": {
+                "is_ward_request": False,
+                "lastmodified_by": current_user,
+                "lastmodified_date": timezone.now(),
+            }}
+        )
+
+        client.close()
+        return Response({"success": True, "message": "Ward request deleted successfully"})
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e), "traceback": traceback.format_exc()}, status=500)
