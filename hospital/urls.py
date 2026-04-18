@@ -166,6 +166,7 @@ urlpatterns = [
 
 
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
     path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
     path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),

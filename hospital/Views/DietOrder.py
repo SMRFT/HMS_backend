@@ -308,6 +308,10 @@ def get_all_diet_orders(request):
 
         if status:
             query["status"] = status
+        
+        meal_time = request.GET.get("meal_time")
+        if meal_time:
+            query["meal_time"] = meal_time
 
         with MongoClient(MONGO_URI) as client:
             db = client["HMS"]
