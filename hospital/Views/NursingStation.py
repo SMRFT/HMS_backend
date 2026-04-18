@@ -305,6 +305,7 @@ from ..models import Admission
 from ..serializers import AdmissionSerializer
 
 @api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 def uhidadmissionstatus(request):
 
     uhid = request.GET.get("uhid")
@@ -320,11 +321,16 @@ def uhidadmissionstatus(request):
 
     admitted = False
 
-    if admission.get("is_admissionActive") and not admission.get("is_discharged"):
+    # ✅ Updated condition including is_admitted
+    if (
+        admission.get("is_admitted") is True and
+        admission.get("is_admissionActive") is True and
+        admission.get("is_discharged") is False
+    ):
         admitted = True
 
-    # Serialize using our custom function to handle objectids and datetimes
     formatted_data = serialize_doc(admission)
+
     if "_id" in formatted_data:
         formatted_data["id"] = formatted_data["_id"]
 
