@@ -790,7 +790,6 @@ def save_ot_medicine_ward_request(request):
             deleted_by="",
 
             round_off=0,
-            edit_history=[],
 
             cashier_id="",
         )

@@ -289,54 +289,52 @@ class PharmacyItem(AuditModel):
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
     
-# Correctly using djongo models below
-from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
+
     Bill_id = models.IntegerField(primary_key=True)
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
     uhid = models.CharField(max_length=50)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    bill_type = models.CharField(max_length=200, blank=True, null=True)  # Changed from IntegerField
-    bill_type_no = models.CharField(max_length=50, blank=True, null=True)
+    bill_type = models.IntegerField(max_length=200, blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
-    medicine_particulars = models.JSONField(default=list, blank=True)
+    room_no = models.CharField(max_length=20, blank=True, null=True)
+    medicine_particulars = models.JSONField(default=list)
     total_amount = models.FloatField(default=0)
-    overall_discount_type = models.CharField(max_length=10, default="percent")
+    overall_discount_type = models.CharField(
+        max_length=10,
+        default="percent"
+    )
     overall_discount_value = models.FloatField(default=0)
     overall_discount_amount = models.FloatField(default=0)
     net_amount = models.FloatField(default=0)
     billing_status = models.CharField(max_length=20)
     billing_mode = models.CharField(max_length=20)
-    payment_details = models.JSONField(default=dict, blank=True)
-    is_deleted = models.BooleanField(default=False)
+    payment_details = models.JSONField(null=True, blank=True)
+    Esimated_id=models.CharField(max_length=150)
+    Edit_reason = models.TextField(null=True, blank=True)
+    Edited_by =models.CharField(max_length=150)
+    is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
-    deleted_by = models.CharField(max_length=150, blank=True, null=True)
-    round_off = models.IntegerField(default=0)
-    edit_history = models.JSONField(default=list, blank=True)
+    deleted_by =models.CharField(max_length=150)
+    round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=50, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
-    is_active = models.BooleanField(default=True)
 
-
-
+    # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
         if not self.Bill_id:
             last = PharmacyBilling.objects.order_by('-Bill_id').first()
             self.Bill_id = (last.Bill_id + 1) if last else 1
-        
-        if self.is_ward_request and not self.ward_request_date:
-            self.ward_request_date = timezone.now()
 
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.Bill_id} - {self.uhid}"
-
+        return f"{self.billing_status} - {self.patient_name}"
 
 
         
@@ -961,10 +959,10 @@ class VelavanItems(AuditModel):
     hsn = models.CharField(max_length=20, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
-
+    class Meta:
+        db_table = 'hospital_velavan_items'
     def __str__(self):
         return self.itemName
-    
 
 class OTMaster(AuditModel):
     ot_id = models.CharField(max_length=20, primary_key=True)
