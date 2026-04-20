@@ -300,7 +300,7 @@ class PharmacyBilling(AuditModel):
     bill_date = models.DateTimeField(blank=True, null=True)
     uhid = models.CharField(max_length=50)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    bill_type = models.IntegerField(max_length=200, blank=True, null=True)
+    bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
     medicine_particulars = models.JSONField(default=list)
