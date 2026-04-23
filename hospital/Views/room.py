@@ -8,12 +8,11 @@ from pyauth.auth import HasRoleAndDataPermission
 from django.views.decorators.csrf import csrf_exempt
 import json
 from uuid import uuid4
-from django.utils import timezone
 from django.utils import timezone as tz
 from datetime import datetime
 import traceback
 
-from ..models import Block, RoomCategory, Room, Admission,Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
+from ..models import Block, RoomCategory, Room, Admission, Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
 from ..serializers import (
     BlockSerializer,
     RoomCategorySerializer,
@@ -1712,15 +1711,48 @@ def get_active_admission(request):
                 admission_date = str(dt)[:10]
                 admission_time = str(dt)[11:19]
 
+        from pymongo import MongoClient
+
+        # Mongo connection (adjust if already configured)
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        global_db = client['Global']
+        profile_collection = global_db['backend_diagnostics_profile']
+
+        # ── Admission date + time formatting ─────────────────────────────
+        admission_date = admission_time = ""
+        formatted_datetime = ""
+
+        dt = admission.admissionDateTime
+        if dt:
+            try:
+                admission_date = dt.strftime("%Y-%m-%d")
+                admission_time = dt.strftime("%H:%M:%S")
+                formatted_datetime = dt.strftime("%d-%m-%Y %I:%M %p")  # 👈 FINAL FORMAT
+            except Exception:
+                admission_date = str(dt)[:10]
+                admission_time = str(dt)[11:19]
+                formatted_datetime = f"{admission_date} {admission_time}"
+
+        # ── Doctor Name Mapping ──────────────────────────────────────────
+        doctor_id = str(admission.admittingDoctor or "").strip()
+        doctor_name = ""
+
+        if doctor_id:
+            doc = profile_collection.find_one({"employeeId": doctor_id})
+            if doc:
+                doctor_name = doc.get("employeeName", "")
+
         return Response({
             "success": True,
             "data": {
                 "uhid":             str(admission.uhid            or ""),
                 "ipNumber":         str(admission.ipNumber        or ""),
                 "ipserial_number":  str(admission.ipserial_number or ""),
-                "admissionDate":    admission_date,
-                "admissionTime":    admission_time,
-                "admittingDoctor":  str(admission.admittingDoctor  or ""),
+                "admittingDoctor":      doctor_id,
+                "admittingDoctorName":  doctor_name,
+                "admissionDate":        admission_date,
+                "admissionTime":        admission_time,
+                "admissionDateTime":    formatted_datetime,
                 "consultingDoctor": str(admission.consultingDoctor or ""),
                 "packageName":      str(admission.packageName      or ""),
                 "roomNo":           active_room.get("roomNo", ""),
