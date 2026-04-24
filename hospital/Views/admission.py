@@ -902,12 +902,31 @@ def admission_advance(request, ipNumber=None):
                 for p in payments:
                     if not isinstance(p, dict):
                         continue
-                    # Skip Edited entries — they are history, not displayed
+
+                    # Skip Edited entries
                     if p.get('status') == 'Edited':
                         continue
+
+                    # ✅ Extract payment mode
+                    payment_mode = ""
+                    if isinstance(p.get("payment_details"), dict):
+                        payment_mode = p["payment_details"].get("method", "")
+
+                    # ✅ Extract paid date
+                    paid_date = p.get("paid_datetime") or ""
+
+                    # Convert datetime → string (safe for UI)
+                    if isinstance(paid_date, datetime):
+                        paid_date = paid_date.isoformat()
+
                     p["ip_number"]    = adm.ipNumber
                     p["uhid"]         = adm.uhid
                     p["patient_name"] = patient_map.get(str(adm.uhid), "")
+
+                    # ✅ Add new fields
+                    p["payment_mode"] = payment_mode
+                    p["paid_date"]    = paid_date
+
                     advance_payments.append(p)
 
             # STEP 4: DATE FILTER
@@ -970,8 +989,15 @@ def admission_advance(request, ipNumber=None):
         def generate_bill_number(payments_list):
             today_dt = timezone.now()
             year, month = today_dt.year, today_dt.month
-            fy = f"{year}{(year + 1) % 100:02d}" if month >= 4 else f"{(year - 1)}{year % 100:02d}"
+
+            # ✅ Financial Year in 2-digit format (e.g., 26-27 → 2627)
+            if month >= 4:
+                fy = f"{year % 100:02d}{(year + 1) % 100:02d}"
+            else:
+                fy = f"{(year - 1) % 100:02d}{year % 100:02d}"
+
             existing_sequences = []
+
             for p in payments_list:
                 if isinstance(p, dict) and p.get('bill_no'):
                     try:
@@ -979,7 +1005,9 @@ def admission_advance(request, ipNumber=None):
                         existing_sequences.append(seq)
                     except:
                         pass
+
             next_seq = max(existing_sequences, default=0) + 1
+
             return f"{fy}/{next_seq:06d}"
 
         # =========================================================
@@ -998,7 +1026,6 @@ def admission_advance(request, ipNumber=None):
                 "advance_amount":  float(amount),
                 "ip_advance":      float(request.data.get('ip_advance', 0)),
                 "billing_advance": float(request.data.get('billing_advance', 0)),
-                "payment_mode":    request.data.get('payment_mode', 'Cash'),
                 "is_advanceActive": True,
                 "status":          "Pending",
                 "created_by":      employee_id,
@@ -1057,7 +1084,6 @@ def admission_advance(request, ipNumber=None):
             if not amount:
                 return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
 
-            # Find the original entry
             original = next(
                 (a for a in advance_payments if a.get('advance_id') == advance_id),
                 None
@@ -1065,12 +1091,14 @@ def admission_advance(request, ipNumber=None):
             if not original:
                 return JsonResponse({'success': False, 'error': 'Advance entry not found'}, status=404)
 
-            # Guard: only Pending entries can be edited
             if original.get('status') != 'Pending':
                 return JsonResponse(
                     {'success': False, 'error': f"Cannot edit — status is '{original.get('status')}'"},
                     status=400
                 )
+
+            # ✅ Preserve the original bill_no
+            original_bill_no = original.get('bill_no')
 
             # Step 1: Mark original as Edited
             original['is_advanceActive'] = False
@@ -1078,21 +1106,20 @@ def admission_advance(request, ipNumber=None):
             original['edited_by']        = employee_id
             original['edited_date']      = now_iso
 
-            # Step 2: Create new entry (successor)
+            # Step 2: Create new entry — reuse same bill_no, NO new generation
             new_entry = {
-                "advance_id":      f"ADV{len(advance_payments) + 1}",
-                "bill_no":         generate_bill_number(advance_payments),
-                "date":            request.data.get('date', now_iso[:10]),
-                "bill_date":       now_iso,
-                "advance_amount":  float(amount),
-                "ip_advance":      float(request.data.get('ip_advance', 0)),
-                "billing_advance": float(request.data.get('billing_advance', 0)),
-                "payment_mode":    request.data.get('payment_mode', 'Cash'),
+                "advance_id":       f"ADV{len(advance_payments) + 1}",
+                "bill_no":          original_bill_no,   # ✅ same bill_no as original
+                "date":             request.data.get('date', now_iso[:10]),
+                "bill_date":        now_iso,
+                "advance_amount":   float(amount),
+                "ip_advance":       float(request.data.get('ip_advance', 0)),
+                "billing_advance":  float(request.data.get('billing_advance', 0)),
                 "is_advanceActive": True,
-                "status":          "Pending",
-                "created_by":      employee_id,
-                "created_date":    now_iso,
-                "edited_from":     advance_id,   # reference to the original
+                "status":           "Pending",
+                "created_by":       employee_id,
+                "created_date":     now_iso,
+                "edited_from":      advance_id,
             }
 
             advance_payments.append(new_entry)
@@ -1106,6 +1133,7 @@ def admission_advance(request, ipNumber=None):
                     'new_entry': new_entry,
                 }
             })
+
 
     except Exception as e:
         traceback.print_exc()
