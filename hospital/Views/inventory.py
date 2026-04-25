@@ -89,6 +89,76 @@ def vendor_view(request, pk=None):
         vendor.save()
         return Response({"message": "Deleted successfully"}, status=200)
 
+    
+# CHEMICAL COMPOSITION VIEWS
+from ..models import ChemicalComposition
+from ..serializers import ChemicalCompositionSerializer
+ 
+@api_view(["GET", "POST", "PUT", "DELETE"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def chemical_composition_view(request, pk=None):
+ 
+    user_id = request.headers.get("auth-user-id", "system")
+ 
+    if request.method == "GET":
+        if pk:
+            try:
+                comp = ChemicalComposition.objects.get(composition_id=pk)
+                if not comp.is_active:
+                    return Response({"error": "Composition not found"}, status=404)
+            except ChemicalComposition.DoesNotExist:
+                return Response({"error": "Composition not found"}, status=404)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid Composition ID"}, status=400)
+            serializer = ChemicalCompositionSerializer(comp)
+            return Response(serializer.data)
+ 
+        all_comps = ChemicalComposition.objects.all().order_by("composition_id")
+        comps     = [c for c in all_comps if c.is_active]
+        serializer = ChemicalCompositionSerializer(comps, many=True)
+        return Response(serializer.data)
+ 
+    if request.method == "POST":
+        serializer = ChemicalCompositionSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+ 
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "Composition ID required"}, status=400)
+        try:
+            comp = ChemicalComposition.objects.get(composition_id=pk)
+            if not comp.is_active:
+                return Response({"error": "Composition not found"}, status=404)
+        except ChemicalComposition.DoesNotExist:
+            return Response({"error": "Composition not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Composition ID"}, status=400)
+        serializer = ChemicalCompositionSerializer(comp, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save(lastmodified_by=user_id)
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+ 
+    if request.method == "DELETE":
+        if not pk:
+            return Response({"error": "Composition ID required"}, status=400)
+        try:
+            comp = ChemicalComposition.objects.get(composition_id=pk)
+            if not comp.is_active:
+                return Response({"error": "Composition not found"}, status=404)
+        except ChemicalComposition.DoesNotExist:
+            return Response({"error": "Composition not found"}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid Composition ID"}, status=400)
+        comp.is_active       = False
+        comp.lastmodified_by = user_id
+        comp.save()
+        return Response({"message": "Deleted successfully"}, status=200)
+
 
 #PHARMACY CATEGORY VIEWS
 from ..models import PharmacyCategory
@@ -167,9 +237,9 @@ from ..serializers import PharmacyItemSerializer
 @api_view(["GET", "POST", "PUT", "DELETE"])
 @csrf_exempt
 def pharmacy_item_view(request, pk=None):
-
+ 
     user_id = request.headers.get("auth-user-id", "system")
-
+ 
     if request.method == "GET":
         if pk:
             try:
@@ -182,19 +252,21 @@ def pharmacy_item_view(request, pk=None):
                 return Response({"error": "Invalid Item ID"}, status=400)
             serializer = PharmacyItemSerializer(item)
             return Response(serializer.data)
-
+ 
         all_items = PharmacyItem.objects.all().order_by("item_id")
-        items = [i for i in all_items if i.is_active]
+        items     = [i for i in all_items if i.is_active]
         serializer = PharmacyItemSerializer(items, many=True)
         return Response(serializer.data)
-
+ 
     if request.method == "POST":
+        # hsn is now typed manually — no auto-generation.
+        # brand_name and chemical_composition accepted as-is from request.data.
         serializer = PharmacyItemSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(created_by=user_id, lastmodified_by=user_id)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
-
+ 
     if request.method == "PUT":
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
@@ -211,7 +283,7 @@ def pharmacy_item_view(request, pk=None):
             serializer.save(lastmodified_by=user_id)
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
-
+ 
     if request.method == "DELETE":
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
@@ -223,7 +295,7 @@ def pharmacy_item_view(request, pk=None):
             return Response({"error": "Item not found"}, status=404)
         except (ValueError, TypeError):
             return Response({"error": "Invalid Item ID"}, status=400)
-        item.is_active = False
+        item.is_active       = False
         item.lastmodified_by = user_id
         item.save()
         return Response({"message": "Deleted successfully"}, status=200)

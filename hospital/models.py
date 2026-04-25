@@ -177,6 +177,35 @@ class TempPatientRegistration(models.Model):
 
     def __str__(self):
         return f"Temp Reg: {self.session_id}"
+    
+class ChemicalComposition(AuditModel):
+    composition_id   = models.IntegerField(primary_key=True)
+    composition_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+ 
+    def save(self, *args, **kwargs):
+        if self.composition_id is None:
+            last = ChemicalComposition.objects.order_by('-composition_id').first()
+            self.composition_id = (last.composition_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.composition_name
+    
+class PharmacyCategory(AuditModel):
+    category_id = models.IntegerField(primary_key=True)
+    category_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.category_id is None:
+            last = PharmacyCategory.objects.order_by('-category_id').first()
+            self.category_id = (last.category_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.category_name
+    
 class Vendor(AuditModel):
     VENDOR_TYPE_CHOICES = [
         ('SUPPLIER', 'Supplier'),
@@ -229,19 +258,6 @@ class Vendor(AuditModel):
 
     def __str__(self):
         return f"{self.name} ({self.vendor_id})"
-class PharmacyCategory(AuditModel):
-    category_id = models.IntegerField(primary_key=True)
-    category_name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
-
-    def save(self, *args, **kwargs):
-        if self.category_id is None:
-            last = PharmacyCategory.objects.order_by('-category_id').first()
-            self.category_id = (last.category_id + 1) if last else 1
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.category_name
 
 class PharmacyItem(AuditModel):
     item_id = models.IntegerField(primary_key=True)
