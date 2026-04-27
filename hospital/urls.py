@@ -22,7 +22,7 @@ from .Views import (
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
-
+handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
@@ -332,5 +332,7 @@ urlpatterns = [
     path("get_all_diet_orders/", DietOrder.get_all_diet_orders, name="get_all_diet_orders"),
     path("get_diet_master/",    DietOrder.get_diet_master,    name="get_diet_master"),
     path("save_diet_master/",   DietOrder.save_diet_master,   name="save_diet_master"),
+    path("get_diet_extra_master/",  DietOrder.get_diet_extra_master,  name="get_diet_extra_master"),
+    path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
 
 ]

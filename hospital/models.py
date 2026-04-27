@@ -1132,6 +1132,10 @@ class PatientDietOrder(AuditModel):
     extra_items          = models.TextField(default="[]")            # JSON array [{item, qty}]
     attender_count       = models.IntegerField(default=0)
 
+    diet_price           = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    extra_items_price    = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    total_price          = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
     special_instructions = models.TextField(null=True, blank=True)
 
     status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Ordered")
@@ -1140,3 +1144,26 @@ class PatientDietOrder(AuditModel):
 
     def __str__(self):
         return f"{self.uhid} – {self.diet_type} ({self.meal_time}) [{self.status}]"
+
+
+class DietMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    diet_name        = models.CharField(max_length=100, unique=True)
+    morning_items    = models.TextField(null=True, blank=True)
+    afternoon_items  = models.TextField(null=True, blank=True)
+    evening_items    = models.TextField(null=True, blank=True)
+    dinner_items     = models.TextField(null=True, blank=True)
+    price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.diet_name
+
+class DietExtraMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    item_name        = models.CharField(max_length=100, unique=True)
+    price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.item_name} - {self.price}"
