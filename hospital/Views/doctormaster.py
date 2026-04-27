@@ -168,6 +168,8 @@ def doctor_schedule_upsert(request, employee_id):
     """Create or update doctor schedule by employeeId"""
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
         
         # Verify doctor exists in diagnostics profile
         global_db = client['Global']
@@ -190,7 +192,9 @@ def doctor_schedule_upsert(request, employee_id):
             "day_schedule": request.data.get("day_schedule", []),
             "time_schedule": request.data.get("time_schedule", []),
             "created_by": created_by,
-            "created_date":datetime.utcnow()
+            "created_date":datetime.utcnow(),
+            "hospital_code": hospital_code,
+            "branch_code": branch_code
         }
         
         # Check if schedule exists

@@ -101,9 +101,22 @@ def create_anes(request):
 @permission_classes([HasRoleAndDataPermission])
 def list_anes(request):
     try:
-        records = AnesMaster.objects.all().values()
+        # ✅ Get auth codes
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
 
-        # Filter active records in Python (safe for custom boolean fields)
+        # ✅ Apply DB-level filters
+        queryset = AnesMaster.objects.all()
+
+        if hospital_code:
+            queryset = queryset.filter(hospital_code=hospital_code)
+
+        if branch_code:
+            queryset = queryset.filter(branch_code=branch_code)
+
+        records = queryset.values()
+
+        # ✅ Keep your existing active filter
         filtered = [r for r in records if r.get("is_active") == True]
 
         return Response({

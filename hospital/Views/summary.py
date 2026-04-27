@@ -82,10 +82,20 @@ def get_summaries(request):
         summary_collection  = hms_db['hospital_summary']
         patient_collection  = hms_db['hospital_patient']
 
-        # Base filter
+        # ✅ Get auth codes
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        # ✅ Base filter
         query = {"is_active": True}
 
-        # From / To date filter
+        # ✅ Apply hospital + branch filter
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # ── Date filter ─────────────────────────
         from_date = request.query_params.get('fromDate', '').strip()
         to_date   = request.query_params.get('toDate', '').strip()
 
@@ -98,30 +108,39 @@ def get_summaries(request):
                 date_filter['$lte'] = to_dt.replace(hour=23, minute=59, second=59)
             query['date'] = date_filter
 
-        # Summary type filter
+        # ── Summary type filter ─────────────────
         summary_type = request.query_params.get('summaryType', '').strip()
         if summary_type:
             query['summaryType'] = {'$regex': summary_type, '$options': 'i'}
 
+        print("SUMMARY QUERY:", query)  # debug
+
         summaries = list(summary_collection.find(query, {"_id": 0}))
 
         if summaries:
-            # Collect unique UHIDs from all summaries
+            # ── Batch patient fetch ─────────────────
             uhids = list({s['uhid'] for s in summaries if s.get('uhid')})
 
-            # Fetch all matching patients in a single query
+            patient_query = {"uhid": {"$in": uhids}}
+
+            # ✅ Apply SAME hospital + branch filter to patient
+            if hospital_code:
+                patient_query["hospital_code"] = hospital_code
+            if branch_code:
+                patient_query["branch_code"] = branch_code
+
             patients = patient_collection.find(
-                {"uhid": {"$in": uhids}},
+                patient_query,
                 {"_id": 0, "uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1}
             )
 
-            # Build a lookup map: uhid → full name
+            # Map
             patient_map = {}
             for p in patients:
                 full_name = f"{p.get('salutation', '')} {p.get('firstName', '')} {p.get('lastName', '')}".strip()
                 patient_map[p['uhid']] = full_name
 
-            # Attach patient name to each summary
+            # Attach names
             for s in summaries:
                 uhid = s.get('uhid', '')
                 s['patient'] = patient_map.get(uhid, s.get('patient', ''))
