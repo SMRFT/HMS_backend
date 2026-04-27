@@ -10,6 +10,15 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
+
+from .models import ChemicalComposition
+ 
+class ChemicalCompositionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = ChemicalComposition
+        fields = "__all__"
+        read_only_fields = ["composition_id"]
+
         
 from .models import PharmacyCategory
 class PharmacyCategorySerializer(serializers.ModelSerializer):
