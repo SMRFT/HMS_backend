@@ -10,6 +10,15 @@ class ObjectIdField(serializers.Field):
             return ObjectId(data)
         except:
             return data
+
+from .models import ChemicalComposition
+ 
+class ChemicalCompositionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = ChemicalComposition
+        fields = "__all__"
+        read_only_fields = ["composition_id"]
+
         
 from .models import PharmacyCategory
 class PharmacyCategorySerializer(serializers.ModelSerializer):
@@ -42,6 +51,14 @@ class PharmacyStockSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["stock_id"]
 
+from rest_framework import serializers
+from .models import PharmacyBilling
+
+class PharmacyBillingSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = PharmacyBilling
+        fields = "__all__"
 
 from .models import GRN
 class GRNSerializer(serializers.ModelSerializer):
@@ -242,8 +259,6 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-
-
 from .models import Billing
 class BillingSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source='patient.firstName', read_only=True)
@@ -259,6 +274,15 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
     class Meta:
         model = InsuranceProvider
         fields = '__all__'
+
+
+from .models import Cashcountershiftdetails
+class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = Cashcountershiftdetails
+        fields = '__all__'
+
 
 from .models import CustomerType
 class CustomerTypeSerializer(serializers.ModelSerializer):
@@ -383,3 +407,4 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
                 {"endTime": "End time must be after start time."}
             )
         return attrs
+

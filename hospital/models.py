@@ -14,7 +14,7 @@ class AuditModel(models.Model):
     lastmodified_date = models.DateTimeField(auto_now = True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
     outlet_code = models.CharField(max_length=100, null=True, blank=True)
-    hospital_code = models.CharField(max_length=100, null=True, blank=True, default="SH001")
+    hospital_code = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         abstract = True
@@ -177,6 +177,35 @@ class TempPatientRegistration(models.Model):
 
     def __str__(self):
         return f"Temp Reg: {self.session_id}"
+    
+class ChemicalComposition(AuditModel):
+    composition_id   = models.IntegerField(primary_key=True)
+    composition_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+ 
+    def save(self, *args, **kwargs):
+        if self.composition_id is None:
+            last = ChemicalComposition.objects.order_by('-composition_id').first()
+            self.composition_id = (last.composition_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.composition_name
+    
+class PharmacyCategory(AuditModel):
+    category_id = models.IntegerField(primary_key=True)
+    category_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.category_id is None:
+            last = PharmacyCategory.objects.order_by('-category_id').first()
+            self.category_id = (last.category_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.category_name
+    
 class Vendor(AuditModel):
     VENDOR_TYPE_CHOICES = [
         ('SUPPLIER', 'Supplier'),
@@ -229,19 +258,6 @@ class Vendor(AuditModel):
 
     def __str__(self):
         return f"{self.name} ({self.vendor_id})"
-class PharmacyCategory(AuditModel):
-    category_id = models.IntegerField(primary_key=True)
-    category_name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
-
-    def save(self, *args, **kwargs):
-        if self.category_id is None:
-            last = PharmacyCategory.objects.order_by('-category_id').first()
-            self.category_id = (last.category_id + 1) if last else 1
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.category_name
 
 class PharmacyItem(AuditModel):
     item_id = models.IntegerField(primary_key=True)
@@ -289,54 +305,52 @@ class PharmacyItem(AuditModel):
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
     
-# Correctly using djongo models below
-from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
+
     Bill_id = models.IntegerField(primary_key=True)
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
     uhid = models.CharField(max_length=50)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    bill_type = models.CharField(max_length=200, blank=True, null=True)  # Changed from IntegerField
-    bill_type_no = models.CharField(max_length=50, blank=True, null=True)
+    bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
-    medicine_particulars = models.JSONField(default=list, blank=True)
+    room_no = models.CharField(max_length=20, blank=True, null=True)
+    medicine_particulars = models.JSONField(default=list)
     total_amount = models.FloatField(default=0)
-    overall_discount_type = models.CharField(max_length=10, default="percent")
+    overall_discount_type = models.CharField(
+        max_length=10,
+        default="percent"
+    )
     overall_discount_value = models.FloatField(default=0)
     overall_discount_amount = models.FloatField(default=0)
     net_amount = models.FloatField(default=0)
     billing_status = models.CharField(max_length=20)
     billing_mode = models.CharField(max_length=20)
-    payment_details = models.JSONField(default=dict, blank=True)
-    is_deleted = models.BooleanField(default=False)
+    payment_details = models.JSONField(null=True, blank=True)
+    Esimated_id=models.CharField(max_length=150)
+    Edit_reason = models.TextField(null=True, blank=True)
+    Edited_by =models.CharField(max_length=150)
+    is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
-    deleted_by = models.CharField(max_length=150, blank=True, null=True)
-    round_off = models.IntegerField(default=0)
-    edit_history = models.JSONField(default=list, blank=True)
+    deleted_by =models.CharField(max_length=150)
+    round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=50, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
-    is_active = models.BooleanField(default=True)
 
-
-
+    # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
         if not self.Bill_id:
             last = PharmacyBilling.objects.order_by('-Bill_id').first()
             self.Bill_id = (last.Bill_id + 1) if last else 1
-        
-        if self.is_ward_request and not self.ward_request_date:
-            self.ward_request_date = timezone.now()
 
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.Bill_id} - {self.uhid}"
-
+        return f"{self.billing_status} - {self.patient_name}"
 
 
         
@@ -603,7 +617,6 @@ class Admission(AuditModel):
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
 
-    is_advanceActive    = models.BooleanField(default=False)
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
@@ -961,48 +974,36 @@ class VelavanItems(AuditModel):
     hsn = models.CharField(max_length=20, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
-
+    class Meta:
+        db_table = 'hospital_velavan_items'
     def __str__(self):
         return self.itemName
+
+
+
+from django.db import models
+
+class Cashcountershiftdetails(AuditModel):
+
+    shiftno = models.CharField(primary_key=True,max_length=100000)
+
+    CashierID      = models.CharField(max_length=100)
+    CashCounter    = models.CharField(max_length=100)
+
+    OpeningBalance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    ClosingBalance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    ShiftStatus    = models.CharField(max_length=50, default="active")
+
+    StartingTime   = models.DateTimeField()
+    closingTime    = models.DateTimeField(null=True, blank=True)
+
     
 
-class OTMaster(AuditModel):
-    ot_id = models.CharField(max_length=20, primary_key=True)
-    ot_name = models.CharField(max_length=100)
-    availability = models.CharField(
-        max_length=20,
-        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
-        default="Available"
-    )
-    capacity = models.CharField(max_length=10)
-    is_active = models.BooleanField(default=True)
+    is_active      = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.ot_id} - {self.ot_name}"
-
-
-class AnesMaster(AuditModel):
-    anesthesia_id = models.CharField(max_length=20, primary_key=True)
-    anesthesia_name = models.CharField(max_length=100)
-    type_of_anesthesia = models.CharField(
-        max_length=30,
-        choices=[
-            ("General",  "General"),
-            ("Regional", "Regional"),
-            ("Local",    "Local"),
-            ("Sedation", "Sedation"),
-            ("Combined", "Combined"),
-        ],
-        default="General",
-    )
-    admin_guide = models.TextField(blank=True, default="")
-    description = models.TextField(blank=True, default="")
-    is_active = models.BooleanField(default=True)
- 
-    def __str__(self):
-        return f"{self.anesthesia_id} - {self.anesthesia_name}"
-
-
+        return f"{self.CashierID} - {self.CashCounter}"
 class SurgerySchedule(AuditModel):
     STATUS_CHOICES = [
         ("Scheduled",  "Scheduled"),
@@ -1047,8 +1048,59 @@ class SurgerySchedule(AuditModel):
  
     class Meta:
         ordering = ["-scheduled_date"]
- 
 
+
+
+class OTMaster(AuditModel):
+    ot_id = models.CharField(max_length=20, primary_key=True)
+    ot_name = models.CharField(max_length=100)
+    availability = models.CharField(
+        max_length=20,
+        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
+        default="Available"
+    )
+    capacity = models.CharField(max_length=10)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.ot_id} - {self.ot_name}"
+
+
+class AnesMaster(AuditModel):
+    anesthesia_id = models.CharField(max_length=20, primary_key=True)
+    anesthesia_name = models.CharField(max_length=100)
+    type_of_anesthesia = models.CharField(
+        max_length=30,
+        choices=[
+            ("General",  "General"),
+            ("Regional", "Regional"),
+            ("Local",    "Local"),
+            ("Sedation", "Sedation"),
+            ("Combined", "Combined"),
+        ],
+        default="General",
+    )
+    admin_guide = models.TextField(blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+ 
+    def __str__(self):
+        return f"{self.anesthesia_id} - {self.anesthesia_name}"
+    
+
+
+class DietMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    diet_name        = models.CharField(max_length=100, unique=True)
+    morning_items    = models.TextField(null=True, blank=True)
+    afternoon_items  = models.TextField(null=True, blank=True)
+    evening_items    = models.TextField(null=True, blank=True)
+    dinner_items     = models.TextField(null=True, blank=True)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.diet_name
+    
 
 class PatientDietOrder(AuditModel):
     STATUS_CHOICES = [

@@ -1040,15 +1040,6 @@ def billing_report_view(request):
 
         if bill_type_ids:
             bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
-
-            # ✅ Apply auth filters
-            if hospital_code:
-                bt_query["hospital_code"] = hospital_code
-            if branch_code:
-                bt_query["branch_code"] = branch_code
-            if outlet_code:
-                bt_query["outlet_code"] = outlet_code
-
             bt_docs = bill_type_collection.find(
                 bt_query,
                 {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
