@@ -10,15 +10,22 @@ PAGE_MAPPING = {
 
     
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+    # ==================== WARD REQUEST ====================
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-WR',
+
+
+    # ==================== DIET ====================
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_master/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/save_diet_master/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/save_diet_order/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/update_diet_status/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/update_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
     
 
     
