@@ -50,6 +50,10 @@ urlpatterns = [
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+
+    # Stock Transfer URLs
+    path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
+    path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
         
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),

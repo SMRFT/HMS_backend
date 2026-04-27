@@ -226,20 +226,10 @@ class Vendor(AuditModel):
     contact_person = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(max_length=255, null=True, blank=True)
-    url = models.URLField(max_length=255, null=True, blank=True)
     
     # Additional Fields
-    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
     gstin = models.CharField(max_length=20, null=True, blank=True)
-    payment = models.CharField(max_length=50, null=True, blank=True)
-    terms = models.TextField(null=True, blank=True)
-    credit_period = models.CharField(max_length=20, null=True, blank=True)
-    export_data_code = models.CharField(max_length=100, null=True, blank=True)
-    tds_percent = models.CharField(max_length=10, null=True, blank=True)
-    igst_supplier = models.BooleanField(default=False)
-    blacklisted_supplier = models.BooleanField(default=False)
-    account_on_hold = models.BooleanField(default=False)
-    reason_for_holding = models.TextField(null=True, blank=True)
+    payment_terms = models.CharField(max_length=50, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -264,6 +254,8 @@ class PharmacyItem(AuditModel):
     item_name = models.CharField(max_length=200)
     item_last_name = models.CharField(max_length=200, blank=True)
     category = models.CharField(max_length=50)
+    brand_name = models.CharField(max_length=100, blank=True)
+    chemical_composition = models.CharField(max_length=255, blank=True)
     hsn = models.CharField(max_length=50, blank=True)
     high_risk = models.BooleanField(default=False)
     look_alike = models.BooleanField(default=False)
@@ -304,6 +296,25 @@ class PharmacyItem(AuditModel):
 
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
+    
+class StockTransfer(AuditModel):
+    # ── Ref number ────────────────────────────────────────────────────────────
+    transfer_ref_number = models.CharField(max_length=30,unique=True)
+ 
+    # ── Outlets ───────────────────────────────────────────────────────────────
+    from_outlet = models.CharField(max_length=100)
+    to_outlet   = models.CharField(max_length=100)
+ 
+    # ── Items (JSON array) ────────────────────────────────────────────────────
+    items = models.JSONField(default=list)
+ 
+    # ── Status ────────────────────────────────────────────────────────────────
+    IS_VERIFIED_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Approved", "Approved"),
+    ]
+    is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
+
     
 # Correctly using djongo models below
 from django.utils import timezone

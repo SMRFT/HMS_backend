@@ -36,6 +36,14 @@ class PharmacyItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["item_id"]
 
 
+from .models import StockTransfer
+class StockTransferSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = StockTransfer
+        fields = "__all__"
+        read_only_fields = ["transfer_id"]
+
+
 from .models import Vendor
 class VendorSerializer(serializers.ModelSerializer):
     class Meta:

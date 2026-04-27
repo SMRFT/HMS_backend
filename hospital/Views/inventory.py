@@ -7,6 +7,7 @@ from django.utils.timezone import now
 from rest_framework.parsers import MultiPartParser, FormParser
 from bson import Decimal128, ObjectId
 from datetime import datetime
+from django.utils import timezone
 import traceback
 import logging
 import json
@@ -26,138 +27,270 @@ from ..models import Vendor
 from ..serializers import VendorSerializer
 
 @api_view(["GET", "POST", "PUT", "DELETE"])
-@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def vendor_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        "system"
+    )
+
+    # ── GET ─────────────────────────────────────────────
     if request.method == "GET":
+
         if pk:
             try:
-                vendor = Vendor.objects.get(vendor_id=pk)
+                vendor = Vendor.objects.get(
+                    vendor_id=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+
                 if not vendor.is_active:
                     return Response({"error": "Vendor not found"}, status=404)
+
             except Vendor.DoesNotExist:
                 return Response({"error": "Vendor not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Vendor ID"}, status=400)
+
             serializer = VendorSerializer(vendor)
             return Response(serializer.data)
 
-        all_vendors = Vendor.objects.all().order_by("vendor_id")
+        # list
+        all_vendors = Vendor.objects.filter(
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        ).order_by("vendor_id")
+
         vendors = [v for v in all_vendors if v.is_active]
+
         serializer = VendorSerializer(vendors, many=True)
         return Response(serializer.data)
 
+    # ── POST ─────────────────────────────────────────────
     if request.method == "POST":
-        serializer = VendorSerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = VendorSerializer(data=data)
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
 
+    # ── PUT ─────────────────────────────────────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Vendor ID required"}, status=400)
+
         try:
-            vendor = Vendor.objects.get(vendor_id=pk)
+            vendor = Vendor.objects.get(
+                vendor_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not vendor.is_active:
                 return Response({"error": "Vendor not found"}, status=404)
+
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Vendor ID"}, status=400)
+
         serializer = VendorSerializer(vendor, data=request.data, partial=True)
+
         if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
+            serializer.save(
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now()
+            )
             return Response(serializer.data)
+
         return Response(serializer.errors, status=400)
 
+    # ── DELETE (SOFT DELETE) ─────────────────────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Vendor ID required"}, status=400)
+
         try:
-            vendor = Vendor.objects.get(vendor_id=pk)
+            vendor = Vendor.objects.get(
+                vendor_id=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+
             if not vendor.is_active:
                 return Response({"error": "Vendor not found"}, status=404)
+
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Vendor ID"}, status=400)
+
         vendor.is_active = False
-        vendor.lastmodified_by = user_id
+        vendor.lastmodified_by = employee_id
+        vendor.lastmodified_date = timezone.now()
         vendor.save()
+
         return Response({"message": "Deleted successfully"}, status=200)
 
     
 # CHEMICAL COMPOSITION VIEWS
 from ..models import ChemicalComposition
 from ..serializers import ChemicalCompositionSerializer
- 
+
 @api_view(["GET", "POST", "PUT", "DELETE"])
 @permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
 def chemical_composition_view(request, pk=None):
- 
-    user_id = request.headers.get("auth-user-id", "system")
- 
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        None   # ⚠️ IMPORTANT
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        None
+    )
+
+    # ─────────────── GET ───────────────
     if request.method == "GET":
-        if pk:
-            try:
+
+        try:
+            if pk:
                 comp = ChemicalComposition.objects.get(composition_id=pk)
-                if not comp.is_active:
+
+                if (
+                    not comp.is_active or
+                    getattr(comp, "hospital_code", None) != hospital_code or
+                    getattr(comp, "branch_code", None) != branch_code
+                ):
                     return Response({"error": "Composition not found"}, status=404)
-            except ChemicalComposition.DoesNotExist:
-                return Response({"error": "Composition not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Composition ID"}, status=400)
-            serializer = ChemicalCompositionSerializer(comp)
+
+                serializer = ChemicalCompositionSerializer(comp)
+                return Response(serializer.data)
+
+            # SAFE FETCH (Djongo safe)
+            all_comps = ChemicalComposition.objects.all()
+
+            comps = [
+                c for c in all_comps
+                if c.is_active and
+                getattr(c, "hospital_code", None) == hospital_code and
+                getattr(c, "branch_code", None) == branch_code
+            ]
+
+            serializer = ChemicalCompositionSerializer(comps, many=True)
             return Response(serializer.data)
- 
-        all_comps = ChemicalComposition.objects.all().order_by("composition_id")
-        comps     = [c for c in all_comps if c.is_active]
-        serializer = ChemicalCompositionSerializer(comps, many=True)
-        return Response(serializer.data)
- 
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+    # ─────────────── POST ───────────────
     if request.method == "POST":
-        serializer = ChemicalCompositionSerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = ChemicalCompositionSerializer(data=data)
+
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
- 
+
+    # ─────────────── PUT ───────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Composition ID required"}, status=400)
+
         try:
             comp = ChemicalComposition.objects.get(composition_id=pk)
-            if not comp.is_active:
+
+            if (
+                not comp.is_active or
+                getattr(comp, "hospital_code", None) != hospital_code or
+                getattr(comp, "branch_code", None) != branch_code
+            ):
                 return Response({"error": "Composition not found"}, status=404)
+
+            serializer = ChemicalCompositionSerializer(
+                comp,
+                data=request.data,
+                partial=True
+            )
+
+            if serializer.is_valid():
+                serializer.save(
+                    lastmodified_by=employee_id,
+                    lastmodified_date=timezone.now()
+                )
+                return Response(serializer.data)
+
+            return Response(serializer.errors, status=400)
+
         except ChemicalComposition.DoesNotExist:
             return Response({"error": "Composition not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Composition ID"}, status=400)
-        serializer = ChemicalCompositionSerializer(comp, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
- 
+
+    # ─────────────── DELETE ───────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Composition ID required"}, status=400)
+
         try:
             comp = ChemicalComposition.objects.get(composition_id=pk)
-            if not comp.is_active:
+
+            if (
+                not comp.is_active or
+                getattr(comp, "hospital_code", None) != hospital_code or
+                getattr(comp, "branch_code", None) != branch_code
+            ):
                 return Response({"error": "Composition not found"}, status=404)
+
+            comp.is_active = False
+            comp.lastmodified_by = employee_id
+            comp.lastmodified_date = timezone.now()
+            comp.save()
+
+            return Response({"message": "Deleted successfully"}, status=200)
+
         except ChemicalComposition.DoesNotExist:
             return Response({"error": "Composition not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Composition ID"}, status=400)
-        comp.is_active       = False
-        comp.lastmodified_by = user_id
-        comp.save()
-        return Response({"message": "Deleted successfully"}, status=200)
 
 
 #PHARMACY CATEGORY VIEWS
@@ -166,68 +299,138 @@ from ..serializers import PharmacyCategorySerializer
 
 @api_view(["GET", "POST", "PUT", "DELETE"])
 @permission_classes([HasRoleAndDataPermission])
-@csrf_exempt
 def pharmacycategory_view(request, pk=None):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
 
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        None   # ⚠️ use None instead of "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        None
+    )
+
+    # ───────────────── GET ─────────────────
     if request.method == "GET":
-        if pk:
-            try:
+
+        try:
+            if pk:
                 category = PharmacyCategory.objects.get(category_id=pk)
-                if not category.is_active:
+
+                # Djongo-safe filtering
+                if (
+                    not category.is_active or
+                    getattr(category, "hospital_code", None) != hospital_code or
+                    getattr(category, "branch_code", None) != branch_code
+                ):
                     return Response({"error": "Category not found"}, status=404)
-            except PharmacyCategory.DoesNotExist:
-                return Response({"error": "Category not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Category ID"}, status=400)
-            serializer = PharmacyCategorySerializer(category)
+
+                serializer = PharmacyCategorySerializer(category)
+                return Response(serializer.data)
+
+            # SAFE FETCH (avoid Djongo crash)
+            all_categories = PharmacyCategory.objects.all()
+
+            categories = [
+                c for c in all_categories
+                if c.is_active and
+                getattr(c, "hospital_code", None) == hospital_code and
+                getattr(c, "branch_code", None) == branch_code
+            ]
+
+            serializer = PharmacyCategorySerializer(categories, many=True)
             return Response(serializer.data)
 
-        all_Category = PharmacyCategory.objects.all().order_by("category_id")
-        Categories = [b for b in all_Category if b.is_active]
-        serializer = PharmacyCategorySerializer(Categories, many=True)
-        return Response(serializer.data)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
 
+    # ───────────────── POST ─────────────────
     if request.method == "POST":
-        serializer = PharmacyCategorySerializer(data=request.data)
+
+        data = request.data.copy()
+        data["hospital_code"] = hospital_code
+        data["branch_code"] = branch_code
+
+        serializer = PharmacyCategorySerializer(data=data)
+
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
 
+    # ───────────────── PUT ─────────────────
     if request.method == "PUT":
-        if not pk:
-            return Response({"error": "Category ID required"}, status=400)
-        try:
-            category = PharmacyCategory.objects.get(category_id=pk)
-            if not category.is_active:
-                return Response({"error": "Category not found"}, status=404)
-        except PharmacyCategory.DoesNotExist:
-            return Response({"error": "Category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Category ID"}, status=400)
-        serializer = PharmacyCategorySerializer(category, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
 
-    if request.method == "DELETE":
         if not pk:
             return Response({"error": "Category ID required"}, status=400)
+
         try:
             category = PharmacyCategory.objects.get(category_id=pk)
-            if not category.is_active:
+
+            if (
+                not category.is_active or
+                getattr(category, "hospital_code", None) != hospital_code or
+                getattr(category, "branch_code", None) != branch_code
+            ):
                 return Response({"error": "Category not found"}, status=404)
+
+            serializer = PharmacyCategorySerializer(
+                category,
+                data=request.data,
+                partial=True
+            )
+
+            if serializer.is_valid():
+                serializer.save(
+                    lastmodified_by=employee_id,
+                    lastmodified_date=timezone.now()
+                )
+                return Response(serializer.data)
+
+            return Response(serializer.errors, status=400)
+
         except PharmacyCategory.DoesNotExist:
             return Response({"error": "Category not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Category ID"}, status=400)
-        category.is_active = False
-        category.lastmodified_by = user_id
-        category.save()
-        return Response({"message": "Deleted successfully"}, status=200)
+
+    # ───────────────── DELETE ─────────────────
+    if request.method == "DELETE":
+
+        if not pk:
+            return Response({"error": "Category ID required"}, status=400)
+
+        try:
+            category = PharmacyCategory.objects.get(category_id=pk)
+
+            if (
+                not category.is_active or
+                getattr(category, "hospital_code", None) != hospital_code or
+                getattr(category, "branch_code", None) != branch_code
+            ):
+                return Response({"error": "Category not found"}, status=404)
+
+            category.is_active = False
+            category.lastmodified_by = employee_id
+            category.lastmodified_date = timezone.now()
+            category.save()
+
+            return Response({"message": "Deleted successfully"}, status=200)
+
+        except PharmacyCategory.DoesNotExist:
+            return Response({"error": "Category not found"}, status=404)
 
 
 #PHARMACY ITEM VIEWS
@@ -235,70 +438,137 @@ from ..models import PharmacyItem
 from ..serializers import PharmacyItemSerializer
 
 @api_view(["GET", "POST", "PUT", "DELETE"])
-@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def pharmacy_item_view(request, pk=None):
- 
-    user_id = request.headers.get("auth-user-id", "system")
- 
+
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        None   # ⚠️ use None instead of "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        None
+    )
+
+
+    # ─────────────── GET ───────────────
     if request.method == "GET":
-        if pk:
-            try:
+
+        try:
+            if pk:
                 item = PharmacyItem.objects.get(item_id=pk)
-                if not item.is_active:
+
+                if (
+                    not item.is_active or
+                    getattr(item, "hospital_code", None) != hospital_code or
+                    getattr(item, "branch_code", None) != branch_code
+                ):
                     return Response({"error": "Item not found"}, status=404)
-            except PharmacyItem.DoesNotExist:
-                return Response({"error": "Item not found"}, status=404)
-            except (ValueError, TypeError):
-                return Response({"error": "Invalid Item ID"}, status=400)
-            serializer = PharmacyItemSerializer(item)
+
+                serializer = PharmacyItemSerializer(item)
+                return Response(serializer.data)
+
+            # Djongo-safe fetch
+            all_items = PharmacyItem.objects.all()
+
+            items = [
+                i for i in all_items
+                if i.is_active and
+                getattr(i, "hospital_code", None) == hospital_code and
+                getattr(i, "branch_code", None) == branch_code
+            ]
+
+            serializer = PharmacyItemSerializer(items, many=True)
             return Response(serializer.data)
- 
-        all_items = PharmacyItem.objects.all().order_by("item_id")
-        items     = [i for i in all_items if i.is_active]
-        serializer = PharmacyItemSerializer(items, many=True)
-        return Response(serializer.data)
- 
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+    # ─────────────── POST ───────────────
     if request.method == "POST":
-        # hsn is now typed manually — no auto-generation.
-        # brand_name and chemical_composition accepted as-is from request.data.
-        serializer = PharmacyItemSerializer(data=request.data)
+
+        payload = request.data.copy()
+        payload["hospital_code"] = hospital_code
+        payload["branch_code"] = branch_code
+
+        serializer = PharmacyItemSerializer(data=payload)
+
         if serializer.is_valid():
-            serializer.save(created_by=user_id, lastmodified_by=user_id)
+            serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
             return Response(serializer.data, status=201)
+
         return Response(serializer.errors, status=400)
- 
+
+    # ─────────────── PUT ───────────────
     if request.method == "PUT":
+
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
+
         try:
             item = PharmacyItem.objects.get(item_id=pk)
-            if not item.is_active:
+
+            if (
+                not item.is_active or
+                getattr(item, "hospital_code", None) != hospital_code or
+                getattr(item, "branch_code", None) != branch_code
+            ):
                 return Response({"error": "Item not found"}, status=404)
+
+            serializer = PharmacyItemSerializer(item, data=request.data, partial=True)
+
+            if serializer.is_valid():
+                serializer.save(
+                    lastmodified_by=employee_id,
+                    lastmodified_date=timezone.now()
+                )
+                return Response(serializer.data)
+
+            return Response(serializer.errors, status=400)
+
         except PharmacyItem.DoesNotExist:
             return Response({"error": "Item not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Item ID"}, status=400)
-        serializer = PharmacyItemSerializer(item, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save(lastmodified_by=user_id)
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
- 
+
+    # ─────────────── DELETE ───────────────
     if request.method == "DELETE":
+
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
+
         try:
             item = PharmacyItem.objects.get(item_id=pk)
-            if not item.is_active:
+
+            if (
+                not item.is_active or
+                getattr(item, "hospital_code", None) != hospital_code or
+                getattr(item, "branch_code", None) != branch_code
+            ):
                 return Response({"error": "Item not found"}, status=404)
+
+            item.is_active = False
+            item.lastmodified_by = employee_id
+            item.lastmodified_date = timezone.now()
+            item.save()
+
+            return Response({"message": "Deleted successfully"}, status=200)
+
         except PharmacyItem.DoesNotExist:
             return Response({"error": "Item not found"}, status=404)
-        except (ValueError, TypeError):
-            return Response({"error": "Invalid Item ID"}, status=400)
-        item.is_active       = False
-        item.lastmodified_by = user_id
-        item.save()
-        return Response({"message": "Deleted successfully"}, status=200)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -526,6 +796,186 @@ def grn_view(request, pk=None):
                 logger.warning("Stock creation failed for item_ids: %s", stock_errors)
 
         return Response(GRNSerializer(saved).data)
+
+@api_view(["GET"])
+def get_active_stock_outlets(request):
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client.HMS
+        collection = db.hospital_outlets
+
+        query = {
+            "is_stock_outlet": True,
+            "is_active": True
+        }
+
+        outlets = list(collection.find(query, {"_id": 0}))
+
+        return Response({
+            "success": True,
+            "data": outlets
+        })
+
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+    
+
+def _next_transfer_ref_number():
+    """
+    Generates the next transfer_ref_number in the pattern YYFINYY/000001.
+    e.g.  2627/000001, 2627/000002, …  (resets each financial year)
+    """
+    from ..models import StockTransfer
+ 
+    fin_year = _current_fin_year()
+    prefix   = f"{fin_year}/"
+ 
+    last = (
+        StockTransfer.objects
+        .filter(transfer_ref_number__startswith=prefix)
+        .order_by("-transfer_ref_number")
+        .values_list("transfer_ref_number", flat=True)
+        .first()
+    )
+ 
+    max_seq = 0
+    if last:
+        try:
+            max_seq = int(last.split("/")[-1])
+        except (ValueError, IndexError):
+            pass
+ 
+    return f"{prefix}{str(max_seq + 1).zfill(6)}"
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# STOCK TRANSFER VIEW
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+from ..models import StockTransfer
+from ..serializers import StockTransferSerializer
+
+@api_view(["GET", "POST", "PUT"])
+@csrf_exempt
+def stock_transfer_view(request, pk=None):
+    """
+    GET    /stock-transfer/          → list all transfers (with optional filters)
+    GET    /stock-transfer/<pk>/     → retrieve one transfer
+    POST   /stock-transfer/          → create new transfer (status = Draft)
+    PUT    /stock-transfer/<pk>/     → update a transfer
+    """
+ 
+    user_id = request.headers.get("auth-user-id", "system")
+ 
+    # ── GET ───────────────────────────────────────────────────────────────────
+    if request.method == "GET":
+ 
+        # ── Single record ─────────────────────────────────────────────────────
+        if pk:
+            try:
+                transfer = StockTransfer.objects.get(transfer_id=pk)
+            except StockTransfer.DoesNotExist:
+                try:
+                    transfer = StockTransfer.objects.get(transfer_ref_number=pk)
+                except StockTransfer.DoesNotExist:
+                    return Response({"error": "Transfer not found"}, status=404)
+            return Response(StockTransferSerializer(transfer).data)
+ 
+        # ── List with optional filters ────────────────────────────────────────
+        qs = StockTransfer.objects.all().order_by("-created_date")
+ 
+        from_outlet = request.query_params.get("from_outlet")
+        to_outlet   = request.query_params.get("to_outlet")
+        from_date   = request.query_params.get("from_date")
+        to_date     = request.query_params.get("to_date")
+        ref_prefix  = request.query_params.get("ref_prefix")   # used by frontend for seq gen
+ 
+        if from_outlet:
+            qs = qs.filter(from_outlet__iexact=from_outlet)
+        if to_outlet:
+            qs = qs.filter(to_outlet__iexact=to_outlet)
+        if from_date:
+            qs = qs.filter(created_date__date__gte=from_date)
+        if to_date:
+            qs = qs.filter(created_date__date__lte=to_date)
+        if ref_prefix:
+            qs = qs.filter(transfer_ref_number__startswith=f"{ref_prefix}/")
+ 
+        return Response(StockTransferSerializer(qs, many=True).data)
+ 
+    # ── POST — create new Draft ───────────────────────────────────────────────
+    if request.method == "POST":
+        data = request.data.copy()
+ 
+        # Normalise items to a JSON string
+        if isinstance(data.get("items"), (list, dict)):
+            data["items"] = json.dumps(data["items"])
+ 
+        # Auto-generate ref number; ignore anything sent by the client
+        data["transfer_ref_number"] = _next_transfer_ref_number()
+ 
+        # Always start as Draft
+        data["is_verified"] = "Draft"
+ 
+        serializer = StockTransferSerializer(data=data)
+        if serializer.is_valid():
+            saved = serializer.save(created_by=user_id, lastmodified_by=user_id)
+            return Response(StockTransferSerializer(saved).data, status=201)
+ 
+        logger.error("StockTransfer POST errors: %s", serializer.errors)
+        return Response(serializer.errors, status=400)
+ 
+    # ── PUT — update existing transfer ────────────────────────────────────────
+    if request.method == "PUT":
+        if not pk:
+            return Response({"error": "Transfer ID required"}, status=400)
+ 
+        # Resolve record by PK or ref number
+        transfer = None
+        try:
+            transfer = StockTransfer.objects.get(transfer_id=pk)
+        except (StockTransfer.DoesNotExist, ValueError):
+            try:
+                transfer = StockTransfer.objects.get(transfer_ref_number=pk)
+            except StockTransfer.DoesNotExist:
+                pass
+ 
+        if transfer is None:
+            return Response({"error": "Transfer not found"}, status=404)
+ 
+        # Guard: Approved transfers are immutable
+        if transfer.is_verified == "Approved":
+            return Response(
+                {"error": "Approved transfers cannot be edited."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+ 
+        incoming = request.data.copy()
+ 
+        # Normalise items
+        if isinstance(incoming.get("items"), (list, dict)):
+            incoming["items"] = json.dumps(incoming["items"])
+ 
+        # Ref number is immutable
+        incoming["transfer_ref_number"] = transfer.transfer_ref_number
+ 
+        # Strip immutable audit fields from payload
+        for field in ("created_by", "created_date"):
+            incoming.pop(field, None)
+ 
+        incoming["lastmodified_by"]   = user_id
+        incoming["lastmodified_date"] = datetime.utcnow()
+ 
+        serializer = StockTransferSerializer(transfer, data=incoming, partial=True)
+        if not serializer.is_valid():
+            logger.error("StockTransfer PUT errors: %s", serializer.errors)
+            return Response(serializer.errors, status=400)
+ 
+        saved = serializer.save(lastmodified_by=user_id)
+        return Response(StockTransferSerializer(saved).data)
     
 
 # ─────────────────────────────────────────────────────────────────────────────
