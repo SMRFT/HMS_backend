@@ -11,7 +11,7 @@ class ObjectIdField(serializers.Field):
         except:
             return data
         
-from .models import PharmacyCategory
+from .models import PharmacyCategory,Cashcountershiftdetails
 class PharmacyCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = PharmacyCategory
@@ -266,13 +266,40 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
         model = InsuranceProvider
         fields = '__all__'
 
+from decimal import Decimal, InvalidOperation
 
-from .models import Cashcountershiftdetails
+from rest_framework import serializers
+from decimal import Decimal, InvalidOperation
+
 class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
+
     class Meta:
         model = Cashcountershiftdetails
         fields = '__all__'
+
+    def validate_OpeningBalance(self, value):
+        return self._clean_decimal(value)
+
+    def validate_ClosingBalance(self, value):
+        return self._clean_decimal(value)
+
+    def _clean_decimal(self, value):
+        if value is None:
+            return value
+
+        raw = str(value)
+
+        raw = (
+            raw.replace("“", "")
+               .replace("”", "")
+               .replace('"', "")
+               .strip()
+        )
+
+        try:
+            return Decimal(raw)
+        except (InvalidOperation, ValueError):
+            raise serializers.ValidationError(f"Invalid decimal: {value}")
 
 
 from .models import CustomerType
@@ -398,4 +425,12 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
                 {"endTime": "End time must be after start time."}
             )
         return attrs
+
+
+from .models import ReceiptAndPayment
+class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = ReceiptAndPayment
+        fields = '__all__'
 

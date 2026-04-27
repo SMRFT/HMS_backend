@@ -27,7 +27,7 @@ urlpatterns = [
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
-    path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
+    path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), 
     path('search-rooms/', admission.search_rooms, name='search-rooms'), 
     path('admission/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
 
@@ -53,7 +53,7 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+   
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -61,8 +61,13 @@ urlpatterns = [
 
 
     # Central cah counter
-    path('cashcountershiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
+  
+    path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
+    path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
+    path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
+    path("get_receipt_payments/", cashcounter.get_receipt_payments),
+     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
     
     
     
