@@ -581,7 +581,7 @@ def get_pharmacy_BillType(request):
     db = client["HMS"]
     stock_collection = db["hospital_billtype"]
 
-    # ✅ Get values from headers
+ 
     hospital_code = request.data.get("auth-hospital-code")
     branch_code = request.data.get("auth-branch-code")
     outlet_code = request.data.get("auth-outlet-code")
@@ -1206,6 +1206,7 @@ def collect_oppharmacy_payment(request):
         Bill_id = data.get("Bill_id")
         uhid = data.get("uhid")
         payment_details = data.get("payment_details")
+        shiftno = data.get("shiftno")
 
         # ✅ AUTH FIELDS
         hospital_code = data.get("auth-hospital-code")
@@ -1328,7 +1329,8 @@ def collect_oppharmacy_payment(request):
                     "billing_status": "Paid",
                     "payment_details": payment_details,
                     "paid_date": datetime.utcnow(),
-                    "cashier_id": cashier_id   # 🔥 ADDED
+                    "cashier_id": cashier_id   ,
+                    "shiftno": shiftno
                 }
             }
         )
@@ -2187,6 +2189,7 @@ def finalize_bill(request):
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+from django.utils import timezone
 from ..models import Admission
 from pymongo import MongoClient
 import os
@@ -2207,9 +2210,12 @@ def ipadvance_bills(request):
         # =========================================
         # ✅ GET VALUES FROM request.data
         # =========================================
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        data = request.data
+
+        hospital_code = data.get("auth-hospital-code")
+        branch_code = data.get("auth-branch-code")
+        outlet_code = data.get("auth-outlet-code")
+        cashier_id = data.get("auth-user-id")   
 
         if not hospital_code or not branch_code or not outlet_code:
             return Response(
@@ -2233,9 +2239,7 @@ def ipadvance_bills(request):
 
             for admission in admissions:
 
-                # =========================================
-                # ✅ FETCH PATIENT NAME USING UHID
-                # =========================================
+                # ✅ FETCH PATIENT NAME
                 patient = patient_collection.find_one({
                     "uhid": admission.uhid,
                     "hospital_code": hospital_code,
@@ -2250,12 +2254,9 @@ def ipadvance_bills(request):
                 else:
                     patient_name = None
 
-                # =========================================
-                # ✅ RESPONSE (RAW DB STRUCTURE)
-                # =========================================
                 admission_data = {
                     "ipNumber": admission.ipNumber,
-                    "ipserial_number" :admission.ipserial_number,
+                    "ipserial_number": admission.ipserial_number,
                     "uhid": admission.uhid,
                     "patient_name": patient_name,
                     "hospital_code": admission.hospital_code,
@@ -2279,7 +2280,7 @@ def ipadvance_bills(request):
                     "lastmodified_by": admission.lastmodified_by,
                     "lastmodified_date": admission.lastmodified_date,
 
-                    # ✅ EXACT SAME AS DB (NO FILTERING)
+                    # ✅ EXACT DB STRUCTURE
                     "advance_payments": admission.advance_payments or []
                 }
 
@@ -2292,13 +2293,20 @@ def ipadvance_bills(request):
             }, status=status.HTTP_200_OK)
 
         # =========================================
-        # ✅ POST METHOD (UPDATE STATUS)
+        # ✅ POST METHOD (UPDATE PAYMENT)
         # =========================================
         if request.method == "POST":
 
-            ipNumber = request.data.get("ipNumber")
-            advance_id = request.data.get("advance_id")
-            payment_details = request.data.get("payment_details", {})
+            if not cashier_id:
+                return Response(
+                    {"error": "auth-user-id (cashier_id) required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            ipNumber = data.get("ipNumber")
+            advance_id = data.get("advance_id")
+            payment_details = data.get("payment_details", {})
+            shiftno = data.get("shiftno") 
 
             if not ipNumber:
                 return Response(
@@ -2325,34 +2333,46 @@ def ipadvance_bills(request):
                 payments = []
 
             updated = False
+            paid_datetime = timezone.now()
 
             for p in payments:
                 if not isinstance(p, dict):
                     continue
 
+                # ✅ CASE 1: Specific advance_id
                 if advance_id:
                     if p.get("advance_id") == advance_id:
-                        p["status"] = "Paid"
-                        p["payment_details"] = payment_details
-                        updated = True
+                        if str(p.get("status", "")).lower() == "pending":
+                            p["status"] = "Paid"
+                            p["payment_details"] = payment_details
+                            p["cashier_id"] = cashier_id
+                            p["paid_datetime"] = paid_datetime
+                            p["shiftno"] = shiftno 
+                            updated = True
+
+                # ✅ CASE 2: Update ALL pending
                 else:
                     if str(p.get("status", "")).lower() == "pending":
                         p["status"] = "Paid"
                         p["payment_details"] = payment_details
+                        p["cashier_id"] = cashier_id
+                        p["paid_datetime"] = paid_datetime
+                        p["shiftno"] = shiftno
                         updated = True
 
             if not updated:
                 return Response(
-                    {"message": "No matching payments found"},
+                    {"message": "No pending payments found"},
                     status=status.HTTP_200_OK
                 )
 
+            # ✅ SAVE
             admission.advance_payments = payments
+            admission.lastmodified_by = cashier_id
+            admission.lastmodified_date = paid_datetime
             admission.save()
 
-            # =========================================
             # ✅ FETCH PATIENT NAME AGAIN
-            # =========================================
             patient = patient_collection.find_one({
                 "uhid": admission.uhid,
                 "hospital_code": hospital_code,
@@ -2369,7 +2389,7 @@ def ipadvance_bills(request):
 
             return Response({
                 "status": "success",
-                "message": "Payment(s) updated successfully",
+                "message": "Payment updated successfully",
                 "data": {
                     "ipNumber": admission.ipNumber,
                     "uhid": admission.uhid,
@@ -2378,7 +2398,7 @@ def ipadvance_bills(request):
                     "branch_code": admission.branch_code,
                     "outlet_code": admission.outlet_code,
 
-                    # ✅ RETURN FULL UPDATED STRUCTURE
+                    # ✅ FULL UPDATED ARRAY
                     "advance_payments": payments
                 }
             }, status=status.HTTP_200_OK)
@@ -2467,3 +2487,8 @@ def cashcounter_outlet(request):
             "status": False,
             "message": str(e)
         }, status=500)
+    
+
+
+
+

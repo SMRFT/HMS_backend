@@ -169,6 +169,8 @@ class Billing(AuditModel):
 
     def __str__(self):
         return f"Billing {self.bill_number} for {self.patient.uhid} - {self.total_fees}"
+    
+    
 class TempPatientRegistration(models.Model):
     session_id = models.CharField(max_length=100, unique=True)
     data = models.TextField() # Storing JSON data as string
@@ -336,7 +338,7 @@ class PharmacyBilling(AuditModel):
     delete_reason = models.TextField(null=True, blank=True)
     deleted_by =models.CharField(max_length=150)
     round_off= models.IntegerField(default=0)
-    cashier_id = models.CharField(max_length=50, blank=True, null=True)
+    cashier_id = models.CharField(max_length=500, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
@@ -620,6 +622,7 @@ class Admission(AuditModel):
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
+    cashier_id          = models.CharField(max_length=500, blank=True, null=True)
 
     class Meta:
         ordering = ['-admissionDateTime']
@@ -986,21 +989,76 @@ from django.db import models
 class Cashcountershiftdetails(AuditModel):
 
     shiftno = models.CharField(primary_key=True,max_length=100000)
-
     CashierID      = models.CharField(max_length=100)
     CashCounter    = models.CharField(max_length=100)
-
     OpeningBalance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    ClosingBalance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
+    ClosingBalance = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, default=0)
     ShiftStatus    = models.CharField(max_length=50, default="active")
-
     StartingTime   = models.DateTimeField()
     closingTime    = models.DateTimeField(null=True, blank=True)
-
-    
-
+    date         = models.DateField(auto_now_add=True)
     is_active      = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.CashierID} - {self.CashCounter}"
+    
+class SurgerySchedule(AuditModel):
+    STATUS_CHOICES = [
+        ("Scheduled",  "Scheduled"),
+        ("Confirmed",  "Confirmed"),
+        ("Completed",  "Completed"),
+        ("Postponed",  "Postponed"),
+        ("Cancelled",  "Cancelled"),
+    ]
+    reference_no = models.CharField(max_length=20, primary_key=True)
+    ip_number   = models.CharField(max_length=30)         
+    ot_id            = models.CharField(max_length=20)     # Operation Theater
+    surgery_name     = models.CharField(max_length=100)    # billTypeNo maps to surgery
+    surgeon_id       = models.CharField(max_length=30)     # Scheduled Surgeon
+    scheduled_date   = models.DateField()
+    startTime        = models.TimeField(null=True, blank=True)
+    endTime          = models.TimeField(null=True, blank=True)
+ 
+    # ── Surgery Meta ──────────────────────────────────────────────────────────
+    surgery_type  = models.CharField(
+        max_length=10,
+        choices=[("Major", "Major"), ("Minor", "Minor")],
+        default="Minor",
+    )
+    is_emergency  = models.BooleanField(default=False)
+    diagnosis     = models.CharField(max_length=200, blank=True, default="")
+    remarks       = models.TextField(blank=True, default="")
+    anaesthetist_id  = models.CharField(max_length=30, blank=True, default="")
+    anesthesia_id    = models.CharField(max_length=20, blank=True, default="")
+    additional_anaesthetists = models.TextField(default="{}")
+    additional_doctors       = models.TextField(default="{}")
+    is_pack_request_CSSD = models.BooleanField(default=False)
+    is_pack_return_CSSD  = models.BooleanField(default=False)
+    is_postponed    = models.BooleanField(default=False)
+    postponed_date  = models.DateField(null=True, blank=True)
+    post_startTime  = models.TimeField(null=True, blank=True)
+    post_endTime    = models.TimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
+    is_active         = models.BooleanField(default=True)
+ 
+    def __str__(self):
+        return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
+ 
+    class Meta:
+        ordering = ["-scheduled_date"]
+
+
+
+class OTMaster(AuditModel):
+    ot_id = models.CharField(max_length=20, primary_key=True)
+    ot_name = models.CharField(max_length=100)
+    availability = models.CharField(
+        max_length=20,
+        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
+        default="Available"
+    )
+    capacity = models.CharField(max_length=10)
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.CashierID} - {self.CashCounter}"
@@ -1144,6 +1202,29 @@ class PatientDietOrder(AuditModel):
 
     def __str__(self):
         return f"{self.uhid} – {self.diet_type} ({self.meal_time}) [{self.status}]"
+    
+
+
+from django.db import models
+
+class ReceiptAndPayment(AuditModel):
+
+    receipt_type = models.CharField(max_length=50)
+    account_head = models.CharField(max_length=150)
+
+    description = models.JSONField(null=True, blank=True)
+
+    voucher_no = models.CharField(max_length=100, unique=True)
+    voucher_date = models.DateField(auto_now_add=True)
+
+    amount = models.DecimalField(max_digits=120, decimal_places=2)
+
+    shiftno = models.CharField(max_length=100)
+    CashierID      = models.CharField(max_length=100,null=True, blank=True)
+    CashCounter    = models.CharField(max_length=100)
+
+    def __str__(self):
+        return f"{self.voucher_no} - {self.account_head}"
 
 
 class DietMaster(AuditModel):
