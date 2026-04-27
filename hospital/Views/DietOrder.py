@@ -7,15 +7,26 @@ from rest_framework.response import Response
 from django.utils import timezone
 from django.db.models import Q
 
-from hospital.models import PatientDietOrder, DietMaster
+from hospital.models import PatientDietOrder, DietMaster, DietExtraMaster
 from pyauth.auth import HasRoleAndDataPermission
 
 import os
 from pymongo import MongoClient
 from bson import ObjectId
+from bson.decimal128 import Decimal128
 
 IST = pytz.timezone("Asia/Kolkata")
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+
+def to_float(value):
+    if value is None:
+        return 0.0
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # ─── Save / Place a new Diet Order ────────────────────────────────────────────
@@ -38,6 +49,11 @@ def save_diet_order(request):
         extra_items      = data.get("extra_items", [])          # list of {item, qty}
         attender_count   = int(data.get("attender_count", 0))
         special_instructions = data.get("special_instructions", "")
+
+        diet_price        = to_float(data.get("diet_price", 0))
+        extra_items_price = to_float(data.get("extra_items_price", 0))
+        total_price       = to_float(data.get("total_price", 0))
+
         ordered_by       = data.get("auth-user-id", "")
         branch_code      = data.get("auth-branch-code", "")
         hospital_code    = data.get("auth-hospital-code", "")
@@ -58,6 +74,9 @@ def save_diet_order(request):
             extra_items          = json.dumps(extra_items),
             attender_count       = attender_count,
             special_instructions = special_instructions,
+            diet_price           = diet_price,
+            extra_items_price    = extra_items_price,
+            total_price          = total_price,
             status               = "Ordered",
             ordered_by           = ordered_by,
             order_date           = timezone.now(),
@@ -121,6 +140,9 @@ def get_diet_orders(request):
                     "meal_time":           o.get("meal_time"),
                     "extra_items":         json.loads(o.get("extra_items") or "[]") if isinstance(o.get("extra_items"), str) else o.get("extra_items", []),
                     "attender_count":      o.get("attender_count", 0),
+                    "diet_price":          to_float(o.get("diet_price", 0)),
+                    "extra_items_price":   to_float(o.get("extra_items_price", 0)),
+                    "total_price":         to_float(o.get("total_price", 0)),
                     "special_instructions": o.get("special_instructions"),
                     "status":              o.get("status"),
                     "ordered_by":          o.get("ordered_by"),
@@ -208,6 +230,7 @@ def get_diet_master(request):
                     "afternoon_items": doc.get('afternoon_items', ""),
                     "evening_items":   doc.get('evening_items', ""),
                     "dinner_items":    doc.get('dinner_items', ""),
+                    "price":           to_float(doc.get('price', 0)),
                     "is_active":       doc.get('is_active', True),
                 })
 
@@ -229,6 +252,7 @@ def save_diet_master(request):
         afternoon_items = data.get("afternoon_items")
         evening_items   = data.get("evening_items")
         dinner_items    = data.get("dinner_items")
+        price           = to_float(data.get("price", 0))
         is_active       = data.get("is_active", True)
         user_id         = data.get("auth-user-id")
 
@@ -246,6 +270,7 @@ def save_diet_master(request):
             master.afternoon_items  = afternoon_items
             master.evening_items    = evening_items
             master.dinner_items     = dinner_items
+            master.price            = price
             master.is_active        = is_active
             if diet_id:
                 master.lastmodified_by = user_id
@@ -270,6 +295,7 @@ def save_diet_master(request):
                 "afternoon_items":  afternoon_items,
                 "evening_items":    evening_items,
                 "dinner_items":     dinner_items,
+                "price":            price,
                 "is_active":        is_active,
                 "hospital_code":    "SH001" 
             }
@@ -308,6 +334,10 @@ def get_all_diet_orders(request):
 
         if status:
             query["status"] = status
+        
+        meal_time = request.GET.get("meal_time")
+        if meal_time:
+            query["meal_time"] = meal_time
 
         with MongoClient(MONGO_URI) as client:
             db = client["HMS"]
@@ -346,6 +376,9 @@ def get_all_diet_orders(request):
                     "meal_time":           o.get("meal_time"),
                     "extra_items":         json.loads(o.get("extra_items") or "[]") if isinstance(o.get("extra_items"), str) else o.get("extra_items", []),
                     "attender_count":      o.get("attender_count", 0),
+                    "diet_price":          to_float(o.get("diet_price", 0)),
+                    "extra_items_price":   to_float(o.get("extra_items_price", 0)),
+                    "total_price":         to_float(o.get("total_price", 0)),
                     "special_instructions": o.get("special_instructions"),
                     "status":              o.get("status"),
                     "ordered_by":          o.get("ordered_by"),
@@ -358,3 +391,62 @@ def get_all_diet_orders(request):
     except Exception as e:
         import traceback
         return Response({"success": False, "error": str(e), "trace": traceback.format_exc()}, status=500)
+
+# ─── Diet Extra Master Views ──────────────────────────────────────────────────
+@csrf_exempt
+@api_view(["GET"])
+def get_diet_extra_master(request):
+    try:
+        active_only = request.GET.get("active_only", "true").lower() == "true"
+        query = {}
+        if active_only:
+            query["is_active"] = True
+
+        with MongoClient(MONGO_URI) as client:
+            db = client["HMS"]
+            col = db["hospital_dietextramaster"]
+            cursor = col.find(query).sort("item_name", 1)
+            
+            data = []
+            for doc in cursor:
+                data.append({
+                    "extra_id":    str(doc.get('_id')),
+                    "item_name":   doc.get('item_name', ""),
+                    "price":       to_float(doc.get('price', 0)),
+                    "is_active":   doc.get('is_active', True),
+                })
+
+        return Response({"success": True, "data": data})
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def save_diet_extra_master(request):
+    try:
+        data       = request.data
+        extra_id   = data.get("extra_id")
+        item_name  = data.get("item_name")
+        price      = to_float(data.get("price", 0))
+        is_active  = data.get("is_active", True)
+        user_id    = data.get("auth-user-id")
+
+        if not item_name:
+            return Response({"success": False, "error": "item_name is required."}, status=400)
+
+        if extra_id:
+            master = DietExtraMaster.objects.get(id=extra_id)
+            master.lastmodified_by = user_id
+        else:
+            master = DietExtraMaster()
+            master.created_by = user_id
+
+        master.item_name = item_name
+        master.price     = price
+        master.is_active = is_active
+        master.save()
+
+        return Response({"success": True, "extra_id": str(master.pk)})
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)

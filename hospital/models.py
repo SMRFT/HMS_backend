@@ -179,6 +179,35 @@ class TempPatientRegistration(models.Model):
 
     def __str__(self):
         return f"Temp Reg: {self.session_id}"
+    
+class ChemicalComposition(AuditModel):
+    composition_id   = models.IntegerField(primary_key=True)
+    composition_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+ 
+    def save(self, *args, **kwargs):
+        if self.composition_id is None:
+            last = ChemicalComposition.objects.order_by('-composition_id').first()
+            self.composition_id = (last.composition_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.composition_name
+    
+class PharmacyCategory(AuditModel):
+    category_id = models.IntegerField(primary_key=True)
+    category_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.category_id is None:
+            last = PharmacyCategory.objects.order_by('-category_id').first()
+            self.category_id = (last.category_id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.category_name
+    
 class Vendor(AuditModel):
     VENDOR_TYPE_CHOICES = [
         ('SUPPLIER', 'Supplier'),
@@ -231,19 +260,6 @@ class Vendor(AuditModel):
 
     def __str__(self):
         return f"{self.name} ({self.vendor_id})"
-class PharmacyCategory(AuditModel):
-    category_id = models.IntegerField(primary_key=True)
-    category_name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
-
-    def save(self, *args, **kwargs):
-        if self.category_id is None:
-            last = PharmacyCategory.objects.order_by('-category_id').first()
-            self.category_id = (last.category_id + 1) if last else 1
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return self.category_name
 
 class PharmacyItem(AuditModel):
     item_id = models.IntegerField(primary_key=True)
@@ -300,7 +316,7 @@ class PharmacyBilling(AuditModel):
     bill_date = models.DateTimeField(blank=True, null=True)
     uhid = models.CharField(max_length=50)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
-    bill_type = models.IntegerField(max_length=200, blank=True, null=True)
+    bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
     medicine_particulars = models.JSONField(default=list)
@@ -603,7 +619,6 @@ class Admission(AuditModel):
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
 
-    is_advanceActive    = models.BooleanField(default=False)
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
@@ -1046,6 +1061,66 @@ class OTMaster(AuditModel):
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
+        return f"{self.CashierID} - {self.CashCounter}"
+class SurgerySchedule(AuditModel):
+    STATUS_CHOICES = [
+        ("Scheduled",  "Scheduled"),
+        ("Confirmed",  "Confirmed"),
+        ("Completed",  "Completed"),
+        ("Postponed",  "Postponed"),
+        ("Cancelled",  "Cancelled"),
+    ]
+    reference_no = models.CharField(max_length=20, primary_key=True)
+    ip_number   = models.CharField(max_length=30)         
+    ot_id            = models.CharField(max_length=20)     # Operation Theater
+    surgery_name     = models.CharField(max_length=100)    # billTypeNo maps to surgery
+    surgeon_id       = models.CharField(max_length=30)     # Scheduled Surgeon
+    scheduled_date   = models.DateField()
+    startTime        = models.TimeField(null=True, blank=True)
+    endTime          = models.TimeField(null=True, blank=True)
+ 
+    # ── Surgery Meta ──────────────────────────────────────────────────────────
+    surgery_type  = models.CharField(
+        max_length=10,
+        choices=[("Major", "Major"), ("Minor", "Minor")],
+        default="Minor",
+    )
+    is_emergency  = models.BooleanField(default=False)
+    diagnosis     = models.CharField(max_length=200, blank=True, default="")
+    remarks       = models.TextField(blank=True, default="")
+    anaesthetist_id  = models.CharField(max_length=30, blank=True, default="")
+    anesthesia_id    = models.CharField(max_length=20, blank=True, default="")
+    additional_anaesthetists = models.TextField(default="{}")
+    additional_doctors       = models.TextField(default="{}")
+    is_pack_request_CSSD = models.BooleanField(default=False)
+    is_pack_return_CSSD  = models.BooleanField(default=False)
+    is_postponed    = models.BooleanField(default=False)
+    postponed_date  = models.DateField(null=True, blank=True)
+    post_startTime  = models.TimeField(null=True, blank=True)
+    post_endTime    = models.TimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
+    is_active         = models.BooleanField(default=True)
+ 
+    def __str__(self):
+        return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
+ 
+    class Meta:
+        ordering = ["-scheduled_date"]
+
+
+
+class OTMaster(AuditModel):
+    ot_id = models.CharField(max_length=20, primary_key=True)
+    ot_name = models.CharField(max_length=100)
+    availability = models.CharField(
+        max_length=20,
+        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
+        default="Available"
+    )
+    capacity = models.CharField(max_length=10)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
         return f"{self.ot_id} - {self.ot_name}"
 
 
@@ -1115,6 +1190,10 @@ class PatientDietOrder(AuditModel):
     extra_items          = models.TextField(default="[]")            # JSON array [{item, qty}]
     attender_count       = models.IntegerField(default=0)
 
+    diet_price           = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    extra_items_price    = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    total_price          = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
     special_instructions = models.TextField(null=True, blank=True)
 
     status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Ordered")
@@ -1146,3 +1225,26 @@ class ReceiptAndPayment(AuditModel):
 
     def __str__(self):
         return f"{self.voucher_no} - {self.account_head}"
+
+
+class DietMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    diet_name        = models.CharField(max_length=100, unique=True)
+    morning_items    = models.TextField(null=True, blank=True)
+    afternoon_items  = models.TextField(null=True, blank=True)
+    evening_items    = models.TextField(null=True, blank=True)
+    dinner_items     = models.TextField(null=True, blank=True)
+    price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.diet_name
+
+class DietExtraMaster(AuditModel):
+    id               = models.AutoField(primary_key=True)
+    item_name        = models.CharField(max_length=100, unique=True)
+    price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.item_name} - {self.price}"

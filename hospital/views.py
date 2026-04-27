@@ -26,6 +26,21 @@ from .models import Billing, TempPatientRegistration
 
 from .models import Billing
 from .serializers import PatientSerializer
+
+
+
+
+def custom_page_not_found(request, exception):
+    if 'application/json' in request.META.get('HTTP_ACCEPT', ''):
+        return JsonResponse({
+            'status': 'error',
+            'message': 'Page not found',
+            'details': 'The requested URL was not found on this server.'
+        }, status=404)
+    return render(request, 'errors/404.html', status=404)
+
+
+    
 @api_view(['GET', 'POST'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
