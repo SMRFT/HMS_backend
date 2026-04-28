@@ -506,8 +506,6 @@ def pharmacy_item_view(request, pk=None):
             serializer.save(
                 created_by=employee_id,
                 created_date=timezone.now(),
-                lastmodified_by=employee_id,
-                lastmodified_date=timezone.now(),
                 is_active=True
             )
             return Response(serializer.data, status=201)
@@ -796,6 +794,7 @@ def grn_view(request, pk=None):
                 logger.warning("Stock creation failed for item_ids: %s", stock_errors)
 
         return Response(GRNSerializer(saved).data)
+
 
 @api_view(["GET"])
 def get_active_stock_outlets(request):

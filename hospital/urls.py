@@ -31,6 +31,7 @@ urlpatterns = [
     path('admission-advance/',             admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
 
+    # Inventory URLs
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
     path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
@@ -52,8 +53,10 @@ urlpatterns = [
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
 
     # Stock Transfer URLs
-    path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
     path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
+
+    path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
+
         
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
