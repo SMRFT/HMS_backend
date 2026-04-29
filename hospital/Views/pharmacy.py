@@ -1282,7 +1282,7 @@ def collect_oppharmacy_payment(request):
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "outlet_code": outlet_code,
-            "is_deleted": False
+            "$or": [{"is_deleted": False}, {"is_deleted": {"$exists": False}}]
         }
 
         bill = bill_collection.find_one(query)
@@ -2492,3 +2492,102 @@ def cashcounter_outlet(request):
 
 
 
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from datetime import date
+import traceback
+from ..models import Patient, Admission
+from ..serializers import AdmissionSerializer
+
+
+def calculate_age(dob):
+    if dob is None:
+        return 0, 0, 0
+    if isinstance(dob, str):
+        from datetime import datetime
+        dob = datetime.strptime(dob[:10], "%Y-%m-%d").date()
+    if hasattr(dob, 'date'):
+        dob = dob.date()
+
+    today = date.today()
+    years  = today.year  - dob.year
+    months = today.month - dob.month
+    days   = today.day   - dob.day
+
+    if days < 0:
+        months -= 1
+        days   += 30
+    if months < 0:
+        years  -= 1
+        months += 12
+
+    return years, months, days
+
+
+@api_view(["GET"])
+def salesreturn_get_patientdetails(request):
+    try:
+        uhid = request.GET.get("uhid", "").strip()
+        print("UHID received:", repr(uhid))
+
+        if not uhid:
+            return Response({
+                "status": "error",
+                "message": "UHID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── 1. Patient ────────────────────────────────────────
+        patient = Patient.objects.filter(uhid=uhid).first()
+        print("Patient:", patient)
+
+        if not patient:
+            return Response({
+                "status": "error",
+                "message": f"Patient not found for UHID: {uhid}"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # ── 2. Active Admission (is_admitted=True) ────────────
+        admission = Admission.objects.filter(
+            uhid=uhid,
+            is_admitted=True
+        ).order_by('-admissionDateTime').first()
+        print("Admission:", admission)
+
+        if not admission:
+            return Response({
+                "status": "error",
+                "message": "No active admission found for this patient"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # ── 3. Age ────────────────────────────────────────────
+        age_y, age_m, age_d = calculate_age(patient.dob)
+
+        # ── 4. Serialize (includes patient_details) ───────────
+        admission_data = AdmissionSerializer(admission).data
+
+        # ── 5. Response ───────────────────────────────────────
+        return Response({
+            "status": "success",
+            "data": {
+                "uhid":      patient.uhid,
+                "ip_number": admission.ipNumber,
+                "name":      f"{patient.firstName} {patient.lastName}".strip(),
+                "gender":    patient.gender or "",
+                "age": {
+                    "years":  age_y,
+                    "months": age_m,
+                    "days":   age_d
+                },
+                "admission": admission_data  # contains patient_details via AdmissionSerializer
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        traceback.print_exc()
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
