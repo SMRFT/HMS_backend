@@ -18,7 +18,7 @@ from .Views import (
     doctor_dashboard,
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
-    DietOrder
+    DietOrder, accounts_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -69,6 +69,7 @@ urlpatterns = [
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
+    path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
 
 
     # Central cah counter
