@@ -265,7 +265,7 @@ PAGE_MAPPING = {
 
 
     # PHARMACY 
-        '/_b_a_c_k_e_n_d/HMS/patient_details/': 'HMS-P-PPD',  
+         r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
         '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
         '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
@@ -288,6 +288,8 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
         '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
          '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
+         '/_b_a_c_k_e_n_d/HMS/get_maniblock_pedingbills/': 'HMS-P-CCGPB',
+         '/_b_a_c_k_e_n_d/HMS/update_maniblock_pedingbills/': 'HMS-P-CCUPB'
             
              
 }
