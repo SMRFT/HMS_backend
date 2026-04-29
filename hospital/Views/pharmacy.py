@@ -1282,7 +1282,7 @@ def collect_oppharmacy_payment(request):
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "outlet_code": outlet_code,
-            "is_deleted": False
+            "$or": [{"is_deleted": False}, {"is_deleted": {"$exists": False}}]
         }
 
         bill = bill_collection.find_one(query)

@@ -566,77 +566,452 @@ def get_receipt_payments(request):
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-from ..models import Billing
-from ..serializers import PatientSerializer
+from pymongo import MongoClient
+from bson.decimal128 import Decimal128
+import os
 
-@api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
-def get_registration_bills(request):
+client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+db = client["HMS"]
+
+billing_col = db["hospital_billing"]
+invest_col = db["hospital_investbilling"]
+discharge_col = db["hospital_dischargebilling"]
+patient_col = db["hospital_patient"]
+
+from bson import ObjectId
+from bson.decimal128 import Decimal128
+
+def serialize_mongo(doc):
+    if isinstance(doc, list):
+        return [serialize_mongo(i) for i in doc]
+
+    if isinstance(doc, dict):
+        new_doc = {}
+        for k, v in doc.items():
+            if isinstance(v, ObjectId):
+                new_doc[k] = str(v)   # ✅ FIX ObjectId
+            elif isinstance(v, Decimal128):
+                new_doc[k] = float(v.to_decimal())  # ✅ FIX Decimal128
+            elif isinstance(v, (dict, list)):
+                new_doc[k] = serialize_mongo(v)
+            else:
+                new_doc[k] = v
+        return new_doc
+
+    return doc
+# ==========================================
+# ✅ COMMON DECIMAL CONVERTER
+# ==========================================
+def convert_decimal(value):
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
     try:
-        # ================================
-        # ✅ AUTH DATA (YOUR STRUCTURE)
-        # ================================
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
+        return float(value)
+    except:
+        return 0.0
+    
 
-        print("request.data:", request.data)
-        print("hospital_code:", hospital_code)
-        print("branch_code:", branch_code)
+from datetime import datetime, timedelta
 
-        # ================================
-        # ✅ FILTER BILLING DATA
-        # ================================
-        filter_query = {
-            "payment_status": "Pending"
+today = datetime.utcnow().date()
+
+start = datetime.combine(today, datetime.min.time())
+end = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_maniblock_pedingbills(request):
+    try:
+        data = request.data
+
+        hospital_code = data.get("auth-hospital-code")
+        branch_code = data.get("auth-branch-code")
+        
+
+        final_data = []
+
+        # ============================
+        # ✅ CURRENT DATE FILTER
+        # ============================
+        from datetime import datetime, timedelta
+
+        today = datetime.utcnow().date()
+        start = datetime.combine(today, datetime.min.time())
+        end = datetime.combine(today + timedelta(days=1), datetime.min.time())
+
+        # =====================================================
+        # 1. BILLING (billed_date)
+        # =====================================================
+        billing_query = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "payment_status": "Pending",
+            "billed_date": {
+                "$gte": start,
+                "$lt": end
+            }
         }
 
-        if hospital_code is not None:
-            filter_query["hospital_code"] = hospital_code
+        billing_docs = list(billing_col.find(billing_query))
 
-        if branch_code is not None:
-            filter_query["branch_code"] = branch_code
+        for bill in billing_docs:
+            patient = patient_col.find_one({
+                "id": bill.get("patient_id"),
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            })
 
-        bills = Billing.objects.select_related('patient').filter(**filter_query).order_by('-billed_date')
+            final_data.append({
+                "type": "Billing",
+                "bill_no": bill.get("bill_number"),
+                "uhid": patient.get("uhid") if patient else None,
+                "patient_name": (
+                    f"{patient.get('firstName')} {patient.get('lastName')}"
+                    if patient else None
+                ),
+                "amount": convert_decimal(bill.get("total_fees")),
+                "status": bill.get("payment_status"),
+                "date": bill.get("billed_date"),
+                "raw": serialize_mongo(bill)
+            })
 
-        response_data = []
+        # =====================================================
+        # 2. INVESTIGATION (investBillDate)
+        # =====================================================
+        invest_query = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "paymentMethod": "Cash",
+            "paymentStatus": "Pending",
+            "investBillDate": {
+                "$gte": start,
+                "$lt": end
+            }
+        }
 
-        # ================================
-        # ✅ BUILD RESPONSE
-        # ================================
-        for index, bill in enumerate(bills, start=1):
+        invest_docs = list(invest_col.find(invest_query))
 
-            patient = bill.patient
+        for inv in invest_docs:
+            patient = patient_col.find_one({
+                "uhid": inv.get("uhid"),
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            })
 
-            billed_date = bill.billed_date
-            date_str = billed_date.strftime("%d-%m-%Y") if billed_date else None
-            time_str = billed_date.strftime("%H:%M:%S") if billed_date else None
+            final_data.append({
+                "type": "Investigation",
+                "bill_no": inv.get("investBillNo"),
+                "uhid": inv.get("uhid"),
+                "patient_name": (
+                    f"{patient.get('firstName')} {patient.get('lastName')}"
+                    if patient else None
+                ),
+                "amount": convert_decimal(inv.get("finalPrice")),
+                "status": inv.get("paymentStatus"),
+                "date": inv.get("investBillDate"),  
+                "raw": serialize_mongo(inv)
+            })
 
-            response_data.append({
-                "Sl No": index,
-                "Date": date_str,
-                "Time": time_str,
-                "Bill No": bill.bill_number,
-                "Bill Type": "Registration",
-                "UHID No": patient.uhid if patient else None,
-                "Patient": f"{patient.firstName} {patient.lastName}" if patient else None,
-                "Ip Number": getattr(patient, "ip_number", None),
+        # =====================================================
+        # 3. DISCHARGE (bill_date)
+        # =====================================================
+        discharge_query = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "status": "Billed",
+            "bill_date": {
+                "$gte": start,
+                "$lt": end
+            }
+        }
 
-                # ✅ Billing details
-                "registration_fee": bill.registration_fee,
-                "consulting_fee": bill.consulting_fee,
-                "total_fees": bill.total_fees,
-                "doctor_id": bill.doctor_id,
-                "payment_status": bill.payment_status
+        discharge_docs = list(discharge_col.find(discharge_query))
+
+        for dis in discharge_docs:
+            patient = patient_col.find_one({
+                "uhid": dis.get("uhid"),
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            })
+
+            final_data.append({
+                "type": "Discharge",
+                "bill_no": dis.get("bill_no"),
+                "uhid": dis.get("uhid"),
+                "patient_name": (
+                    f"{patient.get('firstName')} {patient.get('lastName')}"
+                    if patient else None
+                ),
+                "amount": convert_decimal(dis.get("net_amount")),
+                "status": dis.get("status"),
+                "date": dis.get("bill_date"),
+                "items": serialize_mongo(dis.get("items", [])),
+                "raw": serialize_mongo(dis)
             })
 
         return Response({
-            "status": True,
-            "count": len(response_data),
-            "data": response_data
+            "status": "success",
+            "count": len(final_data),
+            "data": final_data
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
         return Response({
-            "status": False,
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from pymongo import MongoClient
+from bson.decimal128 import Decimal128
+from datetime import datetime
+import os
+
+client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+db = client["HMS"]
+
+billing_col    = db["hospital_billing"]
+invest_col     = db["hospital_investbilling"]
+discharge_col  = db["hospital_dischargebilling"]
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def update_maniblock_pedingbills(request):
+    """
+    Update payment status + insert payment_details for a pending bill.
+
+    Expected body:
+    {
+        "bill_no":         "BL-20240427-001",   # required
+        "type":            "Billing",            # required: "Billing" | "Investigation" | "Discharge"
+        "payment_details": {                     # required
+            "method":      "cash"|"card"|"cheque"|"Multiple Payment",
+            "Paid_amount": 5000,
+            "card_no":     "ICICIBANK2102",      # optional
+            "cheque_no":   "CHQ001",             # optional
+            "breakdown":   [...]                 # optional, for multiple payment
+        },
+        "shiftno":         "SH-001",             # optional
+        "pendingAmount":   0                     # optional — stored when partial payment
+    }
+    """
+    try:
+        data            = request.data
+        hospital_code   = data.get("auth-hospital-code")
+        branch_code     = data.get("auth-branch-code")
+        employee_id   = data.get("auth-user-id")
+        CashierID = employee_id
+        
+
+        bill_no         = data.get("bill_no")
+        payment_details = data.get("payment_details")
+        shiftno         = data.get("shiftno", "")
+        pending_amount  = data.get("pendingAmount", 0)
+
+        # Accept "type" or "bill_type" from frontend
+        bill_type = data.get("type") or data.get("bill_type")
+
+        # Infer type from field names present in the payload
+        # e.g. frontend sends "paymentStatus" -> Investigation
+        #                     "payment_status" -> Billing
+        #                     "status"         -> Discharge
+        if not bill_type:
+            if data.get("paymentStatus"):
+                bill_type = "Investigation"
+            elif data.get("payment_status"):
+                bill_type = "Billing"
+            elif data.get("status"):
+                bill_type = "Discharge"
+
+        # Infer type from bill_no prefix as last fallback
+        # e.g. "2526/DCH/000005" -> Discharge
+        #      "2526/INV/000005" -> Investigation
+        #      "2526/BIL/000005" -> Billing
+        if not bill_type and bill_no:
+            upper = bill_no.upper()
+            if "DCH" in upper or "DIS" in upper:
+                bill_type = "Discharge"
+            elif "INV" in upper:
+                bill_type = "Investigation"
+            elif "BIL" in upper or "/BL" in upper or upper.startswith("BL"):
+                bill_type = "Billing"
+
+        # ── Validation ────────────────────────────────────────────────────────
+        if not bill_no:
+            return Response({"status": "error", "message": "bill_no is required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if not bill_type:
+            return Response({
+                "status": "error",
+                "message": "Could not determine bill type. Please send 'type': 'Billing' | 'Investigation' | 'Discharge'."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not payment_details or not isinstance(payment_details, dict):
+            return Response({"status": "error", "message": "payment_details is required."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if bill_type not in ("Billing", "Investigation", "Discharge"):
+            return Response(
+                {"status": "error",
+                 "message": f"Invalid type '{bill_type}'. Must be Billing, Investigation, or Discharge."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        paid_amount = float(payment_details.get("Paid_amount", 0))
+        if paid_amount <= 0:
+            return Response({"status": "error", "message": "Paid_amount must be greater than 0."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # ── Enrich payment_details with meta ─────────────────────────────────
+        paid_at = datetime.utcnow().isoformat()
+
+        # ── Route by type ─────────────────────────────────────────────────────
+
+        # =====================================================================
+        # 1. BILLING  →  hospital_billing
+        #    filter : bill_number  |  status field : payment_status
+        # =====================================================================
+        if bill_type == "Billing":
+            query = {
+                "hospital_code": hospital_code,
+                "branch_code":   branch_code,
+                "bill_number":   bill_no,
+                "payment_status": "Pending",
+            }
+
+            new_status = "Paid" if pending_amount == 0 else "Partial"
+
+            update = {
+                "$set": {
+                    "payment_status":  new_status,
+                    "payment_details": payment_details,
+                    "shiftno":         shiftno,
+                    "paid_at":         paid_at,
+                    "CashierID":       CashierID, 
+                    **({"pendingAmount": Decimal128(str(pending_amount))} if pending_amount > 0 else {}),
+                }
+            }
+
+            result = billing_col.update_one(query, update)
+
+            if result.matched_count == 0:
+                return Response(
+                    {"status": "error",
+                     "message": f"No Pending Billing bill found with bill_no '{bill_no}'."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            return Response({
+                "status":  "success",
+                "message": f"Billing bill '{bill_no}' updated to '{new_status}'.",
+                "bill_no": bill_no,
+                "type":    "Billing",
+                "new_payment_status": new_status,
+                "pendingAmount": pending_amount,
+                "payment_details": payment_details,
+            }, status=status.HTTP_200_OK)
+
+        # =====================================================================
+        # 2. INVESTIGATION  →  hospital_investbilling
+        #    filter : investBillNo  |  status field : paymentStatus
+        # =====================================================================
+        elif bill_type == "Investigation":
+            query = {
+                "hospital_code": hospital_code,
+                "branch_code":   branch_code,
+                "investBillNo":  bill_no,
+                "paymentStatus": "Pending",
+            }
+
+            new_status = "Paid" if pending_amount == 0 else "Partial"
+
+            update = {
+                "$set": {
+                    "paymentStatus":   new_status,
+                    "payment_details": payment_details,
+                    "shiftno":         shiftno,
+                    "paid_at":         paid_at,
+                    "CashierID":       CashierID,
+                    **({"pendingAmount": Decimal128(str(pending_amount))} if pending_amount > 0 else {}),
+                }
+            }
+
+            result = invest_col.update_one(query, update)
+
+            if result.matched_count == 0:
+                return Response(
+                    {"status": "error",
+                     "message": f"No Pending Investigation bill found with bill_no '{bill_no}'."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            return Response({
+                "status":  "success",
+                "message": f"Investigation bill '{bill_no}' updated to '{new_status}'.",
+                "bill_no": bill_no,
+                "type":    "Investigation",
+                "new_payment_status": new_status,
+                "pendingAmount": pending_amount,
+                "payment_details": payment_details,
+            }, status=status.HTTP_200_OK)
+
+        # =====================================================================
+        # 3. DISCHARGE  →  hospital_dischargebilling
+        #    filter : bill_no  |  status field : items[].payment_status
+        # =====================================================================
+        elif bill_type == "Discharge":
+            # Match by bill_no only — no status pre-filter so we always find the doc
+            query = {
+                "hospital_code": hospital_code,
+                "branch_code":   branch_code,
+                "bill_no":       bill_no,
+            }
+
+            new_status = "Paid" if pending_amount == 0 else "Partial"
+
+            update = {
+                "$set": {
+                    # Root-level status: "Billed" -> "Paid"
+                    "status":          new_status,
+                    # Also mark all items as Paid
+                    "items.$[].payment_status": new_status,
+                    "payment_details": payment_details,
+                    "shiftno":         shiftno,
+                    "paid_at":         paid_at,
+                    "CashierID":       CashierID,
+                    **({"pendingAmount": Decimal128(str(pending_amount))} if pending_amount > 0 else {}),
+                }
+            }
+
+            result = discharge_col.update_one(query, update)
+
+            if result.matched_count == 0:
+                return Response(
+                    {"status": "error",
+                     "message": f"No Discharge bill found with bill_no '{bill_no}'."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            return Response({
+                "status":  "success",
+                "message": f"Discharge bill '{bill_no}' status updated to '{new_status}'.",
+                "bill_no": bill_no,
+                "type":    "Discharge",
+                "new_payment_status": new_status,
+                "pendingAmount": pending_amount,
+                "payment_details": payment_details,
+            }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({
+            "status":  "error",
             "message": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
