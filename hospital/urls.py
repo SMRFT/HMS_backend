@@ -55,6 +55,7 @@ urlpatterns = [
     # Stock Transfer URLs
     path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
 
+    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
     path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
 
         

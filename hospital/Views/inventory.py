@@ -572,6 +572,9 @@ def pharmacy_item_view(request, pk=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN — number generation helpers ONLY
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GRN — number generation helpers ONLY
+# ─────────────────────────────────────────────────────────────────────────────
 from ..models import GRN
 from ..serializers import GRNSerializer
 
@@ -756,12 +759,29 @@ def grn_view(request, pk=None):
                         except ValueError:
                             expiry_date = None
 
-                # ── Tax amounts ───────────────────────────────────────────────
+                # ── Purchase tax amounts (totals stored on item) ──────────────
                 cgst_pct = float(it.get("cgst_percent", 0) or 0)
                 sgst_pct = float(it.get("sgst_percent", 0) or 0)
                 item_val = float(it.get("item_value",   0) or 0)
-                cgst_amt = round(item_val * (cgst_pct / 100), 2)
-                sgst_amt = round(item_val * (sgst_pct / 100), 2)
+                # Use stored total cgst/sgst amounts directly (already computed in frontend)
+                cgst_amt = float(it.get("cgst_amt", 0) or 0)
+                sgst_amt = float(it.get("sgst_amt", 0) or 0)
+                # If not stored as totals, fall back to calculating from item_value
+                if cgst_amt == 0 and cgst_pct > 0:
+                    disc_pct      = float(it.get("purchase_discount", 0) or 0)
+                    deduct_disc   = it.get("deduct_discount_for_tax", True)
+                    disc_amt      = item_val * (disc_pct / 100)
+                    taxable_base  = (item_val - disc_amt) if deduct_disc else item_val
+                    cgst_amt      = round(taxable_base * (cgst_pct / 100), 4)
+                    sgst_amt      = round(taxable_base * (sgst_pct / 100), 4)
+
+                # ── Selling price fields ──────────────────────────────────────
+                selling_price     = float(it.get("selling_price",     0) or 0)
+                ip_price          = float(it.get("ip_price",          0) or 0)
+                selling_cgst_amt  = float(it.get("selling_cgst_amt",  0) or 0)
+                selling_sgst_amt  = float(it.get("selling_sgst_amt",  0) or 0)
+                max_packing_mrp   = float(it.get("max_packing_mrp",   0) or 0)
+                selling_discount  = float(it.get("selling_discount",  0) or 0)
 
                 try:
                     PharmacyStock.objects.create(
@@ -785,6 +805,13 @@ def grn_view(request, pk=None):
                         SGST_Percentage          = sgst_pct,
                         CGST_Amt                 = cgst_amt,
                         SGST_Amt                 = sgst_amt,
+                        # ── New selling fields ────────────────────────────────
+                        selling_price            = selling_price,
+                        ip_price                 = ip_price,
+                        selling_cgst_amt         = selling_cgst_amt,
+                        selling_sgst_amt         = selling_sgst_amt,
+                        max_packing_mrp          = max_packing_mrp,
+                        selling_discount         = selling_discount,
                     )
                 except Exception as e:
                     logger.error("PharmacyStock create failed for item %s: %s", it.get("item_id"), e)
@@ -794,6 +821,57 @@ def grn_view(request, pk=None):
                 logger.warning("Stock creation failed for item_ids: %s", stock_errors)
 
         return Response(GRNSerializer(saved).data)
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def pharmacy_stock_history(request):
+    try:
+        item_id = str(request.GET.get("item_id", "")).strip()
+
+        if not item_id:
+            return Response({
+                "success": False,
+                "error": "item_id is required"
+            }, status=400)
+
+        # Fetch all stock history for this item
+        stocks = PharmacyStock.objects.filter(
+            item_id=item_id
+        ).order_by("-created_date", "-stock_id")   # latest first
+
+        result = []
+
+        for stock in stocks:
+            result.append({
+                "stock_id": stock.stock_id,
+                "item_id": stock.item_id,
+                "item_name": getattr(stock, "item_name", ""),
+                "batch": getattr(stock, "batch", ""),
+                "expiry": getattr(stock, "expiry", ""),
+                "packing_price": str(getattr(stock, "packing_price", 0)),
+                "purchase_cost": str(getattr(stock, "purchase_cost", 0)),
+                "mrp": str(getattr(stock, "mrp", 0)),
+                "CGST_Amt": str(getattr(stock, "CGST_Amt", 0)),
+                "SGST_Amt": str(getattr(stock, "SGST_Amt", 0)),
+                "quantity": str(getattr(stock, "quantity", 0)),
+                "vendor_id": getattr(stock, "vendor_id", ""),
+                "invoice_no": getattr(stock, "invoice_no", ""),
+                "created_date": stock.created_date,
+            })
+
+        return Response({
+            "success": True,
+            "count": len(result),
+            "data": result
+        })
+
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
 
 
 @api_view(["GET"])
