@@ -159,7 +159,8 @@ urlpatterns = [
     re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
-    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),     
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
+    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),     
     
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),

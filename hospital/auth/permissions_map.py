@@ -119,41 +119,14 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-estimate-billings/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/delete-bill/': 'HMS-P-IB',       
 
-    #Investigation Reports (CT):
-    r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-P-CT',                
-    '/_b_a_c_k_e_n_d/HMS/scan-reports/': 'HMS-P-CT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan_reports/?(\?.*)?$': 'HMS-P-CT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan_reports(?:/[^/]+)+/$': 'HHMS-P-CT',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-P-CTA',                 
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-P-CTD',  
-    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-P-CTE',  
-
-    #Investigation Reports (MRI):
-    '/_b_a_c_k_e_n_d/HMS/mri_investigations/': 'HMS-P-MRI',                 
-    '/_b_a_c_k_e_n_d/HMS/mri-reports/': 'HMS-P-MRI',                 
-    '/_b_a_c_k_e_n_d/HMS/mri_reports/': 'HMS-P-MRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri_reports/(?:/[^/]+)+/$': 'HMS-P-MRI',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/approve(?:/[^/]+)+/$': 'HMS-P-MRIA',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/delete(?:/[^/]+)+/$': 'HMS-P-MRID',                 
-    r'^/_b_a_c_k_e_n_d/HMS/mri-reports/edit(?:/[^/]+)+/$': 'HMS-P-MRIE', 
-
-    #Investigation Reports (USG):
-    '/_b_a_c_k_e_n_d/HMS/usg_investigations/': 'HMS-P-USG',               
-    '/_b_a_c_k_e_n_d/HMS/usg-reports/': 'HMS-P-USG',                 
-    '/_b_a_c_k_e_n_d/HMS/usg_reports/': 'HMS-P-USG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg_reports/(?:/[^/]+)+/$': 'HMS-P-USG',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/approve(?:/[^/]+)+/$': 'HMS-P-USGA',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/delete(?:/[^/]+)+/$': 'HMS-P-USGD',                 
-    r'^/_b_a_c_k_e_n_d/HMS/usg-reports/edit(?:/[^/]+)+/$': 'HMS-P-USGE',  
-
-    #Investigation Reports (X-Ray):
-    '/_b_a_c_k_e_n_d/HMS/x_ray_investigations/': 'HMS-P-XRAY',              
-    '/_b_a_c_k_e_n_d/HMS/x_ray-reports/': 'HMS-P-XRAY',                 
-    '/_b_a_c_k_e_n_d/HMS/x_ray_reports/': 'HMS-P-XRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray_reports/(?:/[^/]+)+/$': 'HMS-P-XRAY',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/approve(?:/[^/]+)+/$': 'HMS-P-XRAYA',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/delete(?:/[^/]+)+/$': 'HMS-P-XRAYD',                 
-    r'^/_b_a_c_k_e_n_d/HMS/x_ray-reports/edit(?:/[^/]+)+/$': 'HMS-P-XRAYE',
+    #Investigation Reports (RD):
+    r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-API-RD',                
+    '/_b_a_c_k_e_n_d/HMS/scan-reports/': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan_reports/?(\?.*)?$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan_reports(?:/[^/]+)+/$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-API-RDA',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-API-RDD',  
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
 
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
