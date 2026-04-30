@@ -760,6 +760,7 @@ def list_velavan_invoices(request):
                     'items':           items,
                     'lastmodified_by': getattr(obj, 'lastmodified_by', None),
                     'is_approved':     obj.is_approved,
+                    'approved_by':     obj.approved_by,
 
                 }
 

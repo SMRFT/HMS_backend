@@ -14,13 +14,13 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.db import DatabaseError
 from django.utils import timezone
-from django.db.models import Max
+from django.db.models import Max, Q
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 
 # Models & Serializers
-from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem
+from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Cashcountershiftdetails
 from ..serializers import PharmacyBillingSerializer
 
 # MongoDB Configuration
@@ -1282,7 +1282,7 @@ def collect_oppharmacy_payment(request):
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "outlet_code": outlet_code,
-            "is_deleted": False
+            "$or": [{"is_deleted": False}, {"is_deleted": {"$exists": False}}]
         }
 
         bill = bill_collection.find_one(query)
@@ -2488,6 +2488,7 @@ def cashcounter_outlet(request):
             "message": str(e)
         }, status=500)
     
+
 
 
 
