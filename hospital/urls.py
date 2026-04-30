@@ -18,7 +18,8 @@ from .Views import (
     doctor_dashboard,
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
-    DietOrder, accounts_report
+    DietOrder,
+    doctor_reports
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -238,6 +239,7 @@ urlpatterns = [
 
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
+    path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
@@ -347,5 +349,7 @@ urlpatterns = [
     path("save_diet_master/",   DietOrder.save_diet_master,   name="save_diet_master"),
     path("get_diet_extra_master/",  DietOrder.get_diet_extra_master,  name="get_diet_extra_master"),
     path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
+    path("add_extra_to_order/", DietOrder.add_extra_to_order, name="add_extra_to_order"),
+    path("update_diet_order_extras/", DietOrder.update_diet_order_extras, name="update_diet_order_extras"),
 
 ]
