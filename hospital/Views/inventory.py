@@ -459,7 +459,6 @@ def pharmacy_item_view(request, pk=None):
         None
     )
 
-
     # ─────────────── GET ───────────────
     if request.method == "GET":
 
@@ -572,295 +571,395 @@ def pharmacy_item_view(request, pk=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN — number generation helpers ONLY
 # ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# GRN — number generation helpers ONLY
-# ─────────────────────────────────────────────────────────────────────────────
 from ..models import GRN
 from ..serializers import GRNSerializer
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
 GRN_CATEGORY_PREFIX = {
-    "MEDICINE_PURCHASE":    "OP",
-    "MEDICINE_PURCHASE_IP": "IP",
-    "OPENING_STOCK_DRUG":   "DP",
+    "OP PHARMACY":   "OP",
+    "IP PHARMACY":   "IP",
+    "OPENING STOCK": "DP",
 }
 
+
+def _get_request_data(request):
+    return request.data if hasattr(request, "data") else request.POST
+
+
 def _current_fin_year():
-    today   = datetime.today()
+    today = datetime.today()
     from_yr = today.year if today.month >= 4 else today.year - 1
     return f"{str(from_yr)[-2:]}{str(from_yr + 1)[-2:]}"
 
+
 def _next_draft_number():
-    """DRAFT/<FINYEAR>/<SEQ5>  e.g.  DRAFT/2526/00001"""
+    """DRAFT/<FINYEAR>/<SEQ5>"""
     fin_year = _current_fin_year()
-    prefix   = f"DRAFT/{fin_year}/"
-    last = (
-        GRN.objects
-        .filter(draft_number__startswith=prefix)
-        .order_by("-draft_number")
-        .values_list("draft_number", flat=True)
-        .first()
-    )
+    prefix = f"DRAFT/{fin_year}/"
+
+    all_grns = GRN.objects.all()
+
+    draft_numbers = [
+        getattr(g, "draft_number", "")
+        for g in all_grns
+        if getattr(g, "draft_number", "").startswith(prefix)
+    ]
+
     max_seq = 0
-    if last:
+    for draft in draft_numbers:
         try:
-            max_seq = int(last.split("/")[-1])
+            seq = int(draft.split("/")[-1])
+            if seq > max_seq:
+                max_seq = seq
         except (ValueError, IndexError):
-            pass
+            continue
+
     return f"{prefix}{str(max_seq + 1).zfill(5)}"
 
+
 def _grn_number_from_draft(draft_number, purchase_category):
-    """
-    DRAFT/2526/00001 + MEDICINE_PURCHASE  →  GRN/OP/2526/00001
-    """
     try:
-        parts    = draft_number.split("/")
+        parts = draft_number.split("/")
         fin_year = parts[1]
-        seq      = parts[2]
+        seq = parts[2]
     except (IndexError, AttributeError):
         fin_year = _current_fin_year()
-        seq      = "00001"
+        seq = "00001"
+
     cat_prefix = GRN_CATEGORY_PREFIX.get(purchase_category, "GRN")
     return f"{cat_prefix}/{fin_year}/{seq}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GRN VIEW — pure Django ORM
+# GRN VIEW — DJONGO SAFE + HOSPITAL/BRANCH FILTER
 # ─────────────────────────────────────────────────────────────────────────────
-
 @api_view(["GET", "POST", "PUT"])
-@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def grn_view(request, pk=None):
-    user_id = request.headers.get("auth-user-id", "system")
 
-    # ── GET ──────────────────────────────────────────────────────────────────
+    data = _get_request_data(request)
+
+    employee_id = (
+        data.get("auth-user-id") or
+        request.headers.get("auth-user-id") or
+        "system"
+    )
+
+    hospital_code = (
+        data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        None
+    )
+
+    branch_code = (
+        data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        None
+    )
+
+    # ───────────────── GET ─────────────────
     if request.method == "GET":
-        if pk:
-            try:
-                grn = GRN.objects.get(pk=pk)
-            except GRN.DoesNotExist:
+
+        try:
+            if pk:
+                grn = None
+
                 try:
-                    grn = GRN.objects.get(draft_number=pk)
-                except GRN.DoesNotExist:
+                    grn = GRN.objects.get(pk=pk)
+                except:
+                    try:
+                        grn = GRN.objects.get(draft_number=pk)
+                    except GRN.DoesNotExist:
+                        pass
+
+                if not grn:
                     return Response({"error": "GRN not found"}, status=404)
-            return Response(GRNSerializer(grn).data)
 
-        grns = GRN.objects.all().order_by("-created_date")
-        return Response(GRNSerializer(grns, many=True).data)
+                if (
+                    getattr(grn, "hospital_code", None) != hospital_code or
+                    getattr(grn, "branch_code", None) != branch_code
+                ):
+                    return Response({"error": "GRN not found"}, status=404)
 
-    # ── POST — create new Draft ───────────────────────────────────────────────
+                return Response(GRNSerializer(grn).data)
+
+            # Djongo-safe fetch
+            all_grns = GRN.objects.all()
+
+            grns = [
+                g for g in all_grns
+                if getattr(g, "hospital_code", None) == hospital_code and
+                getattr(g, "branch_code", None) == branch_code
+            ]
+
+            grns = sorted(
+                grns,
+                key=lambda x: getattr(x, "created_date", timezone.now()),
+                reverse=True
+            )
+
+            return Response(GRNSerializer(grns, many=True).data)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+    # ───────────────── POST ─────────────────
     if request.method == "POST":
-        data = request.data.copy()
 
-        if isinstance(data.get("items"), (list, dict)):
-            data["items"] = json.dumps(data["items"])
-        if isinstance(data.get("payment_status"), (list, dict)):
-            data["payment_status"] = json.dumps(data["payment_status"])
+        payload = data.copy()
 
-        data["status"]       = "Draft"
-        data["grn_number"]   = ""
-        data["draft_number"] = _next_draft_number()
+        if isinstance(payload.get("items"), (list, dict)):
+            payload["items"] = json.dumps(payload["items"])
 
-        serializer = GRNSerializer(data=data)
+        if isinstance(payload.get("payment_status"), (list, dict)):
+            payload["payment_status"] = json.dumps(payload["payment_status"])
+
+        payload["hospital_code"] = hospital_code
+        payload["branch_code"] = branch_code
+        payload["status"] = "Draft"
+        payload["grn_number"] = ""
+        payload["draft_number"] = _next_draft_number()
+
+        serializer = GRNSerializer(data=payload)
+
         if serializer.is_valid():
-            saved = serializer.save(created_by=user_id, lastmodified_by=user_id)
+            saved = serializer.save(
+                created_by=employee_id,
+                created_date=timezone.now(),
+                is_active=True
+            )
+
             return Response(GRNSerializer(saved).data, status=201)
+
         logger.error("GRN POST errors: %s", serializer.errors)
         return Response(serializer.errors, status=400)
 
-    # ── PUT — update existing GRN via Django ORM ─────────────────────────────
+    # ───────────────── PUT ─────────────────
     if request.method == "PUT":
-        incoming = request.data.copy()
+
+        incoming = data.copy()
 
         if isinstance(incoming.get("items"), (list, dict)):
             incoming["items"] = json.dumps(incoming["items"])
+
         if isinstance(incoming.get("payment_status"), (list, dict)):
             incoming["payment_status"] = json.dumps(incoming["payment_status"])
 
-        # ── Resolve record ────────────────────────────────────────────────────
         draft_no_in_body = incoming.get("draft_number", "")
         grn = None
+
+        # Resolve GRN
         if draft_no_in_body:
             try:
                 grn = GRN.objects.get(draft_number=draft_no_in_body)
             except GRN.DoesNotExist:
                 pass
+
         if grn is None and pk:
             try:
                 grn = GRN.objects.get(pk=pk)
             except GRN.DoesNotExist:
                 pass
+
         if grn is None:
             return Response({"error": "GRN not found"}, status=404)
 
-        # ── Guard ─────────────────────────────────────────────────────────────
+        # Hospital/Branch security
+        if (
+            getattr(grn, "hospital_code", None) != hospital_code or
+            getattr(grn, "branch_code", None) != branch_code
+        ):
+            return Response({"error": "GRN not found"}, status=404)
+
+        # Verified guard
         if grn.status == "Verified":
             return Response(
                 {"error": "Verified GRN cannot be edited."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # ── Decide status & numbers ───────────────────────────────────────────
         incoming_status = incoming.get("status", grn.status)
-        going_verified  = (grn.status == "Draft" and incoming_status == "Verified")
+        going_verified = (grn.status == "Draft" and incoming_status == "Verified")
 
         if going_verified:
             category = incoming.get("purchase_category") or grn.purchase_category or ""
-            incoming["grn_number"]   = _grn_number_from_draft(grn.draft_number, category)
+            incoming["grn_number"] = _grn_number_from_draft(
+                grn.draft_number,
+                category
+            )
             incoming["draft_number"] = grn.draft_number
-            incoming["status"]       = "Verified"
+            incoming["status"] = "Verified"
         else:
-            incoming["grn_number"]   = ""
+            incoming["grn_number"] = ""
             incoming["draft_number"] = grn.draft_number
-            incoming["status"]       = "Draft"
+            incoming["status"] = "Draft"
 
-        # ── Immutable fields ──────────────────────────────────────────────────
-        for field in ("created_by", "created_date", "hospital_code"):
+        # Immutable fields
+        for field in (
+            "created_by",
+            "created_date",
+            "hospital_code",
+            "branch_code",
+        ):
             incoming.pop(field, None)
 
-        incoming["lastmodified_by"]   = user_id
-        incoming["lastmodified_date"] = datetime.utcnow()
+        incoming["lastmodified_by"] = employee_id
+        incoming["lastmodified_date"] = timezone.now()
 
         serializer = GRNSerializer(grn, data=incoming, partial=True)
+
         if not serializer.is_valid():
             logger.error("GRN PUT errors: %s", serializer.errors)
             return Response(serializer.errors, status=400)
 
         saved = serializer.save()
 
-        # ── Auto-create PharmacyStock on Draft → Verified ─────────────────────
+        # ───────── Auto-create PharmacyStock on Verification ─────────
         if going_verified:
-            from ..models import PharmacyStock
 
             DEPT_CODE_MAP = {
-                "MEDICINE_PURCHASE":    "OLET002",
-                "MEDICINE_PURCHASE_IP": "OLET001",
-                "OPENING_STOCK_DRUG":   "",
+                "OP PHARMACY": "OLET002",
+                "IP PHARMACY": "OLET001",
+                "OPENING STOCK": "",
             }
-            department_code = DEPT_CODE_MAP.get(saved.purchase_category, "PHARMACY")
+
+            outlet_code = DEPT_CODE_MAP.get(
+                saved.purchase_category,
+                "OP PHARMACY"
+            )
+
             assigned_grn_no = saved.grn_number
 
             try:
                 items = json.loads(saved.items or "[]")
-            except (json.JSONDecodeError, TypeError):
+            except:
                 items = []
 
-            stock_errors = []
             for it in items:
-                # ── Parse expiry "MM/YYYY" → date field ──────────────────────
                 expiry_date = None
-                expiry_raw  = it.get("expiry", "")
+                expiry_raw = it.get("expiry", "")
+
                 if expiry_raw:
                     parts = expiry_raw.split("/")
                     if len(parts) == 2:
                         try:
                             expiry_date = datetime.strptime(
-                                f"01/{parts[0]}/{parts[1]}", "%d/%m/%Y"
+                                f"01/{parts[0]}/{parts[1]}",
+                                "%d/%m/%Y"
                             ).date()
-                        except ValueError:
+                        except:
                             expiry_date = None
 
-                # ── Purchase tax amounts (totals stored on item) ──────────────
-                cgst_pct = float(it.get("cgst_percent", 0) or 0)
-                sgst_pct = float(it.get("sgst_percent", 0) or 0)
-                item_val = float(it.get("item_value",   0) or 0)
-                # Use stored total cgst/sgst amounts directly (already computed in frontend)
-                cgst_amt = float(it.get("cgst_amt", 0) or 0)
-                sgst_amt = float(it.get("sgst_amt", 0) or 0)
-                # If not stored as totals, fall back to calculating from item_value
-                if cgst_amt == 0 and cgst_pct > 0:
-                    disc_pct      = float(it.get("purchase_discount", 0) or 0)
-                    deduct_disc   = it.get("deduct_discount_for_tax", True)
-                    disc_amt      = item_val * (disc_pct / 100)
-                    taxable_base  = (item_val - disc_amt) if deduct_disc else item_val
-                    cgst_amt      = round(taxable_base * (cgst_pct / 100), 4)
-                    sgst_amt      = round(taxable_base * (sgst_pct / 100), 4)
+                cgst_pct = float(it.get("selling_cgst_percent", 0) or 0)
+                sgst_pct = float(it.get("selling_sgst_percent", 0) or 0)
 
-                # ── Selling price fields ──────────────────────────────────────
-                selling_price     = float(it.get("selling_price",     0) or 0)
-                ip_price          = float(it.get("ip_price",          0) or 0)
-                selling_cgst_amt  = float(it.get("selling_cgst_amt",  0) or 0)
-                selling_sgst_amt  = float(it.get("selling_sgst_amt",  0) or 0)
-                max_packing_mrp   = float(it.get("max_packing_mrp",   0) or 0)
-                selling_discount  = float(it.get("selling_discount",  0) or 0)
-
-                try:
-                    PharmacyStock.objects.create(
-                        department_code          = department_code,
-                        item_id                  = int(it.get("item_id") or 0),
-                        batch_number             = str(it.get("batch") or ""),
-                        expiry_date              = expiry_date,
-                        mrp                      = float(it.get("mrp") or 0),
-                        grn_number               = assigned_grn_no,
-                        total_stock              = int(it.get("quantity") or 0),
-                        sold_quantity            = 0,
-                        transferred_out_quantity = 0,
-                        stock_type               = "grn",
-                        stock_ref_id             = 0,
-                        grn_return_quantity      = 0,
-                        grn_return_ref_id        = None,
-                        blocked_quantity         = 0,
-                        sales_return_quantity    = 0,
-                        sales_return_ref_id      = None,
-                        CGST_Percentage          = cgst_pct,
-                        SGST_Percentage          = sgst_pct,
-                        CGST_Amt                 = cgst_amt,
-                        SGST_Amt                 = sgst_amt,
-                        # ── New selling fields ────────────────────────────────
-                        selling_price            = selling_price,
-                        ip_price                 = ip_price,
-                        selling_cgst_amt         = selling_cgst_amt,
-                        selling_sgst_amt         = selling_sgst_amt,
-                        max_packing_mrp          = max_packing_mrp,
-                        selling_discount         = selling_discount,
-                    )
-                except Exception as e:
-                    logger.error("PharmacyStock create failed for item %s: %s", it.get("item_id"), e)
-                    stock_errors.append(str(it.get("item_id")))
-
-            if stock_errors:
-                logger.warning("Stock creation failed for item_ids: %s", stock_errors)
+                PharmacyStock.objects.create(
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    outlet_code=outlet_code,
+                    item_id=int(it.get("item_id") or 0),
+                    batch_number=str(it.get("batch") or ""),
+                    expiry_date=expiry_date,
+                    mrp=float(it.get("mrp") or 0),
+                    grn_number=assigned_grn_no,
+                    total_stock=int(it.get("quantity") or 0),
+                    sold_quantity=0,
+                    transferred_out_quantity=0,
+                    stock_type="grn",
+                    stock_ref_id=0,
+                    grn_return_quantity=0,
+                    blocked_quantity=0,
+                    sales_return_quantity=0,
+                    CGST_Percentage=cgst_pct,
+                    SGST_Percentage=sgst_pct,
+                    CGST_Amt=float(it.get("selling_cgst_amt", 0) or 0),
+                    SGST_Amt=float(it.get("selling_sgst_amt", 0) or 0),
+                    Selling_Price=float(it.get("selling_price", 0) or 0),
+                    created_by=employee_id,
+                    created_date=timezone.now(),
+                )
 
         return Response(GRNSerializer(saved).data)
-
+    
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def pharmacy_stock_history(request):
     try:
+        # ───────── Request Values ─────────
         item_id = str(request.GET.get("item_id", "")).strip()
 
+        hospital_code = (
+            request.GET.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            None
+        )
+
+        branch_code = (
+            request.GET.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
+            None
+        )
+
+        # ───────── Validation ─────────
         if not item_id:
             return Response({
                 "success": False,
                 "error": "item_id is required"
             }, status=400)
 
-        # Fetch all stock history for this item
-        stocks = PharmacyStock.objects.filter(
-            item_id=item_id
-        ).order_by("-created_date", "-stock_id")   # latest first
+        # ───────── Djongo-safe fetch ─────────
+        all_stocks = PharmacyStock.objects.all()
 
+        stocks = [
+            stock for stock in all_stocks
+            if str(getattr(stock, "item_id", "")) == item_id
+            and getattr(stock, "hospital_code", None) == hospital_code
+            and getattr(stock, "branch_code", None) == branch_code
+        ]
+
+        # Latest first
+        stocks = sorted(
+            stocks,
+            key=lambda x: (
+                getattr(x, "created_date", None) or "",
+                getattr(x, "stock_id", 0)
+            ),
+            reverse=True
+        )
+
+        # ───────── Build Response ─────────
         result = []
 
         for stock in stocks:
             result.append({
-                "stock_id": stock.stock_id,
-                "item_id": stock.item_id,
+                "stock_id": getattr(stock, "stock_id", ""),
+                "item_id": getattr(stock, "item_id", ""),
                 "item_name": getattr(stock, "item_name", ""),
-                "batch": getattr(stock, "batch", ""),
-                "expiry": getattr(stock, "expiry", ""),
+                "batch": getattr(stock, "batch_number", ""),
+                "expiry": getattr(stock, "expiry_date", ""),
                 "packing_price": str(getattr(stock, "packing_price", 0)),
                 "purchase_cost": str(getattr(stock, "purchase_cost", 0)),
                 "mrp": str(getattr(stock, "mrp", 0)),
                 "CGST_Amt": str(getattr(stock, "CGST_Amt", 0)),
                 "SGST_Amt": str(getattr(stock, "SGST_Amt", 0)),
-                "quantity": str(getattr(stock, "quantity", 0)),
+                "quantity": str(
+                    getattr(stock, "total_stock", 0)
+                ),
                 "vendor_id": getattr(stock, "vendor_id", ""),
                 "invoice_no": getattr(stock, "invoice_no", ""),
-                "created_date": stock.created_date,
+                "grn_number": getattr(stock, "grn_number", ""),
+                "department_code": getattr(stock, "department_code", ""),
+                "hospital_code": getattr(stock, "hospital_code", ""),
+                "branch_code": getattr(stock, "branch_code", ""),
+                "created_date": getattr(stock, "created_date", None),
             })
 
+        # ───────── Final Response ─────────
         return Response({
             "success": True,
             "count": len(result),
@@ -1061,19 +1160,9 @@ def stock_transfer_view(request, pk=None):
 from ..models import PharmacyStock
 from ..serializers import PharmacyStockSerializer
 
-@api_view(["GET", "POST", "PUT", "DELETE"])
+@api_view(["GET"])
 @csrf_exempt
 def pharmacy_stock_view(request, pk=None):
-    """
-    PharmacyStock — one record is created per GRN item when status → Verified.
-
-    POST fields (per item):
-        department_code, item_id, batch_number, expiry_date (YYYY-MM-DD),
-        mrp, grn_number, total_stock,
-        CGST_Percentage, SGST_Percentage, CGST_Amt, SGST_Amt
-    stock_type defaults to "grn"; all other nullable fields default to 0/null.
-    """
-
     user_id = request.headers.get("auth-user-id", "system")
 
     if request.method == "GET":
@@ -1090,58 +1179,3 @@ def pharmacy_stock_view(request, pk=None):
         if dept := request.query_params.get("department_code"):
             qs = qs.filter(department_code=dept)
         return Response(PharmacyStockSerializer(qs, many=True).data)
-
-    if request.method == "POST":
-        data = request.data.copy()
-        # ── Apply model-compatible defaults ──────────────────────────────────
-        # The PharmacyStock model uses IntegerField(default=0) for counters,
-        # NOT null=True.  Frontend sends null for "not yet used" fields;
-        # we coerce those to 0 / None where the model allows it.
-        def _int(v, fallback=0):
-            try: return int(v) if v is not None else fallback
-            except (TypeError, ValueError): return fallback
-
-        data["sold_quantity"]              = _int(data.get("sold_quantity"),            0)
-        data["transferred_out_quantity"]   = _int(data.get("transferred_out_quantity"), 0)
-        data["grn_return_quantity"]        = _int(data.get("grn_return_quantity"),      0)
-        data["blocked_quantity"]           = _int(data.get("blocked_quantity"),         0)
-        data["sales_return_quantity"]      = _int(data.get("sales_return_quantity"),    0)
-        data["stock_ref_id"]               = _int(data.get("stock_ref_id"),             0)
-        # Nullable FK-style fields (null=True, blank=True in model)
-        data["grn_return_ref_id"]          = data.get("grn_return_ref_id")   or None
-        data["sales_return_ref_id"]        = data.get("sales_return_ref_id") or None
-        data.setdefault("stock_type",  "grn")
-        data.setdefault("CGST_Percentage", 0)
-        data.setdefault("SGST_Percentage", 0)
-        data.setdefault("CGST_Amt",        0)
-        data.setdefault("SGST_Amt",        0)
-
-        serializer = PharmacyStockSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=201)
-        logger.error("PharmacyStock POST errors: %s", serializer.errors)
-        return Response(serializer.errors, status=400)
-
-    if request.method == "PUT":
-        if not pk:
-            return Response({"error": "Stock ID required"}, status=400)
-        try:
-            stock = PharmacyStock.objects.get(stock_id=pk)
-        except PharmacyStock.DoesNotExist:
-            return Response({"error": "Stock record not found"}, status=404)
-        serializer = PharmacyStockSerializer(stock, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
-
-    if request.method == "DELETE":
-        if not pk:
-            return Response({"error": "Stock ID required"}, status=400)
-        try:
-            stock = PharmacyStock.objects.get(stock_id=pk)
-        except PharmacyStock.DoesNotExist:
-            return Response({"error": "Stock record not found"}, status=404)
-        stock.delete()
-        return Response({"message": "Deleted successfully"}, status=200)

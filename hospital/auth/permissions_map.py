@@ -54,8 +54,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/?(\?.*)?$': 'HMS-P-PI',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
 
-    r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
-    r'^/_b_a_c_k_e_n_d/HMS/grn/[^/]+/?(\?.*)?$': 'HMS-P-GRNA',
+    '/_b_a_c_k_e_n_d/HMS/grn/': 'HMS-P-GRN',
+    r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-GRN',
 

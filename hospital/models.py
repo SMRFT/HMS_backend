@@ -430,6 +430,7 @@ class PharmacyStock(AuditModel):
     expiry_date = models.DateField(null=True, blank=True)
 
     mrp = models.DecimalField(max_digits=10, decimal_places=2)
+    Selling_Price = models.DecimalField(max_digits=10, decimal_places=2)
 
     grn_number = models.CharField(max_length=50)
 
@@ -496,7 +497,6 @@ class GRN(AuditModel):
     non_taxable_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     cgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     sgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    igst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     tax_paid_to_supplier= models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_discount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0, blank=True, null=True)
@@ -505,22 +505,6 @@ class GRN(AuditModel):
     payment_status      = models.TextField(default="[]")
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
-
-    def __str__(self):
-        return self.grn_number or self.draft_number
-    
-    # Additional Fields
-    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
-    gstin = models.CharField(max_length=20, null=True, blank=True)
-    payment = models.CharField(max_length=50, null=True, blank=True)
-    terms = models.TextField(null=True, blank=True)
-    credit_period = models.CharField(max_length=20, null=True, blank=True)
-    export_data_code = models.CharField(max_length=100, null=True, blank=True)
-    tds_percent = models.CharField(max_length=10, null=True, blank=True)
-    igst_supplier = models.BooleanField(default=False)
-    blacklisted_supplier = models.BooleanField(default=False)
-    account_on_hold = models.BooleanField(default=False)
-    reason_for_holding = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -538,7 +522,7 @@ class GRN(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.vendor_id})"
+        return f"{self.grn_number or self.draft_number} ({self.vendor_id})"
 
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)
