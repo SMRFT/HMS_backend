@@ -2,83 +2,71 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
-from datetime import timedelta
-from ..models import Patient, Billing
+from datetime import datetime, timedelta
+from pymongo import MongoClient
+import os
+import pytz
+
+# Setup Mongo Client
+MONGO_URI = os.getenv("GLOBAL_DB_HOST") or "mongodb://localhost:27017/HMS"
+client = MongoClient(MONGO_URI)
+mongo_db = client["HMS"]
+
+def ensure_aware(dt):
+    if dt is None: return None
+    if not timezone.is_aware(dt):
+        return timezone.make_aware(dt)
+    return dt
 
 @api_view(['GET'])
 def dashboard_stats(request):
     try:
-        # 1. Overall Totals (Lifetime)
-        total_registered_patients = Patient.objects.count()
+        # Use India Standard Time (IST)
+        tz = pytz.timezone('Asia/Kolkata')
+        now = timezone.now().astimezone(tz)
+        
+        # 1. Overall Totals
+        total_registered_patients = mongo_db["hospital_patient"].count_documents({})
 
-        # 2. Today's Stats
-        now = timezone.now()
-        # Set start and end of today
+        # 2. Today's Boundaries (Local IST)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-        # Using range avoids specific database functions that might be missing in some backends (like Djongo)
-        today_new_patients = Patient.objects.filter(
-            created_date__gte=today_start,
-            created_date__lte=today_end
-        ).count()
+        # Convert boundaries to UTC for Mongo comparison if dates are stored in UTC
+        # Usually Djongo stores as UTC
+        today_start_utc = today_start.astimezone(pytz.UTC)
+        today_end_utc = today_end.astimezone(pytz.UTC)
 
-        today_total_billings = Billing.objects.filter(
-            billed_date__gte=today_start,
-            billed_date__lte=today_end
-        ).count()
+        today_new_patients = mongo_db["hospital_patient"].count_documents({
+            "created_date": {"$gte": today_start_utc, "$lte": today_end_utc}
+        })
 
-        # Renewal = Visits - New Registrations (approximate for today)
+        today_total_billings = mongo_db["hospital_billing"].count_documents({
+            "billed_date": {"$gte": today_start_utc, "$lte": today_end_utc}
+        })
+
         today_renewals = max(0, today_total_billings - today_new_patients)
 
         # 3. Chart Data (Last 7 Days)
-        seven_days_ago = now - timedelta(days=6)
-        seven_days_start = seven_days_ago.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        # Fetch raw data for Python-side processing to avoid DB aggregation issues
-        
-        # Get all created_at dates for patients in the last 7 days
-        # We explicitly cast to list to evaluate queryset
-        new_patients_dates = list(Patient.objects.filter(
-            created_date__gte=seven_days_start
-        ).values_list('created_date', flat=True))
-
-        # Get all billed_date dates for billings in the last 7 days
-        billings_dates = list(Billing.objects.filter(
-            billed_date__gte=seven_days_start
-        ).values_list('billed_date', flat=True))
-
-        # Process in Python
-        new_patients_map = {}
-        for dt in new_patients_dates:
-            if dt:
-                # Convert to local date string YYYY-MM-DD
-                d_str = timezone.localtime(dt).strftime('%Y-%m-%d')
-                new_patients_map[d_str] = new_patients_map.get(d_str, 0) + 1
-
-        billings_map = {}
-        for dt in billings_dates:
-            if dt:
-                d_str = timezone.localtime(dt).strftime('%Y-%m-%d')
-                billings_map[d_str] = billings_map.get(d_str, 0) + 1
-
-        # Construct final chart data
         chart_data = []
-        for i in range(7):
-            date_cursor = seven_days_start + timedelta(days=i)
-            str_date = date_cursor.strftime('%Y-%m-%d')
-            display_date = date_cursor.strftime('%d %b')
-
-            count_new = new_patients_map.get(str_date, 0)
-            count_bill = billings_map.get(str_date, 0)
+        for i in range(6, -1, -1):
+            day_local = today_start - timedelta(days=i)
+            day_end_local = day_local.replace(hour=23, minute=59, second=59, microsecond=999999)
             
-            # Logic: Total Visits = New + Renewals -> Renewals = Total - New
-            count_renew = max(0, count_bill - count_new)
+            d_start = day_local.astimezone(pytz.UTC)
+            d_end = day_end_local.astimezone(pytz.UTC)
 
+            count_new = mongo_db["hospital_patient"].count_documents({
+                "created_date": {"$gte": d_start, "$lte": d_end}
+            })
+            count_bill = mongo_db["hospital_billing"].count_documents({
+                "billed_date": {"$gte": d_start, "$lte": d_end}
+            })
+            
             chart_data.append({
-                "date": display_date,
+                "date": day_local.strftime('%d %b'),
                 "New Patients": count_new,
-                "Renewals": count_renew,
+                "Renewals": max(0, count_bill - count_new),
                 "Total Visits": count_bill
             })
 
@@ -91,6 +79,5 @@ def dashboard_stats(request):
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        print(f"Dashboard Stats Error: {str(e)}")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

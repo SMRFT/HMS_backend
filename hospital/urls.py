@@ -9,6 +9,7 @@ from .Views import (
     inventory,
     package_crud,
     pharmacy,
+    cashcounter,
     radiology,
     room,
     NursingStation,
@@ -16,14 +17,21 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
+    DietOrder,
+    doctor_reports,
+    accounts_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
-
+handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
+    path('admission/', admission.admission_view, name='admission'),
+    path('admission/<str:uhid>/', admission.admission_detail, name='admission_detail'), 
+    path('search-rooms/', admission.search_rooms, name='search-rooms'), 
+    path('admission/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-list/', admission.admission_view, name='admission'),
     path('admission-detail/<str:uhid>/', admission.admission_detail, name='admission_detail'), # Supports ID or UHID lookup
     path('admission-room-search/', admission.search_rooms, name='search-rooms'), 
@@ -48,6 +56,33 @@ urlpatterns = [
     path("chemical-composition/", inventory.chemical_composition_view, name="chemical-composition-list"),
     path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
 
+    path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
+    path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
+    path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
+    path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+    path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
+    path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
+    path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
+    path('patient_details/', pharmacy.patient_details, name='patient_details'),
+   
+    path("substitute_medicine/",  pharmacy.substitute_medicine),
+    path("convert_to_bill/",       pharmacy.convert_to_bill),
+    path("finalize_bill/",   pharmacy.finalize_bill),
+    path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
+    # Central cah counter
+  
+    path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
+    path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
+    path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
+    path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
+    path("get_receipt_payments/", cashcounter.get_receipt_payments),
+     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+    
+    
+    
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
@@ -163,6 +198,7 @@ urlpatterns = [
 
 
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
     path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
     path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),
@@ -172,6 +208,7 @@ urlpatterns = [
     path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
     path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
     path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("update_medicine_ward_request/", NursingStation.update_medicine_ward_request, name="update_medicine_ward_request"),
     path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
     path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
     path("get_radiology_ward_requests/", NursingStation.get_radiology_ward_requests, name="get_radiology_ward_requests"),
@@ -191,20 +228,21 @@ urlpatterns = [
     path('packages/delete/<int:package_no>/', package_crud.delete_package, name='delete_package'),
 
     #Investigation Price Master:
-    path('investigation-prices_get/', investigation_price.get_investigation_prices),
-    path('investigation-prices/create/', investigation_price.create_investigation_price),
-    path('investigation-prices/update/<str:bill_type_no>/',investigation_price.update_investigation_price),
-    path('investigation-prices/delete/<str:bill_type_no>/',investigation_price.delete_investigation_price),
-    
+    path('investigation-prices_get/', investigation_price.get_investigation_prices, name='get_investigation_prices'),
+    path('investigation-prices/create/', investigation_price.create_investigation_price, name='create_investigation_price'),
+    path('investigation-prices/update/<str:bill_type_no>/', investigation_price.update_investigation_price, name='update_investigation_price'),
+    path('investigation-prices/delete/<str:bill_type_no>/', investigation_price.delete_investigation_price, name='delete_investigation_price'),
+
     #Bil Type Master:
-    path('bill-types_get/', billType.get_bill_types),
-    path('bill-types/create/', billType.create_bill_type),
-    path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type),
-    path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type),
-    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices),
-    
+    path('bill-types_get/', billType.get_bill_types, name='get_bill_types'),
+    path('bill-types/create/', billType.create_bill_type, name='create_bill_type'),
+    path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type, name='update_bill_type'),
+    path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type, name='delete_bill_type'),
+    path('investigation-price/patch-bill-type/',    billType.patch_bill_type_prices, name='patch_bill_type_prices'),
+
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
+    path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
@@ -225,6 +263,7 @@ urlpatterns = [
     path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
     path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
+    path('velavan/invoices/approve/<path:grn_number>/', velavan.approve_velavan_invoice, name='approve_velavan_invoice'),  
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
@@ -301,5 +340,19 @@ urlpatterns = [
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
     path('get_ippharmacy_stock/', surgeryschedule.get_ippharmacy_stock, name='get_ippharmacy_stock'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
+    path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
+    path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
+
+    # Diet / Food Ordering:
+    path("save_diet_order/",    DietOrder.save_diet_order,    name="save_diet_order"),
+    path("get_diet_orders/",    DietOrder.get_diet_orders,    name="get_diet_orders"),
+    path("update_diet_status/", DietOrder.update_diet_status, name="update_diet_status"),
+    path("get_all_diet_orders/", DietOrder.get_all_diet_orders, name="get_all_diet_orders"),
+    path("get_diet_master/",    DietOrder.get_diet_master,    name="get_diet_master"),
+    path("save_diet_master/",   DietOrder.save_diet_master,   name="save_diet_master"),
+    path("get_diet_extra_master/",  DietOrder.get_diet_extra_master,  name="get_diet_extra_master"),
+    path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
+    path("add_extra_to_order/", DietOrder.add_extra_to_order, name="add_extra_to_order"),
+    path("update_diet_order_extras/", DietOrder.update_diet_order_extras, name="update_diet_order_extras"),
 
 ]

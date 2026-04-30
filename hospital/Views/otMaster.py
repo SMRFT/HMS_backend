@@ -93,7 +93,19 @@ def create_ot(request):
 @permission_classes([HasRoleAndDataPermission])
 def list_ots(request):
     try:
-        ots = OTMaster.objects.all().values()   # ✅ no filter
+         # ✅ Get auth codes
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        queryset = OTMaster.objects.all()  # ✅ no filter
+
+        if hospital_code:
+            queryset = queryset.filter(hospital_code=hospital_code)
+
+        if branch_code:
+            queryset = queryset.filter(branch_code=branch_code)
+
+        ots = queryset.values()
 
         # manually filter in Python (safe)
         filtered = [o for o in ots if o.get("is_active") == True]

@@ -1,0 +1,47 @@
+Unknown command: 'estimate_auto_delete'
+Type 'manage.py help' for usage.
+Initializing environment: local
+Unknown command: 'estimate_auto_delete'
+Type 'manage.py help' for usage.
+Initializing environment: local
+Unknown command: 'estimate_auto_delete'
+Type 'manage.py help' for usage.
+Initializing environment: local
+System check identified some issues:
+
+WARNINGS:
+hospital.PharmacyBilling.bill_type: (fields.W122) 'max_length' is ignored when used with IntegerField.
+	HINT: Remove 'max_length' from field
+Initializing environment: local
+Delete expired estimate bills,
+Loading permissions from: .\hospital\auth\permissions_map.py
+current time 2026-04-17 05:29:24.611976
+stock {'_id': ObjectId('69b50b8a543df70fbbebdb06'), 'hospital_code': 'SH001', 'created_by': None, 'created_date': datetime.datetime(2026, 3, 14, 1, 47, 30, 411000), 'lastmodified_by': None, 'lastmodified_date': datetime.datetime(2026, 4, 4, 4, 57, 50, 923000), 'stock_id': 18, 'item_id': 14, 'batch_number': '09876', 'expiry_date': '2027-03-01', 'mrp': Decimal128('21.00'), 'grn_number': 'OP/2526/00007', 'total_stock': 650, 'sold_quantity': 26, 'transferred_out_quantity': 0, 'stock_type': 'grn', 'stock_ref_id': 0, 'grn_return_quantity': 0, 'grn_return_ref_id': None, 'blocked_quantity': 79.0, 'sales_return_quantity': 0, 'sales_return_ref_id': None, 'CGST_Percentage': Decimal128('2.50'), 'SGST_Percentage': Decimal128('2.50'), 'CGST_Amt': Decimal128('600.00'), 'SGST_Amt': Decimal128('600.00'), 'branch_code': 'SHB001', 'outlet_code': 'OLET002'}
+current_blocked 79.0
+stock {'_id': ObjectId('69b50cab65dd104d57b58c12'), 'hospital_code': 'SH001', 'created_by': None, 'created_date': datetime.datetime(2026, 3, 14, 1, 52, 18, 995000), 'lastmodified_by': None, 'lastmodified_date': datetime.datetime(2026, 4, 4, 4, 25, 43, 807000), 'item_id': 6, 'batch_number': '66778899', 'expiry_date': '2027-08-01', 'mrp': Decimal128('45.80'), 'grn_number': 'OP/2526/00008', 'total_stock': 400, 'sold_quantity': 0, 'transferred_out_quantity': 0, 'stock_type': 'grn', 'stock_ref_id': 0, 'grn_return_quantity': 0, 'grn_return_ref_id': None, 'blocked_quantity': 48.0, 'sales_return_quantity': 0, 'sales_return_ref_id': None, 'CGST_Percentage': Decimal128('2.50'), 'SGST_Percentage': Decimal128('2.50'), 'CGST_Amt': Decimal128('250.00'), 'SGST_Amt': Decimal128('250.00'), 'stock_id': 19, 'branch_code': 'SHB001', 'outlet_code': 'OLET002'}
+current_blocked 48.0
+2 expired bills deleted and stock restored
+System check identified some issues:
+
+WARNINGS:
+hospital.PharmacyBilling.bill_type: (fields.W122) 'max_length' is ignored when used with IntegerField.
+	HINT: Remove 'max_length' from field
+Initializing environment: local
+Delete expired estimate bills,
+Loading permissions from: .\hospital\auth\permissions_map.py
+current time 2026-04-17 05:35:55.554416
+0 expired bills deleted and stock restored
+System check identified some issues:
+
+WARNINGS:
+hospital.PharmacyBilling.bill_type: (fields.W122) 'max_length' is ignored when used with IntegerField.
+	HINT: Remove 'max_length' from field
+Initializing environment: local
+Delete expired estimate bills,
+Loading permissions from: .\hospital\auth\permissions_map.py
+current time 2026-04-17 05:49:23.199358
+stock {'_id': ObjectId('69b29277db8951ae1cbf8b28'), 'hospital_code': 'SH001', 'created_by': None, 'created_date': datetime.datetime(2026, 3, 12, 4, 46, 23, 758000), 'lastmodified_by': None, 'lastmodified_date': datetime.datetime(2026, 4, 4, 4, 57, 51, 339000), 'item_id': 1, 'batch_number': '14252', 'expiry_date': datetime.datetime(2027, 6, 1, 0, 0), 'mrp': Decimal128('21.24'), 'grn_number': 'OP/2526/00001', 'total_stock': 600, 'sold_quantity': 37, 'transferred_out_quantity': 0, 'stock_type': 'grn', 'stock_ref_id': 0, 'grn_return_quantity': 0, 'grn_return_ref_id': None, 'blocked_quantity': 137.0, 'sales_return_quantity': 0, 'sales_return_ref_id': None, 'CGST_Percentage': Decimal128('2.50'), 'SGST_Percentage': Decimal128('2.50'), 'CGST_Amt': Decimal128('200.00'), 'SGST_Amt': Decimal128('200.00'), 'stock_id': 5, 'branch_code': 'SHB001', 'outlet_code': 'OLET002'}
+current_blocked 137.0
+stock None
+[WARNING] Stock not found | Bill: 11, Item: 1, Batch: N/A
+1 expired bills deleted and stock restored

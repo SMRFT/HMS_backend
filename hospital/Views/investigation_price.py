@@ -29,9 +29,20 @@ def get_investigation_prices(request):
     try:
         client, db = get_hms_db()
         collection = db['hospital_investigationprice']
-        
 
+        # ✅ Get auth codes
+        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+        # ✅ Base query
         query = {}
+
+        # ✅ Apply ONLY hospital + branch filter
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # 🔍 Search filter
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
@@ -39,12 +50,19 @@ def get_investigation_prices(request):
                 {'billTypeNo': {'$regex': search, '$options': 'i'}},
             ]
 
-        records = [serialize_doc(r) for r in collection.find(query).sort('BillType', 1)]
+        print("INVESTIGATION PRICE QUERY:", query)  # debug
+
+        records = [
+            serialize_doc(r)
+            for r in collection.find(query).sort('BillType', 1)
+        ]
+
         return Response({'records': records}, status=status.HTTP_200_OK)
 
     except Exception as e:
         logger.exception("get_investigation_prices failed")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     finally:
         if client:
             client.close()
