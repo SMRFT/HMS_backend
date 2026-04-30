@@ -19,7 +19,8 @@ from .Views import (
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
     DietOrder,
-    doctor_reports
+    doctor_reports,
+    accounts_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -65,15 +66,11 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    # path("sales_return_medicine/",  pharmacy.sales_return_medicine),
-    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+   
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
-    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
-
-
     # Central cah counter
   
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
@@ -81,9 +78,7 @@ urlpatterns = [
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
-    path("ipadvance_bills/",  pharmacy.ipadvance_bills),
-    path("get_maniblock_pedingbills/",  cashcounter.get_maniblock_pedingbills),
-    path("update_maniblock_pedingbills/",  cashcounter.update_maniblock_pedingbills),
+     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
     
     
     
