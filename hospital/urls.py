@@ -22,6 +22,9 @@ from .Views import (
 )
 from .Views.AccountsReport import (
     shift_basis_report
+    DietOrder,
+    doctor_reports,
+    accounts_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -40,6 +43,7 @@ urlpatterns = [
     path('admission-advance/',             admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
 
+    # Inventory URLs
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
     path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
@@ -74,6 +78,7 @@ urlpatterns = [
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
 
 
+    path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
     # Central cah counter
   
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
@@ -92,6 +97,13 @@ urlpatterns = [
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+
+    # Stock Transfer URLs
+    path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
+
+    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
+    path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
+
         
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
@@ -158,7 +170,8 @@ urlpatterns = [
     re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
-    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),     
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
+    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),     
     
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
@@ -241,6 +254,7 @@ urlpatterns = [
 
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
+    path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
@@ -350,6 +364,8 @@ urlpatterns = [
     path("save_diet_master/",   DietOrder.save_diet_master,   name="save_diet_master"),
     path("get_diet_extra_master/",  DietOrder.get_diet_extra_master,  name="get_diet_extra_master"),
     path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
+    path("add_extra_to_order/", DietOrder.add_extra_to_order, name="add_extra_to_order"),
+    path("update_diet_order_extras/", DietOrder.update_diet_order_extras, name="update_diet_order_extras"),
 
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
