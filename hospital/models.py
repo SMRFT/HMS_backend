@@ -997,71 +997,19 @@ class Cashcountershiftdetails(AuditModel):
     StartingTime   = models.DateTimeField()
     closingTime    = models.DateTimeField(null=True, blank=True)
     date         = models.DateField(auto_now_add=True)
+    collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    SelectedOutlet = models.CharField(max_length=100, null=True, blank=True)
     is_active      = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.CashierID} - {self.CashCounter}"
     
-class SurgerySchedule(AuditModel):
-    STATUS_CHOICES = [
-        ("Scheduled",  "Scheduled"),
-        ("Confirmed",  "Confirmed"),
-        ("Completed",  "Completed"),
-        ("Postponed",  "Postponed"),
-        ("Cancelled",  "Cancelled"),
-    ]
-    reference_no = models.CharField(max_length=20, primary_key=True)
-    ip_number   = models.CharField(max_length=30)         
-    ot_id            = models.CharField(max_length=20)     # Operation Theater
-    surgery_name     = models.CharField(max_length=100)    # billTypeNo maps to surgery
-    surgeon_id       = models.CharField(max_length=30)     # Scheduled Surgeon
-    scheduled_date   = models.DateField()
-    startTime        = models.TimeField(null=True, blank=True)
-    endTime          = models.TimeField(null=True, blank=True)
- 
-    # ── Surgery Meta ──────────────────────────────────────────────────────────
-    surgery_type  = models.CharField(
-        max_length=10,
-        choices=[("Major", "Major"), ("Minor", "Minor")],
-        default="Minor",
-    )
-    is_emergency  = models.BooleanField(default=False)
-    diagnosis     = models.CharField(max_length=200, blank=True, default="")
-    remarks       = models.TextField(blank=True, default="")
-    anaesthetist_id  = models.CharField(max_length=30, blank=True, default="")
-    anesthesia_id    = models.CharField(max_length=20, blank=True, default="")
-    additional_anaesthetists = models.TextField(default="{}")
-    additional_doctors       = models.TextField(default="{}")
-    is_pack_request_CSSD = models.BooleanField(default=False)
-    is_pack_return_CSSD  = models.BooleanField(default=False)
-    is_postponed    = models.BooleanField(default=False)
-    postponed_date  = models.DateField(null=True, blank=True)
-    post_startTime  = models.TimeField(null=True, blank=True)
-    post_endTime    = models.TimeField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
-    is_active         = models.BooleanField(default=True)
- 
-    def __str__(self):
-        return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
- 
-    class Meta:
-        ordering = ["-scheduled_date"]
 
 
 
-class OTMaster(AuditModel):
-    ot_id = models.CharField(max_length=20, primary_key=True)
-    ot_name = models.CharField(max_length=100)
-    availability = models.CharField(
-        max_length=20,
-        choices=[("Available", "Available"), ("In Use", "In Use"), ("Under Maintenance", "Under Maintenance")],
-        default="Available"
-    )
-    capacity = models.CharField(max_length=10)
-    is_active = models.BooleanField(default=True)
-
-    def __str__(self):
-        return f"{self.CashierID} - {self.CashCounter}"
 class SurgerySchedule(AuditModel):
     STATUS_CHOICES = [
         ("Scheduled",  "Scheduled"),
@@ -1147,17 +1095,6 @@ class AnesMaster(AuditModel):
     
 
 
-class DietMaster(AuditModel):
-    id               = models.AutoField(primary_key=True)
-    diet_name        = models.CharField(max_length=100, unique=True)
-    morning_items    = models.TextField(null=True, blank=True)
-    afternoon_items  = models.TextField(null=True, blank=True)
-    evening_items    = models.TextField(null=True, blank=True)
-    dinner_items     = models.TextField(null=True, blank=True)
-    is_active        = models.BooleanField(default=True)
-
-    def __str__(self):
-        return self.diet_name
     
 
 class PatientDietOrder(AuditModel):

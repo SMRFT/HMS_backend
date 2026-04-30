@@ -292,23 +292,41 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
     def validate_ClosingBalance(self, value):
         return self._clean_decimal(value)
 
+    def validate_collected_Amount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_PettyCashBalance(self, value):
+        return self._clean_decimal(value)
+
+    def validate_RemittedToBank(self, value):
+        return self._clean_decimal(value)
+
+    def validate_SubmittedToAccount(self, value):
+        return self._clean_decimal(value)
+
     def _clean_decimal(self, value):
-        if value is None:
-            return value
+        if value is None or value == "":
+            return Decimal("0.00")
 
         raw = str(value)
 
-        raw = (
-            raw.replace("“", "")
-               .replace("”", "")
-               .replace('"', "")
-               .strip()
-        )
+        # Remove all types of quotes and whitespace
+        for char in ['"', "'", "“", "”", "‘", "’", "₹", " "]:
+            raw = raw.replace(char, "")
+
+        if not raw:
+            return Decimal("0.00")
 
         try:
             return Decimal(raw)
         except (InvalidOperation, ValueError):
-            raise serializers.ValidationError(f"Invalid decimal: {value}")
+            # Fallback for complex strings: try to extract numeric part
+            import re
+            numeric_part = re.sub(r'[^\d.]', '', raw)
+            try:
+                return Decimal(numeric_part) if numeric_part else Decimal("0.00")
+            except:
+                return Decimal("0.00")
 
 
 from .models import CustomerType
