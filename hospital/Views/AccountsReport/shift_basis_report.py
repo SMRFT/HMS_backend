@@ -4,12 +4,12 @@ from django.db.models import Q
 from datetime import datetime
 import os
 from pymongo import MongoClient
-from ..models import Patient, PharmacyBilling, Cashcountershiftdetails
+from ...models import Patient, PharmacyBilling, Cashcountershiftdetails
 from pyauth.auth import HasRoleAndDataPermission
 
 @api_view(["GET", "POST"])
 # @permission_classes([HasRoleAndDataPermission])
-def pharmacy_sales_report(request):
+def shift_basis_accounts_report(request):
     try:
         # 1. Extract params
         if request.method == "POST":

@@ -18,6 +18,10 @@ from .Views import (
     doctor_dashboard,
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
+    DietOrder
+)
+from .Views.AccountsReport import (
+    shift_basis_report
     DietOrder,
     doctor_reports,
     accounts_report
@@ -71,15 +75,22 @@ urlpatterns = [
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
+    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
+
+
     path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
     # Central cah counter
   
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
+    path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
      path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
+     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
+     path("get_registration_bills/", cashcounter.get_registration_bills),
     
     
     
@@ -355,5 +366,8 @@ urlpatterns = [
     path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
     path("add_extra_to_order/", DietOrder.add_extra_to_order, name="add_extra_to_order"),
     path("update_diet_order_extras/", DietOrder.update_diet_order_extras, name="update_diet_order_extras"),
+
+    # Accounts Report URLs
+    path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
 
 ]
