@@ -703,6 +703,7 @@ def get_investigation_items(request):
             formatted_items = []
             for item in items:
                 item_name = item.get("itemName", "")
+                item_id = item.get("item_id", "")
                 # Get the price for the specific bill_type
                 price = item.get(str(bill_type), "0")
                 
@@ -710,6 +711,7 @@ def get_investigation_items(request):
                 if price and price != "0":
                     formatted_items.append({
                         "itemName": item_name,
+                        "item_id": item_id,
                         "price": price
                     })
             
