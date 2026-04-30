@@ -703,13 +703,15 @@ def submit_qr_registration(request):
         if not form_data:
             return Response({"error": "Missing data"}, status=400)
             
-        temp_reg = None
-        if session_id:
-            temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
-            
-        if not temp_reg:
+        # If it's a static QR scan or no session_id, always create a NEW record
+        if not session_id or session_id == "static":
             session_id = str(uuid.uuid4())
             temp_reg = TempPatientRegistration(session_id=session_id)
+        else:
+            # Try to update existing session (e.g. if they refreshed or we pre-generated)
+            temp_reg = TempPatientRegistration.objects.filter(session_id=session_id).first()
+            if not temp_reg:
+                temp_reg = TempPatientRegistration(session_id=session_id)
              
         temp_reg.data = json.dumps(form_data)
         temp_reg.is_consumed = False
@@ -752,28 +754,39 @@ def get_pending_qr_registrations(request):
         # Base query
         query = TempPatientRegistration.objects.all().order_by('-created_at')
         
-        # Filter unless 'all' is requested
-        if status != 'all':
+        # Filter based on status
+        if status == 'pending':
             query = query.filter(is_consumed=False)
+        elif status == 'consumed':
+            query = query.filter(is_consumed=True)
+        # if status is 'all', no filter is applied
             
         pending = query
         results = []
         for p in pending:
             try:
-                data = json.loads(p.data)
-                # Only include if it has actua form data (e.g. mobilePhone is present)
-                if data and 'mobilePhone' in data:
-                    results.append({
-                        "session_id": p.session_id,
-                        "name": f"{data.get('firstName', '')} {data.get('lastName', '')}".strip() or "Unknown",
-                        "mobile": data.get('mobilePhone', ''),
-                        "age_gender": f"{data.get('age', '')}/{data.get('gender', '')}",
-                        "timestamp": p.created_at,
-                        "full_data": data,
-                        "is_consumed": p.is_consumed
-                    })
-            except:
-                pass
+                # Handle potential JSON parsing issues
+                if isinstance(p.data, str):
+                    try:
+                        data = json.loads(p.data)
+                    except json.JSONDecodeError:
+                        data = {}
+                else:
+                    data = p.data or {}
+                
+                # Even if data is empty, we show the record to allow debugging
+                results.append({
+                    "session_id": p.session_id,
+                    "name": f"{data.get('firstName', '')} {data.get('lastName', '')}".strip() or data.get('name') or "Unknown",
+                    "mobile": data.get('mobilePhone', '') or data.get('mobile', ''),
+                    "age_gender": f"{data.get('age', '')}/{data.get('gender', '')}",
+                    "timestamp": p.created_at,
+                    "full_data": data,
+                    "is_consumed": p.is_consumed
+                })
+            except Exception as e:
+                print(f"Error processing temp reg {p.session_id}: {e}")
+                continue
         return Response(results)
     except Exception as e:
         return Response({"error": str(e)}, status=500)

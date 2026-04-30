@@ -160,8 +160,9 @@ PAGE_MAPPING = {
 
     #Doctor Master: 
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
-    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_schedule/': 'HMS-P-DRM',                  
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-report/?.*': 'HMS-API-DLD',   
 
     #Package Master:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  

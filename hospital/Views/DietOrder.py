@@ -61,31 +61,77 @@ def save_diet_order(request):
         if not uhid or not diet_type:
             return Response({"success": False, "error": "uhid and diet_type are required."}, status=400)
 
-        order = PatientDietOrder(
-            uhid                 = uhid,
-            inpatient_number     = ip_number,
-            patient_name         = patient_name,
-            ward_name            = ward_name,
-            room_no              = room_no,
-            food_items           = food_items,
-            diet_type            = diet_type,
-            special_diet_note    = special_diet_note,
-            meal_time            = meal_time,
-            extra_items          = json.dumps(extra_items),
-            attender_count       = attender_count,
-            special_instructions = special_instructions,
-            diet_price           = diet_price,
-            extra_items_price    = extra_items_price,
-            total_price          = total_price,
-            status               = "Ordered",
-            ordered_by           = ordered_by,
-            order_date           = timezone.now(),
-            branch_code          = branch_code,
-            hospital_code        = hospital_code,
-        )
-        order.save()
-
-        return Response({"success": True, "diet_id": str(order.diet_id)})
+        diet_id = data.get("diet_id")
+        
+        # Use MongoClient for updates to handle MongoDB string IDs
+        with MongoClient(MONGO_URI) as client:
+            db = client["HMS"]
+            col = db["hospital_patientdietorder"]
+            
+            if diet_id:
+                try:
+                    oid = ObjectId(diet_id)
+                    existing = col.find_one({"_id": oid})
+                    if not existing:
+                        return Response({"success": False, "error": "Order not found"}, status=404)
+                    
+                    if existing.get("status") != "Ordered":
+                        return Response({"success": False, "error": f"Cannot edit order with status {existing.get('status')}"}, status=400)
+                    
+                    # Update existing record
+                    col.update_one(
+                        {"_id": oid},
+                        {"$set": {
+                            "uhid": uhid,
+                            "inpatient_number": ip_number,
+                            "patient_name": patient_name,
+                            "ward_name": ward_name,
+                            "room_no": room_no,
+                            "food_items": food_items,
+                            "diet_type": diet_type,
+                            "special_diet_note": special_diet_note,
+                            "meal_time": meal_time,
+                            "extra_items": json.dumps(extra_items),
+                            "attender_count": attender_count,
+                            "special_instructions": special_instructions,
+                            "diet_price": Decimal128(str(diet_price)),
+                            "extra_items_price": Decimal128(str(extra_items_price)),
+                            "total_price": Decimal128(str(total_price)),
+                            "ordered_by": ordered_by,
+                            "branch_code": branch_code,
+                            "hospital_code": hospital_code,
+                            "lastmodified_by": ordered_by,
+                            "lastmodified_date": timezone.now()
+                        }}
+                    )
+                    return Response({"success": True, "message": "Order updated successfully"})
+                except Exception as e:
+                    return Response({"success": False, "error": f"Update Error: {str(e)}"}, status=500)
+            else:
+                # Create new record via ORM (safe for new records)
+                order = PatientDietOrder()
+                order.uhid                 = uhid
+                order.inpatient_number     = ip_number
+                order.patient_name         = patient_name
+                order.ward_name            = ward_name
+                order.room_no              = room_no
+                order.food_items           = food_items
+                order.diet_type            = diet_type
+                order.special_diet_note    = special_diet_note
+                order.meal_time            = meal_time
+                order.extra_items          = json.dumps(extra_items)
+                order.attender_count       = attender_count
+                order.special_instructions = special_instructions
+                order.diet_price           = diet_price
+                order.extra_items_price    = extra_items_price
+                order.total_price          = total_price
+                order.status               = "Ordered"
+                order.order_date           = timezone.now()
+                order.ordered_by           = ordered_by
+                order.branch_code          = branch_code
+                order.hospital_code        = hospital_code
+                order.save()
+                return Response({"success": True, "message": "Order placed successfully"})
 
     except Exception as e:
         import traceback
@@ -118,10 +164,11 @@ def get_diet_orders(request):
                 # Date Formatting
                 order_date = o.get("order_date")
                 if order_date:
-                    if hasattr(order_date, "astimezone"):
-                        order_date_ist = order_date.astimezone(IST)
-                    else:
-                        order_date_ist = IST.localize(order_date)
+                    if order_date.tzinfo is None:
+                        # Naive datetime from MongoDB, assume UTC
+                        order_date = pytz.utc.localize(order_date)
+                    
+                    order_date_ist = order_date.astimezone(IST)
                     date_str = order_date_ist.strftime("%d-%m-%Y")
                     time_str = order_date_ist.strftime("%I:%M %p")
                 else:
@@ -240,6 +287,98 @@ def get_diet_master(request):
         import traceback
         return Response({"success": False, "error": str(e), "trace": traceback.format_exc()}, status=500)
 
+
+# ─── Add Extra Food to Existing Order ─────────────────────────────────────────
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def add_extra_to_order(request):
+    try:
+        data = request.data
+        diet_id = data.get("diet_id")
+        extra_item = data.get("extra_item") # {item_name, qty, price}
+        
+        if not diet_id or not extra_item:
+            return Response({"success": False, "error": "diet_id and extra_item are required."}, status=400)
+            
+        with MongoClient(MONGO_URI) as client:
+            db = client["HMS"]
+            col = db["hospital_patientdietorder"]
+            
+            try:
+                oid = ObjectId(diet_id)
+            except:
+                return Response({"success": False, "error": "Invalid ID format."}, status=400)
+
+            order = col.find_one({"_id": oid})
+            if not order:
+                return Response({"success": False, "error": "Order not found."}, status=404)
+            
+            current_extras = json.loads(order.get("extra_items") or "[]") if isinstance(order.get("extra_items"), str) else order.get("extra_items", [])
+            current_extras.append(extra_item)
+            
+            extra_price = to_float(extra_item.get("price", 0)) * int(extra_item.get("qty", 1))
+            new_extra_total = to_float(order.get("extra_items_price", 0)) + extra_price
+            new_grand_total = to_float(order.get("total_price", 0)) + extra_price
+            
+            col.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "extra_items": json.dumps(current_extras),
+                    "extra_items_price": new_extra_total,
+                    "total_price": new_grand_total
+                }}
+            )
+            
+        return Response({"success": True})
+    except Exception as e:
+        import traceback
+        return Response({"success": False, "error": str(e), "trace": traceback.format_exc()}, status=500)
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def update_diet_order_extras(request):
+    try:
+        data = request.data
+        diet_id = data.get("diet_id")
+        extra_items = data.get("extra_items") # List of {item_name, qty, price}
+        
+        if not diet_id or extra_items is None:
+            return Response({"success": False, "error": "diet_id and extra_items are required."}, status=400)
+            
+        with MongoClient(MONGO_URI) as client:
+            db = client["HMS"]
+            col = db["hospital_patientdietorder"]
+            
+            try:
+                oid = ObjectId(diet_id)
+            except:
+                return Response({"success": False, "error": "Invalid ID format."}, status=400)
+
+            order = col.find_one({"_id": oid})
+            if not order:
+                return Response({"success": False, "error": "Order not found."}, status=404)
+            
+            # Recalculate totals
+            extra_items_price = sum(to_float(item.get("price", 0)) * int(item.get("qty", 1)) for item in extra_items)
+            diet_price = to_float(order.get("diet_price", 0))
+            total_price = diet_price + extra_items_price
+            
+            col.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "extra_items": json.dumps(extra_items),
+                    "extra_items_price": extra_items_price,
+                    "total_price": total_price
+                }}
+            )
+            
+        return Response({"success": True})
+    except Exception as e:
+        import traceback
+        return Response({"success": False, "error": str(e), "trace": traceback.format_exc()}, status=500)
+
 @csrf_exempt
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
@@ -339,6 +478,10 @@ def get_all_diet_orders(request):
         if meal_time:
             query["meal_time"] = meal_time
 
+        diet_type = request.GET.get("diet_type")
+        if diet_type:
+            query["diet_type"] = diet_type
+
         with MongoClient(MONGO_URI) as client:
             db = client["HMS"]
             col = db["hospital_patientdietorder"]
@@ -349,15 +492,11 @@ def get_all_diet_orders(request):
                 # Date Formatting
                 order_date = o.get("order_date")
                 if order_date:
-                    if hasattr(order_date, "astimezone"):
-                        order_date_ist = order_date.astimezone(IST)
-                    else:
-                        # If order_date is naive from mongo? improbable but safe.
-                        from datetime import datetime
-                        if not isinstance(order_date, datetime):
-                            order_date = datetime.fromisoformat(str(order_date))
-                        order_date_ist = IST.localize(order_date) if order_date.tzinfo is None else order_date.astimezone(IST)
+                    if order_date.tzinfo is None:
+                        # Naive datetime from MongoDB, assume UTC
+                        order_date = pytz.utc.localize(order_date)
                     
+                    order_date_ist = order_date.astimezone(IST)
                     date_str = order_date_ist.strftime("%d-%m-%Y")
                     time_str = order_date_ist.strftime("%I:%M %p")
                 else:
