@@ -17,14 +17,11 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder
 )
 from .Views.AccountsReport import (
-    shift_basis_report
-    DietOrder,
-    doctor_reports,
-    accounts_report
+    shift_basis_report,
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -78,7 +75,7 @@ urlpatterns = [
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
 
 
-    path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
+    # path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
     # Central cah counter
   
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
