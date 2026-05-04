@@ -422,8 +422,6 @@ class OPPharmacyBill(AuditModel):
 class PharmacyStock(AuditModel):
 
     stock_id = models.IntegerField(primary_key=True)
-
-    department_code = models.CharField(max_length=20)
     item_id = models.IntegerField()
     batch_number = models.CharField(max_length=50)
 

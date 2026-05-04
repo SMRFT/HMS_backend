@@ -7,6 +7,7 @@ from django.utils.timezone import now
 from rest_framework.parsers import MultiPartParser, FormParser
 from bson import Decimal128, ObjectId
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 import traceback
 import logging
@@ -636,6 +637,7 @@ def _grn_number_from_draft(draft_number, purchase_category):
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN VIEW — DJONGO SAFE + HOSPITAL/BRANCH FILTER
 # ─────────────────────────────────────────────────────────────────────────────
+from ..models import GRN, PharmacyStock
 @api_view(["GET", "POST", "PUT"])
 @permission_classes([HasRoleAndDataPermission])
 def grn_view(request, pk=None):
@@ -953,7 +955,6 @@ def pharmacy_stock_history(request):
                 "vendor_id": getattr(stock, "vendor_id", ""),
                 "invoice_no": getattr(stock, "invoice_no", ""),
                 "grn_number": getattr(stock, "grn_number", ""),
-                "department_code": getattr(stock, "department_code", ""),
                 "hospital_code": getattr(stock, "hospital_code", ""),
                 "branch_code": getattr(stock, "branch_code", ""),
                 "created_date": getattr(stock, "created_date", None),
@@ -999,172 +1000,406 @@ def get_active_stock_outlets(request):
         }, status=500)
     
 
-def _next_transfer_ref_number():
-    """
-    Generates the next transfer_ref_number in the pattern YYFINYY/000001.
-    e.g.  2627/000001, 2627/000002, …  (resets each financial year)
-    """
-    from ..models import StockTransfer
- 
-    fin_year = _current_fin_year()
-    prefix   = f"{fin_year}/"
- 
-    last = (
-        StockTransfer.objects
-        .filter(transfer_ref_number__startswith=prefix)
-        .order_by("-transfer_ref_number")
-        .values_list("transfer_ref_number", flat=True)
-        .first()
-    )
- 
-    max_seq = 0
-    if last:
-        try:
-            max_seq = int(last.split("/")[-1])
-        except (ValueError, IndexError):
-            pass
- 
-    return f"{prefix}{str(max_seq + 1).zfill(6)}"
- 
- 
-# ─────────────────────────────────────────────────────────────────────────────
-# STOCK TRANSFER VIEW
-# ─────────────────────────────────────────────────────────────────────────────
- 
-from ..models import StockTransfer
+from ..models import PharmacyStock, StockTransfer
 from ..serializers import StockTransferSerializer
+# ───────────────── SAFE HELPERS ─────────────────
+def _dec(value, default=0):
+    try:
+        if value in (None, "", "None"):
+            return Decimal(str(default))
 
+        # Handle Djongo/PyMongo Decimal128 object
+        if hasattr(value, "to_decimal"):
+            return value.to_decimal()
+
+        # Handle {"$numberDecimal": "100"} dict form
+        if isinstance(value, dict) and "$numberDecimal" in value:
+            return Decimal(str(value["$numberDecimal"]))
+
+        cleaned = str(value).strip()
+        cleaned = (
+            cleaned.replace("\u201c", "")
+                   .replace("\u201d", "")
+                   .replace('"', "")
+                   .replace("'", "")
+                   .replace(",", "")
+        )
+        return Decimal(cleaned)
+
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(str(default))
+
+
+def _int(value, default=0):
+    try:
+        return int(_dec(value, default))
+    except:
+        return default
+
+
+# ───────────────── FINANCIAL YEAR ─────────────────
+def _current_fin_year():
+    today = datetime.today()
+    from_yr = today.year if today.month >= 4 else today.year - 1
+    return f"{str(from_yr)[-2:]}{str(from_yr + 1)[-2:]}"
+
+
+def _next_transfer_ref_number():
+    prefix = f"{_current_fin_year()}/"
+
+    all_rows = list(StockTransfer.objects.all())
+
+    max_seq = 0
+    for row in all_rows:
+        ref = str(getattr(row, "transfer_ref_number", "")).strip()
+
+        if ref.startswith(prefix):
+            try:
+                seq = int(ref.split("/")[-1])
+                if seq > max_seq:
+                    max_seq = seq
+            except:
+                pass
+
+    return f"{prefix}{str(max_seq + 1).zfill(6)}"
+
+
+# ───────────────── HELPER ─────────────────
+def _resolve_outlet_code(outlet_name):
+    return str(outlet_name).strip()
+
+
+# ───────────────── MAIN VIEW ─────────────────
 @api_view(["GET", "POST", "PUT"])
+@permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def stock_transfer_view(request, pk=None):
-    """
-    GET    /stock-transfer/          → list all transfers (with optional filters)
-    GET    /stock-transfer/<pk>/     → retrieve one transfer
-    POST   /stock-transfer/          → create new transfer (status = Draft)
-    PUT    /stock-transfer/<pk>/     → update a transfer
-    """
- 
-    user_id = request.headers.get("auth-user-id", "system")
- 
-    # ── GET ───────────────────────────────────────────────────────────────────
+
+    request_data = request.data if hasattr(request, "data") else request.POST
+
+    user_id = (
+        request_data.get("auth-user-id")
+        or request.headers.get("auth-user-id")
+        or "system"
+    )
+
+    hospital_code = (
+        request_data.get("auth-hospital-code")
+        or request.headers.get("auth-hospital-code")
+        or None
+    )
+
+    branch_code = (
+        request_data.get("auth-branch-code")
+        or request.headers.get("auth-branch-code")
+        or request.headers.get("Branch-Code")
+        or None
+    )
+
+    # ───────────────── GET ─────────────────
     if request.method == "GET":
- 
-        # ── Single record ─────────────────────────────────────────────────────
+
         if pk:
             try:
-                transfer = StockTransfer.objects.get(transfer_id=pk)
-            except StockTransfer.DoesNotExist:
-                try:
-                    transfer = StockTransfer.objects.get(transfer_ref_number=pk)
-                except StockTransfer.DoesNotExist:
-                    return Response({"error": "Transfer not found"}, status=404)
-            return Response(StockTransferSerializer(transfer).data)
- 
-        # ── List with optional filters ────────────────────────────────────────
-        qs = StockTransfer.objects.all().order_by("-created_date")
- 
-        from_outlet = request.query_params.get("from_outlet")
-        to_outlet   = request.query_params.get("to_outlet")
-        from_date   = request.query_params.get("from_date")
-        to_date     = request.query_params.get("to_date")
-        ref_prefix  = request.query_params.get("ref_prefix")   # used by frontend for seq gen
- 
-        if from_outlet:
-            qs = qs.filter(from_outlet__iexact=from_outlet)
-        if to_outlet:
-            qs = qs.filter(to_outlet__iexact=to_outlet)
-        if from_date:
-            qs = qs.filter(created_date__date__gte=from_date)
-        if to_date:
-            qs = qs.filter(created_date__date__lte=to_date)
-        if ref_prefix:
-            qs = qs.filter(transfer_ref_number__startswith=f"{ref_prefix}/")
- 
-        return Response(StockTransferSerializer(qs, many=True).data)
- 
-    # ── POST — create new Draft ───────────────────────────────────────────────
+                obj = StockTransfer.objects.get(transfer_id=pk)
+
+                if (
+                    str(getattr(obj, "hospital_code", "")) != str(hospital_code)
+                    or str(getattr(obj, "branch_code", "")) != str(branch_code)
+                ):
+                    return Response(
+                        {"success": False, "error": "Transfer not found"},
+                        status=404
+                    )
+
+                return Response({
+                    "success": True,
+                    "data": StockTransferSerializer(obj).data
+                })
+
+            except:
+                return Response(
+                    {"success": False, "error": "Transfer not found"},
+                    status=404
+                )
+
+        all_rows = list(StockTransfer.objects.all())
+
+        filtered = []
+
+        for row in all_rows:
+            if (
+                str(getattr(row, "hospital_code", "")) == str(hospital_code)
+                and str(getattr(row, "branch_code", "")) == str(branch_code)
+            ):
+                filtered.append(row)
+
+        filtered = sorted(
+            filtered,
+            key=lambda x: getattr(x, "created_date", timezone.now()),
+            reverse=True
+        )
+
+        return Response({
+            "success": True,
+            "count": len(filtered),
+            "data": StockTransferSerializer(filtered, many=True).data
+        })
+
+    # ───────────────── POST ─────────────────
     if request.method == "POST":
-        data = request.data.copy()
- 
-        # Normalise items to a JSON string
-        if isinstance(data.get("items"), (list, dict)):
-            data["items"] = json.dumps(data["items"])
- 
-        # Auto-generate ref number; ignore anything sent by the client
-        data["transfer_ref_number"] = _next_transfer_ref_number()
- 
-        # Always start as Draft
-        data["is_verified"] = "Draft"
- 
-        serializer = StockTransferSerializer(data=data)
-        if serializer.is_valid():
-            saved = serializer.save(created_by=user_id, lastmodified_by=user_id)
-            return Response(StockTransferSerializer(saved).data, status=201)
- 
-        logger.error("StockTransfer POST errors: %s", serializer.errors)
-        return Response(serializer.errors, status=400)
- 
-    # ── PUT — update existing transfer ────────────────────────────────────────
-    if request.method == "PUT":
-        if not pk:
-            return Response({"error": "Transfer ID required"}, status=400)
- 
-        # Resolve record by PK or ref number
-        transfer = None
-        try:
-            transfer = StockTransfer.objects.get(transfer_id=pk)
-        except (StockTransfer.DoesNotExist, ValueError):
+
+        data = request_data.copy()
+
+        raw_items = data.get("items", [])
+
+        if isinstance(raw_items, str):
             try:
-                transfer = StockTransfer.objects.get(transfer_ref_number=pk)
-            except StockTransfer.DoesNotExist:
-                pass
- 
-        if transfer is None:
-            return Response({"error": "Transfer not found"}, status=404)
- 
-        # Guard: Approved transfers are immutable
-        if transfer.is_verified == "Approved":
-            return Response(
-                {"error": "Approved transfers cannot be edited."},
-                status=status.HTTP_403_FORBIDDEN,
+                raw_items = json.loads(raw_items)
+            except:
+                raw_items = []
+
+        if not raw_items:
+            return Response({
+                "success": False,
+                "error": "At least one item is required"
+            }, status=400)
+
+        from_outlet = str(data.get("from_outlet", "")).strip()
+        to_outlet = str(data.get("to_outlet", "")).strip()
+
+        if not from_outlet or not to_outlet:
+            return Response({
+                "success": False,
+                "error": "from_outlet and to_outlet are required"
+            }, status=400)
+
+        if from_outlet == to_outlet:
+            return Response({
+                "success": False,
+                "error": "from_outlet and to_outlet must be different"
+            }, status=400)
+
+        all_stocks = list(PharmacyStock.objects.all())
+
+        errors = []
+        processed_items = []
+
+        for idx, item in enumerate(raw_items):
+
+            stock_id = str(item.get("stock_id", "")).strip()
+            item_id = str(item.get("item_id", "")).strip()
+            batch_number = str(item.get("batch_number", "")).strip()
+            outlet_code = str(
+                item.get("outlet_code") or from_outlet
+            ).strip()
+
+            transfer_qty = _int(item.get("transfer_quantity", 0))
+
+            if transfer_qty <= 0:
+                errors.append(
+                    f"Item {idx+1}: transfer_quantity must be > 0"
+                )
+                continue
+
+            # ───────── FIND EXACT STOCK ─────────
+            source_stock = None
+
+            for s in all_stocks:
+
+                # hospital + branch mandatory
+                if (
+                    str(getattr(s, "hospital_code", "")) != str(hospital_code)
+                    or str(getattr(s, "branch_code", "")) != str(branch_code)
+                ):
+                    continue
+
+                # stock_id exact
+                if stock_id and str(getattr(s, "stock_id", "")) == stock_id:
+                    source_stock = s
+                    break
+
+                # fallback item + batch + outlet
+                if (
+                    str(getattr(s, "item_id", "")) == item_id
+                    and str(getattr(s, "batch_number", "")).strip() == batch_number
+                    and str(getattr(s, "outlet_code", "")).strip() == outlet_code
+                ):
+                    source_stock = s
+                    break
+
+            if source_stock is None:
+                errors.append(
+                    f"Item {idx+1}: PharmacyStock record not found "
+                    f"(stock_id={stock_id}, item_id={item_id}, "
+                    f"batch={batch_number}, outlet={outlet_code})"
+                )
+                continue
+
+            # ── DEBUG: paste this block right before available_qty = ( ──
+            print("=== STOCK DEBUG ===")
+            print(f"stock_id      : {getattr(source_stock, 'stock_id', 'MISSING')}")
+            print(f"total_stock   : {repr(getattr(source_stock, 'total_stock', 'MISSING'))}")
+            print(f"type          : {type(getattr(source_stock, 'total_stock', None))}")
+            print(f"sold_qty      : {repr(getattr(source_stock, 'sold_quantity', 'MISSING'))}")
+            print(f"transferred   : {repr(getattr(source_stock, 'transferred_out_quantity', 'MISSING'))}")
+            print(f"blocked       : {repr(getattr(source_stock, 'blocked_quantity', 'MISSING'))}")
+            print(f"_int result   : {_int(getattr(source_stock, 'total_stock', 0))}")
+            print("===================")
+
+            # ───────── AVAILABLE QTY ─────────
+            available_qty = (
+                _int(getattr(source_stock, "total_stock", 0))
+                - _int(getattr(source_stock, "sold_quantity", 0))
+                - _int(getattr(source_stock, "transferred_out_quantity", 0))
+                - _int(getattr(source_stock, "grn_return_quantity", 0))
+                - _int(getattr(source_stock, "blocked_quantity", 0))
+                + _int(getattr(source_stock, "sales_return_quantity", 0))
             )
- 
-        incoming = request.data.copy()
- 
-        # Normalise items
-        if isinstance(incoming.get("items"), (list, dict)):
-            incoming["items"] = json.dumps(incoming["items"])
- 
-        # Ref number is immutable
-        incoming["transfer_ref_number"] = transfer.transfer_ref_number
- 
-        # Strip immutable audit fields from payload
-        for field in ("created_by", "created_date"):
-            incoming.pop(field, None)
- 
-        incoming["lastmodified_by"]   = user_id
-        incoming["lastmodified_date"] = datetime.utcnow()
- 
-        serializer = StockTransferSerializer(transfer, data=incoming, partial=True)
-        if not serializer.is_valid():
-            logger.error("StockTransfer PUT errors: %s", serializer.errors)
-            return Response(serializer.errors, status=400)
- 
-        saved = serializer.save(lastmodified_by=user_id)
-        return Response(StockTransferSerializer(saved).data)
+
+            if transfer_qty > available_qty:
+                errors.append(
+                    f"Item {idx+1}: Requested {transfer_qty}, only {available_qty} available"
+                )
+                continue
+
+            # ───────── UPDATE SOURCE ─────────
+            source_stock.transferred_out_quantity = (
+                _int(getattr(source_stock, "transferred_out_quantity", 0))
+                + transfer_qty
+            )
+
+            source_stock.stock_type = "transfer"
+            source_stock.stock_ref_id = _int(getattr(source_stock, "stock_id", 0))
+            source_stock.lastmodified_by = user_id
+            source_stock.lastmodified_date = timezone.now()
+
+            source_stock.save()
+
+            # ───────── CREATE DESTINATION ─────────
+            PharmacyStock.objects.create(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=_resolve_outlet_code(to_outlet),
+
+                department_code=str(
+                    getattr(source_stock, "department_code", "") or ""
+                ),
+
+                item_id=_int(getattr(source_stock, "item_id", 0)),
+                batch_number=str(
+                    getattr(source_stock, "batch_number", "") or ""
+                ),
+
+                expiry_date=getattr(source_stock, "expiry_date", None),
+
+                mrp=_dec(getattr(source_stock, "mrp", 0)),
+                Selling_Price=_dec(
+                    getattr(source_stock, "Selling_Price", 0)
+                ),
+
+                grn_number=str(
+                    getattr(source_stock, "grn_number", "") or ""
+                ),
+
+                total_stock=transfer_qty,
+                sold_quantity=0,
+                transferred_out_quantity=0,
+
+                stock_type="transfer",
+                stock_ref_id=_int(
+                    getattr(source_stock, "stock_id", 0)
+                ),
+
+                grn_return_quantity=0,
+                blocked_quantity=0,
+                sales_return_quantity=0,
+
+                CGST_Percentage=_dec(
+                    getattr(source_stock, "CGST_Percentage", 0)
+                ),
+
+                SGST_Percentage=_dec(
+                    getattr(source_stock, "SGST_Percentage", 0)
+                ),
+
+                CGST_Amt=_dec(
+                    getattr(source_stock, "CGST_Amt", 0)
+                ),
+
+                SGST_Amt=_dec(
+                    getattr(source_stock, "SGST_Amt", 0)
+                ),
+
+                created_by=user_id,
+                created_date=timezone.now(),
+                lastmodified_by=user_id,
+                lastmodified_date=timezone.now(),
+                is_active=True
+            )
+
+            processed_items.append({
+                "stock_id": _int(getattr(source_stock, "stock_id", 0)),
+                "item_id": _int(getattr(source_stock, "item_id", 0)),
+                "batch_number": str(
+                    getattr(source_stock, "batch_number", "")
+                ),
+                "transfer_quantity": transfer_qty,
+                "from_outlet": outlet_code,
+                "to_outlet": to_outlet,
+            })
+
+        if errors:
+            return Response({
+                "success": False,
+                "error": errors
+            }, status=400)
+
+        # ───────── SAVE TRANSFER MASTER ─────────
+        transfer_payload = {
+            "from_outlet": from_outlet,
+            "to_outlet": to_outlet,
+            "transfer_ref_number": _next_transfer_ref_number(),
+            "items": json.dumps(processed_items),
+            "is_verified": "Draft",
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+        }
+
+        serializer = StockTransferSerializer(data=transfer_payload)
+
+        if serializer.is_valid():
+
+            saved = serializer.save(
+                created_by=user_id,
+                created_date=timezone.now(),
+                lastmodified_by=user_id,
+                lastmodified_date=timezone.now()
+            )
+
+            return Response({
+                "success": True,
+                "message": "Stock transferred successfully",
+                "data": StockTransferSerializer(saved).data
+            }, status=201)
+
+        return Response({
+            "success": False,
+            "error": serializer.errors
+        }, status=400)
     
-
+ 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHARMACY STOCK VIEWS
+# PHARMACY STOCK VIEW  (search + item_id + outlet_code filters, Djongo-safe)
 # ─────────────────────────────────────────────────────────────────────────────
-from ..models import PharmacyStock
+from ..models import PharmacyItem
 from ..serializers import PharmacyStockSerializer
-
+ 
+ 
 @api_view(["GET"])
 @csrf_exempt
 def pharmacy_stock_view(request, pk=None):
-    user_id = request.headers.get("auth-user-id", "system")
-
+ 
     if request.method == "GET":
         if pk:
             try:
@@ -1172,10 +1407,49 @@ def pharmacy_stock_view(request, pk=None):
             except PharmacyStock.DoesNotExist:
                 return Response({"error": "Stock record not found"}, status=404)
             return Response(PharmacyStockSerializer(stock).data)
-
-        qs = PharmacyStock.objects.all().order_by("-stock_id")
-        if grn_number := request.query_params.get("grn_number"):
-            qs = qs.filter(grn_number=grn_number)
-        if dept := request.query_params.get("department_code"):
-            qs = qs.filter(department_code=dept)
-        return Response(PharmacyStockSerializer(qs, many=True).data)
+ 
+        all_stocks  = list(PharmacyStock.objects.all().order_by("-stock_id"))
+        grn_number  = request.query_params.get("grn_number")
+        item_id     = request.query_params.get("item_id")
+        outlet_code = request.query_params.get("outlet_code")
+        search      = request.query_params.get("search", "").strip().lower()
+ 
+        matching_item_ids = None
+        if search:
+            all_items = list(PharmacyItem.objects.all())
+            matching_item_ids = set(
+                str(i.item_id)
+                for i in all_items
+                if search in str(getattr(i, "item_name", "")).lower()
+            )
+            if not matching_item_ids:
+                return Response([])
+ 
+        results = []
+        for s in all_stocks:
+            if grn_number and getattr(s, "grn_number", "") != grn_number:
+                continue
+            if item_id and str(getattr(s, "item_id", "")) != str(item_id):
+                continue
+            if outlet_code and getattr(s, "outlet_code", "") != outlet_code:
+                continue
+            if matching_item_ids is not None and str(getattr(s, "item_id", "")) not in matching_item_ids:
+                continue
+            results.append(s)
+ 
+        all_items_map = {}
+        if results:
+            for item in PharmacyItem.objects.all():
+                all_items_map[str(item.item_id)] = getattr(item, "item_name", "")
+ 
+        serialized = PharmacyStockSerializer(results, many=True).data
+ 
+        for row in serialized:
+            iid = str(row.get("item_id", ""))
+            row["item_name"]                    = all_items_map.get(iid, f"Item #{iid}")
+            row["mrp"]                          = str(_dec(row.get("mrp", 0)))
+            row["total_stock"]                  = _int(row.get("total_stock", 0))
+            row["sold_quantity"]                = _int(row.get("sold_quantity", 0))
+            row["transferred_out_quantity"]     = _int(row.get("transferred_out_quantity", 0))
+ 
+        return Response(serialized)

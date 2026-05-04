@@ -53,6 +53,17 @@ urlpatterns = [
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
 
     # Stock Transfer URLs
+    re_path(
+        r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',
+        inventory.pharmacy_stock_view,
+        name='pharmacy-stock'
+    ),
+
+    re_path(
+        r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$',
+        inventory.pharmacy_stock_view,
+        name='pharmacy-stock-detail'
+    ),
     path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
 
     path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
