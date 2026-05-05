@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from ..models import RadiologyReport
 from datetime import datetime, timedelta
 from django.utils import timezone
+import gridfs
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -502,6 +503,7 @@ def soft_delete_scan_report(request, investBillNo, itemName):
         client.close()
 
 @api_view(['GET'])
+# @permission_classes([HasRoleAndDataPermission])
 def get_radiology_format(request):
     """
     GET /scan-reports/format/
@@ -586,3 +588,62 @@ def get_radiology_format(request):
 
     finally:
         client.close()
+
+@api_view(['GET'])
+# @permission_classes([HasRoleAndDataPermission])
+def get_employee_signature_by_id(request):
+    employee_id = request.GET.get('employee_id')
+    if not employee_id:
+        return JsonResponse({'error': 'employee_id is required'}, status=400)
+
+    try:
+        mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        global_db = mongo_client.Global
+
+        profile_collection = global_db.backend_diagnostics_profile
+        designation_collection = global_db.backend_diagnostics_Designation
+        fs = gridfs.GridFS(global_db)
+
+        # ── Fetch profile ─────────────────────────────────────────────────
+        profile = profile_collection.find_one({"employeeId": str(employee_id)})
+        if not profile:
+            return JsonResponse({'error': 'Employee not found'}, status=404)
+
+        employee_name = profile.get("employeeName", "")
+        registration_number = profile.get("registrationNumber", "")
+        designation_code = profile.get("designation", "")
+
+        # ── Fetch designation name ────────────────────────────────────────
+        designation_name = ""
+        if designation_code:
+            desig_doc = designation_collection.find_one({"Designation_code": designation_code})
+            if desig_doc:
+                designation_name = desig_doc.get("designation", "")
+
+        # ── Fetch signature image as base64 ───────────────────────────────
+        signature_base64 = None
+        signature_file_id = profile.get("signatureFileId")
+        if signature_file_id:
+            try:
+                from bson import ObjectId
+                import base64
+                if isinstance(signature_file_id, str):
+                    signature_file_id = ObjectId(signature_file_id)
+                signature_file = fs.get(signature_file_id)
+                signature_bytes = signature_file.read()
+                signature_base64 = base64.b64encode(signature_bytes).decode('utf-8')
+            except Exception as e:
+                print(f"Error fetching signature: {str(e)}")
+
+        return JsonResponse({
+            "employeeId": employee_id,
+            "employeeName": employee_name,
+            "designation": designation_name,
+            "registrationNumber": registration_number,
+            "signatureBase64": signature_base64,
+        })
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return JsonResponse({'error': str(e)}, status=500)
