@@ -759,6 +759,9 @@ def list_velavan_invoices(request):
                     'company_name':    obj.company_name,
                     'items':           items,
                     'lastmodified_by': getattr(obj, 'lastmodified_by', None),
+                    'is_approved':     obj.is_approved,
+                    'approved_by':     obj.approved_by,
+
                 }
 
                 date_fields = ['date', 'invoice_date', 'due_date', 'created_date', 'lastmodified_date']
@@ -1053,6 +1056,68 @@ def update_velavan_invoice(request, grn_number):
 
     except Exception as e:
         logger.error(f"Error updating GRN {grn_number}: {str(e)}\n{traceback.format_exc()}")
+        return Response({
+            'status': 'error',
+            'message': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def approve_velavan_invoice(request, grn_number):
+    try:
+        collection = db["hospital_velavaninvoice"]
+
+        document = collection.find_one({"grn_number": grn_number})
+        if not document:
+            return Response({
+                'status': 'error',
+                'message': f'No record found for GRN {grn_number}'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Prevent re-approving
+        if document.get('is_approved'):
+            return Response({
+                'status': 'error',
+                'message': f'GRN {grn_number} is already approved'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        approved_by = request.data.get('auth-user-id', 'system')
+        approved_at = timezone.now()
+
+        update_data = {
+            'is_approved': True,
+            'approved_by': approved_by,
+            'approved_at': approved_at,
+        }
+
+        result = collection.update_one(
+            {"grn_number": grn_number},
+            {"$set": update_data}
+        )
+
+        if result.matched_count == 1:
+            updated_doc = collection.find_one({"grn_number": grn_number})
+            cleaned_doc = clean_mongo_document(updated_doc)
+
+            if isinstance(cleaned_doc.get('items'), str):
+                try:
+                    cleaned_doc['items'] = json.loads(cleaned_doc['items'])
+                except (json.JSONDecodeError, TypeError):
+                    cleaned_doc['items'] = []
+
+            return Response({
+                'status': 'success',
+                'message': f'GRN {grn_number} approved successfully',
+                'data': cleaned_doc
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                'status': 'error',
+                'message': 'Update failed'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    except Exception as e:
+        logger.error(f"Error approving GRN {grn_number}: {str(e)}\n{traceback.format_exc()}")
         return Response({
             'status': 'error',
             'message': str(e)

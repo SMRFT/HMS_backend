@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal, InvalidOperation
 from bson import ObjectId
 
 class ObjectIdField(serializers.Field):
@@ -19,7 +20,7 @@ class ChemicalCompositionSerializer(serializers.ModelSerializer):
         read_only_fields = ["composition_id"]
 
         
-from .models import PharmacyCategory
+from .models import PharmacyCategory,Cashcountershiftdetails
 class PharmacyCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = PharmacyCategory
@@ -58,6 +59,14 @@ class PharmacyStockSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["stock_id"]
 
+from rest_framework import serializers
+from .models import PharmacyBilling
+
+class PharmacyBillingSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = PharmacyBilling
+        fields = "__all__"
 
 from .models import GRN
 class GRNSerializer(serializers.ModelSerializer):
@@ -253,14 +262,6 @@ class ReferenceDoctorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import OPPharmacyBill
-class OPPharmacyBillSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = OPPharmacyBill
-        fields = '__all__'
-
-
 from .models import Billing
 class BillingSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source='patient.firstName', read_only=True)
@@ -277,6 +278,54 @@ class InsuranceProviderSerializer(serializers.ModelSerializer):
     class Meta:
         model = InsuranceProvider
         fields = '__all__'
+
+class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = Cashcountershiftdetails
+        fields = '__all__'
+
+    def validate_OpeningBalance(self, value):
+        return self._clean_decimal(value)
+
+    def validate_ClosingBalance(self, value):
+        return self._clean_decimal(value)
+
+    def validate_collected_Amount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_PettyCashBalance(self, value):
+        return self._clean_decimal(value)
+
+    def validate_RemittedToBank(self, value):
+        return self._clean_decimal(value)
+
+    def validate_SubmittedToAccount(self, value):
+        return self._clean_decimal(value)
+
+    def _clean_decimal(self, value):
+        if value is None or value == "":
+            return Decimal("0.00")
+
+        raw = str(value)
+
+        # Remove all types of quotes and whitespace
+        for char in ['"', "'", "“", "”", "‘", "’", "₹", " "]:
+            raw = raw.replace(char, "")
+
+        if not raw:
+            return Decimal("0.00")
+
+        try:
+            return Decimal(raw)
+        except (InvalidOperation, ValueError):
+            # Fallback for complex strings: try to extract numeric part
+            import re
+            numeric_part = re.sub(r'[^\d.]', '', raw)
+            try:
+                return Decimal(numeric_part) if numeric_part else Decimal("0.00")
+            except:
+                return Decimal("0.00")
 
 
 from .models import CustomerType
@@ -398,3 +447,12 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
                 {"endTime": "End time must be after start time."}
             )
         return attrs
+
+
+from .models import ReceiptAndPayment
+class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = ReceiptAndPayment
+        fields = '__all__'
+
