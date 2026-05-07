@@ -230,16 +230,20 @@ def create_scan_report(request):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
-        data = request.data
-        user_id = data.get('auth-user-id', 'system')
-        branch_code = request.data.get('auth-branch-code', 'SHB001')
-        outlet_code = request.data.get('auth-outlet-code', 'OLET003')
-        hospital_code = request.data.get('auth-hospital-code', 'SH001')
+        data         = request.data
+        user_id      = data.get('auth-user-id', 'system')
+        branch_code  = data.get('auth-branch-code', 'SHB001')
+        outlet_code  = data.get('auth-outlet-code', 'OLET003')
+        hospital_code = data.get('auth-hospital-code', 'SH001')
         invest_bill_no = data.get('investBillNo')
 
-        # Duplicate check
+        # ── Duplicate check ──────────────────────────────────────────────────
         existing = collection.find_one(
-            {'investBillNo': invest_bill_no, 'itemName': data.get('itemName'), 'is_active': True},
+            {
+                'investBillNo': invest_bill_no,
+                'itemName': data.get('itemName'),
+                'is_active': True
+            },
             {'_id': 1}
         )
         if existing:
@@ -248,7 +252,7 @@ def create_scan_report(request):
                 status=409
             )
 
-        # Parse investBillDate
+        # ── Parse dates ──────────────────────────────────────────────────────
         invest_bill_date = data.get('investBillDate')
         if invest_bill_date:
             try:
@@ -258,27 +262,49 @@ def create_scan_report(request):
         else:
             date_value = timezone.now()
 
-        # Parse optional slot_DateTime
         slot_dt = _parse_slot_datetime(data.get('slot_DateTime'))
 
+        # ── Build valuedetails ───────────────────────────────────────────────
+        # Frontend sends sections: [{ title_id, title, value }]
+        # We store them under valuedetails.value[]
+        sections = data.get('sections', [])   # list of { title_id, title, value }
+
+        valuedetails = {
+            "billTypeNo":  data.get('billTypeNo', ''),
+            "device_id":   data.get('device_id', []),    # e.g. ["MINDRAY"]
+            "item_id":     data.get('item_id', ''),
+            "approve":     False,
+            "approve_time": None,
+            "approve_by":  None,
+            "value": [
+                {
+                    "title_id":    sec.get('title_id', ''),
+                    "title_value": sec.get('value', ''),   # user-edited value
+                }
+                for sec in sections
+            ]
+        }
+
+        # ── Create record ────────────────────────────────────────────────────
         ct_report = RadiologyReport.objects.create(
-            date=date_value,
-            slot_DateTime=slot_dt,
-            investBillNo=invest_bill_no,
-            itemName=data.get('itemName'),
-            impression=data.get('impression', ''),
-            billTypeNo=data.get('billTypeNo', ''),
-            is_active=True,
-            created_by=user_id,
-            branch_code=branch_code,
-            outlet_code=outlet_code,
-            hospital_code=hospital_code,
+            date          = date_value,
+            slot_DateTime = slot_dt,
+            investBillNo  = invest_bill_no,
+            itemName      = data.get('itemName', ''),
+            impression    = data.get('impression', ''),
+            billTypeNo    = data.get('billTypeNo', ''),
+            valuedetails  = valuedetails,
+            is_active     = True,
+            created_by    = user_id,
+            branch_code   = branch_code,
+            outlet_code   = outlet_code,
+            hospital_code = hospital_code,
         )
 
         return JsonResponse({
-            "id": str(ct_report.id),
-            "investBillNo": ct_report.investBillNo,
-            "message": "Report created successfully",
+            "id":            str(ct_report.id),
+            "investBillNo":  ct_report.investBillNo,
+            "message":       "Report created successfully",
         }, status=201)
 
     except Exception as e:
@@ -287,8 +313,6 @@ def create_scan_report(request):
         return JsonResponse({"error": str(e)}, status=400)
     finally:
         client.close()
-
-
 # ─── PATCH: Update slot_DateTime (and optionally impression) ──────────────────
 
 @csrf_exempt
@@ -380,10 +404,15 @@ def edit_scan_report_impression(request, investBillNo, itemName):
     collection = client['HMS']['hospital_radiologyreport']
     try:
         new_impression = request.data.get("impression")
+        new_sections = request.data.get("sections")  # list of {title_id, value}
         user_id = request.data.get('auth-user-id', 'system')
 
-        if not new_impression:
-            return JsonResponse({"error": "Impression field is required"}, status=400)
+        # At least one of impression or sections must be provided
+        if not new_impression and not new_sections:
+            return JsonResponse(
+                {"error": "At least one of 'impression' or 'sections' is required"},
+                status=400
+            )
 
         report = collection.find_one(
             {'investBillNo': investBillNo, 'itemName': itemName, 'is_active': True}
@@ -391,10 +420,52 @@ def edit_scan_report_impression(request, investBillNo, itemName):
         if not report:
             return JsonResponse({"error": "Report not found"}, status=404)
 
+        # ── Build $set payload ────────────────────────────────────────────────
+        set_payload = {
+            "lastmodified_by": user_id,
+            "lastmodified_date": timezone.now(),
+        }
+
+        if new_impression:
+            set_payload["impression"] = new_impression
+
+        # Update only the title_value fields that were sent,
+        # leaving untouched sections as-is in the DB.
+        if new_sections and isinstance(new_sections, list):
+            existing_value = report.get("valuedetails", {}).get("value", [])
+
+            # Build a map of existing sections: title_id -> index
+            existing_map = {
+                item["title_id"]: idx
+                for idx, item in enumerate(existing_value)
+            }
+
+            # Apply incoming changes
+            for incoming in new_sections:
+                title_id = incoming.get("title_id")
+                new_value = incoming.get("value")
+
+                if not title_id or new_value is None:
+                    continue  # skip malformed entries
+
+                if title_id in existing_map:
+                    # Update existing section in-place
+                    idx = existing_map[title_id]
+                    existing_value[idx]["title_value"] = new_value
+                else:
+                    # Append brand-new section if title_id not found
+                    existing_value.append({
+                        "title_id": title_id,
+                        "title_value": new_value,
+                    })
+
+            set_payload["valuedetails.value"] = existing_value
+
         collection.update_one(
             {"_id": report["_id"]},
-            {"$set": {"impression": new_impression, "lastmodified_by": user_id, "lastmodified_date": timezone.now()}}
+            {"$set": set_payload}
         )
+
         updated = collection.find_one({"_id": report["_id"]})
         return JsonResponse(_serialize_report(updated), safe=False, status=200)
 
@@ -402,7 +473,6 @@ def edit_scan_report_impression(request, investBillNo, itemName):
         return JsonResponse({"error": str(e)}, status=500)
     finally:
         client.close()
-
 
 # ─── PATCH: Soft delete ───────────────────────────────────────────────────────
 
@@ -428,5 +498,91 @@ def soft_delete_scan_report(request, investBillNo, itemName):
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+    finally:
+        client.close()
+
+@api_view(['GET'])
+def get_radiology_format(request):
+    """
+    GET /scan-reports/format/
+    Query params:
+        - billTypeNo  (required)
+        - test_id     (required)
+        - gender      (required: 'Male' or 'Female')
+    Returns gender-specific fields + common fields from hospital_radiology_formats.
+    """
+
+    bill_type_no = request.GET.get('billTypeNo')
+    test_id      = request.GET.get('test_id')
+    gender       = request.GET.get('gender', '').strip().lower()   # 'male' or 'female'
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    if not bill_type_no:
+        return JsonResponse({'error': 'billTypeNo is required'}, status=400)
+    if not test_id:
+        return JsonResponse({'error': 'test_id is required'}, status=400)
+    if gender not in ('male', 'female'):
+        return JsonResponse(
+            {'error': "gender must be 'Male' or 'Female'"},
+            status=400
+        )
+
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+    db     = client['HMS']
+    collection = db['hospital_radiology_formats']
+
+    try:
+        # Convert test_id to int if stored as int in MongoDB
+        try:
+            test_id_query = int(test_id)
+        except (ValueError, TypeError):
+            test_id_query = test_id
+
+        # ── Fetch document ────────────────────────────────────────────────────
+        doc = collection.find_one(
+            {
+                'billTypeNo': bill_type_no,
+                'item_id':    test_id_query,
+                'is_active':  True,
+            },
+            {'_id': 0}   # exclude Mongo _id
+        )
+
+        if not doc:
+            return JsonResponse(
+                {'error': 'No active format found for given billTypeNo and test_id'},
+                status=404
+            )
+
+        # ── Gender-specific field ─────────────────────────────────────────────
+        gender_fields = doc.get(gender, [])   # 'male' or 'female' key
+
+        # ── Common fields (everything except male/female arrays) ──────────────
+        GENDER_KEYS   = {'male', 'female'}
+        EXCLUDED_KEYS = {'last_modified_by', 'last_modified_date'}   # internal/audit — remove if you want them
+
+        common_fields = {
+            k: v
+            for k, v in doc.items()
+            if k not in GENDER_KEYS and k not in EXCLUDED_KEYS
+        }
+
+        # Serialize any datetime objects
+        for key, value in common_fields.items():
+            if isinstance(value, datetime):
+                common_fields[key] = value.isoformat()
+
+        # ── Build response ────────────────────────────────────────────────────
+        response_data = {
+            **common_fields,          # test_code, department, itemName, billTypeNo,
+                                      # impression, shortcuts, device_id, TAT_Time, etc.
+            'format': gender_fields,  # list of { title_id, title, title_value }
+        }
+
+        return JsonResponse(response_data, safe=False)
+
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
     finally:
         client.close()

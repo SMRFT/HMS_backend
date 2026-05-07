@@ -52,9 +52,9 @@ def get_oppharmacy_stock(request):
     try:
         # ✅ Get values
         print("test", request.data.get("outlet_code"))
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -396,9 +396,9 @@ def save_oppharmacy_bill(request):
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code")
-    branch_code = data.get("auth-branch-code")
-    outlet_code = data.get("auth-outlet-code")
+    hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+    outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -582,9 +582,9 @@ def get_pharmacy_BillType(request):
     stock_collection = db["hospital_billtype"]
 
  
-    hospital_code = request.data.get("auth-hospital-code")
-    branch_code = request.data.get("auth-branch-code")
-    outlet_code = request.data.get("auth-outlet-code")
+    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+    outlet_code   = request.data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
     print(request.data.get)
     print("hospital_code:", hospital_code)
     print("branch_code:", branch_code)
@@ -793,9 +793,9 @@ def get_active_estimates(request):
 def get_estimate_bills(request):
     try:
 
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         bills = PharmacyBilling.objects.filter(
             billing_status="Estimate",
@@ -962,11 +962,10 @@ def OPPharmacy_pending_bills(request):
     # =========================================================
     # ✅ Get values from HEADERS
     # =========================================================
-    hospital_code  = request.data.get("auth-hospital-code")
-    branch_code    = request.data.get("auth-branch-code")
-    request_outlet = request.data.get("auth-outlet-code")
-    print("request_outlet",request_outlet)
     employee_id    = request.data.get("auth-user-id")
+    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+    outlet_code   = request.data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
     # =========================================================
     # ✅ Guard
@@ -1285,9 +1284,9 @@ def collect_oppharmacy_payment(request):
         shiftno = data.get("shiftno")
 
         # ✅ AUTH FIELDS
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         # ✅ CASHIER (NEW)
         cashier_id = data.get("auth-user-id")
@@ -1620,9 +1619,9 @@ def pharmacy_medicinechart(request):
         # =========================================
         data = request.data
 
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -1967,9 +1966,9 @@ def substitute_medicine(request):
         # ================================
         # ✅ AUTH CONTEXT (NEW)
         # ================================
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code_substitute_medicine:", hospital_code)
         print("branch_code:", branch_code)
@@ -2288,11 +2287,11 @@ def ipadvance_bills(request):
         # =========================================
         data = request.data
 
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
-        cashier_id = data.get("auth-user-id")
         employee_id = data.get("auth-user-id")   
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
+        cashier_id = data.get("auth-user-id")   
 
         if not hospital_code or not branch_code or not outlet_code:
             return Response(
@@ -2511,9 +2510,9 @@ def cashcounter_outlet(request):
         # =========================================
         # ✅ GET VALUES (ONLY request.data)
         # =========================================
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)

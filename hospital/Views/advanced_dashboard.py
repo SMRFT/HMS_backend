@@ -2,10 +2,30 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
-from datetime import timedelta
+from django.utils.timezone import make_aware, is_aware
+from datetime import datetime, timedelta
 import calendar
-from django.db.models import Sum, Count
-from ..models import Patient, Billing, Admission, GRN, Room
+from pymongo import MongoClient
+import os
+import pytz
+
+# Setup Mongo Client
+MONGO_URI = os.getenv("GLOBAL_DB_HOST") or "mongodb://localhost:27017/HMS"
+client = MongoClient(MONGO_URI)
+mongo_db = client["HMS"]
+
+def ensure_aware(dt):
+    """Ensures a datetime object is timezone-aware (UTC)."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    if not is_aware(dt):
+        return make_aware(dt)
+    return dt
 
 @api_view(['GET'])
 def advanced_dashboard_stats(request):
@@ -13,7 +33,10 @@ def advanced_dashboard_stats(request):
         month = request.GET.get('month')
         year = request.GET.get('year')
         
-        now = timezone.now()
+        # Explicitly use India Standard Time (IST)
+        tz = pytz.timezone('Asia/Kolkata')
+        now = timezone.now().astimezone(tz)
+        
         if not month or not year:
             target_date = now
             month = target_date.month
@@ -24,116 +47,188 @@ def advanced_dashboard_stats(request):
             target_date = now.replace(year=year, month=month, day=1)
 
         # 1. KPIs
-        total_op = Patient.objects.count() # Approximation for total OP lifetime
-        total_ip = Admission.objects.count()
+        total_op = mongo_db["hospital_patient"].count_documents({})
+        total_ip_lifetime = mongo_db["hospital_admission"].count_documents({})
+        total_discharge_lifetime = mongo_db["hospital_admission"].count_documents({"is_discharged": True})
+        current_ip = mongo_db["hospital_admission"].count_documents({"is_admissionActive": True})
         
-        # Avoid Djongo aggregate error for Decimal128 by summing values manually
-        total_income = 0
-        for fee in Billing.objects.values_list('total_fees', flat=True):
-            if fee:
-                total_income += float(str(fee))
+        # Income Aggregations
+        income_pipeline = [
+            {"$match": {"payment_status": "Paid"}},
+            {"$group": {"_id": None, "total": {"$sum": "$total_fees"}}}
+        ]
+        op_income_res = list(mongo_db["hospital_billing"].aggregate(income_pipeline))
+        op_income = float(str(op_income_res[0]["total"])) if op_income_res else 0.0
 
+        discharge_income_pipeline = [
+            {"$match": {"status": "Billed"}},
+            {"$group": {"_id": None, "total": {"$sum": "$net_amount"}}}
+        ]
+        ip_income_res = list(mongo_db["hospital_dischargebilling"].aggregate(discharge_income_pipeline))
+        ip_income = float(str(ip_income_res[0]["total"])) if ip_income_res else 0.0
+
+        pharmacy_income_pipeline = [
+            {"$match": {"billing_status": "Paid"}},
+            {"$group": {"_id": None, "total": {"$sum": "$net_amount"}}}
+        ]
+        pharm_income_res = list(mongo_db["hospital_pharmacybilling"].aggregate(pharmacy_income_pipeline))
+        pharm_income = float(str(pharm_income_res[0]["total"])) if pharm_income_res else 0.0
+
+        total_income_lifetime = op_income + ip_income + pharm_income
+
+        # Today's Dates (IST)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-        today_ip = Admission.objects.filter(admissionDateTime__range=(today_start, today_end)).count()
-        today_visits = Billing.objects.filter(billed_date__range=(today_start, today_end)).count()
+        today_ip = mongo_db["hospital_admission"].count_documents({
+            "is_admitted": True, 
+            "admissionDateTime": {"$gte": today_start, "$lte": today_end}
+        })
+        
+        today_visits = mongo_db["hospital_billing"].count_documents({
+            "payment_status": "Paid", 
+            "billed_date": {"$gte": today_start, "$lte": today_end}
+        })
         today_op = max(0, today_visits - today_ip)
 
-        today_discharge = DischargeDetail.objects.filter(discharge_date=now.date()).count()
+        today_discharge = mongo_db["hospital_admission"].count_documents({
+            "is_discharged": True, 
+            "lastmodified_date": {"$gte": today_start, "$lte": today_end}
+        })
+
+        # Today's Income (Billing + Pharmacy)
+        today_op_income_pipeline = [
+            {"$match": {"payment_status": "Paid", "billed_date": {"$gte": today_start, "$lte": today_end}}},
+            {"$group": {"_id": None, "total": {"$sum": "$total_fees"}}}
+        ]
+        t_op_inc = list(mongo_db["hospital_billing"].aggregate(today_op_income_pipeline))
+        today_op_income = float(str(t_op_inc[0]["total"])) if t_op_inc else 0.0
+
+        today_pharm_income_pipeline = [
+            {"$match": {"billing_status": "Paid", "bill_date": {"$gte": today_start, "$lte": today_end}}},
+            {"$group": {"_id": None, "total": {"$sum": "$net_amount"}}}
+        ]
+        t_ph_inc = list(mongo_db["hospital_pharmacybilling"].aggregate(today_pharm_income_pipeline))
+        today_pharm_income = float(str(t_ph_inc[0]["total"])) if t_ph_inc else 0.0
+
+        today_revenue = today_op_income + today_pharm_income
 
         kpis = {
             "total_op": total_op,
-            "total_ip": total_ip,
-            "total_income": float(total_income),
+            "total_ip": total_ip_lifetime,
+            "total_discharge": total_discharge_lifetime,
+            "current_ip": current_ip,
+            "total_income": total_income_lifetime,
+            "today_revenue": today_revenue,
             "today_ip": today_ip,
             "today_op": today_op,
             "today_discharge": today_discharge
         }
 
-        # 2. Monthly OP/IP & Income/Expense
+        # 2. Monthly Stats
         num_days = calendar.monthrange(year, month)[1]
         monthly_op_ip = []
         monthly_income_expense = []
 
-        # Get all records for the month to avoid N+1 queries
-        month_start = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999)
+        month_start = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(pytz.UTC)
+        month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999).astimezone(pytz.UTC)
 
-        admissions = list(Admission.objects.filter(admissionDateTime__range=(month_start, month_end)))
-        billings = list(Billing.objects.filter(billed_date__range=(month_start, month_end)))
-        grns = list(GRN.objects.filter(created_date__range=(month_start, month_end)))
+        admissions = list(mongo_db["hospital_admission"].find({
+            "is_admitted": True,
+            "admissionDateTime": {"$gte": month_start, "$lte": month_end}
+        }))
+        
+        billings = list(mongo_db["hospital_billing"].find({
+            "payment_status": "Paid",
+            "billed_date": {"$gte": month_start, "$lte": month_end}
+        }))
+        
+        pharm_billings = list(mongo_db["hospital_pharmacybilling"].find({
+            "billing_status": "Paid",
+            "bill_date": {"$gte": month_start, "$lte": month_end}
+        }))
+
+        discharge_billings = list(mongo_db["hospital_dischargebilling"].find({
+            "status": "Billed",
+            "bill_date": {"$gte": month_start.strftime("%Y-%m-%d"), "$lte": month_end.strftime("%Y-%m-%d")}
+        }))
+        
+        grns = list(mongo_db["hospital_grn"].find({
+            "status": "Approved",
+            "created_date": {"$gte": month_start, "$lte": month_end}
+        }))
 
         for day in range(1, num_days + 1):
-            day_start = now.replace(year=year, month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
-            day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+            # We work in IST for day boundaries
+            d_start_local = now.replace(year=year, month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
+            d_end_local = d_start_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+            # Convert to UTC for comparison with DB results
+            d_start = d_start_local.astimezone(pytz.UTC)
+            d_end = d_end_local.astimezone(pytz.UTC)
 
-            # OP/IP
-            day_admissions = [a for a in admissions if day_start <= a.admissionDateTime <= day_end]
-            day_billings = [b for b in billings if day_start <= b.billed_date <= day_end]
+            day_admissions = [a for a in admissions if d_start <= ensure_aware(a.get("admissionDateTime")) <= d_end]
+            day_billings = [b for b in billings if d_start <= ensure_aware(b.get("billed_date")) <= d_end]
             
             d_ip = len(day_admissions)
             d_visits = len(day_billings)
             d_op = max(0, d_visits - d_ip)
 
-            monthly_op_ip.append({
-                "day": day,
-                "OP": d_op,
-                "IP": d_ip
-            })
+            monthly_op_ip.append({"day": day, "OP": d_op, "IP": d_ip})
 
-            # Income/Expense
-            day_income = sum([float(str(b.total_fees or 0)) for b in day_billings])
-            day_grns = [g for g in grns if day_start <= g.created_date <= day_end]
-            day_expense = sum([float(str(g.net_invoice_amount or 0)) for g in day_grns])
+            # Income
+            d_income = sum([float(str(b.get("total_fees") or 0)) for b in day_billings])
+            d_str = d_start_local.strftime("%Y-%m-%d")
+            d_discharges = [db for db in discharge_billings if db.get("bill_date") == d_str]
+            d_income += sum([float(str(db.get("net_amount") or 0)) for db in d_discharges])
+            
+            d_pharm = [pb for pb in pharm_billings if d_start <= ensure_aware(pb.get("bill_date")) <= d_end]
+            d_income += sum([float(str(pb.get("net_amount") or 0)) for pb in d_pharm])
 
-            monthly_income_expense.append({
-                "day": day,
-                "Income": day_income,
-                "Expense": day_expense
-            })
+            # Expense
+            d_grns = [g for g in grns if d_start <= ensure_aware(g.get("created_date")) <= d_end]
+            d_expense = sum([float(str(g.get("net_invoice_amount") or 0)) for g in d_grns])
 
-        # 3. Today's Income by Method
-        today_billings = [b for b in billings if today_start <= b.billed_date <= today_end]
-        income_methods = {}
-        for b in today_billings:
-            method = b.payment_method or "Unknown"
-            if not method.strip(): method = "Unknown"
-            income_methods[method] = income_methods.get(method, 0) + float(str(b.total_fees or 0))
+            monthly_income_expense.append({"day": day, "Income": d_income, "Expense": d_expense})
+
+        # 3. Income Methods Today
+        t_billings = [b for b in billings if today_start.astimezone(pytz.UTC) <= ensure_aware(b.get("billed_date")) <= today_end.astimezone(pytz.UTC)]
+        t_pharm = [pb for pb in pharm_billings if today_start.astimezone(pytz.UTC) <= ensure_aware(pb.get("bill_date")) <= today_end.astimezone(pytz.UTC)]
         
-        todays_income_method = [{"method": k, "amount": v} for k, v in income_methods.items()]
+        methods = {}
+        for b in t_billings:
+            m = b.get("payment_method") or "Cash"
+            methods[m] = methods.get(m, 0) + float(str(b.get("total_fees") or 0))
+        for pb in t_pharm:
+            m = pb.get("payment_mode") or "Cash"
+            methods[m] = methods.get(m, 0) + float(str(pb.get("net_amount") or 0))
+        todays_income_method = [{"method": k, "amount": v} for k, v in methods.items()]
 
-        # 4. Doctor-wise OP/IP (Today)
-        doctor_stats = {}
-        # IP from admissions
-        today_admissions = [a for a in admissions if today_start <= a.admissionDateTime <= today_end]
-        for a in today_admissions:
-            doc = a.consultingDoctor or a.admittingDoctor or "Unknown"
-            if not doc.strip(): doc = "Unknown"
-            if doc not in doctor_stats: doctor_stats[doc] = {"OP": 0, "IP": 0, "Amount": 0.0}
-            doctor_stats[doc]["IP"] += 1
-
-        # OP from billings
-        for b in today_billings:
-            doc = b.doctor_id or "Unknown"
-            if not doc.strip(): doc = "Unknown"
-            if doc not in doctor_stats: doctor_stats[doc] = {"OP": 0, "IP": 0, "Amount": 0.0}
-            doctor_stats[doc]["OP"] += 1
-            doctor_stats[doc]["Amount"] += float(str(b.consulting_fee or 0))
-        
-        doctor_wise = [{"name": k, "OP": v["OP"], "IP": v["IP"], "Amount": v["Amount"]} for k, v in doctor_stats.items() if k != "Unknown"]
-        # Limit to top 10 for UI
+        # 4. Doctor Stats
+        doc_stats = {}
+        t_admissions = [a for a in admissions if today_start.astimezone(pytz.UTC) <= ensure_aware(a.get("admissionDateTime")) <= today_end.astimezone(pytz.UTC)]
+        for a in t_admissions:
+            d = a.get("consultingDoctor") or a.get("admittingDoctor") or "Other"
+            if d not in doc_stats: doc_stats[d] = {"OP": 0, "IP": 0, "Amount": 0.0}
+            doc_stats[d]["IP"] += 1
+            
+        for b in t_billings:
+            d = b.get("doctor_id") or "Other"
+            if d not in doc_stats: doc_stats[d] = {"OP": 0, "IP": 0, "Amount": 0.0}
+            doc_stats[d]["OP"] += 1
+            doc_stats[d]["Amount"] += float(str(b.get("consulting_fee") or 0))
+            
+        doctor_wise = [{"name": k, "OP": v["OP"], "IP": v["IP"], "Amount": v["Amount"]} for k, v in doc_stats.items() if k != "Other"]
         doctor_wise = sorted(doctor_wise, key=lambda x: x["OP"] + x["IP"], reverse=True)[:10]
 
         # 5. Bed Occupancy
-        total_beds = sum([c for c in Room.objects.values_list('capacity', flat=True) if c])
-        discharged_uhids = set(DischargeDetail.objects.values_list('uhid_no', flat=True))
-        occupied_beds = Admission.objects.exclude(uhid__in=discharged_uhids).count()
-        vacant_beds = max(0, total_beds - occupied_beds)
-
+        total_beds_res = list(mongo_db["hospital_room"].aggregate([{"$group": {"_id": None, "total": {"$sum": "$capacity"}}}]))
+        total_beds = total_beds_res[0]["total"] if total_beds_res else 0
+        occupied_beds = mongo_db["hospital_admission"].count_documents({"is_admissionActive": True})
+        
         bed_occupancy = [
             {"name": "Occupied", "value": occupied_beds},
-            {"name": "Vacant", "value": vacant_beds}
+            {"name": "Vacant", "value": max(0, total_beds - occupied_beds)}
         ]
 
         return Response({
@@ -143,9 +238,8 @@ def advanced_dashboard_stats(request):
             "todays_income_method": todays_income_method,
             "doctor_wise": doctor_wise,
             "bed_occupancy": bed_occupancy
-        }, status=status.HTTP_200_OK)
+        })
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        print(f"Advanced Dashboard Error: {str(e)}")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
