@@ -576,7 +576,7 @@ def save_oppharmacy_bill(request):
 
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_BillType(request):
     db = client["HMS"]
     stock_collection = db["hospital_billtype"]
@@ -2493,6 +2493,295 @@ def cashcounter_outlet(request):
 
 
 
+# from rest_framework.decorators import api_view
+# from rest_framework.response import Response
+# from rest_framework import status
+# from datetime import date
+# from ..models import Patient
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+from datetime import datetime
+from ..models import SalesReturn
+from ..serializers import SalesReturnSerializer
+from django.db.models import Max
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def OP_salesreturn_billdetails(request):
+    try:
+        data = request.data
+
+        # =========================
+        # :white_check_mark: INPUT
+        # =========================
+        bill_no = data.get("bill_no")
+        uhid = data.get("uhid")
+        medicine_particulars = data.get("medicine_particulars", [])
+
+        # :fire: FIX: Handle string → convert to list
+        if isinstance(medicine_particulars, str):
+            try:
+                medicine_particulars = json.loads(medicine_particulars)
+            except:
+                return Response({
+                    "status": "error",
+                    "message": "medicine_particulars must be a valid array"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # :fire: FIX: Ensure it's list
+        if not isinstance(medicine_particulars, list):
+            return Response({
+                "status": "error",
+                "message": "medicine_particulars must be an array"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not bill_no or not uhid or not medicine_particulars:
+            return Response({
+                "status": "error",
+                "message": "bill_no, uhid and medicine_particulars are required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # =========================
+        # :white_check_mark: AUTH FIELDS
+        # =========================
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        employee_id   = data.get("auth-user-id")
+
+        # =========================
+        # :white_check_mark: VALIDATION (FIXED SAFE)
+        # =========================
+        cleaned_particulars = []
+
+        for item in medicine_particulars:
+
+            # :fire: Ensure each item is dict
+            if not isinstance(item, dict):
+                return Response({
+                    "status": "error",
+                    "message": "Each medicine_particular must be an object"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                billed_qty = float(item.get("billed_qty", 0))
+                return_qty = float(item.get("return_qty", 0))
+            except:
+                return Response({
+                    "status": "error",
+                    "message": f"Invalid quantity format for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if return_qty <= 0:
+                return Response({
+                    "status": "error",
+                    "message": f"Return qty must be > 0 for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if return_qty > billed_qty:
+                return Response({
+                    "status": "error",
+                    "message": f"Return qty exceeds billed qty for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # :white_check_mark: Keep full object (important)
+            cleaned_particulars.append(item)
+
+        # =========================
+        # :white_check_mark: GENERATE RETURN BILL NO
+        # =========================
+        now = timezone.now()
+        current_year = now.year % 100
+        next_year = (now.year + 1) % 100
+        financial_year = f"{current_year:02d}{next_year:02d}"
+
+        last_records = SalesReturn.objects.filter(
+            return_bill_no__startswith=financial_year
+        ).values_list("return_bill_no", flat=True)
+
+        max_no = 0
+
+        for bill in last_records:
+            try:
+                bill_str = str(bill)
+
+                if "/" in bill_str:
+                    last_part = bill_str.split("/")[-1]
+
+                if last_part.isdigit():
+                    max_no = max(max_no, int(last_part))
+            except:
+                continue
+
+        new_no = max_no + 1
+        return_bill_no = f"{financial_year}/{new_no:06d}"
+
+        # =========================
+        # :white_check_mark: SAVE
+        # =========================
+        sales_return = SalesReturn.objects.create(
+            return_bill_no=return_bill_no,
+            bill_no=bill_no,
+            uhid=uhid,
+            medicine_particulars=cleaned_particulars,  # :white_check_mark: FIXED HERE
+
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+
+            cashier_id=employee_id
+        )
+
+        serializer = SalesReturnSerializer(sales_return)
+
+        return Response({
+            "status": "success",
+            "message": "Sales Return created successfully",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from rest_framework.response import Response
+from rest_framework import status
+from pymongo import MongoClient
+from bson.decimal128 import Decimal128
+import os
+
+client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+db = client["HMS"]
+
+bill_collection = db["hospital_pharmacybilling"]
+stock_collection = db["hospital_pharmacystock"]
+item_collection = db["hospital_pharmacyitem"]
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def get_salesreturn_billdetails(request):
+    try:
+        data = request.data
+        print("data1234567:", data)
+        # =========================
+        # :white_check_mark: INPUT
+        # =========================
+        bill_no = data.get("bill_no")
+
+        if not bill_no:
+            return Response({
+                "status": "error",
+                "message": "bill_no is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # =========================
+        # :white_check_mark: AUTH
+        # =========================
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        print("hospital_code:", hospital_code)
+        print("branch_code:", branch_code)
+        print("outlet_code:", outlet_code)
+
+        # =========================
+        # :white_check_mark: FETCH BILL
+        # =========================
+        bill = bill_collection.find_one({
+            "bill_no": bill_no,
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "outlet_code": outlet_code
+        })
+
+        if not bill:
+            return Response({
+                "status": "error",
+                "message": "Bill not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # =========================
+        # :white_check_mark: PROCESS ITEMS
+        # =========================
+        items_data = []
+
+        for item in bill.get("medicine_particulars", []):
+            item_id = item.get("item_id")
+            batch = item.get("batch_number")
+
+            # :small_blue_diamond: GET ITEM NAME
+            item_master = item_collection.find_one({
+                "item_id": item_id,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            })
+
+            item_name = item_master.get("item_name") if item_master else ""
+
+            # :small_blue_diamond: GET STOCK DETAILS
+            stock = stock_collection.find_one({
+                "item_id": item_id,
+                "batch_number": batch,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet_code": outlet_code
+            })
+
+            # :small_blue_diamond: Decimal Handling
+            def convert_decimal(val):
+                return float(val.to_decimal()) if isinstance(val, Decimal128) else val
+
+            items_data.append({
+                "item_id": item_id,
+                "item_name": item_name,
+                "batch_number": batch,
+                "qty": item.get("qty"),
+                "price": item.get("price"),
+
+                # stock fields
+                "mrp": convert_decimal(stock.get("mrp")) if stock else 0,
+                "expiry_date": stock.get("expiry_date") if stock else None,
+                "available_stock": stock.get("total_stock", 0) if stock else 0,
+                "blocked_qty": stock.get("blocked_quantity", 0) if stock else 0,
+
+                "cgst": convert_decimal(stock.get("CGST_Percentage")) if stock else 0,
+                "sgst": convert_decimal(stock.get("SGST_Percentage")) if stock else 0,
+            })
+
+        # =========================
+        # :white_check_mark: RESPONSE
+        # =========================
+        return Response({
+            "status": "success",
+            "data": {
+                "bill_no": bill.get("bill_no"),
+                "uhid": bill.get("uhid"),
+                "bill_date": bill.get("bill_date"),
+                "doctor_id": bill.get("doctor_id"),
+                "total_amount": bill.get("total_amount"),
+                "net_amount": bill.get("net_amount"),
+                "billing_mode": bill.get("billing_mode"),
+                "items": items_data
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -2594,3 +2883,4 @@ def salesreturn_get_patientdetails(request):
             "error_type": type(e).__name__,
             "trace": traceback.format_exc()
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    

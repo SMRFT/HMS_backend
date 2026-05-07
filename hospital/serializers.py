@@ -28,7 +28,15 @@ class PharmacyCategorySerializer(serializers.ModelSerializer):
         read_only_fields = ["category_id"]
 
         
-from .models import PharmacyItem
+from .models import PharmacyItem,CashCounter
+class CashCounterSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    counter_id = serializers.CharField(required=False, allow_blank=True)
+    bill_type = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    class Meta:
+        model = CashCounter
+        fields = '__all__'
+
 class PharmacyItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = PharmacyItem
@@ -454,10 +462,17 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
         return attrs
 
 
-from .models import ReceiptAndPayment
+from .models import ReceiptAndPayment, CashCounter
 class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = ReceiptAndPayment
         fields = '__all__'
 
+
+from .models import SalesReturn
+class SalesReturnSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = SalesReturn
+        fields = '__all__'

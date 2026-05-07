@@ -21,7 +21,9 @@ from .Views import (
     DietOrder
 )
 from .Views.AccountsReport import (
-    shift_basis_report
+    shift_basis_report,
+    cash_counter_manager,
+    bill_wise_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -353,5 +355,14 @@ urlpatterns = [
 
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
+    path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
+    path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
 
+    # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("salesreturn_get_patientdetails/",pharmacy.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
+    path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
+    path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+
+    
 ]

@@ -339,6 +339,7 @@ class PharmacyBilling(AuditModel):
     deleted_by =models.CharField(max_length=150)
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
@@ -1008,7 +1009,53 @@ class Cashcountershiftdetails(AuditModel):
         return f"{self.CashierID} - {self.CashCounter}"
     
 
+class CashCounter(AuditModel):
+    counter_id = models.CharField(primary_key=True,max_length=100000)
+    counter_name = models.CharField(max_length=50)
+    outlet = models.CharField(max_length=50)
+    bill_type = models.JSONField(default=list)
+    is_active = models.BooleanField(default=True)
+    
+    def __str__(self):
+        return self.counter_id
 
+    def save(self, *args, **kwargs):
+        if not self.counter_id:
+            # Find the highest numeric ID starting with 'CC'
+            last = CashCounter.objects.filter(counter_id__startswith="CC").order_by("-counter_id").first()
+            if last:
+                try:
+                    # Extract number from "CC0001" -> 1
+                    last_num = int(last.counter_id[2:])
+                    self.counter_id = f"CC{(last_num + 1):04d}"
+                except (ValueError, IndexError):
+                    self.counter_id = "CC0001"
+            else:
+                self.counter_id = "CC0001"
+        
+        # Ensure bill_type is a list for saving
+        if isinstance(self.bill_type, str):
+            try:
+                import json
+                self.bill_type = json.loads(self.bill_type)
+            except:
+                pass
+
+        super().save(*args, **kwargs)
+
+        # 🚀 Force BSON array storage in MongoDB using pymongo
+        try:
+            from pymongo import MongoClient
+            import os
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            db["hospital_cashcounter"].update_one(
+                {"counter_id": self.counter_id},
+                {"$set": {"bill_type": self.bill_type if isinstance(self.bill_type, list) else []}}
+            )
+            client.close()
+        except Exception as e:
+            print(f"Pymongo force update failed: {e}")
 
 class SurgerySchedule(AuditModel):
     STATUS_CHOICES = [
@@ -1142,7 +1189,7 @@ class PatientDietOrder(AuditModel):
     
 
 
-from django.db import models
+
 
 class ReceiptAndPayment(AuditModel):
 
@@ -1185,3 +1232,40 @@ class DietExtraMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - {self.price}"
+
+class SalesReturn(AuditModel):
+    return_bill_no     = models.CharField(max_length=20, unique=True)
+    return_bill_date = models.DateTimeField(auto_now_add=True)
+    bill_no            = models.CharField(max_length=20)
+    uhid               = models.CharField(max_length=20)
+    medicine_particulars = models.JSONField()
+    # medicine_particulars_json = models.TextField(null=True, blank=True)
+    cashier_id         = models.CharField(max_length=500, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        # 1. Standard Django Save
+        super().save(*args, **kwargs)
+
+        # 2. Force BSON array storage in MongoDB using pymongo (Fix for Djongo JSONField issues)
+        try:
+            from pymongo import MongoClient
+            import os
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            
+            # Ensure medicine_particulars is a list
+            meds = self.medicine_particulars
+            if isinstance(meds, str):
+                import json
+                try:
+                    meds = json.loads(meds)
+                except:
+                    meds = []
+            
+            db["hospital_salesreturn"].update_one(
+                {"return_bill_no": self.return_bill_no},
+                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+            )
+            client.close()
+        except Exception as e:
+            print(f"SalesReturn Pymongo force update failed: {e}")

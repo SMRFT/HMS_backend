@@ -1,15 +1,13 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from django.db.models import Q
 from datetime import datetime
 import os
 from pymongo import MongoClient
-from ...models import Patient, PharmacyBilling, Cashcountershiftdetails
 from pyauth.auth import HasRoleAndDataPermission
 
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
-def shift_basis_accounts_report(request):
+def bill_wise_report(request):
     try:
         # 1. Extract params
         if request.method == "POST":
@@ -19,9 +17,9 @@ def shift_basis_accounts_report(request):
 
         from_date_str = data.get("from_date")
         to_date_str = data.get("to_date")
-        outlet_code_filter = data.get("outlet_code")
-        shiftno_filter = data.get("shiftno")
-
+        type_filter = data.get("bill_type") # "All", "Pharmacy", "Investigation", etc.
+        patient_filter = data.get("uhid")
+        
         # AUTH CODES
         hospital_code = data.get("auth-hospital-code")
         branch_code = data.get("auth-branch-code")
@@ -57,14 +55,10 @@ def shift_basis_accounts_report(request):
         report_data = []
         
         # Query Builder for Mongo
-        # We search by created_date or specific bill date depending on collection
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
-        if outlet_code_filter and outlet_code_filter != "all":
-            mongo_query["outlet_code"] = outlet_code_filter
-        if shiftno_filter:
-            mongo_query["shiftno"] = shiftno_filter
+        if patient_filter: mongo_query["uhid"] = patient_filter
 
         # COLLECTIONS TO SCAN
         # format: (collection_name, date_field, type_label, id_field, amt_field, status_query, uhid_field)
@@ -73,41 +67,53 @@ def shift_basis_accounts_report(request):
             ("hospital_investbilling", "investBillDate", "Investigation", "investBillNo", "finalPrice", {"paymentStatus": "Paid"}, "uhid"),
             ("hospital_pharmacybilling", "bill_date", "Pharmacy", "bill_no", "net_amount", {"billing_status": "Paid"}, "uhid"),
             ("hospital_dischargebilling", "bill_date", "Discharge", "bill_no", "net_amount", {"status": "Paid"}, "uhid"),
-            ("hospital_receiptandpayment", "created_date", "Receipt", "voucher_no", "amount", {"receipt_type": "Receipt"}, None),
-            ("hospital_receiptandpayment", "created_date", "Payment", "voucher_no", "amount", {"receipt_type": "Payment"}, None),
+            ("hospital_salesreturn", "return_bill_date", "Sales Return", "return_bill_no", "medicine_particulars", {}, "uhid"),
         ]
 
         for col_name, date_f, label, id_f, amt_f, status_q, uhid_f in scans:
+            if type_filter and type_filter != "All" and type_filter != label:
+                continue
+
             q = mongo_query.copy()
             q.update(status_q)
-            
-            # Date filter only if shiftno is NOT provided (if shiftno is provided, we want all items in that shift regardless of date)
-            if not shiftno_filter:
-                q[date_f] = {"$gte": from_date, "$lte": to_date}
+            q[date_f] = {"$gte": from_date, "$lte": to_date}
             
             docs = list(db[col_name].find(q))
             for d in docs:
-                amt = clean_amt(d.get(amt_f, 0))
-                # For payments, we treat as negative for net total
-                display_amt = -amt if label == "Payment" else amt
-                
-                # Extract items if they exist
-                items = d.get("items") or d.get("item") or []
-                
+                # Handle Sales Return specially to sum up prices
+                if label == "Sales Return":
+                    meds = d.get("medicine_particulars", [])
+                    if isinstance(meds, str):
+                        import json
+                        try: meds = json.loads(meds)
+                        except: meds = []
+                    
+                    # Calculate total return amount
+                    amt = 0.0
+                    for m in meds:
+                        # item format: {"item_id": 1, "return_qty": 1, "price": 21.24, ...}
+                        qty = float(m.get("return_qty", 0))
+                        price = float(m.get("price", 0))
+                        amt += qty * price
+                    
+                    display_amt = -amt # Returns are negative
+                    items = meds
+                else:
+                    amt = clean_amt(d.get(amt_f, 0))
+                    display_amt = amt
+                    items = d.get("items") or d.get("item") or d.get("medicine_particulars") or []
+
                 report_data.append({
                     "type": label,
                     "bill_no": d.get(id_f),
                     "bill_date": clean_val(d.get(date_f)),
                     "uhid": d.get(uhid_f) if uhid_f else "",
                     "patient_name": "", # Will fill later
-                    "net_amount": amt,
-                    "display_amount": display_amt,
+                    "net_amount": round(amt, 2),
+                    "display_amount": round(display_amt, 2),
                     "payment_mode": d.get("payment_mode") or d.get("paymentMethod") or d.get("payment_method") or "Cash",
-                    "outlet_code": d.get("outlet_code"),
-                    "shiftno": d.get("shiftno"),
                     "cashier_id": d.get("cashier_id") or d.get("created_by") or d.get("CashierID"),
-                    "status": "Paid",
-                    "items": clean_val(items) # Sanitize items list
+                    "items": clean_val(items)
                 })
 
         # 4. Fetch Patient Names
@@ -130,11 +136,17 @@ def shift_basis_accounts_report(request):
         except: pass
 
         # Final Polish
-        total_net = 0
+        total_collection = 0
+        total_return = 0
+        
         for r in report_data:
             r["patient_name"] = patient_map.get(r["uhid"], "N/A") if r["uhid"] else "N/A"
             r["cashier_name"] = cashier_name_map.get(r["cashier_id"], r["cashier_id"])
-            total_net += r["display_amount"]
+            
+            if r["type"] == "Sales Return":
+                total_return += abs(r["display_amount"])
+            else:
+                total_collection += r["display_amount"]
 
         client.close()
         
@@ -144,9 +156,10 @@ def shift_basis_accounts_report(request):
         return Response({
             "success": True,
             "summary": {
-                "total_net": round(total_net, 2),
+                "total_collection": round(total_collection, 2),
+                "total_return": round(total_return, 2),
+                "net_collection": round(total_collection - total_return, 2),
                 "count": len(report_data),
-                # Breakdown by type
                 "breakdown": {
                     label: round(sum(r["display_amount"] for r in report_data if r["type"] == label), 2)
                     for label in set(r["type"] for r in report_data)
@@ -156,5 +169,7 @@ def shift_basis_accounts_report(request):
         })
 
     except Exception as e:
-        print("Report Error:", str(e))
+        import traceback
+        print("Bill Wise Report Error:", str(e))
+        print(traceback.format_exc())
         return Response({"success": False, "message": str(e)}, status=500)
