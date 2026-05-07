@@ -55,6 +55,8 @@ urlpatterns = [
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
     # path("sales_return_medicine/",  pharmacy.sales_return_medicine),
     path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -69,8 +71,8 @@ urlpatterns = [
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
-    path("get_maniblock_pedingbills/",  cashcounter.get_maniblock_pedingbills),
-    path("update_maniblock_pedingbills/",  cashcounter.update_maniblock_pedingbills),
+    path("get_mainblock_pendingbills/",  cashcounter.get_mainblock_pendingbills),
+    path("update_mainblock_pendingbills/",  cashcounter.update_mainblock_pendingbills),
     
     
     

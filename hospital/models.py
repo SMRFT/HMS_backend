@@ -1146,3 +1146,49 @@ class ReceiptAndPayment(AuditModel):
 
     def __str__(self):
         return f"{self.voucher_no} - {self.account_head}"
+    
+
+
+
+
+class SalesReturn(AuditModel):
+    return_bill_no = models.CharField(max_length=200, unique=True)
+    return_bill_date = models.DateTimeField(auto_now_add=True)
+    bill_no = models.CharField(max_length=200)
+    uhid = models.CharField(max_length=20)
+    return_amount= models.CharField(max_length=200)
+    medicine_particulars = models.JSONField()
+    cashier_id = models.CharField(max_length=500, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        # 1. Standard Django Save
+        super().save(*args, **kwargs)
+
+        # 2. Force BSON array storage in MongoDB using pymongo
+        try:
+            from pymongo import MongoClient
+            import os
+            import json
+
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+
+            meds = self.medicine_particulars
+
+            if isinstance(meds, str):
+                try:
+                    meds = json.loads(meds)
+                except:
+                    meds = []
+
+            db["hospital_salesreturn"].update_one(
+                {"return_bill_no": self.return_bill_no},
+                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+            )
+
+            client.close()
+
+        except Exception as e:
+            print(f"SalesReturn Pymongo force update failed: {e}")
+
+

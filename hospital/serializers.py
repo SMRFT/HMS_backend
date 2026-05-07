@@ -434,3 +434,12 @@ class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
         model = ReceiptAndPayment
         fields = '__all__'
 
+
+
+from .models import SalesReturn
+class SalesReturnSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = SalesReturn
+        fields = '__all__'
+

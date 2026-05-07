@@ -151,7 +151,7 @@ def cash_counter_shiftdetails(request):
             "is_active": True,
         }
 
-        print("POST PAYLOAD:", payload)
+        # print("POST PAYLOAD:", payload)
 
         serializer = CashcountershiftdetailsSerializer(data=payload)
 
@@ -239,15 +239,15 @@ def get_active_shift(request):
     try:
         data = request.data
 
-        print("===== REQUEST DATA =====")
-        print(data)
+        # print("===== REQUEST DATA =====")
+        # print(data)
 
         cash_counter = data.get("CashCounter")
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
 
-        print("CashCounter:", cash_counter)
+        # print("CashCounter:", cash_counter)
 
         if not cash_counter:
             return Response({
@@ -278,7 +278,7 @@ def get_active_shift(request):
             queryset = queryset.filter(outlet_code=outlet_code)
 
         # ✅ SAFE DEBUG
-        print("Queryset exists:", queryset.exists())
+        # print("Queryset exists:", queryset.exists())
 
         # ✅ get latest shift (safe)
         shift = queryset.order_by('-StartingTime').first()
@@ -568,19 +568,30 @@ from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
 from bson.decimal128 import Decimal128
-import os
-
-client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-db = client["HMS"]
-
-billing_col = db["hospital_billing"]
-invest_col = db["hospital_investbilling"]
-discharge_col = db["hospital_dischargebilling"]
-patient_col = db["hospital_patient"]
-
 from bson import ObjectId
-from bson.decimal128 import Decimal128
+import os
+from datetime import datetime, timedelta
 
+# =========================================================
+# ✅ DB CONNECTIONS
+# =========================================================
+client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+
+hms_db = client["HMS"]
+global_db = client["Global"]   # ✅ FIX: profile comes from Global DB
+
+billing_col = hms_db["hospital_billing"]
+invest_col = hms_db["hospital_investbilling"]
+discharge_col = hms_db["hospital_dischargebilling"]
+patient_col = hms_db["hospital_patient"]
+
+profile_collection = global_db["backend_diagnostics_profile"]  # ✅ FIX
+cashcounter_collection = hms_db["hospital_cashcounter"]
+
+
+# =========================================================
+# ✅ SERIALIZER
+# =========================================================
 def serialize_mongo(doc):
     if isinstance(doc, list):
         return [serialize_mongo(i) for i in doc]
@@ -589,9 +600,9 @@ def serialize_mongo(doc):
         new_doc = {}
         for k, v in doc.items():
             if isinstance(v, ObjectId):
-                new_doc[k] = str(v)   # ✅ FIX ObjectId
+                new_doc[k] = str(v)
             elif isinstance(v, Decimal128):
-                new_doc[k] = float(v.to_decimal())  # ✅ FIX Decimal128
+                new_doc[k] = float(v.to_decimal())
             elif isinstance(v, (dict, list)):
                 new_doc[k] = serialize_mongo(v)
             else:
@@ -599,9 +610,11 @@ def serialize_mongo(doc):
         return new_doc
 
     return doc
-# ==========================================
-# ✅ COMMON DECIMAL CONVERTER
-# ==========================================
+
+
+# =========================================================
+# ✅ DECIMAL CONVERTER
+# =========================================================
 def convert_decimal(value):
     if isinstance(value, Decimal128):
         return float(value.to_decimal())
@@ -609,51 +622,103 @@ def convert_decimal(value):
         return float(value)
     except:
         return 0.0
-    
-
-from datetime import datetime, timedelta
-
-today = datetime.utcnow().date()
-
-start = datetime.combine(today, datetime.min.time())
-end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
 
+# =========================================================
+# ✅ MAIN API
+# =========================================================
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
-def get_maniblock_pedingbills(request):
+def get_mainblock_pendingbills(request):
     try:
         data = request.data
 
         hospital_code = data.get("auth-hospital-code")
         branch_code = data.get("auth-branch-code")
-        
+        employee_id = data.get("auth-user-id")
+
+        print("employee_id:", employee_id)
 
         final_data = []
 
-        # ============================
-        # ✅ CURRENT DATE FILTER
-        # ============================
-        from datetime import datetime, timedelta
+        # =========================================================
+        # ✅ EMPLOYEE PROFILE (Global DB)
+        # =========================================================
+        employee_profile = profile_collection.find_one(
+            {"employeeId": str(employee_id)},
+            {
+                "employeeId": 1,
+                "cashcounter": 1
+            }
+        )
 
+        if not employee_profile:
+            return Response({
+                "success": False,
+                "message": "Employee not found"
+            }, status=404)
+
+        emp_cashcounter = employee_profile.get("cashcounter")
+
+        if not emp_cashcounter:
+            return Response({
+                "success": False,
+                "message": "Cashcounter not mapped"
+            }, status=400)
+
+        # =========================================================
+        # ✅ CASHCOUNTER FETCH
+        # =========================================================
+        cashcounter_doc = cashcounter_collection.find_one(
+            {
+                "counter_id": emp_cashcounter,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "is_active": True
+            }
+        )
+
+        if not cashcounter_doc:
+            return Response({
+                "success": False,
+                "message": "No matching cashcounter found"
+            }, status=404)
+
+        cashcounter_details = {
+            "counter_id": cashcounter_doc.get("counter_id"),
+            "counter_name": cashcounter_doc.get("counter_name")
+        }
+
+        # =========================================================
+        # ✅ BILL TYPES
+        # =========================================================
+        allowed_bill_type_details = cashcounter_doc.get("bill_type", [])
+
+        allowed_bill_types = [
+            {
+                "bill_type": bt.get("bill_type"),
+                "bill_name": bt.get("bill_name")
+            }
+            for bt in allowed_bill_type_details
+            if bt.get("bill_type") is not None
+        ]
+
+        # =========================================================
+        # ✅ DATE FILTER
+        # =========================================================
         today = datetime.utcnow().date()
         start = datetime.combine(today, datetime.min.time())
         end = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
-        # =====================================================
-        # 1. BILLING (billed_date)
-        # =====================================================
-        billing_query = {
+        # =========================================================
+        # 1. BILLING
+        # =========================================================
+        billing_docs = list(billing_col.find({
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "payment_status": "Pending",
-            "billed_date": {
-                "$gte": start,
-                "$lt": end
-            }
-        }
-
-        billing_docs = list(billing_col.find(billing_query))
+            "billed_date": {"$gte": start, "$lt": end}
+        }))
 
         for bill in billing_docs:
             patient = patient_col.find_one({
@@ -676,21 +741,16 @@ def get_maniblock_pedingbills(request):
                 "raw": serialize_mongo(bill)
             })
 
-        # =====================================================
-        # 2. INVESTIGATION (investBillDate)
-        # =====================================================
-        invest_query = {
+        # =========================================================
+        # 2. INVESTIGATION
+        # =========================================================
+        invest_docs = list(invest_col.find({
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "paymentMethod": "Cash",
             "paymentStatus": "Pending",
-            "investBillDate": {
-                "$gte": start,
-                "$lt": end
-            }
-        }
-
-        invest_docs = list(invest_col.find(invest_query))
+            "investBillDate": {"$gte": start, "$lt": end}
+        }))
 
         for inv in invest_docs:
             patient = patient_col.find_one({
@@ -709,24 +769,19 @@ def get_maniblock_pedingbills(request):
                 ),
                 "amount": convert_decimal(inv.get("finalPrice")),
                 "status": inv.get("paymentStatus"),
-                "date": inv.get("investBillDate"),  
+                "date": inv.get("investBillDate"),
                 "raw": serialize_mongo(inv)
             })
 
-        # =====================================================
-        # 3. DISCHARGE (bill_date)
-        # =====================================================
-        discharge_query = {
+        # =========================================================
+        # 3. DISCHARGE
+        # =========================================================
+        discharge_docs = list(discharge_col.find({
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "status": "Billed",
-            "bill_date": {
-                "$gte": start,
-                "$lt": end
-            }
-        }
-
-        discharge_docs = list(discharge_col.find(discharge_query))
+            "bill_date": {"$gte": start, "$lt": end}
+        }))
 
         for dis in discharge_docs:
             patient = patient_col.find_one({
@@ -750,9 +805,14 @@ def get_maniblock_pedingbills(request):
                 "raw": serialize_mongo(dis)
             })
 
+        # =========================================================
+        # ✅ FINAL RESPONSE
+        # =========================================================
         return Response({
             "status": "success",
             "count": len(final_data),
+            "cashcounter": cashcounter_details,
+            "allowed_bill_types": allowed_bill_types,
             "data": final_data
         }, status=status.HTTP_200_OK)
 
@@ -761,8 +821,6 @@ def get_maniblock_pedingbills(request):
             "status": "error",
             "message": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-
 
 
 from rest_framework.decorators import api_view, permission_classes
@@ -783,7 +841,7 @@ discharge_col  = db["hospital_dischargebilling"]
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
-def update_maniblock_pedingbills(request):
+def update_mainblock_pendingbills(request):
     """
     Update payment status + insert payment_details for a pending bill.
 
