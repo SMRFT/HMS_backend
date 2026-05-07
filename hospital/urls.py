@@ -68,7 +68,10 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-   
+    # path("sales_return_medicine/",  pharmacy.sales_return_medicine),
+    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
