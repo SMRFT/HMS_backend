@@ -228,20 +228,10 @@ class Vendor(AuditModel):
     contact_person = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(max_length=255, null=True, blank=True)
-    url = models.URLField(max_length=255, null=True, blank=True)
     
     # Additional Fields
-    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
     gstin = models.CharField(max_length=20, null=True, blank=True)
-    payment = models.CharField(max_length=50, null=True, blank=True)
-    terms = models.TextField(null=True, blank=True)
-    credit_period = models.CharField(max_length=20, null=True, blank=True)
-    export_data_code = models.CharField(max_length=100, null=True, blank=True)
-    tds_percent = models.CharField(max_length=10, null=True, blank=True)
-    igst_supplier = models.BooleanField(default=False)
-    blacklisted_supplier = models.BooleanField(default=False)
-    account_on_hold = models.BooleanField(default=False)
-    reason_for_holding = models.TextField(null=True, blank=True)
+    payment_terms = models.CharField(max_length=50, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -266,6 +256,8 @@ class PharmacyItem(AuditModel):
     item_name = models.CharField(max_length=200)
     item_last_name = models.CharField(max_length=200, blank=True)
     category = models.CharField(max_length=50)
+    brand_name = models.CharField(max_length=100, blank=True)
+    chemical_composition = models.CharField(max_length=255, blank=True)
     hsn = models.CharField(max_length=50, blank=True)
     high_risk = models.BooleanField(default=False)
     look_alike = models.BooleanField(default=False)
@@ -307,6 +299,27 @@ class PharmacyItem(AuditModel):
     def __str__(self):
         return f"{self.item_id} {self.item_name}"
     
+class StockTransfer(AuditModel):
+    # ── Ref number ────────────────────────────────────────────────────────────
+    transfer_ref_number = models.CharField(max_length=30,unique=True)
+ 
+    # ── Outlets ───────────────────────────────────────────────────────────────
+    from_outlet = models.CharField(max_length=100)
+    to_outlet   = models.CharField(max_length=100)
+ 
+    # ── Items (JSON array) ────────────────────────────────────────────────────
+    items = models.JSONField(default=list)
+ 
+    # ── Status ────────────────────────────────────────────────────────────────
+    IS_VERIFIED_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Approved", "Approved"),
+    ]
+    is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
+
+    
+# Correctly using djongo models below
+from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
 
@@ -368,6 +381,7 @@ class PharmacyStock(AuditModel):
     expiry_date = models.DateField(null=True, blank=True)
 
     mrp = models.DecimalField(max_digits=10, decimal_places=2)
+    Selling_Price = models.DecimalField(max_digits=10, decimal_places=2)
 
     grn_number = models.CharField(max_length=50)
 
@@ -434,7 +448,6 @@ class GRN(AuditModel):
     non_taxable_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     cgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     sgst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    igst                = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     tax_paid_to_supplier= models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_discount      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     round_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0, blank=True, null=True)
@@ -443,22 +456,6 @@ class GRN(AuditModel):
     payment_status      = models.TextField(default="[]")
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
-
-    def __str__(self):
-        return self.grn_number or self.draft_number
-    
-    # Additional Fields
-    kgst_tin_number = models.CharField(max_length=100, null=True, blank=True)
-    gstin = models.CharField(max_length=20, null=True, blank=True)
-    payment = models.CharField(max_length=50, null=True, blank=True)
-    terms = models.TextField(null=True, blank=True)
-    credit_period = models.CharField(max_length=20, null=True, blank=True)
-    export_data_code = models.CharField(max_length=100, null=True, blank=True)
-    tds_percent = models.CharField(max_length=10, null=True, blank=True)
-    igst_supplier = models.BooleanField(default=False)
-    blacklisted_supplier = models.BooleanField(default=False)
-    account_on_hold = models.BooleanField(default=False)
-    reason_for_holding = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -476,7 +473,7 @@ class GRN(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.vendor_id})"
+        return f"{self.grn_number or self.draft_number} ({self.vendor_id})"
 
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)
@@ -733,6 +730,7 @@ class RadiologyReport(AuditModel):
     investBillNo = models.CharField(max_length=50, blank=True)
     billTypeNo = models.TextField()    
     itemName = models.TextField()
+    valuedetails      = models.JSONField(default=dict)
     impression = models.TextField()    
     is_approved = models.BooleanField(default=False)
     approved_date = models.DateTimeField(null=True, blank=True)
@@ -1209,6 +1207,47 @@ class ReceiptAndPayment(AuditModel):
 
     def __str__(self):
         return f"{self.voucher_no} - {self.account_head}"
+    
+
+class SalesReturn(AuditModel):
+    return_bill_no = models.CharField(max_length=200, unique=True)
+    return_bill_date = models.DateTimeField(auto_now_add=True)
+    bill_no = models.CharField(max_length=200)
+    uhid = models.CharField(max_length=20)
+    return_amount= models.CharField(max_length=200)
+    medicine_particulars = models.JSONField()
+    cashier_id = models.CharField(max_length=500, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        # 1. Standard Django Save
+        super().save(*args, **kwargs)
+
+        # 2. Force BSON array storage in MongoDB using pymongo
+        try:
+            from pymongo import MongoClient
+            import os
+            import json
+
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+
+            meds = self.medicine_particulars
+
+            if isinstance(meds, str):
+                try:
+                    meds = json.loads(meds)
+                except:
+                    meds = []
+
+            db["hospital_salesreturn"].update_one(
+                {"return_bill_no": self.return_bill_no},
+                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+            )
+
+            client.close()
+
+        except Exception as e:
+            print(f"SalesReturn Pymongo force update failed: {e}")
 
 
 class DietMaster(AuditModel):
@@ -1232,40 +1271,3 @@ class DietExtraMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - {self.price}"
-
-class SalesReturn(AuditModel):
-    return_bill_no     = models.CharField(max_length=20, unique=True)
-    return_bill_date = models.DateTimeField(auto_now_add=True)
-    bill_no            = models.CharField(max_length=20)
-    uhid               = models.CharField(max_length=20)
-    medicine_particulars = models.JSONField()
-    # medicine_particulars_json = models.TextField(null=True, blank=True)
-    cashier_id         = models.CharField(max_length=500, blank=True, null=True)
-
-    def save(self, *args, **kwargs):
-        # 1. Standard Django Save
-        super().save(*args, **kwargs)
-
-        # 2. Force BSON array storage in MongoDB using pymongo (Fix for Djongo JSONField issues)
-        try:
-            from pymongo import MongoClient
-            import os
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client["HMS"]
-            
-            # Ensure medicine_particulars is a list
-            meds = self.medicine_particulars
-            if isinstance(meds, str):
-                import json
-                try:
-                    meds = json.loads(meds)
-                except:
-                    meds = []
-            
-            db["hospital_salesreturn"].update_one(
-                {"return_bill_no": self.return_bill_no},
-                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
-            )
-            client.close()
-        except Exception as e:
-            print(f"SalesReturn Pymongo force update failed: {e}")
