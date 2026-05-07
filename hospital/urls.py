@@ -89,11 +89,10 @@ urlpatterns = [
      path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
      path("get_registration_bills/", cashcounter.get_registration_bills),
     
-    
-    
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+    path("grn-ocr/", inventory.grn_ocr_scan, name="grn_ocr_scan"),
 
     # Stock Transfer URLs
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',inventory.pharmacy_stock_view,name='pharmacy-stock'),
