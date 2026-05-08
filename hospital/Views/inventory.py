@@ -1622,8 +1622,6 @@ def pharmacy_stock_view(request, pk=None):
         return Response(serialized)
 
 
-
-
 """
 grn_ocr_view.py  —  OCR endpoint for GRN auto-fill
 ────────────────────────────────────────────────────
