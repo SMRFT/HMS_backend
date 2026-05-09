@@ -131,6 +131,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-API-RDA',                 
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-API-RDD',  
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
+    r'^/_b_a_c_k_e_n_d/HMS/employee-signature/?(\?.*)?$': 'HMS-API-RD',  
 
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
@@ -282,16 +283,36 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
+         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
+         '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
+         '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+         '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
+         '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
+         '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
+      #   '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-PIPA',
+         '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
+
+         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
+         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-POPSR',
+         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-PSRBD',
+         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-POPSRBD',
+
         # Central cah counter
 
-        '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-CCC',
-        '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCC',
-        '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
-        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
-         '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
-         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCC',
-         '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCC',
-            
+        '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
+        '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
+  
+        '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
+  
+        '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
+         
+        '/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/' : 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
              
 }
 

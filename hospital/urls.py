@@ -23,6 +23,8 @@ from .Views import (
 )
 from .Views.AccountsReport import (
     shift_basis_report,
+    cash_counter_manager,
+    bill_wise_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -69,7 +71,11 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-   
+    # path("sales_return_medicine/",  pharmacy.sales_return_medicine),
+    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -169,7 +175,8 @@ urlpatterns = [
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
     re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
-    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),     
+    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
+    path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),   
     
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
@@ -368,5 +375,14 @@ urlpatterns = [
 
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
+    path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
+    path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
 
+    # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("salesreturn_get_patientdetails/",pharmacy.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
+    path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
+    path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+
+    
 ]

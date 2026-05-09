@@ -265,6 +265,7 @@ def _obj_to_dict(obj):
         "hospital_code":     getattr(obj, "hospital_code", "") or "",
         "created_date":      _safe_isoformat(getattr(obj, "created_date", None)),
         "lastmodified_date": _safe_isoformat(getattr(obj, "lastmodified_date", None)),
+        "shiftno":           getattr(obj, "shiftno", "") or "",
 
         "patient_details":   patient_details,
     }
@@ -311,6 +312,7 @@ def _apply_fields(obj, data, existing=None):
     obj.total_disc       = flt("total_disc")
     obj.net_amount       = flt("net_amount")
     obj.remarks          = s("remarks")
+    obj.shiftno          = s("shiftno")
     obj.is_active        = True
 
 
@@ -620,6 +622,7 @@ def convert_estimate_to_bill(request, pk):
     estimate.status    = "Billed"
     estimate.bill_no   = generate_bill_number()
     estimate.bill_date = timezone.now().date()   # USE_TZ-safe
+    estimate.shiftno   = request.data.get("shiftno")
 
     try:
         estimate.save()

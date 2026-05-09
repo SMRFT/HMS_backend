@@ -6,6 +6,7 @@ def get_shift_summary_report(request):
         data = request.data
         from_date = data.get("from_date")
         to_date = data.get("to_date")
+        shiftno = data.get("shiftno")
         hospital_code = data.get("auth-hospital-code")
         branch_code = data.get("auth-branch-code")
 
@@ -18,6 +19,8 @@ def get_shift_summary_report(request):
             queryset = queryset.filter(date__gte=from_date)
         if to_date:
             queryset = queryset.filter(date__lte=to_date)
+        if shiftno:
+            queryset = queryset.filter(shiftno=shiftno)
 
         shifts = queryset.order_by("-date", "-StartingTime")
         

@@ -131,7 +131,8 @@ def patientCreateView(request):
                 doctor_id=doctor_id,
                 created_by=employee_id,
                 lastmodified_by=employee_id,
-                hospital_code=hospital_code
+                hospital_code=hospital_code,
+                shiftno=request.data.get('shiftno')
             )
 
             return Response({
@@ -473,6 +474,7 @@ def update_bill_status(request, bill_number):
             
             if payment_status == 'Paid':
                 bill.paid_date = timezone.now()
+                bill.shiftno = request.data.get('shiftno')
             else:
                 bill.paid_date = None
 
