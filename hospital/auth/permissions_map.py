@@ -291,9 +291,9 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
   
-        '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
-        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
-        '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
+        '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCMBPB',
+        '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCMBPB',
         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCMBPB',
         '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
          
