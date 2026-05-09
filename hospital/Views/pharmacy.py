@@ -794,10 +794,14 @@ def get_active_estimates(request):
 def get_estimate_bills(request):
     try:
 
+      
         hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
         branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
         outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
+        # =========================================================
+        # ✅ Fetch Estimate Bills
+        # =========================================================
         bills = PharmacyBilling.objects.filter(
             billing_status="Estimate",
             hospital_code=hospital_code,
@@ -808,16 +812,22 @@ def get_estimate_bills(request):
         data = []
 
         for bill in bills:
-            # ✅ Get patient using UHID
+
+            # =========================================================
+            # ✅ Get Patient (ONLY ONCE)
+            # =========================================================
             patient = Patient.objects.filter(uhid=bill.uhid).first()
 
             patient_name = ""
             if patient:
                 patient_name = f"{patient.firstName} {patient.lastName}"
 
+            # =========================================================
+            # ✅ Medicine Particulars Handling
+            # =========================================================
             meds = bill.medicine_particulars
 
-            # ✅ Handle both string and list
+            # Handle string JSON
             if isinstance(meds, str):
                 meds = json.loads(meds)
 
@@ -825,8 +835,10 @@ def get_estimate_bills(request):
 
             for med in meds:
                 item_id = med.get("item_id")
-                
-                # Fetch name since it is no longer stored in medicine_particulars array
+
+                # =====================================================
+                # ✅ Fetch Item Name
+                # =====================================================
                 item = PharmacyItem.objects.filter(item_id=item_id).first()
                 item_name = item.item_name if item else ""
 
@@ -835,13 +847,12 @@ def get_estimate_bills(request):
                     "item_name": item_name,
                     "batch_number": med.get("batch_number"),
                     "qty": med.get("qty"),
-                    "Price": med.get("price"),
+                    "price": med.get("price"),
                 })
 
-            # Re-fetch patient name from Patient model
-            patient = Patient.objects.filter(uhid=bill.uhid).first()
-            patient_name = patient.patient_name if patient else ""
-
+            # =========================================================
+            # ✅ Final Response Object
+            # =========================================================
             data.append({
                 "created_date": bill.created_date,
                 "lastmodified_date": bill.lastmodified_date,
@@ -870,10 +881,13 @@ def get_estimate_bills(request):
                 "cashier_id": bill.cashier_id,
             })
 
-        return Response(data)
+        return Response(data, status=status.HTTP_200_OK)
 
     except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["GET"])
@@ -944,14 +958,10 @@ def convert_decimal(value):
         return 0.0
 
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
-from pymongo import MongoClient
-import os
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from datetime import datetime, timedelta
 from rest_framework import status
 from pymongo import MongoClient
 import os
@@ -1088,13 +1098,19 @@ def OPPharmacy_pending_bills(request):
     # =========================================================
     # ✅ Django Bills (FIXED outlet)
     # =========================================================
+    today = datetime.utcnow().date()
+
+    start = datetime.combine(today, datetime.min.time())
+    end = datetime.combine(today + timedelta(days=1), datetime.min.time())
     bills = list(
         PharmacyBilling.objects.filter(
             billing_status__in=["Billed", "Paid", "Processing", "deleted"],
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=matched_outlet,   # ✅ FIXED
-            bill_type__in=allowed_bill_types
+            bill_type__in=allowed_bill_types,
+            bill_date__gte=start,   # ✅ FIX
+            bill_date__lt=end       # ✅ FIX
         )
     )
 
@@ -1302,6 +1318,7 @@ def collect_oppharmacy_payment(request):
         uhid = data.get("uhid")
         payment_details = data.get("payment_details")
         shiftno = data.get("shiftno")
+        counter_id = data.get("counter_id")
 
         # ✅ AUTH FIELDS
         hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
@@ -1425,7 +1442,8 @@ def collect_oppharmacy_payment(request):
                     "payment_details": payment_details,
                     "paid_date": datetime.utcnow(),
                     "cashier_id": cashier_id   ,
-                    "shiftno": shiftno
+                    "shiftno": shiftno,
+                    "counter_id": counter_id,
                 }
             }
         )
@@ -2985,6 +3003,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
 from bson.decimal128 import Decimal128
+from datetime import datetime, timedelta
 import os
 
 client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -3002,18 +3021,18 @@ def get_salesreturn_billdetails(request):
         data = request.data
 
         # =========================
-        # ✅ INPUT
+        # ✅ INPUT VALIDATION
         # =========================
         bill_no = data.get("bill_no")
 
         if not bill_no:
             return Response({
                 "status": "error",
-                "message": "bill_no is required"
+                "message": "Bill number is required to fetch details."
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # =========================
-        # ✅ AUTH
+        # ✅ AUTH DETAILS
         # =========================
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
@@ -3026,34 +3045,63 @@ def get_salesreturn_billdetails(request):
             "bill_no": bill_no,
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            "outlet_code": outlet_code
+            "outlet_code": outlet_code,
+            "billing_status": "Paid"
         })
 
+        # ❌ BILL NOT FOUND
         if not bill:
             return Response({
                 "status": "error",
-                "message": "Bill not found"
+                "message": f"No paid bill found for Bill No: {bill_no}."
             }, status=status.HTTP_404_NOT_FOUND)
+
+        # =========================
+        # ✅ BILL DATE VALIDATION (30 DAYS)
+        # =========================
+        bill_date = bill.get("bill_date")
+
+        if not bill_date:
+            return Response({
+                "status": "error",
+                "message": "Bill date is missing. Unable to process sales return."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Convert string → datetime if needed
+        if isinstance(bill_date, str):
+            bill_date = datetime.fromisoformat(bill_date)
+
+        current_date = datetime.now()
+        allowed_date = current_date - timedelta(days=30)
+
+        if bill_date < allowed_date:
+            return Response({
+                "status": "error",
+                "message": "Sales return is allowed only within 30 days from the bill date."
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # =========================
         # ✅ PROCESS ITEMS
         # =========================
         items_data = []
 
+        def convert_decimal(val):
+            return float(val.to_decimal()) if isinstance(val, Decimal128) else val
+
         for item in bill.get("medicine_particulars", []):
             item_id = item.get("item_id")
             batch   = item.get("batch_number")
 
-            # 🔹 GET ITEM NAME
+            # 🔹 ITEM MASTER
             item_master = item_collection.find_one({
                 "item_id": item_id,
                 "hospital_code": hospital_code,
                 "branch_code": branch_code
             })
 
-            item_name = item_master.get("item_name") if item_master else ""
+            item_name = item_master.get("item_name") if item_master else "Unknown Item"
 
-            # 🔹 GET STOCK DETAILS
+            # 🔹 STOCK DETAILS
             stock = stock_collection.find_one({
                 "item_id": item_id,
                 "batch_number": batch,
@@ -3062,36 +3110,31 @@ def get_salesreturn_billdetails(request):
                 "outlet_code": outlet_code
             })
 
-            # 🔹 Decimal Handling
-            def convert_decimal(val):
-                return float(val.to_decimal()) if isinstance(val, Decimal128) else val
-
             items_data.append({
                 "item_id": item_id,
                 "item_name": item_name,
                 "batch_number": batch,
-                "qty": item.get("qty"),
-                "price": item.get("price"),
+                "qty": item.get("qty", 0),
+                "price": item.get("price", 0),
 
-                # stock fields
                 "mrp": convert_decimal(stock.get("mrp")) if stock else 0,
                 "expiry_date": stock.get("expiry_date") if stock else None,
                 "available_stock": stock.get("total_stock", 0) if stock else 0,
                 "blocked_qty": stock.get("blocked_quantity", 0) if stock else 0,
-
                 "cgst": convert_decimal(stock.get("CGST_Percentage")) if stock else 0,
                 "sgst": convert_decimal(stock.get("SGST_Percentage")) if stock else 0,
             })
 
         # =========================
-        # ✅ RESPONSE
+        # ✅ SUCCESS RESPONSE
         # =========================
         return Response({
             "status": "success",
+            "message": "Bill details fetched successfully.",
             "data": {
                 "bill_no": bill.get("bill_no"),
                 "uhid": bill.get("uhid"),
-                "bill_date": bill.get("bill_date"),
+                "bill_date": bill_date,
                 "doctor_id": bill.get("doctor_id"),
                 "total_amount": bill.get("total_amount"),
                 "net_amount": bill.get("net_amount"),
@@ -3103,7 +3146,7 @@ def get_salesreturn_billdetails(request):
     except Exception as e:
         return Response({
             "status": "error",
-            "message": str(e)
+            "message": f"Internal server error: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
@@ -3115,9 +3158,12 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 from datetime import datetime
+from pymongo import MongoClient
+import os
+import json
+
 from ..models import SalesReturn
 from ..serializers import SalesReturnSerializer
-from django.db.models import Max
 
 
 @api_view(["POST"])
@@ -3134,14 +3180,14 @@ def OP_salesreturn_billdetails(request):
         medicine_particulars = data.get("medicine_particulars", [])
         return_amount = data.get("return_amount", "0.00")
 
-        # 🔥 Convert string → list
+        # 🔹 Convert string → list
         if isinstance(medicine_particulars, str):
             try:
                 medicine_particulars = json.loads(medicine_particulars)
             except:
                 return Response({
                     "status": "error",
-                    "message": "medicine_particulars must be a valid array"
+                    "message": "medicine_particulars must be a valid JSON array"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         if not isinstance(medicine_particulars, list):
@@ -3189,19 +3235,19 @@ def OP_salesreturn_billdetails(request):
             if return_qty <= 0:
                 return Response({
                     "status": "error",
-                    "message": f"Return qty must be > 0 for item {item.get('item_id')}"
+                    "message": f"Return quantity must be greater than 0 for item {item.get('item_id')}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             if return_qty > billed_qty:
                 return Response({
                     "status": "error",
-                    "message": f"Return qty exceeds billed qty for item {item.get('item_id')}"
+                    "message": f"Return quantity exceeds billed quantity for item {item.get('item_id')}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             cleaned_particulars.append(item)
 
         # =========================
-        # ✅ GENERATE BILL NO
+        # ✅ GENERATE RETURN BILL NO
         # =========================
         now = timezone.now()
         current_year = now.year % 100
@@ -3225,53 +3271,86 @@ def OP_salesreturn_billdetails(request):
         return_bill_no = f"{financial_year}/{new_no:06d}"
 
         # =========================
-        # ✅ UPDATE STOCK (MongoDB)
+        # ✅ MONGO CONNECTION
         # =========================
-        try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client["HMS"]
-            stock_col = db["hospital_pharmacystock"]
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
 
-            for item in cleaned_particulars:
-                item_id = item.get("item_id")
-                batch_number = item.get("batch_number")
-                return_qty = float(item.get("return_qty", 0))
+        stock_col = db["hospital_pharmacystock"]
+        bill_col = db["hospital_pharmacybilling"]
 
-                if not item_id or not batch_number:
-                    continue
+        # =========================
+        # ✅ UPDATE STOCK + BILL HISTORY
+        # =========================
+        for item in cleaned_particulars:
+            item_id = int(item.get("item_id"))
+            batch_number = str(item.get("batch_number"))
+            return_qty = float(item.get("return_qty", 0))
+            billed_qty = float(item.get("billed_qty", 0))
 
-                result = stock_col.update_one(
-                    {
-                        "item_id": int(item_id),
-                        "batch_number": str(batch_number),
-                        "outlet_code": outlet_code
+            # 🔹 STOCK UPDATE
+            stock_result = stock_col.update_one(
+                {
+                    "item_id": item_id,
+                    "batch_number": batch_number,
+                    "outlet_code": outlet_code
+                },
+                {
+                    "$inc": {
+                        "sales_return_quantity": return_qty
                     },
-                    {
-                        "$inc": {
-                            "sales_return_quantity": return_qty
-                        },
-                        "$set": {
-                            "sales_return_ref_id": return_bill_no,
-                            "lastmodified_date": datetime.utcnow()
-                        }
+                    "$set": {
+                        "sales_return_ref_id": return_bill_no,
+                        "lastmodified_date": datetime.utcnow()
                     }
-                )
+                }
+            )
 
-                # ❌ If stock not found → stop
-                if result.matched_count == 0:
-                    client.close()
-                    return Response({
-                        "status": "error",
-                        "message": f"Stock not found for item_id {item_id}, batch {batch_number}"
-                    }, status=status.HTTP_400_BAD_REQUEST)
+            if stock_result.matched_count == 0:
+                client.close()
+                return Response({
+                    "status": "error",
+                    "message": f"Stock not found for item_id {item_id}, batch {batch_number}"
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-            client.close()
+            # 🔹 EDIT HISTORY UPDATE
+            history_data = {
+                "action": "sales_return",
+                "old_qty": billed_qty,
+                "return_qty": return_qty,
+                "return_bill_no": return_bill_no,
+                "return_date": datetime.utcnow().isoformat(),  # ✅ changed here
+                "edited_by": employee_id
+            }
 
-        except Exception as e:
-            return Response({
-                "status": "error",
-                "message": f"Stock update failed: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            bill_result = bill_col.update_one(
+                {
+                    "bill_no": bill_no,
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "medicine_particulars.item_id": item_id,
+                    "medicine_particulars.batch_number": batch_number
+                },
+                {
+                    "$push": {
+                        "medicine_particulars.$.edit_history": history_data
+                    },
+                    "$set": {
+                        "lastmodified_by": employee_id,
+                        "lastmodified_date": datetime.utcnow()
+                    }
+                }
+            )
+
+            if bill_result.matched_count == 0:
+                client.close()
+                return Response({
+                    "status": "error",
+                    "message": f"Item {item_id} batch {batch_number} not found in bill {bill_no}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        client.close()
 
         # =========================
         # ✅ SAVE SALES RETURN
@@ -3280,11 +3359,12 @@ def OP_salesreturn_billdetails(request):
             return_bill_no=return_bill_no,
             bill_no=bill_no,
             uhid=uhid,
-            return_amount=return_amount,  
+            return_amount=return_amount,
             medicine_particulars=cleaned_particulars,
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
+            pharmacist_id=employee_id
             cashier_id=employee_id,
             shiftno=data.get("shiftno")
         )
@@ -3293,13 +3373,128 @@ def OP_salesreturn_billdetails(request):
 
         return Response({
             "status": "success",
-            "message": "Sales Return created successfully",
+            "message": "Sales return processed successfully",
             "data": serializer.data
         }, status=status.HTTP_201_CREATED)
 
     except Exception as e:
         return Response({
             "status": "error",
-            "message": str(e),
+            "message": f"Internal server error: {str(e)}",
             "error_type": type(e).__name__
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+from pymongo import MongoClient
+import os
+
+from ..models import SalesReturn, Patient
+from ..serializers import SalesReturnSerializer, PatientSerializer
+
+
+@api_view(["GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def get_salesreturn_details(request):
+    """
+    GET /get_salesreturn_details/?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD
+    Returns sales return records enriched with patient name and pharmacist name.
+    Defaults to today's date if no params are passed.
+    """
+    try:
+        today = timezone.now().date()
+
+        from_date_str = request.query_params.get("from_date", str(today))
+        to_date_str   = request.query_params.get("to_date",   str(today))
+
+        try:
+            from datetime import datetime
+            from_dt = datetime.strptime(from_date_str, "%Y-%m-%d")
+            to_dt   = datetime.strptime(to_date_str,   "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59
+            )
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "Invalid date format. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ── 1. Fetch SalesReturn records in date range ────────────────────────
+        returns = SalesReturn.objects.filter(
+            return_bill_date__gte=from_dt,
+            return_bill_date__lte=to_dt,
+        ).order_by("-return_bill_date")
+
+        serialized = SalesReturnSerializer(returns, many=True).data
+
+        if not serialized:
+            return Response({"status": "success", "data": []}, status=status.HTTP_200_OK)
+
+        # ── 2. Collect unique UHIDs & pharmacist IDs for batch lookup ─────────
+        uhid_set         = {r["uhid"] for r in serialized if r.get("uhid")}
+        pharmacist_id_set = {r["pharmacist_id"] for r in serialized if r.get("pharmacist_id")}
+
+        # ── 3. Patient name lookup (Django ORM) ───────────────────────────────
+        patients = Patient.objects.filter(uhid__in=uhid_set)
+        patient_map = {}
+        for p in patients:
+            pd = PatientSerializer(p).data
+            salutation  = (pd.get("salutation") or "").strip()
+            first_name  = (pd.get("firstName")  or "").strip()
+            last_name   = (pd.get("lastName")   or "").strip()
+            full_name   = " ".join(filter(None, [salutation, first_name, last_name]))
+            patient_map[pd["uhid"]] = full_name
+
+        # ── 4. Pharmacist name lookup (MongoDB cross-db) ──────────────────────
+        pharmacist_map = {}
+        if pharmacist_id_set:
+            try:
+                client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                global_db          = client["Global"]
+                profile_collection = global_db["backend_diagnostics_profile"]
+
+                profiles = profile_collection.find(
+                    {"employeeId": {"$in": list(pharmacist_id_set)}},
+                    {"employeeId": 1, "employeeName": 1, "_id": 0},
+                )
+                for profile in profiles:
+                    pharmacist_map[str(profile["employeeId"])] = profile.get("employeeName", "")
+
+                client.close()
+            except Exception as mongo_err:
+                # Non-fatal — names just won't resolve
+                print(f"Pharmacist lookup failed: {mongo_err}")
+
+        # ── 5. Build enriched response ────────────────────────────────────────
+        result = []
+        for r in serialized:
+            uhid          = r.get("uhid", "")
+            pharmacist_id = r.get("pharmacist_id", "")
+
+            result.append({
+                # Raw serializer fields
+                **r,
+                # Enriched display fields
+                "patient_name":    patient_map.get(uhid, ""),
+                "pharmacist_name": pharmacist_map.get(str(pharmacist_id), ""),
+            })
+
+        return Response(
+            {"status": "success", "data": result},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        return Response(
+            {
+                "status": "error",
+                "message": f"Internal server error: {str(e)}",
+                "error_type": type(e).__name__,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

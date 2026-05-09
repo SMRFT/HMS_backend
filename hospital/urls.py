@@ -74,6 +74,7 @@ urlpatterns = [
     path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
     path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
     path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),

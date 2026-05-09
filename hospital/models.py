@@ -1222,6 +1222,7 @@ class SalesReturn(AuditModel):
     uhid = models.CharField(max_length=20)
     return_amount= models.CharField(max_length=200)
     medicine_particulars = models.JSONField()
+    pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
     shiftno = models.CharField(max_length=100, blank=True, null=True)
 
