@@ -320,6 +320,18 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
     def validate_SubmittedToAccount(self, value):
         return self._clean_decimal(value)
 
+    def validate_HandOverAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_PendingAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_IPAdvanceAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_SalesReturnAmount(self, value):
+        return self._clean_decimal(value)
+
     def _clean_decimal(self, value):
         if value is None or value == "":
             return Decimal("0.00")

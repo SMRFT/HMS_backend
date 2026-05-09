@@ -430,6 +430,7 @@ def save_oppharmacy_bill(request):
         "overall_discount_value": float(data.get("overall_discount_value", 0)),
         "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
         "net_amount": float(data.get("net_amount", 0)),
+        "shiftno": data.get("shiftno"),
     }
 
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -962,10 +963,10 @@ def OPPharmacy_pending_bills(request):
     # =========================================================
     # ✅ Get values from HEADERS
     # =========================================================
-    employee_id    = request.data.get("auth-user-id")
-    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
-    outlet_code   = request.data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
+    employee_id   = request.data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID")
+    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE")
+    request_outlet = request.data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE")
 
     # =========================================================
     # ✅ Guard
@@ -973,7 +974,7 @@ def OPPharmacy_pending_bills(request):
     if not hospital_code or not branch_code or not request_outlet or not employee_id:
         return Response({
             "success": False,
-            "message": "Missing required headers"
+            "message": "Missing required headers (hospital, branch, outlet, or employee)"
         }, status=400)
 
     # =========================================================
@@ -992,14 +993,23 @@ def OPPharmacy_pending_bills(request):
     cashcounter_collection    = hms_db["hospital_cashcounter"]
 
     # =========================================================
-    # ✅ Employee Profile
+    # ✅ Employee Profile (Robust lookup)
     # =========================================================
+    try:
+        query_id = str(employee_id)
+        search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+    except:
+        search_query = {"employeeId": str(employee_id)}
+
     employee_profile = profile_collection.find_one(
-        {"employeeId": str(employee_id)},
+        search_query,
         {
             "employeeId": 1,
+            "employeeName": 1,
             "cashcounter": 1,
-            "hms_outlets": 1
+            "hms_outlets": 1,
+            "primaryRole": 1,
+            "additionalRoles": 1
         }
     )
 
@@ -1011,11 +1021,21 @@ def OPPharmacy_pending_bills(request):
 
     emp_cashcounter = employee_profile.get("cashcounter")
     emp_outlets     = employee_profile.get("hms_outlets", [])
+    emp_name        = employee_profile.get("employeeName", employee_id)
 
     if not emp_cashcounter or not emp_outlets:
+        missing = []
+        if not emp_cashcounter: missing.append("cashcounter")
+        if not emp_outlets: missing.append("outlets")
+        
         return Response({
             "success": False,
-            "message": "Cashcounter or outlets not mapped"
+            "message": f"Configuration missing for {emp_name} (ID: {employee_id}): {', '.join(missing)} not mapped in profile.",
+            "debug": {
+                "employeeId": employee_id,
+                "has_cashcounter": bool(emp_cashcounter),
+                "outlets_count": len(emp_outlets)
+            }
         }, status=400)
 
     # =========================================================
@@ -2709,8 +2729,8 @@ def OP_salesreturn_billdetails(request):
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
-
-            cashier_id=employee_id
+            cashier_id=employee_id,
+            shiftno=data.get("shiftno")
         )
 
         serializer = SalesReturnSerializer(sales_return)
@@ -3265,7 +3285,8 @@ def OP_salesreturn_billdetails(request):
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
-            cashier_id=employee_id
+            cashier_id=employee_id,
+            shiftno=data.get("shiftno")
         )
 
         serializer = SalesReturnSerializer(sales_return)

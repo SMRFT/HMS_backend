@@ -144,6 +144,7 @@ class Billing(AuditModel):
     payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     paid_date = models.DateTimeField(null=True, blank=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
 
     def save(self, *args, **kwargs):
         if not self.bill_number:
@@ -683,6 +684,7 @@ class DischargeBilling(AuditModel):
     net_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)   
 
     remarks           = models.TextField(blank=True, null=True)
+    shiftno           = models.CharField(max_length=100, blank=True, null=True)
 
     # ── Estimate→Bill traceability ────────────────────────────────────────────
     converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
@@ -1000,6 +1002,10 @@ class Cashcountershiftdetails(AuditModel):
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    HandOverAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    PendingAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    IPAdvanceAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    SalesReturnAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SelectedOutlet = models.CharField(max_length=100, null=True, blank=True)
     is_active      = models.BooleanField(default=True)
 
@@ -1217,6 +1223,7 @@ class SalesReturn(AuditModel):
     return_amount= models.CharField(max_length=200)
     medicine_particulars = models.JSONField()
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
 
     def save(self, *args, **kwargs):
         # 1. Standard Django Save

@@ -1130,6 +1130,7 @@ def admission_advance(request, ipNumber=None):
                 "status":          "Pending",
                 "created_by":      employee_id,
                 "created_date":    now_iso,
+                "shiftno":         request.data.get('shiftno'),
             }
             advance_payments.append(new_entry)
             adm.advance_payments = advance_payments
