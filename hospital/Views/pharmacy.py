@@ -52,9 +52,9 @@ def get_oppharmacy_stock(request):
     try:
         # ✅ Get values
         print("test", request.data.get("outlet_code"))
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -396,9 +396,9 @@ def save_oppharmacy_bill(request):
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code")
-    branch_code = data.get("auth-branch-code")
-    outlet_code = data.get("auth-outlet-code")
+    hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+    outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -430,6 +430,7 @@ def save_oppharmacy_bill(request):
         "overall_discount_value": float(data.get("overall_discount_value", 0)),
         "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
         "net_amount": float(data.get("net_amount", 0)),
+        "shiftno": data.get("shiftno"),
     }
 
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -576,15 +577,15 @@ def save_oppharmacy_bill(request):
 
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_BillType(request):
     db = client["HMS"]
     stock_collection = db["hospital_billtype"]
 
  
-    hospital_code = request.data.get("auth-hospital-code")
-    branch_code = request.data.get("auth-branch-code")
-    outlet_code = request.data.get("auth-outlet-code")
+    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+    outlet_code   = request.data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
     print(request.data.get)
     print("hospital_code:", hospital_code)
     print("branch_code:", branch_code)
@@ -792,12 +793,11 @@ def get_active_estimates(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
     try:
-        # =========================================================
-        # ✅ Get values from HEADERS
-        # =========================================================
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+
+      
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         # =========================================================
         # ✅ Fetch Estimate Bills
@@ -973,11 +973,10 @@ def OPPharmacy_pending_bills(request):
     # =========================================================
     # ✅ Get values from HEADERS
     # =========================================================
-    hospital_code  = request.data.get("auth-hospital-code")
-    branch_code    = request.data.get("auth-branch-code")
-    request_outlet = request.data.get("auth-outlet-code")
-    print("request_outlet",request_outlet)
-    employee_id    = request.data.get("auth-user-id")
+    employee_id   = request.data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID")
+    hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+    branch_code   = request.data.get("auth-branch-code") or request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE")
+    request_outlet = request.data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE")
 
     # =========================================================
     # ✅ Guard
@@ -985,7 +984,7 @@ def OPPharmacy_pending_bills(request):
     if not hospital_code or not branch_code or not request_outlet or not employee_id:
         return Response({
             "success": False,
-            "message": "Missing required headers"
+            "message": "Missing required headers (hospital, branch, outlet, or employee)"
         }, status=400)
 
     # =========================================================
@@ -1004,14 +1003,23 @@ def OPPharmacy_pending_bills(request):
     cashcounter_collection    = hms_db["hospital_cashcounter"]
 
     # =========================================================
-    # ✅ Employee Profile
+    # ✅ Employee Profile (Robust lookup)
     # =========================================================
+    try:
+        query_id = str(employee_id)
+        search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+    except:
+        search_query = {"employeeId": str(employee_id)}
+
     employee_profile = profile_collection.find_one(
-        {"employeeId": str(employee_id)},
+        search_query,
         {
             "employeeId": 1,
+            "employeeName": 1,
             "cashcounter": 1,
-            "hms_outlets": 1
+            "hms_outlets": 1,
+            "primaryRole": 1,
+            "additionalRoles": 1
         }
     )
 
@@ -1023,11 +1031,21 @@ def OPPharmacy_pending_bills(request):
 
     emp_cashcounter = employee_profile.get("cashcounter")
     emp_outlets     = employee_profile.get("hms_outlets", [])
+    emp_name        = employee_profile.get("employeeName", employee_id)
 
     if not emp_cashcounter or not emp_outlets:
+        missing = []
+        if not emp_cashcounter: missing.append("cashcounter")
+        if not emp_outlets: missing.append("outlets")
+        
         return Response({
             "success": False,
-            "message": "Cashcounter or outlets not mapped"
+            "message": f"Configuration missing for {emp_name} (ID: {employee_id}): {', '.join(missing)} not mapped in profile.",
+            "debug": {
+                "employeeId": employee_id,
+                "has_cashcounter": bool(emp_cashcounter),
+                "outlets_count": len(emp_outlets)
+            }
         }, status=400)
 
     # =========================================================
@@ -1303,9 +1321,9 @@ def collect_oppharmacy_payment(request):
         counter_id = data.get("counter_id")
 
         # ✅ AUTH FIELDS
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         # ✅ CASHIER (NEW)
         cashier_id = data.get("auth-user-id")
@@ -1639,9 +1657,9 @@ def pharmacy_medicinechart(request):
         # =========================================
         data = request.data
 
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -1986,9 +2004,9 @@ def substitute_medicine(request):
         # ================================
         # ✅ AUTH CONTEXT (NEW)
         # ================================
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code_substitute_medicine:", hospital_code)
         print("branch_code:", branch_code)
@@ -2307,11 +2325,11 @@ def ipadvance_bills(request):
         # =========================================
         data = request.data
 
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code")
-        cashier_id = data.get("auth-user-id")
         employee_id = data.get("auth-user-id")   
+        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
+        cashier_id = data.get("auth-user-id")   
 
         if not hospital_code or not branch_code or not outlet_code:
             return Response(
@@ -2530,9 +2548,9 @@ def cashcounter_outlet(request):
         # =========================================
         # ✅ GET VALUES (ONLY request.data)
         # =========================================
-        hospital_code = request.data.get("auth-hospital-code")
-        branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -2588,6 +2606,295 @@ def cashcounter_outlet(request):
 
 
 
+
+# from rest_framework.decorators import api_view
+# from rest_framework.response import Response
+# from rest_framework import status
+# from datetime import date
+# from ..models import Patient
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+from datetime import datetime
+from ..models import SalesReturn
+from ..serializers import SalesReturnSerializer
+from django.db.models import Max
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def OP_salesreturn_billdetails(request):
+    try:
+        data = request.data
+
+        # =========================
+        # :white_check_mark: INPUT
+        # =========================
+        bill_no = data.get("bill_no")
+        uhid = data.get("uhid")
+        medicine_particulars = data.get("medicine_particulars", [])
+
+        # :fire: FIX: Handle string → convert to list
+        if isinstance(medicine_particulars, str):
+            try:
+                medicine_particulars = json.loads(medicine_particulars)
+            except:
+                return Response({
+                    "status": "error",
+                    "message": "medicine_particulars must be a valid array"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # :fire: FIX: Ensure it's list
+        if not isinstance(medicine_particulars, list):
+            return Response({
+                "status": "error",
+                "message": "medicine_particulars must be an array"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not bill_no or not uhid or not medicine_particulars:
+            return Response({
+                "status": "error",
+                "message": "bill_no, uhid and medicine_particulars are required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # =========================
+        # :white_check_mark: AUTH FIELDS
+        # =========================
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        employee_id   = data.get("auth-user-id")
+
+        # =========================
+        # :white_check_mark: VALIDATION (FIXED SAFE)
+        # =========================
+        cleaned_particulars = []
+
+        for item in medicine_particulars:
+
+            # :fire: Ensure each item is dict
+            if not isinstance(item, dict):
+                return Response({
+                    "status": "error",
+                    "message": "Each medicine_particular must be an object"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                billed_qty = float(item.get("billed_qty", 0))
+                return_qty = float(item.get("return_qty", 0))
+            except:
+                return Response({
+                    "status": "error",
+                    "message": f"Invalid quantity format for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if return_qty <= 0:
+                return Response({
+                    "status": "error",
+                    "message": f"Return qty must be > 0 for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if return_qty > billed_qty:
+                return Response({
+                    "status": "error",
+                    "message": f"Return qty exceeds billed qty for item {item.get('item_id')}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # :white_check_mark: Keep full object (important)
+            cleaned_particulars.append(item)
+
+        # =========================
+        # :white_check_mark: GENERATE RETURN BILL NO
+        # =========================
+        now = timezone.now()
+        current_year = now.year % 100
+        next_year = (now.year + 1) % 100
+        financial_year = f"{current_year:02d}{next_year:02d}"
+
+        last_records = SalesReturn.objects.filter(
+            return_bill_no__startswith=financial_year
+        ).values_list("return_bill_no", flat=True)
+
+        max_no = 0
+
+        for bill in last_records:
+            try:
+                bill_str = str(bill)
+
+                if "/" in bill_str:
+                    last_part = bill_str.split("/")[-1]
+
+                if last_part.isdigit():
+                    max_no = max(max_no, int(last_part))
+            except:
+                continue
+
+        new_no = max_no + 1
+        return_bill_no = f"{financial_year}/{new_no:06d}"
+
+        # =========================
+        # :white_check_mark: SAVE
+        # =========================
+        sales_return = SalesReturn.objects.create(
+            return_bill_no=return_bill_no,
+            bill_no=bill_no,
+            uhid=uhid,
+            medicine_particulars=cleaned_particulars,  # :white_check_mark: FIXED HERE
+
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+            cashier_id=employee_id,
+            shiftno=data.get("shiftno")
+        )
+
+        serializer = SalesReturnSerializer(sales_return)
+
+        return Response({
+            "status": "success",
+            "message": "Sales Return created successfully",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from rest_framework.response import Response
+from rest_framework import status
+from pymongo import MongoClient
+from bson.decimal128 import Decimal128
+import os
+
+client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+db = client["HMS"]
+
+bill_collection = db["hospital_pharmacybilling"]
+stock_collection = db["hospital_pharmacystock"]
+item_collection = db["hospital_pharmacyitem"]
+
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def get_salesreturn_billdetails(request):
+    try:
+        data = request.data
+        print("data1234567:", data)
+        # =========================
+        # :white_check_mark: INPUT
+        # =========================
+        bill_no = data.get("bill_no")
+
+        if not bill_no:
+            return Response({
+                "status": "error",
+                "message": "bill_no is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # =========================
+        # :white_check_mark: AUTH
+        # =========================
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        print("hospital_code:", hospital_code)
+        print("branch_code:", branch_code)
+        print("outlet_code:", outlet_code)
+
+        # =========================
+        # :white_check_mark: FETCH BILL
+        # =========================
+        bill = bill_collection.find_one({
+            "bill_no": bill_no,
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "outlet_code": outlet_code
+        })
+
+        if not bill:
+            return Response({
+                "status": "error",
+                "message": "Bill not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # =========================
+        # :white_check_mark: PROCESS ITEMS
+        # =========================
+        items_data = []
+
+        for item in bill.get("medicine_particulars", []):
+            item_id = item.get("item_id")
+            batch = item.get("batch_number")
+
+            # :small_blue_diamond: GET ITEM NAME
+            item_master = item_collection.find_one({
+                "item_id": item_id,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            })
+
+            item_name = item_master.get("item_name") if item_master else ""
+
+            # :small_blue_diamond: GET STOCK DETAILS
+            stock = stock_collection.find_one({
+                "item_id": item_id,
+                "batch_number": batch,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet_code": outlet_code
+            })
+
+            # :small_blue_diamond: Decimal Handling
+            def convert_decimal(val):
+                return float(val.to_decimal()) if isinstance(val, Decimal128) else val
+
+            items_data.append({
+                "item_id": item_id,
+                "item_name": item_name,
+                "batch_number": batch,
+                "qty": item.get("qty"),
+                "price": item.get("price"),
+
+                # stock fields
+                "mrp": convert_decimal(stock.get("mrp")) if stock else 0,
+                "expiry_date": stock.get("expiry_date") if stock else None,
+                "available_stock": stock.get("total_stock", 0) if stock else 0,
+                "blocked_qty": stock.get("blocked_quantity", 0) if stock else 0,
+
+                "cgst": convert_decimal(stock.get("CGST_Percentage")) if stock else 0,
+                "sgst": convert_decimal(stock.get("SGST_Percentage")) if stock else 0,
+            })
+
+        # =========================
+        # :white_check_mark: RESPONSE
+        # =========================
+        return Response({
+            "status": "success",
+            "data": {
+                "bill_no": bill.get("bill_no"),
+                "uhid": bill.get("uhid"),
+                "bill_date": bill.get("bill_date"),
+                "doctor_id": bill.get("doctor_id"),
+                "total_amount": bill.get("total_amount"),
+                "net_amount": bill.get("net_amount"),
+                "billing_mode": bill.get("billing_mode"),
+                "items": items_data
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -2690,11 +2997,6 @@ def salesreturn_get_patientdetails(request):
             "error_type": type(e).__name__,
             "trace": traceback.format_exc()
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-
-
-    
-
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -3063,6 +3365,8 @@ def OP_salesreturn_billdetails(request):
             branch_code=branch_code,
             outlet_code=outlet_code,
             pharmacist_id=employee_id
+            cashier_id=employee_id,
+            shiftno=data.get("shiftno")
         )
 
         serializer = SalesReturnSerializer(sales_return)
