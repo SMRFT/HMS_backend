@@ -1158,7 +1158,7 @@ class SalesReturn(AuditModel):
     uhid = models.CharField(max_length=20)
     return_amount= models.CharField(max_length=200)
     medicine_particulars = models.JSONField()
-    cashier_id = models.CharField(max_length=500, blank=True, null=True)
+    pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
 
     def save(self, *args, **kwargs):
         # 1. Standard Django Save
