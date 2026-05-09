@@ -5,7 +5,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/referred-patients-report/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-AIN',
 
+    
+    
 
 
     
@@ -268,17 +272,15 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
         # '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-PGLBU',
         '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCC',
-
-         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
-         '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
-         '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
-          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
-            '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
-          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
+        '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
+        '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
+        '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+        '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
+        '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
+        '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
         #   '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-PIPA',
-          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
-
-         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
+        '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
+        r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
         # Central cah counter
 
