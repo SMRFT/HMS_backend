@@ -7,6 +7,7 @@ from .Views import (
     doctormaster,
     ICD11,
     inventory,
+    chandra_ocr,
     package_crud,
     pharmacy,
     cashcounter,
@@ -92,13 +93,13 @@ urlpatterns = [
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
-    path("grn-ocr/", inventory.grn_ocr_scan, name="grn_ocr_scan"),
+    path("grn-ocr/", chandra_ocr.grn_ocr_scan, name="grn_ocr_scan"),
 
     # Stock Transfer URLs
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',inventory.pharmacy_stock_view,name='pharmacy-stock'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$',inventory.pharmacy_stock_view,name='pharmacy-stock-detail'),
     path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
-    path('stock-transfer/<int:pk>/', inventory.stock_transfer_view, name='stock_transfer_detail'),
+    path("stock-transfer-action/",   inventory.stock_transfer_action_view, name="stock_transfer_action"),
 
     path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
     path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),

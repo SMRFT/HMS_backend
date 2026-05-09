@@ -83,7 +83,7 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-PSH',
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
-    r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/[^/]+/?(\?.*)?$': 'HMS-P-ST',
+    '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-ST',
 
     # ==================== PHARMACY STOCK ====================
     r'^/_b_a_c_k_e_n_d/HMS/ip-pharmacy-stock/?(\?.*)?$': 'HMS-P-IPPS',
