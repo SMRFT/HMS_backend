@@ -18,7 +18,8 @@ from .Views import (
     doctor_dashboard,
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
-    DietOrder
+    DietOrder,
+    front_office_reports
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -259,6 +260,7 @@ urlpatterns = [
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
     path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
+    path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
