@@ -46,7 +46,7 @@ def convert_decimals(obj):
 
 
 
-@api_view(["POST"])
+@api_view(["POST","GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_oppharmacy_stock(request):
     try:
@@ -3364,7 +3364,7 @@ def OP_salesreturn_billdetails(request):
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
-            pharmacist_id=employee_id
+            pharmacist_id=employee_id,
             cashier_id=employee_id,
             shiftno=data.get("shiftno")
         )

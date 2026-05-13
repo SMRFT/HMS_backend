@@ -394,7 +394,7 @@ def serialize_doc(doc):
     return doc
 
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_lab_ward_requests(request):
     try:
         uhid = request.GET.get("uhid")
@@ -464,14 +464,18 @@ def get_lab_ward_requests(request):
         }, status=500)
 
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def save_lab_ward_request(request):
     try:
         import json
         data = request.data
         current_user = data.get('auth-user-id', "system")
         branch_code = data.get('auth-branch-code', 'system')
-        department_code = data.get('auth-department-code', 'system')
+        outlet_code = (
+            request.data.get("auth-outlet-code") or
+            request.headers.get("Outlet-Code") or "system"
+        )
+
         hospital_code = data.get('auth-hospital-code', 'system')
         
         # Prepare the document for saving
@@ -503,7 +507,7 @@ def save_lab_ward_request(request):
         request_doc["item"] = selected_tests
         
         # ── Bill Number Generation ──────────────────────────────
-        bill_type_code = data.get("billTypeNo", "LAB")
+        bill_type_code = data.get("bill_type", "LAB")
         today = datetime.now()
         if today.month < 4:
             financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
@@ -513,7 +517,7 @@ def save_lab_ward_request(request):
         prefix_key = f"{financial_year}/{bill_type_code}"
         prefix = f"{prefix_key}/"
 
-        counters_collection = mongo_db["hospital_counters"]
+        counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
             {"_id": prefix_key},
             {"$inc": {"seq": 1}},
@@ -533,14 +537,14 @@ def save_lab_ward_request(request):
             "total_amount": round(float(request_doc.get("total_amount", 0)), 2),
             "created_by": current_user,
             "branch_code": branch_code,
-            "department_code": department_code,
+            "outlet_code": outlet_code,
             "hospital_code": hospital_code,
             "created_date": now_ist,
             "investBillDate": now_ist,
-            "bill_date": now_ist,
             "is_active": True,
             "is_ward_request": True,
             "status": "Result Pending",
+            "paymentStatus":"Pending",
             "ward_request_type": "LAB"
         })
         
@@ -563,7 +567,7 @@ def save_lab_ward_request(request):
         }, status=500)
 
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def cancel_lab_ward_request(request):
     try:
         data = request.data
@@ -933,7 +937,7 @@ def save_medicine_ward_request(request):
             uhid=data.get("uhid"),
             inpatient_number=data.get("ipNumber"),
             bill_type=data.get("bill_type"),
-            bill_type_no=data.get("billTypeNo"),
+            # bill_type_no=data.get("billTypeNo"),
             doctor_id=data.get("doctor_id"),
             medicine_particulars=cleaned_particulars,
             total_amount=total_amount,
@@ -941,7 +945,6 @@ def save_medicine_ward_request(request):
             billing_status="Pending",
             billing_mode="WARD REQUEST",
             payment_details={},
-            edit_history=[],
             outlet_code=outlet_code,
             hospital_code=hospital_code,
             branch_code=branch_code,
