@@ -585,7 +585,7 @@ from ..serializers import GRNSerializer
 GRN_CATEGORY_PREFIX = {
     "OP PHARMACY":   "OP",
     "IP PHARMACY":   "IP",
-    "OPENING STOCK": "DP",
+    "DRUG PURCHASE": "DP"
 }
 
 
@@ -828,7 +828,7 @@ def grn_view(request, pk=None):
             DEPT_CODE_MAP = {
                 "OP PHARMACY": "OLET002",
                 "IP PHARMACY": "OLET001",
-                "OPENING STOCK": "",
+                "DRUG PURCHASE": ""
             }
 
             outlet_code = DEPT_CODE_MAP.get(
