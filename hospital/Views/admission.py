@@ -691,13 +691,256 @@ def admission_view(request):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_detail(request, ipNumber):
-    """
-    Original admission detail view — not changed.
-    Only shown here for completeness; keep your existing implementation.
-    """
-    # ... (keep your existing admission_detail implementation here unchanged)
-    pass
+    try:
+        employee_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
+        hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
+        branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
+        outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
 
+        # ✅ STRICT FILTER
+        adm = Admission.objects.filter(
+            ipNumber=str(ipNumber),
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+        ).first()
+
+        if not adm:
+            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
+
+        if not adm.is_admitted:
+            return JsonResponse({'success': False, 'error': 'Admission inactive'}, status=404)
+
+        def _patient_block(uhid):
+            try:
+                uhid = str(uhid).strip()
+                if not uhid:
+                    return {}
+
+                pt = Patient.objects.filter(
+                    hospital_code=hospital_code,
+                    uhid=uhid
+                ).first()
+
+                if not pt:
+                    return {}
+
+                ins_name = ""
+                if getattr(pt, 'company_code', None):
+                    try:
+                        prov = InsuranceProvider.objects.get(
+                            company_code=pt.company_code
+                        )
+                        ins_name = prov.company_name
+                    except:
+                        ins_name = pt.company_code or ""
+
+                return {
+                    'salutation': pt.salutation or "",
+                    'firstName': pt.firstName or "",
+                    'middleName': getattr(pt, "middleName", "") or "",
+                    'lastName': pt.lastName or "",
+                    'age': pt.age,
+                    'gender': pt.gender or "",
+                    'mobilePhone': pt.mobilePhone or "",
+                    'permanent_address': getattr(pt, "permanent_address", "") or "",
+                    'area': getattr(pt, "area", "") or "",
+                    'zipcode': getattr(pt, "zipcode", "") or "",
+                    'city': getattr(pt, "city", "") or "",
+                    'state': getattr(pt, "state", "") or "",
+                    'customerType': str(
+                        getattr(pt, "customer_type", "") or
+                        getattr(pt, "customerType", "") or ""
+                    ),
+                    'insuranceCompanyName': ins_name,
+                    'company_code': getattr(pt, "company_code", "") or "",
+                }
+
+            except Exception:
+                return {}
+
+        def _build_result(adm):
+            room_details = parse_json_field(adm.room_details)
+            room_shifting_details = parse_json_field(adm.roomShitingDetails)
+            advance_payments = parse_json_field(adm.advance_payments)
+            current_room = _get_current_room(adm)
+
+            return {
+                'id': str(adm.pk),
+                'ipNumber': adm.ipNumber,
+                'uhid': adm.uhid,
+
+                'admissionDateTime':
+                    adm.admissionDateTime.isoformat()
+                    if adm.admissionDateTime else None,
+
+                'admittingDoctor': adm.admittingDoctor or "",
+                'consultingDoctor': adm.consultingDoctor or "",
+
+                'packageNo': adm.packageName or "",
+
+                'roomNo': current_room.get('roomNo', ''),
+                'bedNo': current_room.get('bedNo', ''),
+
+                'reasonForAdmission': adm.reasonForAdmission or "",
+                'mlc_type': adm.mlc_type or "",
+                'mlc_remarks': adm.mlc_remarks or "",
+
+                'advance_payments': advance_payments,
+
+                'is_admissionActive': bool(adm.is_admissionActive),
+                'is_admitted': bool(adm.is_admitted),
+                'is_discharged': bool(adm.is_discharged),
+
+                'ipserial_number': adm.ipserial_number,
+
+                'room_details': room_details,
+                'roomShitingDetails': room_shifting_details,
+
+                **_patient_block(str(adm.uhid or "")),
+            }
+
+        # ---------------- GET ----------------
+
+        if request.method == 'GET':
+            return JsonResponse({
+                "success": True,
+                "data": _build_result(adm)
+            })
+
+        # ---------------- PUT ----------------
+
+        elif request.method == 'PUT':
+
+            data = request.data
+
+            def get_val(v):
+                return v[0] if isinstance(v, list) else v
+
+            # Normal field updates
+            for f in [
+                'admittingDoctor',
+                'consultingDoctor',
+                'reasonForAdmission',
+                'mlc_type',
+                'mlc_remarks'
+            ]:
+                if f in data:
+                    val = get_val(data.get(f))
+                    setattr(adm, f, str(val) if val else "")
+
+            if 'packageNo' in data:
+                val = get_val(data.get('packageNo'))
+                adm.packageName = str(val) if val else ""
+
+            # Update active room_details entry directly
+            new_room_no = str(get_val(data.get("roomNo")) or "").strip()
+            new_bed_no = str(get_val(data.get("bedNo")) or "").strip()
+
+            if new_room_no or new_bed_no:
+                room_details = parse_json_field(adm.room_details)
+
+                if not isinstance(room_details, list):
+                    room_details = []
+
+                now_iso = timezone.now().isoformat()
+
+                # STEP 1: Find active room
+                active_room = next(
+                    (
+                        room for room in room_details
+                        if isinstance(room, dict) and room.get("is_roomActive")
+                    ),
+                    None
+                )
+
+                # STEP 2: Close existing active room
+                if active_room:
+                    active_room["is_roomActive"] = False
+                    active_room["endDateTime"] = now_iso
+                    active_room["lastmodified_by"] = employee_id
+                    active_room["lastmodified_date"] = now_iso
+
+                    prev_room_no = active_room.get("roomNo", "")
+                    prev_bed_no = active_room.get("bedNo", "")
+                else:
+                    prev_room_no = ""
+                    prev_bed_no = ""
+
+                # STEP 3: Create new room entry
+                new_entry = {
+                    "room_entry_id": len(room_details) + 1,
+                    "roomNo": new_room_no or prev_room_no,
+                    "bedNo": new_bed_no or prev_bed_no,
+                    "is_roomActive": True,
+                    "is_roomCleaned": False,
+                    "startDateTime": now_iso,
+                    "endDateTime": None,
+                    "created_by": employee_id,
+                    "created_date": now_iso,
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": now_iso
+                }
+
+                room_details.append(new_entry)
+
+                # STEP 4: Assign back
+                adm.room_details = room_details
+
+            adm.lastmodified_by = employee_id
+            adm.lastmodified_date = timezone.now()
+            adm.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Updated successfully",
+                "data": _build_result(adm)
+            })
+
+        # ---------------- DELETE ----------------
+
+        elif request.method == 'DELETE':
+
+            now_iso = timezone.now().isoformat()
+
+            room_details = parse_json_field(adm.room_details)
+            room_shifting_details = parse_json_field(adm.roomShitingDetails)
+
+            # Deactivate active room entries in room_details
+            for room in room_details:
+                if isinstance(room, dict) and room.get("is_roomActive"):
+                    room["is_roomActive"] = False
+                    if not room.get("endDateTime"):
+                        room["endDateTime"] = now_iso
+
+            # Deactivate active room entries in roomShitingDetails
+            for room in room_shifting_details:
+                if isinstance(room, dict) and room.get("is_roomActive"):
+                    room["is_roomActive"] = False
+                    if not room.get("endDateTime"):
+                        room["endDateTime"] = now_iso
+
+            adm.room_details = room_details
+            adm.roomShitingDetails = room_shifting_details
+
+            adm.is_admissionActive = False
+            adm.is_admitted = False
+            adm.lastmodified_by = employee_id
+            adm.lastmodified_date = timezone.now()
+
+            adm.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Admission cancelled successfully"
+            })
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+    
 
 # ──────────────────────────────────────────────────────────────────────────────
 #   admission_advance  (GET / POST / PATCH / PUT)
