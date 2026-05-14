@@ -206,6 +206,7 @@ urlpatterns = [
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
+    path('invest-refund/', departmentBilling.invest_refund_create, name='invest_refund_create'),
 
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 

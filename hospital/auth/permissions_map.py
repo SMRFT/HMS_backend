@@ -122,6 +122,7 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/estimateBilling/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/get-estimate-billings/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/delete-bill/': 'HMS-P-IB',       
+    '/_b_a_c_k_e_n_d/HMS/invest-refund/': 'HMS-P-IB',       
 
     #Investigation Reports (RD):
     r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-API-RD',                
