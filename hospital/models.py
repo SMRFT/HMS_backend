@@ -374,7 +374,6 @@ class PharmacyBilling(AuditModel):
     deleted_by =models.CharField(max_length=150)
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
-    shiftno = models.CharField(max_length=100, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(default=timezone.now)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
@@ -705,7 +704,6 @@ class DischargeBilling(AuditModel):
     net_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)   
 
     remarks           = models.TextField(blank=True, null=True)
-    shiftno           = models.CharField(max_length=100, blank=True, null=True)
 
     # ── Estimate→Bill traceability ────────────────────────────────────────────
     converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
@@ -1024,8 +1022,6 @@ class Cashcountershiftdetails(AuditModel):
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     HandOverAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    PendingAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    IPAdvanceAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SalesReturnAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SelectedOutlet = models.CharField(max_length=100, null=True, blank=True)
     is_active      = models.BooleanField(default=True)
