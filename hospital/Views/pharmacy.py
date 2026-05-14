@@ -46,7 +46,7 @@ def convert_decimals(obj):
 
 
 
-@api_view(["POST"])
+@api_view(["POST","GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_oppharmacy_stock(request):
     try:

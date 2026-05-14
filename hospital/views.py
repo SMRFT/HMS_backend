@@ -56,6 +56,17 @@ def patientCreateView(request):
         request.headers.get('auth-hospital-code') or
         "system"
     )
+    branch_code = (
+        request.data.get('auth-branch-code') or
+        request.headers.get('auth-branch-code') or
+        "system"
+    )
+    outlet_code = (
+        request.data.get('auth-outlet-code') or
+        request.headers.get('auth-outlet-code') or
+        "system"
+    )
+    
     if request.method == 'GET':
         uhid = request.GET.get('uhid')
         ip_number = request.GET.get('ip_number')
@@ -99,7 +110,9 @@ def patientCreateView(request):
                 # Per requirements: only hospital_code is needed here, not branch/outlet.
                 save_kwargs = {
                     'lastmodified_by': employee_id,
-                    'hospital_code': hospital_code
+                    'hospital_code': hospital_code,
+                    'branch_code': branch_code,
+                    'outlet_code': outlet_code
                 }
                 if not serializer.instance:
                     save_kwargs['created_by'] = employee_id
@@ -122,6 +135,13 @@ def patientCreateView(request):
             payment_method = request.data.get('payment_method', None)
             doctor_id = request.data.get('employeeId', None)
 
+            # Determine billtype based on outlet_code
+            billtype = None
+            if outlet_code == "OLET004":
+                billtype = "19"
+            elif outlet_code == "OLET003":
+                billtype = "5"
+
             Billing.objects.create(
                 patient=patient,
                 registration_fee=registration_fee,
@@ -132,7 +152,10 @@ def patientCreateView(request):
                 created_by=employee_id,
                 lastmodified_by=employee_id,
                 hospital_code=hospital_code,
-                shiftno=request.data.get('shiftno')
+                branch_code=branch_code,
+                outlet_code=outlet_code,
+                shiftno=request.data.get('shiftno'),
+                billtype=billtype
             )
 
             return Response({

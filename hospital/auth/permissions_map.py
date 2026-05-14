@@ -217,12 +217,26 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/update_surgery_schedule/': 'HMS-P-OTSSU',                
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSSA',                
-    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
+
+    
+
+                  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
     r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
     r'^/_b_a_c_k_e_n_d/HMS/get_ippharmacy_stock/?(\?.*)?$': 'HMS-P-OTMB',  
-    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',    
+    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',  
+    '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
+    '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
+    '/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/': 'HMS-P-IB',
+    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-OTMBD',    
+                
+
+
+    
+    
+     
 
     #Assets Management:
     '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
@@ -266,7 +280,8 @@ PAGE_MAPPING = {
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
-        '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
+        # '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
+        r'^/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/?(\?.*)?$': 'HMS-P-IB',
         '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',

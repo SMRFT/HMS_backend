@@ -144,27 +144,49 @@ class Billing(AuditModel):
     payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     paid_date = models.DateTimeField(null=True, blank=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
+    billtype = models.CharField(max_length=50, blank=True, null=True)
 
     def save(self, *args, **kwargs):
+
         if not self.bill_number:
-            date_prefix = now().strftime('%Y%m%d')
-            pattern = f"{date_prefix}/"
-            
-            # Find the last bill that matches the current date pattern
-            last_bill = Billing.objects.filter(bill_number__startswith=pattern).order_by('-bill_number').first()
-            
+
+            current_date = now()
+
+            year = current_date.year
+            month = current_date.month
+
+            # Financial Year Calculation
+            if month >= 4:
+                start_year = year % 100
+                end_year = (year + 1) % 100
+            else:
+                start_year = (year - 1) % 100
+                end_year = year % 100
+
+            fy_prefix = f"{start_year:02d}{end_year:02d}"
+
+            pattern = f"{fy_prefix}/"
+
+            # Find last bill number
+            last_bill = Billing.objects.filter(
+                bill_number__startswith=pattern
+            ).order_by('-bill_number').first()
+
             if last_bill and last_bill.bill_number:
                 try:
-                    # Extract the sequence number (dates matching)
-                    last_number = int(last_bill.bill_number.split('/')[-1])
+                    last_number = int(
+                        last_bill.bill_number.split('/')[-1]
+                    )
                 except (ValueError, IndexError):
                     last_number = 0
             else:
                 last_number = 0
-                
+
             next_number = last_number + 1
-            self.bill_number = f"{pattern}{next_number:04d}"
-            
+
+            self.bill_number = f"{fy_prefix}/{next_number:06d}"
+
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -353,7 +375,7 @@ class PharmacyBilling(AuditModel):
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
-    ward_request_date = models.DateTimeField(blank=True, null=True)
+    ward_request_date = models.DateTimeField(default=timezone.now)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
