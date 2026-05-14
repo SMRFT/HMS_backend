@@ -694,9 +694,10 @@ def admission_detail(request, ipNumber):
         branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
         outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
 
-        # ✅ STRICT FILTER
+        from django.db.models import Q
+        # ✅ SUPPORT BOTH IP AND UHID
         adm = Admission.objects.filter(
-            ipNumber=str(ipNumber),
+            Q(ipNumber=str(ipNumber)) | Q(uhid=str(ipNumber)),
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
