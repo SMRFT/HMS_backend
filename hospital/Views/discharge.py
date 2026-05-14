@@ -439,7 +439,10 @@ def search_discharge_patient(request):
     except Exception:
         invest_items = []
 
-    return Response({"patient": patient_info, "invest_items": invest_items})
+    return Response({
+        "success": True,
+        "data": {"patient": patient_info, "invest_items": invest_items}
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,7 +503,10 @@ def discharge_billing_list_create(request):
             return (bd, o.discharge_id or 0)
 
         filtered.sort(key=_sort_key, reverse=True)
-        return Response([_obj_to_dict(o) for o in filtered])
+        return Response({
+            "success": True,
+            "data": [_obj_to_dict(o) for o in filtered]
+        })
 
     # ── POST ──────────────────────────────────────────────────────────────────
     # Flow 1: status="Billed"    → bill_no generated, estimate_number=None
@@ -533,7 +539,10 @@ def discharge_billing_list_create(request):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(_obj_to_dict(obj), status=status.HTTP_201_CREATED)
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(obj)
+        }, status=status.HTTP_201_CREATED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -557,7 +566,10 @@ def discharge_billing_detail(request, pk):
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
-        return Response(_obj_to_dict(billing))
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(billing)
+        })
 
     # ── PUT / PATCH  (Flow 3: edit estimate in-place) ─────────────────────────
     if request.method in ["PUT", "PATCH"]:
@@ -578,7 +590,10 @@ def discharge_billing_detail(request, pk):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(_obj_to_dict(billing))
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(billing)
+        })
 
     # ── DELETE (soft) ─────────────────────────────────────────────────────────
     if request.method == "DELETE":
@@ -629,4 +644,4 @@ def convert_estimate_to_bill(request, pk):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    return Response(_obj_to_dict(estimate), status=status.HTTP_200_OK)
+    return Response({"success": True, "data": _obj_to_dict(estimate)}, status=status.HTTP_200_OK)
