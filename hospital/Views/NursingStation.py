@@ -444,7 +444,6 @@ def get_lab_ward_requests(request):
                 "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
                 "userName": doc.get("created_by", ""),
                 "billNo": doc.get("investBillNo", ""),
-                "billType": doc.get("billTypeName", "LAB BILL (CREDIT)"),
                 "wardName": doc.get("wardName", ""),
                 "doctorName": doc.get("doctor", ""),
                 "tests": tests
