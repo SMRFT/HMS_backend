@@ -614,7 +614,6 @@ class Admission(AuditModel):
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
-    cashier_id          = models.CharField(max_length=500, blank=True, null=True)
 
     class Meta:
         ordering = ['-admissionDateTime']
