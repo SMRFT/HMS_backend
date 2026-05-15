@@ -171,10 +171,10 @@ urlpatterns = [
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),
     path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),  
-    re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
-    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
-    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
-    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
+    re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
+    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
+    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
     path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),   
     
@@ -250,6 +250,8 @@ urlpatterns = [
     path('investigation-prices/create/', investigation_price.create_investigation_price, name='create_investigation_price'),
     path('investigation-prices/update/<str:bill_type_no>/', investigation_price.update_investigation_price, name='update_investigation_price'),
     path('investigation-prices/delete/<str:bill_type_no>/', investigation_price.delete_investigation_price, name='delete_investigation_price'),
+    path('investigation-prices/update_item/<str:bill_type_no>/<int:item_id>/', investigation_price.update_investigation_item, name='update_investigation_item'),
+    path('investigation-prices/delete_item/<str:bill_type_no>/<int:item_id>/', investigation_price.delete_investigation_item, name='delete_investigation_item'),
 
     #Bil Type Master:
     path('bill-types_get/', billType.get_bill_types, name='get_bill_types'),
