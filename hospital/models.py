@@ -637,6 +637,23 @@ class Admission(AuditModel):
     def __str__(self):
         return f"{self.uhid} | {self.ipNumber}"
 
+
+class AdmissionRefund(models.Model):
+    refund_bill_no   = models.CharField(max_length=30, unique=True)
+    refund_date      = models.DateTimeField()
+    refund_amount        = models.DecimalField(max_digits=12, decimal_places=2)
+
+    bill_no          = models.CharField(max_length=30) 
+    ip_number        = models.CharField(max_length=50)
+
+    advance_amount       = models.DecimalField(max_digits=12, decimal_places=2)
+    total_refunded_so_far= models.DecimalField(max_digits=12, decimal_places=2)
+    remaining_balance    = models.DecimalField(max_digits=12, decimal_places=2)
+    remarks              = models.TextField(blank=True, default="")
+
+    bill_type        = models.CharField(max_length=20)
+    status           = models.CharField(max_length=20, default="Pending")
+
 class DischargeBilling(AuditModel):
     # ── Identity ──────────────────────────────────────────────────────────────
     discharge_id    = models.IntegerField(primary_key=True)

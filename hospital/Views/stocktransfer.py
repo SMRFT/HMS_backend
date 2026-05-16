@@ -249,107 +249,136 @@ def pharmacy_stock_view(request, pk=None):
                 return Response({"error": "Stock record not found"}, status=404)
             return Response(PharmacyStockSerializer(stock).data)
 
-        # ── Read auth context from headers ────────────────────────────────────
-        hospital_code = (
-            request.headers.get("auth-hospital-code")
-            or request.query_params.get("hospital_code")
-            or None
-        )
-        branch_code = (
-            request.headers.get("auth-branch-code")
-            or request.headers.get("Branch-Code")
-            or request.query_params.get("branch_code")
-            or None
-        )
-
-        grn_number  = request.query_params.get("grn_number")
-        item_id     = request.query_params.get("item_id")
-        # outlet_code param:
-        #   "OLET001"  → real outlet
-        #   ""         → Drug Purchase (outlet_code="" or None in DB)
-        #   absent     → no filter (return all — used by admin)
-        outlet_code_param = request.query_params.get("outlet_code", None)
-        search      = request.query_params.get("search", "").strip().lower()
-
-        all_stocks = list(PharmacyStock.objects.all().order_by("-stock_id"))
-
-        # Resolve item_ids matching the search string
-        matching_item_ids = None
-        if search:
-            all_items = list(PharmacyItem.objects.all())
-            matching_item_ids = {
-                str(i.item_id)
-                for i in all_items
-                if search in str(getattr(i, "item_name", "")).lower()
-            }
-            if not matching_item_ids:
-                return Response([])
-
-        results = []
-        for s in all_stocks:
-
-            # ── hospital + branch scope ────────────────────────────────────
-            if hospital_code and str(getattr(s, "hospital_code", "")) != str(hospital_code):
-                continue
-            if branch_code and str(getattr(s, "branch_code", "")) != str(branch_code):
-                continue
-
-            if grn_number and getattr(s, "grn_number", "") != grn_number:
-                continue
-            if item_id and str(getattr(s, "item_id", "")) != str(item_id):
-                continue
-
-            # ── outlet_code filter ─────────────────────────────────────────
-            if outlet_code_param is not None:
-                row_outlet = str(getattr(s, "outlet_code", "") or "")
-                if outlet_code_param == "":
-                    # Drug Purchase: rows with empty outlet_code
-                    if row_outlet != "":
-                        continue
-                else:
-                    if row_outlet != outlet_code_param:
-                        continue
-
-            if matching_item_ids is not None:
-                if str(getattr(s, "item_id", "")) not in matching_item_ids:
-                    continue
-
-            results.append(s)
-
-        # Build item_name lookup
-        all_items_map = {}
-        for itm in PharmacyItem.objects.all():
-            all_items_map[str(itm.item_id)] = getattr(itm, "item_name", "")
-
-        serialized = PharmacyStockSerializer(results, many=True).data
-
-        for row in serialized:
-            iid = str(row.get("item_id", ""))
-            row["item_name"]                = all_items_map.get(iid, f"Item #{iid}")
-            row["mrp"]                      = str(_dec(row.get("mrp", 0)))
-            row["Selling_Price"]            = str(_dec(
-                row.get("Selling_Price") or row.get("selling_price") or row.get("mrp") or 0
-            ))
-            row["CGST_Percentage"]          = str(_dec(row.get("CGST_Percentage", 0)))
-            row["SGST_Percentage"]          = str(_dec(row.get("SGST_Percentage", 0)))
-            row["CGST_Amt"]                 = str(_dec(row.get("CGST_Amt", 0)))
-            row["SGST_Amt"]                 = str(_dec(row.get("SGST_Amt", 0)))
-            row["total_stock"]              = _int(row.get("total_stock", 0))
-            row["sold_quantity"]            = _int(row.get("sold_quantity", 0))
-            row["transferred_out_quantity"] = _int(row.get("transferred_out_quantity", 0))
-            row["grn_return_quantity"]      = _int(row.get("grn_return_quantity", 0))
-            row["blocked_quantity"]         = _int(row.get("blocked_quantity", 0))
-            row["sales_return_quantity"]    = _int(row.get("sales_return_quantity", 0))
-            row["available_qty"] = (
-                row["total_stock"]
-                - row["sold_quantity"]
-                - row["transferred_out_quantity"]
-                - row["grn_return_quantity"]
-                - row["blocked_quantity"]
-                + row["sales_return_quantity"]
+        try:
+            # ── Read auth context from headers ────────────────────────────
+            hospital_code = (
+                request.headers.get("auth-hospital-code")
+                or request.query_params.get("hospital_code")
+                or None
+            )
+            branch_code = (
+                request.headers.get("auth-branch-code")
+                or request.headers.get("Branch-Code")
+                or request.query_params.get("branch_code")
+                or None
             )
 
-        return Response(serialized)
+            grn_number        = request.query_params.get("grn_number")
+            item_id           = request.query_params.get("item_id")
+            outlet_code_param = request.query_params.get("outlet_code", None)
+            search            = request.query_params.get("search", "").strip().lower()
+
+            # ── Search: resolve matching item_ids ─────────────────────────
+            matching_item_ids = None
+            if search:
+                try:
+                    all_items = list(PharmacyItem.objects.all())
+                except Exception as e:
+                    logger.error(f"[pharmacy_stock_view] PharmacyItem query failed: {e}")
+                    return Response({"error": "Failed to query items"}, status=500)
+
+                matching_item_ids = {
+                    str(i.item_id)
+                    for i in all_items
+                    if search in str(getattr(i, "item_name", "") or "").lower()
+                }
+                if not matching_item_ids:
+                    return Response([])
+
+            # ── Fetch stocks ──────────────────────────────────────────────
+            try:
+                all_stocks = list(PharmacyStock.objects.all().order_by("-stock_id"))
+            except Exception as e:
+                logger.error(f"[pharmacy_stock_view] PharmacyStock query failed: {e}")
+                return Response({"error": "Failed to query stock"}, status=500)
+
+            # ── Filter ────────────────────────────────────────────────────
+            results = []
+            for s in all_stocks:
+                try:
+                    if hospital_code and str(getattr(s, "hospital_code", "") or "") != str(hospital_code):
+                        continue
+                    if branch_code and str(getattr(s, "branch_code", "") or "") != str(branch_code):
+                        continue
+                    if grn_number and str(getattr(s, "grn_number", "") or "") != str(grn_number):
+                        continue
+                    if item_id and str(getattr(s, "item_id", "") or "") != str(item_id):
+                        continue
+
+                    if outlet_code_param is not None:
+                        row_outlet = str(getattr(s, "outlet_code", "") or "")
+                        if outlet_code_param == "":
+                            if row_outlet != "":
+                                continue
+                        else:
+                            if row_outlet != outlet_code_param:
+                                continue
+
+                    if matching_item_ids is not None:
+                        if str(getattr(s, "item_id", "") or "") not in matching_item_ids:
+                            continue
+
+                    results.append(s)
+
+                except Exception as e:
+                    logger.warning(f"[pharmacy_stock_view] Skipping stock record due to error: {e}")
+                    continue
+
+            # ── Build item_name lookup ────────────────────────────────────
+            try:
+                all_items_map = {
+                    str(itm.item_id): getattr(itm, "item_name", "") or ""
+                    for itm in PharmacyItem.objects.all()
+                }
+            except Exception as e:
+                logger.error(f"[pharmacy_stock_view] item_name lookup failed: {e}")
+                all_items_map = {}
+
+            # ── Serialize ─────────────────────────────────────────────────
+            try:
+                serialized = PharmacyStockSerializer(results, many=True).data
+            except Exception as e:
+                logger.error(f"[pharmacy_stock_view] Serialization failed: {e}", exc_info=True)
+                return Response({"error": f"Serialization error: {str(e)}"}, status=500)
+
+            # ── Enrich rows ───────────────────────────────────────────────
+            enriched = []
+            for idx, row in enumerate(serialized):
+                try:
+                    iid = str(row.get("item_id", "") or "")
+                    row["item_name"]                = all_items_map.get(iid, f"Item #{iid}")
+                    row["mrp"]                      = str(_dec(row.get("mrp", 0)))
+                    row["Selling_Price"]            = str(_dec(
+                        row.get("Selling_Price") or row.get("selling_price") or row.get("mrp") or 0
+                    ))
+                    row["CGST_Percentage"]          = str(_dec(row.get("CGST_Percentage", 0)))
+                    row["SGST_Percentage"]          = str(_dec(row.get("SGST_Percentage", 0)))
+                    row["CGST_Amt"]                 = str(_dec(row.get("CGST_Amt", 0)))
+                    row["SGST_Amt"]                 = str(_dec(row.get("SGST_Amt", 0)))
+                    row["total_stock"]              = _int(row.get("total_stock", 0))
+                    row["sold_quantity"]            = _int(row.get("sold_quantity", 0))
+                    row["transferred_out_quantity"] = _int(row.get("transferred_out_quantity", 0))
+                    row["grn_return_quantity"]      = _int(row.get("grn_return_quantity", 0))
+                    row["blocked_quantity"]         = _int(row.get("blocked_quantity", 0))
+                    row["sales_return_quantity"]    = _int(row.get("sales_return_quantity", 0))
+                    row["available_qty"] = (
+                        row["total_stock"]
+                        - row["sold_quantity"]
+                        - row["transferred_out_quantity"]
+                        - row["grn_return_quantity"]
+                        - row["blocked_quantity"]
+                        + row["sales_return_quantity"]
+                    )
+                    enriched.append(row)
+                except Exception as e:
+                    logger.warning(f"[pharmacy_stock_view] Skipping row {idx} during enrichment: {e}")
+                    continue
+
+            return Response(enriched)
+
+        except Exception as e:
+            logger.error(f"[pharmacy_stock_view] Unhandled error: {e}", exc_info=True)
+            return Response({"error": str(e)}, status=500)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,9 +473,8 @@ def stock_transfer_view(request, pk=None):
             # Drug Purchase (outlet_code="") → sees all transfers for the hospital+branch
             # Real outlet → sees only transfers involving that outlet (from or to)
             if not is_drug_purchase:
-                row_from = str(getattr(row, "outlet_code", "") or "")
-                row_to   = str(getattr(row, "to_outlet",   "") or "")
-                if outlet_code not in (row_from, row_to):
+                row_to = str(getattr(row, "to_outlet", "") or "")
+                if row_to != outlet_code:
                     continue
 
             # Date range filter

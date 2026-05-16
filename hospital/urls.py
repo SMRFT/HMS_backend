@@ -59,6 +59,21 @@ urlpatterns = [
     path("chemical-composition/", inventory.chemical_composition_view, name="chemical-composition-list"),
     path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
 
+    # GRN URLs
+    path('grn/', inventory.grn_view, name='grn_list'),
+    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
+    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
+
+    path("grn-ocr/", chandra_ocr.grn_ocr_scan, name="grn_ocr_scan"),
+
+    # Stock Transfer URLs
+    path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
+
+    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock'),
+    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock-detail'),
+    path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
+    path("stock-transfer-action/",   stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
+
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
@@ -90,21 +105,6 @@ urlpatterns = [
      path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
      path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
      path("get_registration_bills/", cashcounter.get_registration_bills),
-    
-    # GRN URLs
-    path('grn/', inventory.grn_view, name='grn_list'),
-    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
-    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
-
-    path("grn-ocr/", chandra_ocr.grn_ocr_scan, name="grn_ocr_scan"),
-
-    # Stock Transfer URLs
-    path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
-
-    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock'),
-    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock-detail'),
-    path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
-    path("stock-transfer-action/",   stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
 
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
