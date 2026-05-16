@@ -61,15 +61,17 @@ def get_investigations(request):
     if not bill_type_no:
         return JsonResponse({'error': 'billTypeNo query parameter is required'}, status=400)
 
-    branch_code = request.data.get('auth-branch-code', 'system')
+    branch_code   = request.data.get('auth-branch-code',   'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db = client['HMS']
-    invest_billing_collection = db['hospital_investbilling']
-    ct_report_collection = db['hospital_radiologyreport']
-    patient_collection = db['hospital_patient']
-    invest_price_collection = db['hospital_investigationprice']
+    invest_billing_collection   = db['hospital_investbilling']
+    ct_report_collection        = db['hospital_radiologyreport']
+    patient_collection          = db['hospital_patient']
+    invest_price_collection     = db['hospital_investigationprice']
+    refund_collection           = db['hospital_investrefund']         # ← refund
+    radiology_format_collection = db['hospital_radiology_formats']    # ← formats
 
     try:
         # ── 0. Build item_id → itemName map from investigationprice ──────────
@@ -112,7 +114,39 @@ def get_investigations(request):
         if not billing_records:
             return JsonResponse([], safe=False)
 
-        # ── 2. Filter by billTypeNo ───────────────────────────────────────────
+        # ── 2. Batch Refund Cache ─────────────────────────────────────────────
+        # Build { investBillNo → set of refunded test_ids }
+        invest_bill_nos = [
+            r.get('investBillNo') for r in billing_records if r.get('investBillNo')
+        ]
+
+        refunded_test_ids = {}  # investBillNo → set of int test_ids
+
+        if invest_bill_nos:
+            refund_docs = refund_collection.find(
+                {'investBillNo': {'$in': invest_bill_nos}, 'is_active': True},
+                {'_id': 0, 'investBillNo': 1, 'item': 1}
+            )
+            for rdoc in refund_docs:
+                bill_no = rdoc.get('investBillNo')
+                items   = rdoc.get('item', [])
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
+                if bill_no not in refunded_test_ids:
+                    refunded_test_ids[bill_no] = set()
+                for it in items:
+                    # refund docs store item_id (not test_id)
+                    tid = it.get('item_id') or it.get('test_id')
+                    if tid is not None:
+                        try:
+                            refunded_test_ids[bill_no].add(int(tid))
+                        except (ValueError, TypeError):
+                            refunded_test_ids[bill_no].add(tid)
+
+        # ── 3. Filter by billTypeNo and exclude refunded items ────────────────
         filtered_records = []
         for record in billing_records:
             try:
@@ -125,7 +159,24 @@ def get_investigations(request):
             except:
                 items = []
 
-            matched_items = [i for i in items if i.get('billTypeNo') == bill_type_no]
+            bill_no          = record.get('investBillNo', '')
+            already_refunded = refunded_test_ids.get(bill_no, set())
+
+            matched_items = []
+            for i in items:
+                # Must match billTypeNo
+                if i.get('billTypeNo') != bill_type_no:
+                    continue
+                # Exclude if already refunded — billing items use item_id
+                tid = i.get('item_id') or i.get('test_id')
+                try:
+                    tid_norm = int(tid) if tid is not None else None
+                except (ValueError, TypeError):
+                    tid_norm = tid
+                if tid_norm in already_refunded:
+                    continue
+                matched_items.append(i)
+
             if not matched_items:
                 continue
 
@@ -135,7 +186,7 @@ def get_investigations(request):
         if not filtered_records:
             return JsonResponse([], safe=False)
 
-        # ── 3. Fetch existing reports ─────────────────────────────────────────
+        # ── 4. Fetch existing reports ─────────────────────────────────────────
         bill_nos = [r['investBillNo'] for r in filtered_records if r.get('investBillNo')]
         report_filter = {
             'investBillNo': {'$in': bill_nos},
@@ -148,19 +199,17 @@ def get_investigations(request):
 
         ct_reports = list(ct_report_collection.find(report_filter, {'_id': 0}))
 
-        # Key: (investBillNo, item_id) — both normalized to int for item_id
         report_map = {}
         for r in ct_reports:
             for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date',
                           'approved_date', 'deleted_date']:
                 if field in r and isinstance(r[field], datetime):
                     r[field] = r[field].isoformat()
-
-            raw_item_id = r.get('item_id')
+            raw_item_id        = r.get('item_id')
             normalized_item_id = int(raw_item_id) if raw_item_id is not None else None
             report_map[(r.get('investBillNo'), normalized_item_id)] = r
 
-        # ── 4. Fetch patients ─────────────────────────────────────────────────
+        # ── 5. Fetch patients ─────────────────────────────────────────────────
         uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid')})
         patient_filter = {'uhid': {'$in': uhid_list}}
         if hospital_code:
@@ -175,47 +224,103 @@ def get_investigations(request):
         ))
         patient_map = {p['uhid']: p for p in patients}
 
-        # ── 5. Build result ───────────────────────────────────────────────────
+        # ── 6. Batch Radiology Format Cache ──────────────────────────────────
+        # Collect all unique item_ids across all matched items
+        all_item_ids = set()
+        for record in filtered_records:
+            for item in record.get('_matched_items', []):
+                tid = item.get('test_id') or item.get('item_id')
+                if tid is not None:
+                    try:
+                        all_item_ids.add(int(tid))
+                    except (ValueError, TypeError):
+                        pass
+
+        # format_map: item_id (int) → full format doc (_id removed)
+        format_map = {}
+        if all_item_ids:
+            format_docs = radiology_format_collection.find(
+                {
+                    'item_id':    {'$in': list(all_item_ids)},
+                    'billTypeNo': bill_type_no,
+                    'is_active':  True
+                }
+            )
+            for fdoc in format_docs:
+                fdoc.pop('_id', None)
+                # Serialize datetime fields inside format doc
+                for field in ['last_modified_date']:
+                    if field in fdoc and isinstance(fdoc[field], datetime):
+                        fdoc[field] = fdoc[field].isoformat()
+                fid = fdoc.get('item_id')
+                if fid is not None:
+                    try:
+                        format_map[int(fid)] = fdoc
+                    except (ValueError, TypeError):
+                        pass
+
+        # ── 7. Build result ───────────────────────────────────────────────────
         result = []
         for record in filtered_records:
             invest_bill_no = record.get('investBillNo')
             if not invest_bill_no:
                 continue
 
-            uhid = record.get('uhid', '')
+            uhid    = record.get('uhid', '')
             patient = patient_map.get(uhid, {})
+            gender  = patient.get('gender', '').strip().upper()
+
+            # Normalise gender → format doc key
+            if gender in ('M', 'MALE'):
+                gender_key = 'male'
+            elif gender in ('F', 'FEMALE'):
+                gender_key = 'female'
+            else:
+                gender_key = 'male'   # safe fallback
+
             matched_items = record.get('_matched_items', [])
 
             base = record.copy()
             base.pop('_matched_items', None)
-            base.pop('item', None)  # remove raw items array from response
+            base.pop('item', None)
 
             for field in ['investBillDate', 'created_date', 'lastmodified_date']:
                 if field in base and isinstance(base[field], datetime):
                     base[field] = base[field].isoformat()
 
-            base['salutation']  = patient.get('salutation', '')
-            base['firstName']   = patient.get('firstName', '')
-            base['middleName']  = patient.get('middleName', '')
-            base['lastName']    = patient.get('lastName', '')
-            base['age']         = patient.get('age', None)
-            base['gender']      = patient.get('gender', '')
+            base['salutation']  = patient.get('salutation',  '')
+            base['firstName']   = patient.get('firstName',   '')
+            base['middleName']  = patient.get('middleName',  '')
+            base['lastName']    = patient.get('lastName',    '')
+            base['age']         = patient.get('age',         None)
+            base['gender']      = patient.get('gender',      '')
 
             for item in matched_items:
-                raw_item_id = item.get('item_id')
-                item_id = int(raw_item_id) if raw_item_id is not None else None
+                raw_item_id = item.get('item_id') or item.get('test_id')
+                item_id     = int(raw_item_id) if raw_item_id is not None else None
 
-                # ✅ itemName from investigationprice, fallback to billing record
                 item_name = item_name_map.get(item_id) or item.get('itemName', '')
-
-                # ✅ report_map lookup with matching int key
-                report = report_map.get((invest_bill_no, item_id))
+                report    = report_map.get((invest_bill_no, item_id))
 
                 row = base.copy()
                 row['item_id']   = item_id
                 row['itemName']  = item_name
                 row['report']    = report
-                row['hasReport']  = report.get('has_report', False) if report else False 
+                row['hasReport'] = report.get('has_report', False) if report else False
+
+                # ── Radiology format: all fields + gender-resolved titles ─────
+                fmt_doc = format_map.get(item_id)
+                if fmt_doc:
+                    # All fields except the raw male/female arrays
+                    fmt_base = {
+                        k: v for k, v in fmt_doc.items()
+                        if k not in ('male', 'female')
+                    }
+                    # Gender-matched titles array under a unified key
+                    fmt_base['format_titles'] = fmt_doc.get(gender_key, [])
+                    row['radiology_format'] = fmt_base
+                else:
+                    row['radiology_format'] = None
 
                 result.append(row)
 
@@ -228,7 +333,6 @@ def get_investigations(request):
 
     finally:
         client.close()
-
 
 # ─── POST: Create scan report (with optional slot_DateTime) ───────────────────
 

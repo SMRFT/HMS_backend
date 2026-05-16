@@ -1033,9 +1033,9 @@ def billing_report_view(request):
                     refunded_test_ids[bill_no] = set()
 
                 for it in items:
-                    tid = it.get("test_id")
+                    # refund docs store item_id (not test_id)
+                    tid = it.get("item_id") or it.get("test_id")
                     if tid is not None:
-                        # Normalise to int for safe comparison
                         try:
                             refunded_test_ids[bill_no].add(int(tid))
                         except (ValueError, TypeError):
@@ -1122,13 +1122,14 @@ def billing_report_view(request):
             if already_refunded:
                 filtered_items = []
                 for it in items:
-                    tid = it.get("test_id")
+                    # billing items use item_id (not test_id)
+                    tid = it.get("item_id") or it.get("test_id")
                     try:
                         tid_norm = int(tid) if tid is not None else None
                     except (ValueError, TypeError):
                         tid_norm = tid
 
-                    # Keep item only if its test_id has NOT been refunded
+                    # Keep item only if its item_id has NOT been refunded
                     if tid_norm not in already_refunded:
                         filtered_items.append(it)
                 doc["item"] = filtered_items
@@ -1151,7 +1152,8 @@ def billing_report_view(request):
         return JsonResponse(
             {"error": "Failed to generate billing report", "details": str(e)},
             status=500
-        )    
+        )
+
 
 @api_view(['PATCH'])
 @csrf_exempt
