@@ -97,6 +97,7 @@ def _next_transfer_ref_number():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 def get_active_stock_outlets(request):
     """
     Returns all outlets where is_stock_outlet=True and is_active=True.
@@ -235,8 +236,8 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
 # GET params: item_id, outlet_code, search (item_name prefix)
 # Drug Purchase: outlet_code="" (stocks with no outlet_code)
 # ─────────────────────────────────────────────────────────────────────────────
-
 @api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def pharmacy_stock_view(request, pk=None):
 
@@ -252,15 +253,12 @@ def pharmacy_stock_view(request, pk=None):
         try:
             # ── Read auth context from headers ────────────────────────────
             hospital_code = (
-                request.headers.get("auth-hospital-code")
-                or request.query_params.get("hospital_code")
-                or None
+                request.data.get("auth-hospital-code") or
+                request.headers.get("auth-hospital-code") or "system"
             )
             branch_code = (
-                request.headers.get("auth-branch-code")
-                or request.headers.get("Branch-Code")
-                or request.query_params.get("branch_code")
-                or None
+                request.data.get("auth-branch-code") or
+                request.headers.get("Branch-Code") or "system"
             )
 
             grn_number        = request.query_params.get("grn_number")
@@ -472,8 +470,11 @@ def stock_transfer_view(request, pk=None):
             # Outlet scope:
             # Drug Purchase (outlet_code="") → sees all transfers for the hospital+branch
             # Real outlet → sees only transfers involving that outlet (from or to)
-            if not is_drug_purchase:
-                row_to = str(getattr(row, "to_outlet", "") or "")
+            row_to = str(getattr(row, "to_outlet", "") or "")
+            if is_drug_purchase:
+                if row_to != "":
+                    continue
+            else:
                 if row_to != outlet_code:
                     continue
 

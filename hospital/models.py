@@ -300,13 +300,9 @@ class PharmacyItem(AuditModel):
         return f"{self.item_id} {self.item_name}"
     
 class StockTransfer(AuditModel):
-    # ── Ref number ────────────────────────────────────────────────────────────
     transfer_ref_number = models.CharField(max_length=30,unique=True)
-    # ── Outlets ───────────────────────────────────────────────────────────────
-    to_outlet   = models.CharField(max_length=100)
-    # ── Items (JSON array) ────────────────────────────────────────────────────
+    to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
-    # ── Status ────────────────────────────────────────────────────────────────
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
