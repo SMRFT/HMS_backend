@@ -369,18 +369,26 @@ def create_scan_report(request):
 
         # ── Build valuedetails ───────────────────────────────────────────────
         sections = data.get('sections', [])
+        value_list = []
+
+        for sec in sections:
+            if sec.get('table_id'):
+                # Table entry — store as-is: { table_id, row1col1, row1col2, ... }
+                value_list.append(sec)
+            else:
+                # Text entry — store as-is: { title_id, title, title_value }
+                value_list.append({
+                    "title_id":    sec.get('title_id', ''),
+                    "title":       sec.get('title', ''),
+                    "title_value": sec.get('title_value', ''),
+                })
+
         valuedetails = {
             "device_id":    data.get('device_id', []),
             "approve":      False,
             "approve_time": None,
             "approve_by":   None,
-            "value": [
-                {
-                    "title_id":    sec.get('title_id', ''),
-                    "title_value": sec.get('value', ''),
-                }
-                for sec in sections
-            ]
+            "value":        value_list,
         }
 
         impression = data.get('impression', '')
@@ -623,32 +631,49 @@ def edit_scan_report_impression(request, investBillNo, item_id):
         if new_sections and isinstance(new_sections, list):
             existing_value = report.get("valuedetails", {}).get("value", [])
 
-            # Build a map of existing sections: title_id -> index
-            existing_map = {
-                item["title_id"]: idx
-                for idx, item in enumerate(existing_value)
-            }
-
             # Apply incoming changes
-            for incoming in new_sections:
-                title_id = incoming.get("title_id")
-                new_value = incoming.get("value")
+            if new_sections and isinstance(new_sections, list):
+                existing_value = report.get("valuedetails", {}).get("value", [])
 
-                if not title_id or new_value is None:
-                    continue  # skip malformed entries
+                # Build a map of existing TEXT sections: title_id -> index
+                existing_text_map = {
+                    item["title_id"]: idx
+                    for idx, item in enumerate(existing_value)
+                    if item.get("title_id") and not item.get("table_id")
+                }
 
-                if title_id in existing_map:
-                    # Update existing section in-place
-                    idx = existing_map[title_id]
-                    existing_value[idx]["title_value"] = new_value
-                else:
-                    # Append brand-new section if title_id not found
-                    existing_value.append({
-                        "title_id": title_id,
-                        "title_value": new_value,
-                    })
+                # Build a map of existing TABLE sections: table_id -> index
+                existing_table_map = {
+                    item["table_id"]: idx
+                    for idx, item in enumerate(existing_value)
+                    if item.get("table_id")
+                }
 
-            set_payload["valuedetails.value"] = existing_value
+                for incoming in new_sections:
+                    if incoming.get("table_id"):
+                        table_id = incoming["table_id"]
+                        if table_id in existing_table_map:
+                            existing_value[existing_table_map[table_id]] = incoming
+                        else:
+                            existing_value.append(incoming)
+                    else:
+                        title_id = incoming.get("title_id")
+                        new_val  = incoming.get("title_value")
+                        if not title_id or new_val is None:
+                            continue
+                        if title_id in existing_text_map:
+                            idx = existing_text_map[title_id]
+                            existing_value[idx]["title_value"] = new_val
+                            if incoming.get("title"):
+                                existing_value[idx]["title"] = incoming["title"]
+                        else:
+                            existing_value.append({
+                                "title_id":    title_id,
+                                "title":       incoming.get("title", ""),
+                                "title_value": new_val,
+                            })
+
+                set_payload["valuedetails.value"] = existing_value
 
         collection.update_one(
             {"_id": report["_id"]},
