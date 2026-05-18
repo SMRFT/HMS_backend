@@ -20,13 +20,12 @@ from .Views import (
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder,
     front_office_reports,
-    insurance
+    registration_updates
 )
 from .Views.AccountsReport import (
     shift_basis_report,
     cash_counter_manager,
-    bill_wise_report,
-    accounting_reports
+    bill_wise_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -89,7 +88,7 @@ urlpatterns = [
   
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
-    path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
+    path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
@@ -296,6 +295,8 @@ urlpatterns = [
     path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
     path('registration-bills/', views.registration_bills, name='registration_bills'),
     re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('update-registration-visit/', registration_updates.update_registration_visit, name='update_registration_visit'),
+    path('process-registration-refund/', registration_updates.process_registration_refund, name='process_registration_refund'),
     path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
     path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
     path('get-all-outlets/', views.get_all_outlets, name='get_all_outlets'),
@@ -379,8 +380,6 @@ urlpatterns = [
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
     path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
     path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
-    path("discharge-bills-report/", accounting_reports.discharge_bills_report, name="discharge_bills_report"),
-    path("advance-registration-report/", accounting_reports.advance_registration_report, name="advance_registration_report"),
 
     # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
     # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
@@ -388,8 +387,5 @@ urlpatterns = [
     path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
     path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
 
-    # Insurance Claim URLs
-    path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
-    path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
-    path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
+    
 ]

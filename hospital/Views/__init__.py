@@ -12,4 +12,5 @@ from . import dashboard
 from . import advanced_dashboard
 from . import NursingStation
 from . import Stores
+from . import registration_updates
 from .Insurance import insurance
