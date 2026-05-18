@@ -221,10 +221,26 @@ class RoomSerializer(serializers.ModelSerializer):
         return value
     
 
-from .models import Admission
+from .models import Patient, InsuranceProvider, Admission
+
+class PatientSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    uhid = serializers.CharField(read_only=True)
+    class Meta:
+        model = Patient
+        fields = '__all__'
+
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
+        fields = '__all__'
 
 class AdmissionSerializer(serializers.ModelSerializer):
     patient_details = serializers.SerializerMethodField()
+    insurance_details = serializers.SerializerMethodField()
+    registration_details = serializers.SerializerMethodField()
+    room_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Admission
@@ -232,10 +248,48 @@ class AdmissionSerializer(serializers.ModelSerializer):
 
     def get_patient_details(self, obj):
         patient = Patient.objects.filter(uhid=obj.uhid).first()
-
         if patient:
             return PatientSerializer(patient).data
         return None 
+
+    def get_insurance_details(self, obj):
+        # Fetch insurance details by comparing company_code from patient
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient and patient.company_code:
+            insurance = InsuranceProvider.objects.filter(company_code=patient.company_code).first()
+            if insurance:
+                return {
+                    "company_code": insurance.company_code,
+                    "company_name": insurance.company_name,
+                }
+        return None
+
+    def get_registration_details(self, obj):
+        # Fetch registration details from patient record
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient:
+            return {
+                "registration_date": patient.registration_date,
+                "customer_type": patient.customer_type,
+            }
+        return None
+
+    def get_room_info(self, obj):
+        # Logic to extract current room/bed from room_details
+        import json
+        details = obj.room_details
+        if isinstance(details, str):
+            try: details = json.loads(details)
+            except: details = []
+        
+        if details:
+            for r in reversed(details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    return {
+                        "room_no": r.get("roomNo"),
+                        "bed_no": r.get("bedNo")
+                    }
+        return {}
 
 
 from .models import DischargeBilling
@@ -245,13 +299,6 @@ class DischargeBillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Patient
-class PatientSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    uhid = serializers.CharField(read_only=True)
-    class Meta:
-        model = Patient
-        fields = '__all__'
 
 
 from .models import Summary
@@ -284,12 +331,6 @@ class BillingSerializer(serializers.ModelSerializer):
         model = Billing
         fields = '__all__'
 
-from .models import InsuranceProvider
-class InsuranceProviderSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = InsuranceProvider
-        fields = '__all__'
 
 from decimal import Decimal, InvalidOperation
 

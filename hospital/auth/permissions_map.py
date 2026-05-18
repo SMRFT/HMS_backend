@@ -328,9 +328,15 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCMBPB',
         '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
          
-        '/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/' : 'HMS-P-CCC',
-        '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
-             
+        r'^/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/?(\?.*)?$' : 'HMS-P-ASR',
+        r'^/_b_a_c_k_e_n_d/HMS/bill_wise_report/?(\?.*)?$' : 'HMS-P-ASR',
+        r'^/_b_a_c_k_e_n_d/HMS/discharge-bills-report/?(\?.*)?$' : 'HMS-P-ASR',
+        r'^/_b_a_c_k_e_n_d/HMS/advance-registration-report/?(\?.*)?$' : 'HMS-P-ASR',
+        r'^/_b_a_c_k_e_n_d/HMS/get_shift_summary_report/?(\?.*)?$' : 'HMS-P-ASR',
+
+        r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$' : 'HMS-P-ICD',
+        r'^/_b_a_c_k_e_n_d/HMS/patient-admission-details/?(\?.*)?$' : 'HMS-P-ICD',
+
 }
 
 
