@@ -22,7 +22,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
     
-from .models import Billing, TempPatientRegistration
+from .models import Billing, TempPatientRegistration, Refund
 
 from .models import Billing
 from .serializers import PatientSerializer
@@ -423,15 +423,31 @@ def get_all_employees(request):
             ]
         }
 
+        # Fetch mappings
+        dept_collection = global_db['backend_diagnostics_Departments']
+        desig_collection = global_db['backend_diagnostics_Designation']
+        
+        depts = {d.get('department_code'): d.get('department_name') for d in dept_collection.find({}, {"department_code": 1, "department_name": 1, "_id": 0})}
+        desigs = {d.get('Designation_code'): d.get('designation') for d in desig_collection.find({}, {"Designation_code": 1, "designation": 1, "_id": 0})}
+
         employees = list(diag_collection.find(
             query,
             {
                 "employeeId": 1,
                 "employeeName": 1,
                 "designation": 1,
+                "department": 1,
                 "_id": 0
             }
         ))
+
+        for emp in employees:
+            dept_code = emp.get('department')
+            desig_code = emp.get('designation')
+            if dept_code and dept_code in depts:
+                emp['department'] = depts[dept_code]
+            if desig_code and desig_code in desigs:
+                emp['designation'] = desigs[desig_code]
 
         client.close()
         return Response(employees, status=200)
@@ -676,6 +692,21 @@ def patient_visit_list(request):
             ]
             full_address = ", ".join([str(val) for val in address_parts if val]).strip()
 
+            # Get refund details
+            refunds = Refund.objects.filter(bill_no=bill.bill_number)
+            refund_data = []
+            total_refunded = 0
+            for r in refunds:
+                amt = r.refund_amount
+                if hasattr(amt, 'to_decimal'): amt = amt.to_decimal()
+                total_refunded += float(amt)
+                refund_data.append({
+                    "refund_bill_no": r.refund_bill_no,
+                    "amount": str(r.refund_amount),
+                    "status": r.status,
+                    "date": r.refund_date.strftime("%d-%m-%Y %I:%M %p") if r.refund_date else ''
+                })
+
             data.append({
                 "uhid": p.uhid,
                 "patientName": full_name,
@@ -693,7 +724,10 @@ def patient_visit_list(request):
                 "billAmount": str(bill.total_fees or 0),
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
-                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else ''
+                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else '',
+                "editHistory": bill.edit_history or [],
+                "refunds": refund_data,
+                "totalRefunded": str(total_refunded)
             })
             
         return Response(data)

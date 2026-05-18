@@ -534,6 +534,7 @@ def save_lab_ward_request(request):
         request_doc.update({
             "investBillNo": invest_bill_no,
             "total_amount": round(float(request_doc.get("total_amount", 0)), 2),
+            "finalPrice": round(float(request_doc.get("total_amount", 0)), 2),
             "created_by": current_user,
             "branch_code": branch_code,
             "outlet_code": outlet_code,

@@ -19,7 +19,8 @@ from .Views import (
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder,
-    front_office_reports
+    front_office_reports,
+    registration_updates
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -294,6 +295,8 @@ urlpatterns = [
     path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
     path('registration-bills/', views.registration_bills, name='registration_bills'),
     re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('update-registration-visit/', registration_updates.update_registration_visit, name='update_registration_visit'),
+    path('process-registration-refund/', registration_updates.process_registration_refund, name='process_registration_refund'),
     path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
     path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
     path('get-all-outlets/', views.get_all_outlets, name='get_all_outlets'),
