@@ -373,15 +373,15 @@ def create_scan_report(request):
 
         for sec in sections:
             if sec.get('table_id'):
-                # Table entry — store as-is: { table_id, row1col1, row1col2, ... }
                 value_list.append(sec)
             else:
-                # Text entry — store as-is: { title_id, title, title_value }
                 value_list.append({
                     "title_id":    sec.get('title_id', ''),
                     "title":       sec.get('title', ''),
                     "title_value": sec.get('title_value', ''),
                 })
+
+        anc_fields = data.get('anc_fields', None)
 
         valuedetails = {
             "device_id":    data.get('device_id', []),
@@ -389,28 +389,37 @@ def create_scan_report(request):
             "approve_time": None,
             "approve_by":   None,
             "value":        value_list,
+            **({"anc_fields": anc_fields} if anc_fields else {}),
         }
 
-        impression = data.get('impression', '')
-        item_name  = data.get('itemName', '')
-        bill_type_no = data.get('billTypeNo', '')
+        impression    = data.get('impression', '')
+        item_name     = data.get('itemName', '')
+        bill_type_no  = data.get('billTypeNo', '')
 
-        # ── Check if a slot-only record exists (has_report=False) ────────────
+        # ── Check if a patchable record exists ───────────────────────────────
+        # Covers: slot-only (has_report=False) OR slot created via SlotModal
+        # that set has_report=True but left impression empty
         existing_slot = collection.find_one({
             'investBillNo': invest_bill_no,
             'item_id':      item_id,
             'is_active':    True,
-            'has_report':   False,
+            'is_approved':  {'$ne': True},
+            '$or': [
+                {'has_report': False},
+                {'impression': ''},
+                {'impression': None},
+            ]
         })
 
         if existing_slot:
-            # ── PATCH: fill in the report on the existing slot record ─────────
+            # ── PATCH: fill in the report on the existing slot/empty record ──
             set_payload = {
                 "impression":        impression,
                 "valuedetails":      valuedetails,
                 "has_report":        True,
                 "lastmodified_by":   user_id,
                 "lastmodified_date": timezone.now(),
+                "type":              data.get('type', ''), 
             }
             if slot_dt:
                 set_payload["slot_DateTime"] = slot_dt
@@ -431,12 +440,14 @@ def create_scan_report(request):
                 "report":       _serialize_report(updated),
             }, status=200)
 
-        # ── Duplicate check: fully submitted report already exists ────────────
+        # ── Duplicate check: a real report already exists ────────────────────
+        # Only block if impression is actually filled (not a slot-only record)
         existing_full = collection.find_one({
             'investBillNo': invest_bill_no,
             'item_id':      item_id,
             'is_active':    True,
             'has_report':   True,
+            'impression':   {'$nin': ['', None]},
         })
         if existing_full:
             return JsonResponse(
@@ -445,6 +456,11 @@ def create_scan_report(request):
             )
 
         # ── POST: create new record ───────────────────────────────────────────
+        # has_report is True only when impression is actually filled
+        has_report = bool(impression and impression.strip())
+
+        report_type = data.get('type', '')
+
         ct_report = RadiologyReport.objects.create(
             date          = date_value,
             slot_DateTime = slot_dt,
@@ -455,7 +471,8 @@ def create_scan_report(request):
             billTypeNo    = bill_type_no,
             valuedetails  = valuedetails,
             is_active     = True,
-            has_report    = True,        # ✅ full report on create
+            has_report    = has_report,
+            type          = report_type,      # ← add this
             created_by    = user_id,
             branch_code   = branch_code,
             outlet_code   = outlet_code,
@@ -602,6 +619,7 @@ def edit_scan_report_impression(request, investBillNo, item_id):
     try:
         new_impression = request.data.get("impression")
         new_sections = request.data.get("sections")  # list of {title_id, value}
+        new_anc_fields = request.data.get("anc_fields", None)
         user_id = request.data.get('auth-user-id', 'system')
         item_id = int(item_id)
         # At least one of impression or sections must be provided
@@ -674,6 +692,8 @@ def edit_scan_report_impression(request, investBillNo, item_id):
                             })
 
                 set_payload["valuedetails.value"] = existing_value
+            if new_anc_fields:
+                set_payload["valuedetails.anc_fields"] = new_anc_fields
 
         collection.update_one(
             {"_id": report["_id"]},

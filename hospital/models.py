@@ -739,6 +739,8 @@ class RadiologyReport(AuditModel):
     approved_date = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)   # ✅ add this
     has_report = models.BooleanField(default=False)   # ✅ add this
+    type = models.TextField()    
+
 
     def __str__(self):
         return f"Radiology Report - {self.investBillNo} ({self.uhid})"
