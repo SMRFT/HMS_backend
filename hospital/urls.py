@@ -31,6 +31,7 @@ from .Views.AccountsReport import (
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
+from .Views.Insurance import insurance
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -393,5 +394,8 @@ urlpatterns = [
     path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
     path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
 
-    
+    # Insurance Claim URLs
+    path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
+    path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
+    path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
 ]
