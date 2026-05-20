@@ -729,6 +729,8 @@ class InsuranceProvider(AuditModel):
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
     slot_DateTime = models.DateTimeField()
+    patientIn_DateTime = models.DateTimeField(null=True, blank=True)
+    scan_started_DateTime = models.DateTimeField(null=True, blank=True)
     investBillNo = models.CharField(max_length=50, blank=True)
     billTypeNo = models.TextField()    
     itemName = models.TextField()
@@ -740,6 +742,9 @@ class RadiologyReport(AuditModel):
     is_active = models.BooleanField(default=True)   # ✅ add this
     has_report = models.BooleanField(default=False)   # ✅ add this
     type = models.TextField()    
+    is_Dispatched = models.BooleanField(default=False)
+    dispatch_DateTime = models.DateTimeField(null=True, blank=True)
+    dispatched_by = models.CharField(max_length=100, blank=True)
 
 
     def __str__(self):
