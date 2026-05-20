@@ -323,20 +323,13 @@ class PharmacyItem(AuditModel):
         return f"{self.item_id} {self.item_name}"
     
 class StockTransfer(AuditModel):
-    # ── Ref number ────────────────────────────────────────────────────────────
     transfer_ref_number = models.CharField(max_length=30,unique=True)
- 
-    # ── Outlets ───────────────────────────────────────────────────────────────
-    from_outlet = models.CharField(max_length=100)
-    to_outlet   = models.CharField(max_length=100)
- 
-    # ── Items (JSON array) ────────────────────────────────────────────────────
+    to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
- 
-    # ── Status ────────────────────────────────────────────────────────────────
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
+        ("Rejected", "Rejected")
     ]
     is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
 
@@ -395,8 +388,6 @@ class PharmacyBilling(AuditModel):
 class PharmacyStock(AuditModel):
 
     stock_id = models.IntegerField(primary_key=True)
-
-    department_code = models.CharField(max_length=20)
     item_id = models.IntegerField()
     batch_number = models.CharField(max_length=50)
 
@@ -642,7 +633,6 @@ class Admission(AuditModel):
     is_admissionActive  = models.BooleanField(default=True)
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
-    cashier_id          = models.CharField(max_length=500, blank=True, null=True)
 
     class Meta:
         ordering = ['-admissionDateTime']
@@ -665,6 +655,23 @@ class Admission(AuditModel):
 
     def __str__(self):
         return f"{self.uhid} | {self.ipNumber}"
+
+
+class AdmissionRefund(models.Model):
+    refund_bill_no   = models.CharField(max_length=30, unique=True)
+    refund_date      = models.DateTimeField()
+    refund_amount        = models.DecimalField(max_digits=12, decimal_places=2)
+
+    bill_no          = models.CharField(max_length=30) 
+    ip_number        = models.CharField(max_length=50)
+
+    advance_amount       = models.DecimalField(max_digits=12, decimal_places=2)
+    total_refunded_so_far= models.DecimalField(max_digits=12, decimal_places=2)
+    remaining_balance    = models.DecimalField(max_digits=12, decimal_places=2)
+    remarks              = models.TextField(blank=True, default="")
+
+    bill_type        = models.CharField(max_length=20)
+    status           = models.CharField(max_length=20, default="Pending")
 
 class DischargeBilling(AuditModel):
     # ── Identity ──────────────────────────────────────────────────────────────

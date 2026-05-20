@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal, InvalidOperation
 from bson import ObjectId
 
 class ObjectIdField(serializers.Field):
@@ -12,7 +13,6 @@ class ObjectIdField(serializers.Field):
             return data
 
 from .models import ChemicalComposition
- 
 class ChemicalCompositionSerializer(serializers.ModelSerializer):
     class Meta:
         model  = ChemicalComposition
@@ -46,10 +46,10 @@ class PharmacyItemSerializer(serializers.ModelSerializer):
 
 from .models import StockTransfer
 class StockTransferSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
     class Meta:
         model  = StockTransfer
         fields = "__all__"
-        read_only_fields = ["transfer_id"]
 
 
 from .models import Vendor
@@ -123,7 +123,7 @@ class NursingStationSerializer(serializers.ModelSerializer):
             "lastmodified_date",
             "is_active"
         ]
-
+       
 class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoomServiceDescription
@@ -151,11 +151,9 @@ class RoomKitItemsSerializer(serializers.ModelSerializer):
         ]
 
 class RoomSerializer(serializers.ModelSerializer):
- 
     services  = serializers.JSONField(required=False, allow_null=True, default=list)
     beds      = serializers.JSONField(required=False, allow_null=True, default=list)
     room_kits = serializers.JSONField(required=False, allow_null=True, default=list)
- 
     class Meta:
         model  = Room
         fields = "__all__"
@@ -168,7 +166,6 @@ class RoomSerializer(serializers.ModelSerializer):
             "is_active"
         ]
 
- 
     # ── Field-level validators ────────────────────────────────────────────────
  
     def validate_room_status(self, value):
@@ -221,27 +218,9 @@ class RoomSerializer(serializers.ModelSerializer):
         return value
     
 
-from .models import Patient, InsuranceProvider, Admission
-
-class PatientSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    uhid = serializers.CharField(read_only=True)
-    class Meta:
-        model = Patient
-        fields = '__all__'
-
-class InsuranceProviderSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    class Meta:
-        model = InsuranceProvider
-        fields = '__all__'
-
+from .models import Admission
 class AdmissionSerializer(serializers.ModelSerializer):
     patient_details = serializers.SerializerMethodField()
-    insurance_details = serializers.SerializerMethodField()
-    registration_details = serializers.SerializerMethodField()
-    room_info = serializers.SerializerMethodField()
-
     class Meta:
         model = Admission
         fields = "__all__"
@@ -332,10 +311,12 @@ class BillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from decimal import Decimal, InvalidOperation
-
-from rest_framework import serializers
-from decimal import Decimal, InvalidOperation
+from .models import InsuranceProvider
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
+        fields = '__all__'
 
 class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
 
@@ -401,7 +382,6 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
 from .models import CustomerType
 class CustomerTypeSerializer(serializers.ModelSerializer):
     patient_count = serializers.SerializerMethodField()
-
     class Meta:
         model = CustomerType
         fields = '__all__'
@@ -411,14 +391,13 @@ class CustomerTypeSerializer(serializers.ModelSerializer):
         from .models import Patient
         return Patient.objects.filter(customer_type=obj.type_name).count()
 
-from .models import SurgerySchedule
 
+from .models import SurgerySchedule
 class SurgeryScheduleSerializer(serializers.ModelSerializer):
     """
     Used for READ responses (list, retrieve, after create/update).
     All audit/system fields are read-only — never accepted from the client.
     """
-
     class Meta:
         model  = SurgerySchedule
         fields = "__all__"
@@ -438,9 +417,7 @@ class SurgeryScheduleSerializer(serializers.ModelSerializer):
             "hospital_code",
         ]
 
-
 class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
- 
     class Meta:
         model  = SurgerySchedule
         fields = [
