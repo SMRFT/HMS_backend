@@ -329,6 +329,7 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/get_shift_summary_report/?(\?.*)?$' : 'HMS-P-ASR',
 
         r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$' : 'HMS-P-ICD',
+        r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/[^/]+/?(\?.*)?$' : 'HMS-P-ICD',
         r'^/_b_a_c_k_e_n_d/HMS/patient-admission-details/?(\?.*)?$' : 'HMS-P-ICD',
 
 }
