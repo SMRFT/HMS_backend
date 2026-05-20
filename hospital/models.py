@@ -759,11 +759,15 @@ class RadiologyReport(AuditModel):
     investBillNo = models.CharField(max_length=50, blank=True)
     billTypeNo = models.TextField()    
     itemName = models.TextField()
+    item_id = models.IntegerField()
     valuedetails      = models.JSONField(default=dict)
     impression = models.TextField()    
     is_approved = models.BooleanField(default=False)
     approved_date = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)   # ✅ add this
+    has_report = models.BooleanField(default=False)   # ✅ add this
+    type = models.TextField()    
+
 
     def __str__(self):
         return f"Radiology Report - {self.investBillNo} ({self.uhid})"

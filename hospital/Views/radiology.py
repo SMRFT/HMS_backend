@@ -61,26 +61,37 @@ def get_investigations(request):
     if not bill_type_no:
         return JsonResponse({'error': 'billTypeNo query parameter is required'}, status=400)
 
-    # ✅ ADD THIS (auth)
-    branch_code = request.data.get('auth-branch-code', 'system')
+    branch_code   = request.data.get('auth-branch-code',   'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db = client['HMS']
-    invest_billing_collection = db['hospital_investbilling']
-    ct_report_collection = db['hospital_radiologyreport']
-    patient_collection = db['hospital_patient']
+    invest_billing_collection   = db['hospital_investbilling']
+    ct_report_collection        = db['hospital_radiologyreport']
+    patient_collection          = db['hospital_patient']
+    invest_price_collection     = db['hospital_investigationprice']
+    refund_collection           = db['hospital_investrefund']         # ← refund
+    radiology_format_collection = db['hospital_radiology_formats']    # ← formats
 
     try:
-        # ── 1. Fetch billing records ─────────────────────────
+        # ── 0. Build item_id → itemName map from investigationprice ──────────
+        price_doc = invest_price_collection.find_one(
+            {'billTypeNo': bill_type_no, 'is_active': True},
+            {'_id': 0, 'Items': 1}
+        )
+        item_name_map = {}
+        if price_doc:
+            for itm in price_doc.get('Items', []):
+                raw_id = itm.get('item_id')
+                if raw_id is not None:
+                    item_name_map[int(raw_id)] = itm.get('itemName', '')
+
+        # ── 1. Fetch billing records ──────────────────────────────────────────
         billing_filter = {'is_active': True}
-
-        # ✅ ADD THIS BLOCK
         if hospital_code:
-            billing_filter["hospital_code"] = hospital_code
+            billing_filter['hospital_code'] = hospital_code
         if branch_code:
-            billing_filter["branch_code"] = branch_code
-
+            billing_filter['branch_code'] = branch_code
         if invest_bill_no_filter:
             billing_filter['investBillNo'] = invest_bill_no_filter
 
@@ -91,30 +102,55 @@ def get_investigations(request):
                     date_filter['$gte'] = datetime.strptime(from_date, '%Y-%m-%d')
                 except ValueError:
                     return JsonResponse({'error': 'Invalid from_date format'}, status=400)
-
             if to_date:
                 try:
                     to_date_obj = datetime.strptime(to_date, '%Y-%m-%d')
                     date_filter['$lte'] = to_date_obj + timedelta(days=1) - timedelta(seconds=1)
                 except ValueError:
                     return JsonResponse({'error': 'Invalid to_date format'}, status=400)
-
             billing_filter['investBillDate'] = date_filter
 
-        print("BILLING FILTER:", billing_filter)
-
         billing_records = list(invest_billing_collection.find(billing_filter, {'_id': 0}))
-
         if not billing_records:
             return JsonResponse([], safe=False)
 
-        # ── 2. Filter by billTypeNo ─────────────────────────
-        filtered_records = []
+        # ── 2. Batch Refund Cache ─────────────────────────────────────────────
+        # Build { investBillNo → set of refunded test_ids }
+        invest_bill_nos = [
+            r.get('investBillNo') for r in billing_records if r.get('investBillNo')
+        ]
 
+        refunded_test_ids = {}  # investBillNo → set of int test_ids
+
+        if invest_bill_nos:
+            refund_docs = refund_collection.find(
+                {'investBillNo': {'$in': invest_bill_nos}, 'is_active': True},
+                {'_id': 0, 'investBillNo': 1, 'item': 1}
+            )
+            for rdoc in refund_docs:
+                bill_no = rdoc.get('investBillNo')
+                items   = rdoc.get('item', [])
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
+                if bill_no not in refunded_test_ids:
+                    refunded_test_ids[bill_no] = set()
+                for it in items:
+                    # refund docs store item_id (not test_id)
+                    tid = it.get('item_id') or it.get('test_id')
+                    if tid is not None:
+                        try:
+                            refunded_test_ids[bill_no].add(int(tid))
+                        except (ValueError, TypeError):
+                            refunded_test_ids[bill_no].add(tid)
+
+        # ── 3. Filter by billTypeNo and exclude refunded items ────────────────
+        filtered_records = []
         for record in billing_records:
             try:
                 items = record.get('item', [])
-
                 if isinstance(items, str):
                     try:
                         items = json.loads(items)
@@ -123,7 +159,23 @@ def get_investigations(request):
             except:
                 items = []
 
-            matched_items = [i for i in items if i.get('billTypeNo') == bill_type_no]
+            bill_no          = record.get('investBillNo', '')
+            already_refunded = refunded_test_ids.get(bill_no, set())
+
+            matched_items = []
+            for i in items:
+                # Must match billTypeNo
+                if i.get('billTypeNo') != bill_type_no:
+                    continue
+                # Exclude if already refunded — billing items use item_id
+                tid = i.get('item_id') or i.get('test_id')
+                try:
+                    tid_norm = int(tid) if tid is not None else None
+                except (ValueError, TypeError):
+                    tid_norm = tid
+                if tid_norm in already_refunded:
+                    continue
+                matched_items.append(i)
 
             if not matched_items:
                 continue
@@ -134,90 +186,149 @@ def get_investigations(request):
         if not filtered_records:
             return JsonResponse([], safe=False)
 
-        # ── 3. Reports ─────────────────────────
+        # ── 4. Fetch existing reports ─────────────────────────────────────────
         bill_nos = [r['investBillNo'] for r in filtered_records if r.get('investBillNo')]
-
         report_filter = {
             'investBillNo': {'$in': bill_nos},
             'is_active': True
         }
-
-        # ✅ ADD THIS BLOCK
         if hospital_code:
-            report_filter["hospital_code"] = hospital_code
+            report_filter['hospital_code'] = hospital_code
         if branch_code:
-            report_filter["branch_code"] = branch_code
+            report_filter['branch_code'] = branch_code
 
         ct_reports = list(ct_report_collection.find(report_filter, {'_id': 0}))
 
         report_map = {}
         for r in ct_reports:
-            bill = r.get('investBillNo')
-            item_name = r.get('itemName', '')
-
-            for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date', 'approved_date', 'deleted_date']:
+            for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date',
+                          'approved_date', 'deleted_date']:
                 if field in r and isinstance(r[field], datetime):
                     r[field] = r[field].isoformat()
+            raw_item_id        = r.get('item_id')
+            normalized_item_id = int(raw_item_id) if raw_item_id is not None else None
+            report_map[(r.get('investBillNo'), normalized_item_id)] = r
 
-            report_map[(bill, item_name)] = r
-
-        # ── 4. Patient ─────────────────────────
+        # ── 5. Fetch patients ─────────────────────────────────────────────────
         uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid')})
-
         patient_filter = {'uhid': {'$in': uhid_list}}
-
-        # ✅ ADD THIS BLOCK
         if hospital_code:
-            patient_filter["hospital_code"] = hospital_code
+            patient_filter['hospital_code'] = hospital_code
         if branch_code:
-            patient_filter["branch_code"] = branch_code
+            patient_filter['branch_code'] = branch_code
 
         patients = list(patient_collection.find(
             patient_filter,
-            {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'lastName': 1, 'age': 1, 'gender': 1}
+            {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'middleName': 1,
+             'lastName': 1, 'age': 1, 'gender': 1}
         ))
-
         patient_map = {p['uhid']: p for p in patients}
 
-        # ── 5. Build result ─────────────────────────
-        result = []
+        # ── 6. Batch Radiology Format Cache ──────────────────────────────────
+        # Collect all unique item_ids across all matched items
+        all_item_ids = set()
+        for record in filtered_records:
+            for item in record.get('_matched_items', []):
+                tid = item.get('test_id') or item.get('item_id')
+                if tid is not None:
+                    try:
+                        all_item_ids.add(int(tid))
+                    except (ValueError, TypeError):
+                        pass
 
+        # format_map: item_id (int) → full format doc (_id removed)
+        format_map = {}
+        if all_item_ids:
+            format_docs = radiology_format_collection.find(
+                {
+                    'item_id':    {'$in': list(all_item_ids)},
+                    'billTypeNo': bill_type_no,
+                    'is_active':  True
+                }
+            )
+            for fdoc in format_docs:
+                fdoc.pop('_id', None)
+                # Serialize datetime fields inside format doc
+                for field in ['last_modified_date']:
+                    if field in fdoc and isinstance(fdoc[field], datetime):
+                        fdoc[field] = fdoc[field].isoformat()
+                fid = fdoc.get('item_id')
+                if fid is not None:
+                    try:
+                        format_map[int(fid)] = fdoc
+                    except (ValueError, TypeError):
+                        pass
+
+        # ── 7. Build result ───────────────────────────────────────────────────
+        result = []
         for record in filtered_records:
             invest_bill_no = record.get('investBillNo')
             if not invest_bill_no:
                 continue
 
-            uhid = record.get('uhid', '')
+            uhid    = record.get('uhid', '')
             patient = patient_map.get(uhid, {})
+            gender  = patient.get('gender', '').strip().upper()
+
+            # Normalise gender → format doc key
+            if gender in ('M', 'MALE'):
+                gender_key = 'male'
+            elif gender in ('F', 'FEMALE'):
+                gender_key = 'female'
+            else:
+                gender_key = 'male'   # safe fallback
+
             matched_items = record.get('_matched_items', [])
 
             base = record.copy()
             base.pop('_matched_items', None)
+            base.pop('item', None)
 
             for field in ['investBillDate', 'created_date', 'lastmodified_date']:
                 if field in base and isinstance(base[field], datetime):
                     base[field] = base[field].isoformat()
 
-            base['salutation'] = patient.get('salutation', '')
-            base['firstName'] = patient.get('firstName', '')
-            base['lastName'] = patient.get('lastName', '')
-            base['age'] = patient.get('age', None)
-            base['gender'] = patient.get('gender', '')
+            base['salutation']  = patient.get('salutation',  '')
+            base['firstName']   = patient.get('firstName',   '')
+            base['middleName']  = patient.get('middleName',  '')
+            base['lastName']    = patient.get('lastName',    '')
+            base['age']         = patient.get('age',         None)
+            base['gender']      = patient.get('gender',      '')
 
             for item in matched_items:
-                item_name = item.get('itemName', '')
-                report = report_map.get((invest_bill_no, item_name))
+                raw_item_id = item.get('item_id') or item.get('test_id')
+                item_id     = int(raw_item_id) if raw_item_id is not None else None
+
+                item_name = item_name_map.get(item_id) or item.get('itemName', '')
+                report    = report_map.get((invest_bill_no, item_id))
 
                 row = base.copy()
-                row['itemName'] = item_name
-                row['report'] = report
-                row['hasReport'] = report is not None
+                row['item_id']   = item_id
+                row['itemName']  = item_name
+                row['report']    = report
+                row['hasReport'] = report.get('has_report', False) if report else False
+
+                # ── Radiology format: all fields + gender-resolved titles ─────
+                fmt_doc = format_map.get(item_id)
+                if fmt_doc:
+                    # All fields except the raw male/female arrays
+                    fmt_base = {
+                        k: v for k, v in fmt_doc.items()
+                        if k not in ('male', 'female')
+                    }
+                    # Gender-matched titles array under a unified key
+                    fmt_base['format_titles'] = fmt_doc.get(gender_key, [])
+                    row['radiology_format'] = fmt_base
+                else:
+                    row['radiology_format'] = None
 
                 result.append(row)
 
         return JsonResponse(result, safe=False)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
 
     finally:
@@ -225,33 +336,24 @@ def get_investigations(request):
 
 # ─── POST: Create scan report (with optional slot_DateTime) ───────────────────
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 def create_scan_report(request):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
-        data         = request.data
-        user_id      = data.get('auth-user-id', 'system')
-        branch_code  = data.get('auth-branch-code', 'SHB001')
-        outlet_code  = data.get('auth-outlet-code', 'OLET003')
+        data          = request.data
+        user_id       = data.get('auth-user-id', 'system')
+        branch_code   = data.get('auth-branch-code', 'SHB001')
+        outlet_code   = data.get('auth-outlet-code', 'OLET003')
         hospital_code = data.get('auth-hospital-code', 'SH001')
         invest_bill_no = data.get('investBillNo')
 
-        # ── Duplicate check ──────────────────────────────────────────────────
-        existing = collection.find_one(
-            {
-                'investBillNo': invest_bill_no,
-                'itemName': data.get('itemName'),
-                'is_active': True
-            },
-            {'_id': 1}
-        )
-        if existing:
-            return JsonResponse(
-                {'error': f'A report already exists for Bill No {invest_bill_no}'},
-                status=409
-            )
+        try:
+            item_id = int(data.get('item_id'))
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "item_id must be a valid integer"}, status=400)
 
         # ── Parse dates ──────────────────────────────────────────────────────
         invest_bill_date = data.get('investBillDate')
@@ -266,36 +368,111 @@ def create_scan_report(request):
         slot_dt = _parse_slot_datetime(data.get('slot_DateTime'))
 
         # ── Build valuedetails ───────────────────────────────────────────────
-        # Frontend sends sections: [{ title_id, title, value }]
-        # We store them under valuedetails.value[]
-        sections = data.get('sections', [])   # list of { title_id, title, value }
+        sections = data.get('sections', [])
+        value_list = []
+
+        for sec in sections:
+            if sec.get('table_id'):
+                value_list.append(sec)
+            else:
+                value_list.append({
+                    "title_id":    sec.get('title_id', ''),
+                    "title":       sec.get('title', ''),
+                    "title_value": sec.get('title_value', ''),
+                })
+
+        anc_fields = data.get('anc_fields', None)
 
         valuedetails = {
-            "billTypeNo":  data.get('billTypeNo', ''),
-            "device_id":   data.get('device_id', []),    # e.g. ["MINDRAY"]
-            "item_id":     data.get('item_id', ''),
-            "approve":     False,
+            "device_id":    data.get('device_id', []),
+            "approve":      False,
             "approve_time": None,
-            "approve_by":  None,
-            "value": [
-                {
-                    "title_id":    sec.get('title_id', ''),
-                    "title_value": sec.get('value', ''),   # user-edited value
-                }
-                for sec in sections
-            ]
+            "approve_by":   None,
+            "value":        value_list,
+            **({"anc_fields": anc_fields} if anc_fields else {}),
         }
 
-        # ── Create record ────────────────────────────────────────────────────
+        impression    = data.get('impression', '')
+        item_name     = data.get('itemName', '')
+        bill_type_no  = data.get('billTypeNo', '')
+
+        # ── Check if a patchable record exists ───────────────────────────────
+        # Covers: slot-only (has_report=False) OR slot created via SlotModal
+        # that set has_report=True but left impression empty
+        existing_slot = collection.find_one({
+            'investBillNo': invest_bill_no,
+            'item_id':      item_id,
+            'is_active':    True,
+            'is_approved':  {'$ne': True},
+            '$or': [
+                {'has_report': False},
+                {'impression': ''},
+                {'impression': None},
+            ]
+        })
+
+        if existing_slot:
+            # ── PATCH: fill in the report on the existing slot/empty record ──
+            set_payload = {
+                "impression":        impression,
+                "valuedetails":      valuedetails,
+                "has_report":        True,
+                "lastmodified_by":   user_id,
+                "lastmodified_date": timezone.now(),
+                "type":              data.get('type', ''), 
+            }
+            if slot_dt:
+                set_payload["slot_DateTime"] = slot_dt
+            if item_name:
+                set_payload["itemName"] = item_name
+            if bill_type_no:
+                set_payload["billTypeNo"] = bill_type_no
+
+            collection.update_one(
+                {"_id": existing_slot["_id"]},
+                {"$set": set_payload}
+            )
+            updated = collection.find_one({"_id": existing_slot["_id"]})
+            return JsonResponse({
+                "id":           str(existing_slot["_id"]),
+                "investBillNo": invest_bill_no,
+                "message":      "Report updated on existing slot record",
+                "report":       _serialize_report(updated),
+            }, status=200)
+
+        # ── Duplicate check: a real report already exists ────────────────────
+        # Only block if impression is actually filled (not a slot-only record)
+        existing_full = collection.find_one({
+            'investBillNo': invest_bill_no,
+            'item_id':      item_id,
+            'is_active':    True,
+            'has_report':   True,
+            'impression':   {'$nin': ['', None]},
+        })
+        if existing_full:
+            return JsonResponse(
+                {'error': f'A report already exists for Bill No {invest_bill_no}'},
+                status=409
+            )
+
+        # ── POST: create new record ───────────────────────────────────────────
+        # has_report is True only when impression is actually filled
+        has_report = bool(impression and impression.strip())
+
+        report_type = data.get('type', '')
+
         ct_report = RadiologyReport.objects.create(
             date          = date_value,
             slot_DateTime = slot_dt,
             investBillNo  = invest_bill_no,
-            itemName      = data.get('itemName', ''),
-            impression    = data.get('impression', ''),
-            billTypeNo    = data.get('billTypeNo', ''),
+            itemName      = item_name,
+            item_id       = item_id,
+            impression    = impression,
+            billTypeNo    = bill_type_no,
             valuedetails  = valuedetails,
             is_active     = True,
+            has_report    = has_report,
+            type          = report_type,      # ← add this
             created_by    = user_id,
             branch_code   = branch_code,
             outlet_code   = outlet_code,
@@ -303,9 +480,9 @@ def create_scan_report(request):
         )
 
         return JsonResponse({
-            "id":            str(ct_report.id),
-            "investBillNo":  ct_report.investBillNo,
-            "message":       "Report created successfully",
+            "id":           str(ct_report.id),
+            "investBillNo": ct_report.investBillNo,
+            "message":      "Report created successfully",
         }, status=201)
 
     except Exception as e:
@@ -319,65 +496,101 @@ def create_scan_report(request):
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
-def update_slot_datetime(request, investBillNo, itemName):
-    """
-    PATCH scan-reports/slot/<investBillNo>/<itemName>/
-    Updates slot_DateTime on an existing active report.
-    Optionally updates impression if provided.
-    """
+def update_slot_datetime(request, investBillNo, item_id):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
-        user_id = request.data.get('auth-user-id', 'system')
-        raw_slot = request.data.get('slot_DateTime')
+        user_id   = request.data.get('auth-user-id', 'system')
+        branch_code   = request.data.get('auth-branch-code', 'SHB001')
+        outlet_code   = request.data.get('auth-outlet-code', 'OLET003')
+        hospital_code = request.data.get('auth-hospital-code', 'SH001')
+        raw_slot  = request.data.get('slot_DateTime')
 
         if not raw_slot:
             return JsonResponse({"error": "slot_DateTime is required"}, status=400)
 
         slot_dt = _parse_slot_datetime(raw_slot)
         if not slot_dt:
-            return JsonResponse({"error": "Invalid slot_DateTime format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SS)"}, status=400)
+            return JsonResponse({"error": "Invalid slot_DateTime format."}, status=400)
 
-        report = collection.find_one(
-            {'investBillNo': investBillNo, 'itemName': itemName, 'is_active': True}
-        )
-        if not report:
-            return JsonResponse({"error": "Report not found"}, status=404)
+        try:
+            item_id_int = int(item_id)
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "item_id must be a valid integer"}, status=400)
 
-        update_fields = {
-            "slot_DateTime": slot_dt,
-            "lastmodified_by": user_id,
-            "lastmodified_date": timezone.now(),
-        }
+        # ── Try to find a slot-only record (has_report=False) ────────────────
+        report = collection.find_one({
+            'investBillNo': investBillNo,
+            'item_id':      item_id_int,
+            'is_active':    True,
+            'has_report':   False,        # ✅ only update slot-only records
+        })
 
-        # Optionally update impression
-        new_impression = request.data.get('impression')
-        if new_impression:
-            update_fields["impression"] = new_impression
+        if report:
+            # ── PATCH existing slot record ────────────────────────────────────
+            update_fields = {
+                "slot_DateTime":     slot_dt,
+                "lastmodified_by":   user_id,
+                "lastmodified_date": timezone.now(),
+            }
+            new_impression = request.data.get('impression')
+            if new_impression:
+                update_fields["impression"] = new_impression
 
-        collection.update_one({"_id": report["_id"]}, {"$set": update_fields})
+            collection.update_one({"_id": report["_id"]}, {"$set": update_fields})
+            updated = collection.find_one({"_id": report["_id"]})
+            return JsonResponse(_serialize_report(updated), safe=False, status=200)
 
-        updated = collection.find_one({"_id": report["_id"]})
-        return JsonResponse(_serialize_report(updated), safe=False, status=200)
+        else:
+            # ── No slot record exists → create one with has_report=False ─────
+            invest_bill_date = request.data.get('investBillDate')
+            if invest_bill_date:
+                try:
+                    date_value = datetime.fromisoformat(invest_bill_date.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    date_value = timezone.now()
+            else:
+                date_value = timezone.now()
+
+            ct_report = RadiologyReport.objects.create(
+                date          = date_value,
+                slot_DateTime = slot_dt,
+                investBillNo  = investBillNo,
+                itemName      = request.data.get('itemName', ''),
+                item_id       = item_id_int,
+                impression    = request.data.get('impression', ''),
+                billTypeNo    = request.data.get('billTypeNo', ''),
+                valuedetails  = {"device_id": [], "approve": False, "approve_time": None, "approve_by": None, "value": []},
+                is_active     = True,
+                has_report    = False,       # ✅ slot-only
+                created_by    = user_id,
+                branch_code   = branch_code,
+                outlet_code   = outlet_code,
+                hospital_code = hospital_code,
+            )
+            updated = collection.find_one({"investBillNo": investBillNo, "item_id": item_id_int, "is_active": True})
+            return JsonResponse(_serialize_report(updated), safe=False, status=201)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=500)
     finally:
         client.close()
-
 
 # ─── PATCH: Approve ───────────────────────────────────────────────────────────
 
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
-def approve_scan_report(request, investBillNo, itemName):
+def approve_scan_report(request, investBillNo, item_id):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
         user_id = request.data.get('auth-user-id', 'system')
+        item_id = int(item_id)
         report = collection.find_one(
-            {'investBillNo': investBillNo, 'itemName': itemName, 'is_active': True}
+            {'investBillNo': investBillNo, 'item_id': item_id, 'is_active': True}
         )
         if not report:
             return JsonResponse({"error": "Report not found"}, status=404)
@@ -400,14 +613,15 @@ def approve_scan_report(request, investBillNo, itemName):
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
-def edit_scan_report_impression(request, investBillNo, itemName):
+def edit_scan_report_impression(request, investBillNo, item_id):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
         new_impression = request.data.get("impression")
         new_sections = request.data.get("sections")  # list of {title_id, value}
+        new_anc_fields = request.data.get("anc_fields", None)
         user_id = request.data.get('auth-user-id', 'system')
-
+        item_id = int(item_id)
         # At least one of impression or sections must be provided
         if not new_impression and not new_sections:
             return JsonResponse(
@@ -416,7 +630,7 @@ def edit_scan_report_impression(request, investBillNo, itemName):
             )
 
         report = collection.find_one(
-            {'investBillNo': investBillNo, 'itemName': itemName, 'is_active': True}
+            {'investBillNo': investBillNo, 'item_id': item_id, 'is_active': True}
         )
         if not report:
             return JsonResponse({"error": "Report not found"}, status=404)
@@ -435,32 +649,51 @@ def edit_scan_report_impression(request, investBillNo, itemName):
         if new_sections and isinstance(new_sections, list):
             existing_value = report.get("valuedetails", {}).get("value", [])
 
-            # Build a map of existing sections: title_id -> index
-            existing_map = {
-                item["title_id"]: idx
-                for idx, item in enumerate(existing_value)
-            }
-
             # Apply incoming changes
-            for incoming in new_sections:
-                title_id = incoming.get("title_id")
-                new_value = incoming.get("value")
+            if new_sections and isinstance(new_sections, list):
+                existing_value = report.get("valuedetails", {}).get("value", [])
 
-                if not title_id or new_value is None:
-                    continue  # skip malformed entries
+                # Build a map of existing TEXT sections: title_id -> index
+                existing_text_map = {
+                    item["title_id"]: idx
+                    for idx, item in enumerate(existing_value)
+                    if item.get("title_id") and not item.get("table_id")
+                }
 
-                if title_id in existing_map:
-                    # Update existing section in-place
-                    idx = existing_map[title_id]
-                    existing_value[idx]["title_value"] = new_value
-                else:
-                    # Append brand-new section if title_id not found
-                    existing_value.append({
-                        "title_id": title_id,
-                        "title_value": new_value,
-                    })
+                # Build a map of existing TABLE sections: table_id -> index
+                existing_table_map = {
+                    item["table_id"]: idx
+                    for idx, item in enumerate(existing_value)
+                    if item.get("table_id")
+                }
 
-            set_payload["valuedetails.value"] = existing_value
+                for incoming in new_sections:
+                    if incoming.get("table_id"):
+                        table_id = incoming["table_id"]
+                        if table_id in existing_table_map:
+                            existing_value[existing_table_map[table_id]] = incoming
+                        else:
+                            existing_value.append(incoming)
+                    else:
+                        title_id = incoming.get("title_id")
+                        new_val  = incoming.get("title_value")
+                        if not title_id or new_val is None:
+                            continue
+                        if title_id in existing_text_map:
+                            idx = existing_text_map[title_id]
+                            existing_value[idx]["title_value"] = new_val
+                            if incoming.get("title"):
+                                existing_value[idx]["title"] = incoming["title"]
+                        else:
+                            existing_value.append({
+                                "title_id":    title_id,
+                                "title":       incoming.get("title", ""),
+                                "title_value": new_val,
+                            })
+
+                set_payload["valuedetails.value"] = existing_value
+            if new_anc_fields:
+                set_payload["valuedetails.anc_fields"] = new_anc_fields
 
         collection.update_one(
             {"_id": report["_id"]},
@@ -480,13 +713,14 @@ def edit_scan_report_impression(request, investBillNo, itemName):
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
-def soft_delete_scan_report(request, investBillNo, itemName):
+def soft_delete_scan_report(request, investBillNo, item_id):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     try:
         user_id = request.data.get('auth-user-id', 'system')
+        item_id = int(item_id)
         report = collection.find_one(
-            {'investBillNo': investBillNo, 'itemName': itemName, 'is_active': True}
+            {'investBillNo': investBillNo, 'item_id': item_id, 'is_active': True}
         )
         if not report:
             return JsonResponse({"error": "Report not found"}, status=404)
@@ -501,6 +735,7 @@ def soft_delete_scan_report(request, investBillNo, itemName):
         return JsonResponse({"error": str(e)}, status=500)
     finally:
         client.close()
+
 
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
