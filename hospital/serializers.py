@@ -218,9 +218,27 @@ class RoomSerializer(serializers.ModelSerializer):
         return value
     
 
-from .models import Admission
+from .models import Patient, InsuranceProvider, Admission
+
+class PatientSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    uhid = serializers.CharField(read_only=True)
+    class Meta:
+        model = Patient
+        fields = '__all__'
+
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
+        fields = '__all__'
+
 class AdmissionSerializer(serializers.ModelSerializer):
     patient_details = serializers.SerializerMethodField()
+    insurance_details = serializers.SerializerMethodField()
+    registration_details = serializers.SerializerMethodField()
+    room_info = serializers.SerializerMethodField()
+
     class Meta:
         model = Admission
         fields = "__all__"
@@ -269,6 +287,7 @@ class AdmissionSerializer(serializers.ModelSerializer):
                         "bed_no": r.get("bedNo")
                     }
         return {}
+
 
 
 from .models import DischargeBilling
