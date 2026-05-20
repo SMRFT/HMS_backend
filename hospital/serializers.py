@@ -28,7 +28,15 @@ class PharmacyCategorySerializer(serializers.ModelSerializer):
         read_only_fields = ["category_id"]
 
         
-from .models import PharmacyItem
+from .models import PharmacyItem,CashCounter
+class CashCounterSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    counter_id = serializers.CharField(required=False, allow_blank=True)
+    bill_type = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    class Meta:
+        model = CashCounter
+        fields = '__all__'
+
 class PharmacyItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = PharmacyItem
@@ -219,10 +227,48 @@ class AdmissionSerializer(serializers.ModelSerializer):
 
     def get_patient_details(self, obj):
         patient = Patient.objects.filter(uhid=obj.uhid).first()
-
         if patient:
             return PatientSerializer(patient).data
         return None 
+
+    def get_insurance_details(self, obj):
+        # Fetch insurance details by comparing company_code from patient
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient and patient.company_code:
+            insurance = InsuranceProvider.objects.filter(company_code=patient.company_code).first()
+            if insurance:
+                return {
+                    "company_code": insurance.company_code,
+                    "company_name": insurance.company_name,
+                }
+        return None
+
+    def get_registration_details(self, obj):
+        # Fetch registration details from patient record
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient:
+            return {
+                "registration_date": patient.registration_date,
+                "customer_type": patient.customer_type,
+            }
+        return None
+
+    def get_room_info(self, obj):
+        # Logic to extract current room/bed from room_details
+        import json
+        details = obj.room_details
+        if isinstance(details, str):
+            try: details = json.loads(details)
+            except: details = []
+        
+        if details:
+            for r in reversed(details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    return {
+                        "room_no": r.get("roomNo"),
+                        "bed_no": r.get("bedNo")
+                    }
+        return {}
 
 
 from .models import DischargeBilling
@@ -232,13 +278,6 @@ class DischargeBillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Patient
-class PatientSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    uhid = serializers.CharField(read_only=True)
-    class Meta:
-        model = Patient
-        fields = '__all__'
 
 
 from .models import Summary
@@ -301,6 +340,18 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
         return self._clean_decimal(value)
 
     def validate_SubmittedToAccount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_HandOverAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_PendingAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_IPAdvanceAmount(self, value):
+        return self._clean_decimal(value)
+
+    def validate_SalesReturnAmount(self, value):
         return self._clean_decimal(value)
 
     def _clean_decimal(self, value):
@@ -449,10 +500,19 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
         return attrs
 
 
-from .models import ReceiptAndPayment
+from .models import ReceiptAndPayment, CashCounter
 class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = ReceiptAndPayment
+        fields = '__all__'
+
+
+
+from .models import SalesReturn
+class SalesReturnSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = SalesReturn
         fields = '__all__'
 

@@ -887,6 +887,7 @@ def invest_billing_create(request):
         data["lastmodified_by"] = None
         data["lastmodified_date"] = timezone.now()
         data["is_active"] = True
+        data["shiftno"] = request.data.get("shiftno")
 
         # Insert
         invest_collection.insert_one(data)

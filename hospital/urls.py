@@ -7,8 +7,6 @@ from .Views import (
     doctormaster,
     ICD11,
     inventory,
-    stocktransfer,
-    chandra_ocr,
     package_crud,
     pharmacy,
     cashcounter,
@@ -20,10 +18,14 @@ from .Views import (
     doctor_dashboard,
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
-    DietOrder
+    DietOrder,
+    front_office_reports,
+    registration_updates
 )
 from .Views.AccountsReport import (
     shift_basis_report,
+    cash_counter_manager,
+    bill_wise_report
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -59,21 +61,6 @@ urlpatterns = [
     path("chemical-composition/", inventory.chemical_composition_view, name="chemical-composition-list"),
     path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
 
-    # GRN URLs
-    path('grn/', inventory.grn_view, name='grn_list'),
-    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
-    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
-
-    path("grn-ocr/", chandra_ocr.grn_ocr_scan, name="grn_ocr_scan"),
-
-    # Stock Transfer URLs
-    path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
-
-    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock'),
-    re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$',stocktransfer.pharmacy_stock_view,name='pharmacy-stock-detail'),
-    path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
-    path("stock-transfer-action/",   stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
-
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
@@ -85,7 +72,11 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-   
+    # path("sales_return_medicine/",  pharmacy.sales_return_medicine),
+    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -105,7 +96,20 @@ urlpatterns = [
      path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
      path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
      path("get_registration_bills/", cashcounter.get_registration_bills),
+    
+    
+    
+    # GRN URLs
+    path('grn/', inventory.grn_view, name='grn_list'),
+    re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
 
+    # Stock Transfer URLs
+    path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
+
+    path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),
+    path('get_active_outlets/', inventory.get_active_stock_outlets, name='get_active_stock_outlets'),
+
+        
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
     path('block/<int:pk>/', room.block_view, name='block_update_delete'),
@@ -172,7 +176,8 @@ urlpatterns = [
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
     re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
-    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),     
+    path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
+    path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),   
     
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
@@ -256,6 +261,7 @@ urlpatterns = [
     #Reports:
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
     path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
+    path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
@@ -289,6 +295,8 @@ urlpatterns = [
     path('get-all-employees/', views.get_all_employees, name='get_all_employees'),
     path('registration-bills/', views.registration_bills, name='registration_bills'),
     re_path(r'^update-bill-status/(?P<bill_number>.+)/$', views.update_bill_status, name='update_bill_status'),
+    path('update-registration-visit/', registration_updates.update_registration_visit, name='update_registration_visit'),
+    path('process-registration-refund/', registration_updates.process_registration_refund, name='process_registration_refund'),
     path('get-sidebar-mapping/', views.get_sidebar_mapping, name='get_sidebar_mapping'),
     path('update-sidebar-mapping/', views.update_sidebar_mapping, name='update_sidebar_mapping'),
     path('get-all-outlets/', views.get_all_outlets, name='get_all_outlets'),
@@ -370,5 +378,14 @@ urlpatterns = [
 
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
+    path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
+    path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
 
+    # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    path("salesreturn_get_patientdetails/",pharmacy.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
+    path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
+    path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+
+    
 ]

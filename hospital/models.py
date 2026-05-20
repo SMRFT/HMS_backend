@@ -144,27 +144,50 @@ class Billing(AuditModel):
     payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     paid_date = models.DateTimeField(null=True, blank=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
+    billtype = models.CharField(max_length=50, blank=True, null=True)
+    edit_history = models.JSONField(default=list, blank=True)
 
     def save(self, *args, **kwargs):
+
         if not self.bill_number:
-            date_prefix = now().strftime('%Y%m%d')
-            pattern = f"{date_prefix}/"
-            
-            # Find the last bill that matches the current date pattern
-            last_bill = Billing.objects.filter(bill_number__startswith=pattern).order_by('-bill_number').first()
-            
+
+            current_date = now()
+
+            year = current_date.year
+            month = current_date.month
+
+            # Financial Year Calculation
+            if month >= 4:
+                start_year = year % 100
+                end_year = (year + 1) % 100
+            else:
+                start_year = (year - 1) % 100
+                end_year = year % 100
+
+            fy_prefix = f"{start_year:02d}{end_year:02d}"
+
+            pattern = f"{fy_prefix}/"
+
+            # Find last bill number
+            last_bill = Billing.objects.filter(
+                bill_number__startswith=pattern
+            ).order_by('-bill_number').first()
+
             if last_bill and last_bill.bill_number:
                 try:
-                    # Extract the sequence number (dates matching)
-                    last_number = int(last_bill.bill_number.split('/')[-1])
+                    last_number = int(
+                        last_bill.bill_number.split('/')[-1]
+                    )
                 except (ValueError, IndexError):
                     last_number = 0
             else:
                 last_number = 0
-                
+
             next_number = last_number + 1
-            self.bill_number = f"{pattern}{next_number:04d}"
-            
+
+            self.bill_number = f"{fy_prefix}/{next_number:06d}"
+
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -346,7 +369,7 @@ class PharmacyBilling(AuditModel):
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
-    ward_request_date = models.DateTimeField(blank=True, null=True)
+    ward_request_date = models.DateTimeField(default=timezone.now)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
@@ -1006,6 +1029,8 @@ class Cashcountershiftdetails(AuditModel):
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    HandOverAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    SalesReturnAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SelectedOutlet = models.CharField(max_length=100, null=True, blank=True)
     is_active      = models.BooleanField(default=True)
 
@@ -1013,7 +1038,53 @@ class Cashcountershiftdetails(AuditModel):
         return f"{self.CashierID} - {self.CashCounter}"
     
 
+class CashCounter(AuditModel):
+    counter_id = models.CharField(primary_key=True,max_length=100000)
+    counter_name = models.CharField(max_length=50)
+    outlet = models.CharField(max_length=50)
+    bill_type = models.JSONField(default=list)
+    is_active = models.BooleanField(default=True)
+    
+    def __str__(self):
+        return self.counter_id
 
+    def save(self, *args, **kwargs):
+        if not self.counter_id:
+            # Find the highest numeric ID starting with 'CC'
+            last = CashCounter.objects.filter(counter_id__startswith="CC").order_by("-counter_id").first()
+            if last:
+                try:
+                    # Extract number from "CC0001" -> 1
+                    last_num = int(last.counter_id[2:])
+                    self.counter_id = f"CC{(last_num + 1):04d}"
+                except (ValueError, IndexError):
+                    self.counter_id = "CC0001"
+            else:
+                self.counter_id = "CC0001"
+        
+        # Ensure bill_type is a list for saving
+        if isinstance(self.bill_type, str):
+            try:
+                import json
+                self.bill_type = json.loads(self.bill_type)
+            except:
+                pass
+
+        super().save(*args, **kwargs)
+
+        # 🚀 Force BSON array storage in MongoDB using pymongo
+        try:
+            from pymongo import MongoClient
+            import os
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            db["hospital_cashcounter"].update_one(
+                {"counter_id": self.counter_id},
+                {"$set": {"bill_type": self.bill_type if isinstance(self.bill_type, list) else []}}
+            )
+            client.close()
+        except Exception as e:
+            print(f"Pymongo force update failed: {e}")
 
 class SurgerySchedule(AuditModel):
     STATUS_CHOICES = [
@@ -1147,7 +1218,7 @@ class PatientDietOrder(AuditModel):
     
 
 
-from django.db import models
+
 
 class ReceiptAndPayment(AuditModel):
 
@@ -1167,6 +1238,49 @@ class ReceiptAndPayment(AuditModel):
 
     def __str__(self):
         return f"{self.voucher_no} - {self.account_head}"
+    
+
+class SalesReturn(AuditModel):
+    return_bill_no = models.CharField(max_length=200, unique=True)
+    return_bill_date = models.DateTimeField(auto_now_add=True)
+    bill_no = models.CharField(max_length=200)
+    uhid = models.CharField(max_length=20)
+    return_amount= models.CharField(max_length=200)
+    medicine_particulars = models.JSONField()
+    pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
+    cashier_id = models.CharField(max_length=500, blank=True, null=True)
+    shiftno = models.CharField(max_length=100, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        # 1. Standard Django Save
+        super().save(*args, **kwargs)
+
+        # 2. Force BSON array storage in MongoDB using pymongo
+        try:
+            from pymongo import MongoClient
+            import os
+            import json
+
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+
+            meds = self.medicine_particulars
+
+            if isinstance(meds, str):
+                try:
+                    meds = json.loads(meds)
+                except:
+                    meds = []
+
+            db["hospital_salesreturn"].update_one(
+                {"return_bill_no": self.return_bill_no},
+                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+            )
+
+            client.close()
+
+        except Exception as e:
+            print(f"SalesReturn Pymongo force update failed: {e}")
 
 
 class DietMaster(AuditModel):
@@ -1190,3 +1304,47 @@ class DietExtraMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - {self.price}"
+
+class Refund(AuditModel):
+    id = models.AutoField(primary_key=True)
+    refund_bill_no = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    refund_date = models.DateTimeField(auto_now_add=True)
+    bill_no = models.CharField(max_length=50) # Original Bill Number
+    uhid = models.CharField(max_length=50)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    bill_type = models.CharField(max_length=50, null=True, blank=True)
+    remarks = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='Pending') # Pending, Approved, etc.
+    
+    # Audit info is inherited from AuditModel (created_by, created_date, etc.)
+
+    def save(self, *args, **kwargs):
+        if not self.refund_bill_no:
+            from django.utils import timezone
+            
+            # Generate refund bill number: YY-YY/000001 (matching user example)
+            now = timezone.now()
+            year = now.year
+            if now.month >= 4:
+                fy = f"{str(year)[2:]}{str(year+1)[2:]}"
+            else:
+                fy = f"{str(year-1)[2:]}{str(year)[2:]}"
+            
+            prefix = f"{fy}/"
+            
+            last_refund = Refund.objects.filter(refund_bill_no__startswith=prefix).order_by('-refund_bill_no').first()
+            if last_refund:
+                try:
+                    last_no = int(last_refund.refund_bill_no.split('/')[-1])
+                    new_no = last_no + 1
+                except (ValueError, IndexError):
+                    new_no = 1
+            else:
+                new_no = 1
+            
+            self.refund_bill_no = f"{prefix}{new_no:06d}"
+            
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.refund_bill_no} - {self.uhid} (₹{self.refund_amount})"
