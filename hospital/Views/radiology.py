@@ -32,13 +32,20 @@ def get_hard_bill_types(request):
 
 def _serialize_report(doc):
     doc["_id"] = str(doc["_id"])
+    
+    # These all need IST conversion
     for field in [
-        "date", "slot_DateTime", "created_date", "lastmodified_date",
+        "date", "created_date", "lastmodified_date",
         "approved_date", "deleted_date",
-        "patientIn_DateTime", "scan_started_DateTime", "dispatch_DateTime",  # ← add scan_started_DateTime
+        "patientIn_DateTime", "scan_started_DateTime", "dispatch_DateTime",
     ]:
         if field in doc and isinstance(doc[field], datetime):
-            doc[field] = doc[field].isoformat()
+            doc[field] = _to_ist(doc[field])  # ← was .isoformat(), now _to_ist()
+
+    # slot_DateTime: no timezone conversion, return as plain time string
+    if "slot_DateTime" in doc and isinstance(doc["slot_DateTime"], datetime):
+        doc["slot_DateTime"] = doc["slot_DateTime"].strftime('%Y-%m-%dT%H:%M:%S')
+
     return doc
 
 
@@ -78,7 +85,7 @@ def _parse_tat_minutes(tat_str):
     return int(value * 60) if unit == 'H' else int(value)
 
 
-def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_minutes):
+def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_minutes, slot_DateTime=None):
     """
     All internal calculations in seconds for sub-minute accuracy.
     Outputs *_seconds fields alongside *_minutes for display flexibility.
@@ -120,17 +127,30 @@ def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_
         "overdue_seconds":  None,
     }
 
-    if not tat_minutes:
-        return {**base, "status": "unknown", "label": "TAT N/A"}
-
-    if not patientIn_DateTime:
-        return {**base, "status": "waiting", "label": "Awaiting check-in"}
-
+    # Resolve all datetimes FIRST — before any guard that references them
     t_in       = _make_aware(patientIn_DateTime)
     t_started  = _make_aware(scan_started_DateTime)
     t_dispatch = _make_aware(dispatch_DateTime)
     t_now      = datetime.now(dt_timezone.utc)
 
+    # Slot punctuality (needs t_in already resolved)
+    slot_info = None
+    if slot_DateTime and patientIn_DateTime:
+        t_slot   = _make_aware(slot_DateTime) if isinstance(slot_DateTime, str) else slot_DateTime
+        t_in_val = t_in  # already resolved above
+        if t_slot and t_in_val:
+            diff = int((t_in_val - t_slot).total_seconds())
+            if diff <= 0:
+                slot_info = {"status": "on_time",  "label": f"Early by {_fmt(abs(diff))}", "diff_seconds": diff}
+            else:
+                slot_info = {"status": "late",     "label": f"Late by {_fmt(diff)}",       "diff_seconds": diff}
+    elif slot_DateTime and not patientIn_DateTime:
+        slot_info = {"status": "not_arrived", "label": "Not arrived", "diff_seconds": None}
+
+    if not tat_minutes:
+        return {**base, "status": "unknown",  "label": "TAT N/A",            "slot_info": slot_info}
+    if t_in is None:
+        return {**base, "status": "waiting",  "label": "Awaiting check-in",  "slot_info": slot_info}
     if t_in is None:
         return {**base, "status": "waiting", "label": "Awaiting check-in"}
 
@@ -141,6 +161,28 @@ def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_
 
     # ── TAT clock starts from scan_started if available, else patientIn ───
     t_start = t_started if t_started else t_in
+     # ── Slot Punctuality ──────────────────────────────────────────────────────
+     # ── Slot Punctuality ──────────────────────────────────────────────────────
+    slot_info = None
+    if slot_DateTime and patientIn_DateTime:
+            t_slot   = _make_aware(slot_DateTime) if isinstance(slot_DateTime, str) else slot_DateTime
+            t_in_val = _make_aware(patientIn_DateTime) if isinstance(patientIn_DateTime, str) else patientIn_DateTime
+            if t_slot and t_in_val:
+                diff = int((t_in_val - t_slot).total_seconds())
+                if diff <= 0:
+                    slot_info = {
+                        "status": "on_time",
+                        "label": f"Early by {_fmt(abs(diff))}",
+                        "diff_seconds": diff,  # negative = early
+                    }
+                else:
+                    slot_info = {
+                        "status": "late",
+                        "label": f"Late by {_fmt(diff)}",
+                        "diff_seconds": diff,  # positive = late
+                    }
+    elif slot_DateTime and not patientIn_DateTime:
+            slot_info = {"status": "not_arrived", "label": "Not arrived", "diff_seconds": None}
 
     def _make_result(elapsed_s, scan_s, status, label):
         overdue_s = max(elapsed_s - tat_seconds, 0)
@@ -157,6 +199,7 @@ def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_
             "tat_minutes":     tat_minutes,
             "overdue_seconds": overdue_s,
             "overdue_minutes": round(overdue_s / 60, 2),
+            "slot_info":       slot_info,
         }
 
     if t_dispatch:
@@ -178,7 +221,7 @@ def _calc_tat(patientIn_DateTime, scan_started_DateTime, dispatch_DateTime, tat_
         else:
             label  = f"{_fmt(tat_seconds - elapsed_s)} left"
             status = "on_track"
-        return _make_result(elapsed_s, None, status, label)
+        return _make_result(elapsed_s, None, status, label)    
 
 IST = dt_timezone(timedelta(hours=5, minutes=30))
 
@@ -348,9 +391,15 @@ def get_investigations(request):
 
         report_map = {}
         for r in ct_reports:
-            for field in ['date', 'slot_DateTime', 'created_date', 'lastmodified_date',
+            for field in ['date', 'created_date', 'lastmodified_date',
               'approved_date', 'deleted_date',
               'patientIn_DateTime', 'scan_started_DateTime', 'dispatch_DateTime']:
+                if field in r:
+                    r[field] = _to_ist(r[field])
+
+            # slot_DateTime: return raw UTC ISO string, no timezone shift
+            if 'slot_DateTime' in r and isinstance(r['slot_DateTime'], datetime):
+                r['slot_DateTime'] = r['slot_DateTime'].strftime('%Y-%m-%dT%H:%M:%S')
                 if field in r:
                     r[field] = _to_ist(r[field])
             raw_item_id        = r.get('item_id')
@@ -465,8 +514,8 @@ def get_investigations(request):
                     patient_in  = report.get('patientIn_DateTime') if report else None
                     scan_started = report.get('scan_started_DateTime')     if report else None 
                     dispatch_dt = report.get('dispatch_DateTime')  if report else None
-
-                    row['tat_info']  = _calc_tat(patient_in, scan_started, dispatch_dt, tat_minutes)
+                    slot_dt_raw = report.get('slot_DateTime') if report else None
+                    row['tat_info'] = _calc_tat(patient_in, scan_started, dispatch_dt, tat_minutes, slot_DateTime=slot_dt_raw)
                     row['scan_type'] = (fmt_doc.get('type') or '').upper() if fmt_doc else ''
                 else:
                     row['radiology_format'] = None
@@ -1104,13 +1153,9 @@ def patient_checkin(request, investBillNo, item_id):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def dispatch_report(request, investBillNo, item_id):
-    """
-    Mark a report as dispatched.
-    Sets is_Dispatched=True and dispatch_DateTime to now (or provided value).
-    Only works on approved reports.
-    """
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
+    radiology_format_collection = client['HMS']['hospital_radiology_formats']
     try:
         user_id = request.data.get('auth-user-id', 'system')
 
@@ -1128,16 +1173,10 @@ def dispatch_report(request, investBillNo, item_id):
             return JsonResponse({"error": "Report not found"}, status=404)
 
         if not report.get('is_approved'):
-            return JsonResponse(
-                {"error": "Only approved reports can be dispatched."},
-                status=400
-            )
+            return JsonResponse({"error": "Only approved reports can be dispatched."}, status=400)
 
         if report.get('is_Dispatched'):
-            return JsonResponse(
-                {"error": "Report is already dispatched."},
-                status=409
-            )
+            return JsonResponse({"error": "Report is already dispatched."}, status=409)
 
         raw_dt      = request.data.get('dispatch_DateTime')
         dispatch_dt = _parse_slot_datetime(raw_dt) if raw_dt else timezone.now()
@@ -1153,7 +1192,20 @@ def dispatch_report(request, investBillNo, item_id):
             }}
         )
         updated = collection.find_one({"_id": report["_id"]})
-        return JsonResponse(_serialize_report(updated), safe=False, status=200)
+        serialized = _serialize_report(updated)
+
+        # ── Calculate TAT and include in response ────────────────────────────
+        fmt_doc = radiology_format_collection.find_one(
+            {'item_id': item_id_int, 'billTypeNo': updated.get('billTypeNo'), 'is_active': True},
+            {'TAT_Time': 1, '_id': 0}
+        )
+        tat_minutes  = _parse_tat_minutes(fmt_doc.get('TAT_Time')) if fmt_doc else None
+        patient_in   = serialized.get('patientIn_DateTime')
+        scan_started = serialized.get('scan_started_DateTime')
+        dispatch_str = serialized.get('dispatch_DateTime')
+        serialized['tat_info'] = _calc_tat(patient_in, scan_started, dispatch_str, tat_minutes)
+
+        return JsonResponse(serialized, safe=False, status=200)
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
