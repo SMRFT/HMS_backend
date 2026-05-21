@@ -323,16 +323,18 @@ class PharmacyItem(AuditModel):
         return f"{self.item_id} {self.item_name}"
     
 class StockTransfer(AuditModel):
-    transfer_ref_number = models.CharField(max_length=30,unique=True)
+    transfer_ref_number = models.CharField(max_length=30, unique=True)
     to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
+    remarks = models.TextField(blank=False, default="")          # NEW — mandatory
+    approved_by = models.CharField(max_length=100, blank=True, default="")   # NEW
+    approved_date = models.DateTimeField(null=True, blank=True)              # NEW
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
-        ("Rejected", "Rejected")
+        ("Rejected", "Rejected"),
     ]
-    is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
-
+    is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
     
 # Correctly using djongo models below
 from django.utils import timezone
@@ -386,7 +388,6 @@ class PharmacyBilling(AuditModel):
 
         
 class PharmacyStock(AuditModel):
-
     stock_id = models.IntegerField(primary_key=True)
     item_id = models.IntegerField()
     batch_number = models.CharField(max_length=50)
@@ -407,12 +408,10 @@ class PharmacyStock(AuditModel):
     stock_ref_id = models.IntegerField(default=0)
 
     grn_return_quantity = models.IntegerField(default=0)
-    grn_return_ref_id = models.IntegerField(null=True, blank=True)
 
     blocked_quantity = models.IntegerField(default=0)
 
     sales_return_quantity = models.IntegerField(default=0)
-    sales_return_ref_id = models.IntegerField(null=True, blank=True)
 
     CGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     SGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
