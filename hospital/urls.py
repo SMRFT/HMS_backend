@@ -14,6 +14,7 @@ from .Views import (
     cashcounter,
     radiology,
     room,
+    pharmacynotification,
     NursingStation,
     dashboard,
     advanced_dashboard,
@@ -21,6 +22,7 @@ from .Views import (
     insurance_provider,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder,
+    purchasereturn,
     front_office_reports,
     registration_updates
 )
@@ -79,12 +81,20 @@ urlpatterns = [
     path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
     path("stock-transfer-action/",   stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
 
+    path("purchase-return/",          purchasereturn.purchase_return_view,     name="purchase-return-list"),
+    path("purchase-return/<str:pk>/", purchasereturn.purchase_return_view,     name="purchase-return-detail"),
+    path("grn-items/",                purchasereturn.get_grn_items,            name="grn-items"),
+
+    path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
+
+    path('get_oppharmacy_stock/',  pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
     path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
-    path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
-    path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
+    path('get_estimate_bills/',    pharmacy.get_estimate_bills, name='get_estimate_bills'),
+    path('get_last_billed_uhid/',  pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
     path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
@@ -101,20 +111,19 @@ urlpatterns = [
     path("finalize_bill/",   pharmacy.finalize_bill),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
 
-
     # path("pharmacy_sales_report/", accounts_report.pharmacy_sales_report, name="pharmacy_sales_report"),
+
     # Central cah counter
-  
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
     path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
-     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
-     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
-     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
-     path("get_registration_bills/", cashcounter.get_registration_bills),
+    path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+    path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
+    path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
+    path("get_registration_bills/", cashcounter.get_registration_bills),
 
     # Room URLs
     path('block/', room.block_view, name='block_list_create'),
@@ -220,7 +229,6 @@ urlpatterns = [
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
     path('doctor_schedule/<str:employee_id>/', doctormaster.doctor_schedule_detail, name='doctor_schedule_detail'),
     path('doctor_schedule_upsert/<str:employee_id>/', doctormaster.doctor_schedule_upsert, name='doctor_schedule_upsert'),
-
 
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
     path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
