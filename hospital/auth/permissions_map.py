@@ -139,6 +139,13 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
     r'^/_b_a_c_k_e_n_d/HMS/employee-signature/?(\?.*)?$': 'HMS-API-RD',  
 
+     #Investigation Reports (RD):      
+    r'^/_b_a_c_k_e_n_d/HMS/anc-register/?(\?.*)?$': 'HMS-API-JRD',  
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/?(\?.*)?$': 'HMS-API-JRD',  
+    '/_b_a_c_k_e_n_d/HMS/jrd-reports/create/': 'HMS-API-JRD', 
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/update(?:/[^/]+)+/$': 'HMS-P-JRDE',  
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/delete(?:/[^/]+)+/$': 'HMS-P-JRDD',  
+
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
     '/_b_a_c_k_e_n_d/HMS/summary-type/': 'HMS-P-SUM',                  

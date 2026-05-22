@@ -1058,19 +1058,13 @@ def get_employee_signature_by_id(request):
 
 
 # ─── PATCH: Patient Check-In ──────────────────────────────────────────────────
-
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def patient_checkin(request, investBillNo, item_id):
-    """
-    Toggle or set patientIn_DateTime on an existing report record.
-    Body: { "patientIn_DateTime": "2025-07-01T10:30:00" }  ← set
-          { "patientIn_DateTime": null }                    ← clear (un-check)
-    If the record doesn't exist yet, create a slot-only record.
-    """
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
+    radiology_format_collection = client['HMS']['hospital_radiology_formats']
     try:
         user_id       = request.data.get('auth-user-id', 'system')
         branch_code   = request.data.get('auth-branch-code', 'SHB001')
@@ -1096,6 +1090,27 @@ def patient_checkin(request, investBillNo, item_id):
             'is_active':    True,
         })
 
+        def _build_response(doc, status_code):
+            serialized = _serialize_report(doc)
+            fmt_doc = radiology_format_collection.find_one(
+                {
+                    'item_id':    item_id_int,
+                    'billTypeNo': doc.get('billTypeNo'),
+                    'is_active':  True,
+                },
+                {'TAT_Time': 1, '_id': 0}
+            )
+            tat_minutes  = _parse_tat_minutes(fmt_doc.get('TAT_Time')) if fmt_doc else None
+            patient_in   = serialized.get('patientIn_DateTime')
+            scan_started = serialized.get('scan_started_DateTime')
+            dispatch_str = serialized.get('dispatch_DateTime')
+            slot_dt_raw  = serialized.get('slot_DateTime')
+            serialized['tat_info'] = _calc_tat(
+                patient_in, scan_started, dispatch_str, tat_minutes,
+                slot_DateTime=slot_dt_raw
+            )
+            return JsonResponse(serialized, safe=False, status=status_code)
+
         if report:
             set_payload = {
                 "patientIn_DateTime": patient_in_dt,
@@ -1104,7 +1119,7 @@ def patient_checkin(request, investBillNo, item_id):
             }
             collection.update_one({"_id": report["_id"]}, {"$set": set_payload})
             updated = collection.find_one({"_id": report["_id"]})
-            return JsonResponse(_serialize_report(updated), safe=False, status=200)
+            return _build_response(updated, 200)
 
         else:
             invest_bill_date = request.data.get('investBillDate')
@@ -1137,7 +1152,7 @@ def patient_checkin(request, investBillNo, item_id):
                 'item_id':      item_id_int,
                 'is_active':    True,
             })
-            return JsonResponse(_serialize_report(updated), safe=False, status=201)
+            return _build_response(updated, 201)
 
     except Exception as e:
         import traceback
@@ -1146,6 +1161,109 @@ def patient_checkin(request, investBillNo, item_id):
     finally:
         client.close()
 
+
+@csrf_exempt
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def scan_started(request, investBillNo, item_id):
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+    collection = client['HMS']['hospital_radiologyreport']
+    radiology_format_collection = client['HMS']['hospital_radiology_formats']
+    try:
+        user_id       = request.data.get('auth-user-id', 'system')
+        branch_code   = request.data.get('auth-branch-code', 'SHB001')
+        outlet_code   = request.data.get('auth-outlet-code', 'OLET003')
+        hospital_code = request.data.get('auth-hospital-code', 'SH001')
+
+        try:
+            item_id_int = int(item_id)
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "item_id must be a valid integer"}, status=400)
+
+        raw_dt = request.data.get('scan_started_DateTime')
+        if raw_dt is not None:
+            scan_dt = _parse_slot_datetime(raw_dt)
+            if not scan_dt:
+                return JsonResponse({"error": "Invalid scan_started_DateTime format."}, status=400)
+        else:
+            scan_dt = None
+
+        report = collection.find_one({
+            'investBillNo': investBillNo,
+            'item_id':      item_id_int,
+            'is_active':    True,
+        })
+
+        def _build_response(doc, status_code):
+            serialized = _serialize_report(doc)
+            fmt_doc = radiology_format_collection.find_one(
+                {
+                    'item_id':    item_id_int,
+                    'billTypeNo': doc.get('billTypeNo'),
+                    'is_active':  True,
+                },
+                {'TAT_Time': 1, '_id': 0}
+            )
+            tat_minutes  = _parse_tat_minutes(fmt_doc.get('TAT_Time')) if fmt_doc else None
+            patient_in   = serialized.get('patientIn_DateTime')
+            scan_started = serialized.get('scan_started_DateTime')
+            dispatch_str = serialized.get('dispatch_DateTime')
+            slot_dt_raw  = serialized.get('slot_DateTime')
+            serialized['tat_info'] = _calc_tat(
+                patient_in, scan_started, dispatch_str, tat_minutes,
+                slot_DateTime=slot_dt_raw
+            )
+            return JsonResponse(serialized, safe=False, status=status_code)
+
+        if report:
+            set_payload = {
+                "scan_started_DateTime": scan_dt,
+                "lastmodified_by":       user_id,
+                "lastmodified_date":     timezone.now(),
+            }
+            collection.update_one({"_id": report["_id"]}, {"$set": set_payload})
+            updated = collection.find_one({"_id": report["_id"]})
+            return _build_response(updated, 200)
+
+        else:
+            invest_bill_date = request.data.get('investBillDate')
+            try:
+                date_value = datetime.fromisoformat(
+                    invest_bill_date.replace("Z", "+00:00")
+                ) if invest_bill_date else timezone.now()
+            except (ValueError, AttributeError):
+                date_value = timezone.now()
+
+            ct_report = RadiologyReport.objects.create(
+                date                  = date_value,
+                slot_DateTime         = None,
+                investBillNo          = investBillNo,
+                itemName              = request.data.get('itemName', ''),
+                item_id               = item_id_int,
+                impression            = '',
+                billTypeNo            = request.data.get('billTypeNo', ''),
+                valuedetails          = {"device_id": [], "value": []},
+                is_active             = True,
+                has_report            = False,
+                scan_started_DateTime = scan_dt,
+                created_by            = user_id,
+                branch_code           = branch_code,
+                outlet_code           = outlet_code,
+                hospital_code         = hospital_code,
+            )
+            updated = collection.find_one({
+                'investBillNo': investBillNo,
+                'item_id':      item_id_int,
+                'is_active':    True,
+            })
+            return _build_response(updated, 201)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=500)
+    finally:
+        client.close()
 
 # ─── PATCH: Dispatch ──────────────────────────────────────────────────────────
 
@@ -1212,87 +1330,3 @@ def dispatch_report(request, investBillNo, item_id):
     finally:
         client.close()
 
-@csrf_exempt
-@api_view(['PATCH'])
-@permission_classes([HasRoleAndDataPermission])
-def scan_started(request, investBillNo, item_id):
-    """
-    Toggle scan_started_DateTime on an existing report record.
-    Creates a skeleton record if none exists (same pattern as patient_checkin).
-    """
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    collection = client['HMS']['hospital_radiologyreport']
-    try:
-        user_id       = request.data.get('auth-user-id', 'system')
-        branch_code   = request.data.get('auth-branch-code', 'SHB001')
-        outlet_code   = request.data.get('auth-outlet-code', 'OLET003')
-        hospital_code = request.data.get('auth-hospital-code', 'SH001')
-
-        try:
-            item_id_int = int(item_id)
-        except (ValueError, TypeError):
-            return JsonResponse({"error": "item_id must be a valid integer"}, status=400)
-
-        raw_dt = request.data.get('scan_started_DateTime')
-        if raw_dt is not None:
-            scan_dt = _parse_slot_datetime(raw_dt)
-            if not scan_dt:
-                return JsonResponse({"error": "Invalid scan_started_DateTime format."}, status=400)
-        else:
-            scan_dt = None  # clearing
-
-        report = collection.find_one({
-            'investBillNo': investBillNo,
-            'item_id':      item_id_int,
-            'is_active':    True,
-        })
-
-        if report:
-            set_payload = {
-                "scan_started_DateTime": scan_dt,
-                "lastmodified_by":       user_id,
-                "lastmodified_date":     timezone.now(),
-            }
-            collection.update_one({"_id": report["_id"]}, {"$set": set_payload})
-            updated = collection.find_one({"_id": report["_id"]})
-            return JsonResponse(_serialize_report(updated), safe=False, status=200)
-
-        else:
-            invest_bill_date = request.data.get('investBillDate')
-            try:
-                date_value = datetime.fromisoformat(
-                    invest_bill_date.replace("Z", "+00:00")
-                ) if invest_bill_date else timezone.now()
-            except (ValueError, AttributeError):
-                date_value = timezone.now()
-
-            ct_report = RadiologyReport.objects.create(
-                date                  = date_value,
-                slot_DateTime         = None,
-                investBillNo          = investBillNo,
-                itemName              = request.data.get('itemName', ''),
-                item_id               = item_id_int,
-                impression            = '',
-                billTypeNo            = request.data.get('billTypeNo', ''),
-                valuedetails          = {"device_id": [], "value": []},
-                is_active             = True,
-                has_report            = False,
-                scan_started_DateTime = scan_dt,
-                created_by            = user_id,
-                branch_code           = branch_code,
-                outlet_code           = outlet_code,
-                hospital_code         = hospital_code,
-            )
-            updated = collection.find_one({
-                'investBillNo': investBillNo,
-                'item_id':      item_id_int,
-                'is_active':    True,
-            })
-            return JsonResponse(_serialize_report(updated), safe=False, status=201)
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JsonResponse({"error": str(e)}, status=500)
-    finally:
-        client.close()
