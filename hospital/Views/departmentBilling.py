@@ -20,6 +20,7 @@ from bson import Decimal128, ObjectId
 from bson.json_util import dumps
 import json
 from pymongo import MongoClient, ReturnDocument
+import re
 
 
 
@@ -887,7 +888,6 @@ def invest_billing_create(request):
         data["lastmodified_by"] = None
         data["lastmodified_date"] = timezone.now()
         data["is_active"] = True
-        data["shiftno"] = request.data.get("shiftno")
 
         # Insert
         invest_collection.insert_one(data)
@@ -929,21 +929,21 @@ def billing_report_view(request):
         return doc
 
     try:
-        branch_code = request.data.get('auth-branch-code', 'system')
-        outlet_code = request.data.get('auth-outlet-code', 'system')
+        branch_code   = request.data.get('auth-branch-code',   'system')
+        outlet_code   = request.data.get('auth-outlet-code',   'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
 
-        collection = db['hospital_investbilling']
-        bill_type_collection = db['hospital_billtype']
-        patient_collection = db['hospital_patient']
+        collection          = db['hospital_investbilling']
+        bill_type_collection= db['hospital_billtype']
+        patient_collection  = db['hospital_patient']
+        refund_collection   = db['hospital_investrefund']       # ← refund collection
 
         # ── Base Query ─────────────────────────────────────────
         query = {"is_active": True}
 
-        # ✅ Apply auth filters
         if hospital_code:
             query["hospital_code"] = hospital_code
         if branch_code:
@@ -955,12 +955,12 @@ def billing_report_view(request):
 
         # ── Date filter ────────────────────────────────────────
         start_date = request.GET.get('start_date')
-        end_date = request.GET.get('end_date')
+        end_date   = request.GET.get('end_date')
 
         if start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
-                end = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                end   = datetime.strptime(end_date,   "%Y-%m-%d").replace(
                     hour=23, minute=59, second=59, microsecond=999999
                 )
                 query["investBillDate"] = {"$gte": start, "$lte": end}
@@ -996,17 +996,57 @@ def billing_report_view(request):
                 {"ipNumber": None},
             ]
 
-        # ── Fetch data ─────────────────────────────────────────
+        # ── Fetch billing data ─────────────────────────────────
         data = list(collection.find(query))
 
-        # ── Batch Patient Cache (OPTIMIZED) ────────────────────
+        # ── Batch Refund Cache ─────────────────────────────────
+        # For every investBillNo in the result set, collect all test_ids
+        # that have already been refunded (is_active=True refund docs).
+        # Structure: { "2627/16/000008": {2, 22}, ... }
+
+        invest_bill_nos = [
+            doc.get("investBillNo") for doc in data if doc.get("investBillNo")
+        ]
+
+        refunded_test_ids = {}   # investBillNo → set of refunded test_ids
+
+        if invest_bill_nos:
+            refund_docs = refund_collection.find(
+                {
+                    "investBillNo": {"$in": invest_bill_nos},
+                    "is_active": True
+                },
+                {"_id": 0, "investBillNo": 1, "item": 1}
+            )
+
+            for rdoc in refund_docs:
+                bill_no = rdoc.get("investBillNo")
+                items   = rdoc.get("item", [])
+
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
+
+                if bill_no not in refunded_test_ids:
+                    refunded_test_ids[bill_no] = set()
+
+                for it in items:
+                    # refund docs store item_id (not test_id)
+                    tid = it.get("item_id") or it.get("test_id")
+                    if tid is not None:
+                        try:
+                            refunded_test_ids[bill_no].add(int(tid))
+                        except (ValueError, TypeError):
+                            refunded_test_ids[bill_no].add(tid)
+
+        # ── Batch Patient Cache ────────────────────────────────
         uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
         patient_cache = {}
 
         if uhids:
             patient_query = {"uhid": {"$in": list(uhids)}}
-
-            # ✅ Apply auth filters
             if hospital_code:
                 patient_query["hospital_code"] = hospital_code
             if branch_code:
@@ -1015,22 +1055,15 @@ def billing_report_view(request):
             patients = patient_collection.find(
                 patient_query,
                 {
-                    "_id": 0,
-                    "uhid": 1,
-                    "salutation": 1,
-                    "firstName": 1,
-                    "lastName": 1,
-                    "age": 1,
-                    "gender": 1
+                    "_id": 0, "uhid": 1, "salutation": 1,
+                    "firstName": 1, "lastName": 1, "age": 1, "gender": 1
                 }
             )
-
             for p in patients:
                 patient_cache[p["uhid"]] = p
 
-        # ── Batch Bill Type Cache (OPTIMIZED) ──────────────────
+        # ── Batch Bill Type Cache ──────────────────────────────
         bill_type_ids = set()
-
         for doc in data:
             bt = doc.get("bill_type")
             if bt:
@@ -1040,21 +1073,18 @@ def billing_report_view(request):
                     pass
 
         bill_type_cache = {}
-
         if bill_type_ids:
-            bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
             bt_docs = bill_type_collection.find(
-                bt_query,
+                {"bill_type": {"$in": list(bill_type_ids)}},
                 {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
             )
-
             for bt in bt_docs:
                 bill_type_cache[int(bt["bill_type"])] = {
-                    "bill_name": bt.get("bill_name", ""),
+                    "bill_name":  bt.get("bill_name",  ""),
                     "billTypeNo": bt.get("billTypeNo", "")
                 }
 
-        # ── Enrich Data ────────────────────────────────────────
+        # ── Enrich & Filter Data ───────────────────────────────
         result = []
 
         for doc in data:
@@ -1062,10 +1092,10 @@ def billing_report_view(request):
             # Patient
             patient = patient_cache.get(doc.get("uhid"), {})
             doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"] = patient.get("firstName", "")
-            doc["lastName"] = patient.get("lastName", "")
-            doc["age"] = patient.get("age", "")
-            doc["gender"] = patient.get("gender", "")
+            doc["firstName"]  = patient.get("firstName",  "")
+            doc["lastName"]   = patient.get("lastName",   "")
+            doc["age"]        = patient.get("age",        "")
+            doc["gender"]     = patient.get("gender",     "")
 
             # Bill type
             try:
@@ -1074,15 +1104,41 @@ def billing_report_view(request):
                 bt_key = 0
 
             bt_info = bill_type_cache.get(bt_key, {})
-            doc["bill_name"] = bt_info.get("bill_name", "")
+            doc["bill_name"]  = bt_info.get("bill_name",  "")
             doc["billTypeNo"] = bt_info.get("billTypeNo", "")
 
             # Parse items
-            if isinstance(doc.get("item"), str):
+            items = doc.get("item", [])
+            if isinstance(items, str):
                 try:
-                    doc["item"] = json.loads(doc["item"])
+                    items = json.loads(items)
                 except:
-                    doc["item"] = []
+                    items = []
+
+            # ── Exclude already-refunded items ─────────────────
+            bill_no          = doc.get("investBillNo", "")
+            already_refunded = refunded_test_ids.get(bill_no, set())
+
+            if already_refunded:
+                filtered_items = []
+                for it in items:
+                    # billing items use item_id (not test_id)
+                    tid = it.get("item_id") or it.get("test_id")
+                    try:
+                        tid_norm = int(tid) if tid is not None else None
+                    except (ValueError, TypeError):
+                        tid_norm = tid
+
+                    # Keep item only if its item_id has NOT been refunded
+                    if tid_norm not in already_refunded:
+                        filtered_items.append(it)
+                doc["item"] = filtered_items
+            else:
+                doc["item"] = items
+
+            # Skip the bill entirely if all items have been refunded
+            if not doc["item"]:
+                continue
 
             result.append(serialize_doc(doc))
 
@@ -1097,7 +1153,7 @@ def billing_report_view(request):
             {"error": "Failed to generate billing report", "details": str(e)},
             status=500
         )
-    
+
 
 @api_view(['PATCH'])
 @csrf_exempt
@@ -1301,4 +1357,149 @@ def dept_budr_view(request):
             {"error": "Failed to fetch report", "details": str(e)},
             status=500,
         )
-    
+@api_view(['POST'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
+def invest_refund_create(request):
+    """
+    Creates a refund bill for selected items from an existing invest bill.
+    refundBillNo is generated by incrementing the last existing refundBillNo
+    that matches the same financial-year/bill_type prefix  (no atomic counter).
+    """
+    mongo_client = None
+    try:
+        current_user  = request.data.get('auth-user-id',       'system')
+        branch_code   = request.data.get('auth-branch-code',   'system')
+        outlet_code   = request.data.get('auth-outlet-code',   'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+
+        data = {k: v for k, v in request.data.items()
+                if not k.startswith('auth-')}
+
+        # ── Validate required fields ────────────────────────────────────────
+        required = ['investBillNo', 'uhid', 'bill_type', 'item', 'refund_finalPrice']
+        for field in required:
+            if not data.get(field):
+                return Response(
+                    {'error': f'{field} is required'},
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
+
+        # ── Normalize item list ─────────────────────────────────────────────
+        item_data = data.get('item', [])
+        if isinstance(item_data, str):
+            try:
+                item_data = json.loads(item_data)
+                if isinstance(item_data, str):
+                    item_data = json.loads(item_data)
+            except (json.JSONDecodeError, TypeError):
+                item_data = []
+        if not isinstance(item_data, list) or len(item_data) == 0:
+            return Response(
+                {'error': 'At least one item must be selected for refund'},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
+
+        # ── Connect MongoDB ─────────────────────────────────────────────────
+        mongo_client   = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        mongo_db       = mongo_client['HMS']
+        refund_col     = mongo_db['hospital_investrefund']
+        invest_col     = mongo_db['hospital_investbilling']
+
+        # ── Verify the source invest bill exists and is active ───────────────
+        invest_bill_no = data['investBillNo']
+        source_bill = invest_col.find_one(
+            {'investBillNo': invest_bill_no, 'is_active': True}
+        )
+        if not source_bill:
+            return Response(
+                {'error': f'Active invest bill not found: {invest_bill_no}'},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+
+        # ── Financial year prefix ────────────────────────────────────────────
+        today = datetime.today()
+        if today.month < 4:
+            financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
+        else:
+            financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
+
+        # fixed — financial year only
+        bill_type  = data['bill_type']   
+        prefix_key = f"{financial_year}"   # e.g. "2627"
+        prefix     = f"{prefix_key}/"      # e.g. "2627/"
+
+        # ── Last-incremental refundBillNo (no atomic counter) ────────────────
+        # Find the highest existing refundBillNo for this prefix and add 1.
+        last_doc = refund_col.find_one(
+            {'refundBillNo': {'$regex': f'^{re.escape(prefix)}'}},
+            sort=[('refundBillNo', -1)]
+        )
+
+        if last_doc and last_doc.get('refundBillNo'):
+            try:
+                last_seq = int(last_doc['refundBillNo'].rsplit('/', 1)[-1])
+            except (ValueError, IndexError):
+                last_seq = 0
+        else:
+            last_seq = 0
+
+        next_seq       = last_seq + 1
+        refund_bill_no = f"{prefix}{next_seq:06d}"   # e.g. "2627/16/000009"
+
+        # ── Build document ───────────────────────────────────────────────────
+        now = timezone.now()
+        # Parse investBillDate string → proper datetime object
+        raw_invest_date = data.get('investBillDate')
+        if raw_invest_date:
+            try:
+                # Handle both "2026-05-13T11:57:04.604Z" and "2026-05-13T11:57:04.604+00:00"
+                invest_bill_date = datetime.fromisoformat(
+                    raw_invest_date.replace('Z', '+00:00')
+                )
+            except (ValueError, AttributeError):
+                invest_bill_date = now
+        else:
+            invest_bill_date = now
+
+        refund_doc = {
+            'refundBillNo':     refund_bill_no,
+            'refundBillDate':   now,
+            'investBillNo':     invest_bill_no,
+            'uhid':             data.get('uhid', ''),
+            'ipNumber':         data.get('ipNumber', ''),
+            'bill_type':        bill_type,
+            'billTypeNo':       data.get('billTypeNo', ''),
+            'refund_finalPrice':str(data.get('refund_finalPrice', '0.00')),
+            'paymentStatus':    'Pending',
+            'item':             item_data,
+            'investBillDate':   invest_bill_date,   # use the parsed datetime object
+            'created_by':       current_user,
+            'branch_code':      branch_code,
+            'outlet_code':      outlet_code,
+            'hospital_code':    hospital_code,
+            'created_date':     now,
+            'lastmodified_by':  None,
+            'lastmodified_date':now,
+            'is_active':        True,
+        }
+
+        refund_col.insert_one(refund_doc)
+
+        return Response(
+            {
+                'message':       'Refund bill created successfully!',
+                'refundBillNo':  refund_bill_no,
+            },
+            status=drf_status.HTTP_201_CREATED
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {'error': 'Refund creation failed', 'details': repr(e)},
+            status=500
+        )
+    finally:
+        if mongo_client:
+            mongo_client.close()  

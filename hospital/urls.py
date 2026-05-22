@@ -29,10 +29,12 @@ from .Views import (
 from .Views.AccountsReport import (
     shift_basis_report,
     cash_counter_manager,
-    bill_wise_report
+    bill_wise_report,
+    accounting_reports,
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
+from .Views.Insurance import insurance
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -87,6 +89,9 @@ urlpatterns = [
 
     path('get_oppharmacy_stock/',  pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
+    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/',    pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/',  pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
@@ -182,10 +187,10 @@ urlpatterns = [
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),
     path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),  
-    re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
-    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
-    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
-    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<itemName>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
+    re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
+    re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
+    re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
+    re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
     path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),   
     
@@ -217,6 +222,7 @@ urlpatterns = [
     path('estimateBilling/', departmentBilling.estimate_billing_create, name='estimate_billing_create'),
     path('get-estimate-billings/', departmentBilling.estimate_billing_list, name='estimate-billing-list'),
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
+    path('invest-refund/', departmentBilling.invest_refund_create, name='invest_refund_create'),
 
     #Doctor Master:
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
@@ -259,6 +265,8 @@ urlpatterns = [
     path('investigation-prices/create/', investigation_price.create_investigation_price, name='create_investigation_price'),
     path('investigation-prices/update/<str:bill_type_no>/', investigation_price.update_investigation_price, name='update_investigation_price'),
     path('investigation-prices/delete/<str:bill_type_no>/', investigation_price.delete_investigation_price, name='delete_investigation_price'),
+    path('investigation-prices/update_item/<str:bill_type_no>/<int:item_id>/', investigation_price.update_investigation_item, name='update_investigation_item'),
+    path('investigation-prices/delete_item/<str:bill_type_no>/<int:item_id>/', investigation_price.delete_investigation_item, name='delete_investigation_item'),
 
     #Bil Type Master:
     path('bill-types_get/', billType.get_bill_types, name='get_bill_types'),
@@ -388,7 +396,10 @@ urlpatterns = [
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
     path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
-    path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
+    path("cash_counter_manager/",   cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
+    path('discharge-bills-report/', accounting_reports.discharge_bills_report, name='discharge_bills_report'),
+    path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
+    path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
 
     # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
     # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
@@ -396,5 +407,8 @@ urlpatterns = [
     path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
     path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
 
-    
+    # Insurance Claim URLs
+    path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
+    path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
+    path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
 ]
