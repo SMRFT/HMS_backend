@@ -11,6 +11,7 @@ from .Views import (
     chandra_ocr,
     package_crud,
     pharmacy,
+    purchase_Requisition,
     cashcounter,
     radiology,
     room,
@@ -82,6 +83,12 @@ urlpatterns = [
     path("purchase-return/",          purchasereturn.purchase_return_view,     name="purchase-return-list"),
     path("purchase-return/<str:pk>/", purchasereturn.purchase_return_view,     name="purchase-return-detail"),
     path("grn-items/",                purchasereturn.get_grn_items,            name="grn-items"),
+
+    path('purchase-requisition/', purchase_Requisition.purchase_requisition_view, name='purchase-requisition-list'),
+    path('purchase-requisition/<str:pk>/', purchase_Requisition.purchase_requisition_view, name='purchase-requisition-detail'),
+    path('purchase-requisition/<str:pk>/approve/', purchase_Requisition.purchase_requisition_view, name='approve-purchase-requisition'),
+    path('purchase-requisition/<str:pk>/reject/', purchase_Requisition.purchase_requisition_view, name='reject-purchase-requisition'),
+    path('purchase-requisition/<str:pk>/edit/', purchase_Requisition.purchase_requisition_view, name='edit-purchase-requisition'),
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 

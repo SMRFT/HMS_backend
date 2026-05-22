@@ -84,6 +84,14 @@ class GRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+from .models import PurchaseRequisition
+class PurchaseRequisitionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = PurchaseRequisition
+        fields = "__all__"
+
+
+
 from .models import Block, RoomCategory, Room, NursingStation, RoomKitItems, RoomServiceDescription
 class BlockSerializer(serializers.ModelSerializer):
     class Meta:
