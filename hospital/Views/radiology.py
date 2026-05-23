@@ -417,7 +417,7 @@ def get_investigations(request):
         patients = list(patient_collection.find(
             patient_filter,
             {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'middleName': 1,
-             'lastName': 1, 'age': 1, 'gender': 1}
+             'lastName': 1, 'gender': 1}
         ))
         patient_map = {p['uhid']: p for p in patients}
 
@@ -485,7 +485,6 @@ def get_investigations(request):
             base['firstName']   = patient.get('firstName',   '')
             base['middleName']  = patient.get('middleName',  '')
             base['lastName']    = patient.get('lastName',    '')
-            base['age']         = patient.get('age',         None)
             base['gender']      = patient.get('gender',      '')
 
             for item in matched_items:

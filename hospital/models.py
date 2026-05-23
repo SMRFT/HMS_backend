@@ -810,6 +810,9 @@ class EstimateBilling(AuditModel):
     EstBillNo = models.CharField(max_length=50, blank=True)
     EstBillDate = models.DateTimeField() 
     uhid = models.CharField(max_length=50)
+    age = models.CharField(max_length=50)
+    age_type = models.CharField(max_length=50)
+    roomNo = models.CharField(max_length=50)
     ipNumber = models.CharField(max_length=50,blank=True)
     bill_type       = models.CharField(max_length=100, blank=True, null=True)  # collection / category key
     billTypeNo      = models.CharField(max_length=50, blank=True, null=True)

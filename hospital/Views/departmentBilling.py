@@ -1,3 +1,5 @@
+from pydoc import doc
+
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
@@ -186,6 +188,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'lastName': patient.lastName,
             'age': patient.age,
             'gender': patient.gender,
+            'dob': patient.dob,
             'mobilePhone': patient.mobilePhone,
             'area': patient.area,
             'city': patient.city,
@@ -419,7 +422,9 @@ def estimate_billing_list(request):
             doc["salutation"] = patient.get("salutation", "")
             doc["firstName"] = patient.get("firstName", "")
             doc["lastName"] = patient.get("lastName", "")
-            doc["age"] = patient.get("age", "")
+            doc["age"]        = doc.get("age")         # ← use bill's own age first
+            doc["age_type"]   = doc.get("age_type", "")  
+            doc["roomNo"]   = doc.get("roomNo", "")  
             doc["gender"] = patient.get("gender", "")
 
             try:
@@ -1094,7 +1099,9 @@ def billing_report_view(request):
             doc["salutation"] = patient.get("salutation", "")
             doc["firstName"]  = patient.get("firstName",  "")
             doc["lastName"]   = patient.get("lastName",   "")
-            doc["age"]        = patient.get("age",        "")
+            doc["age"]        = doc.get("age")         # ← use bill's own age first
+            doc["age_type"]   = doc.get("age_type", "")  
+            doc["roomNo"]   = doc.get("roomNo", "")  
             doc["gender"]     = patient.get("gender",     "")
 
             # Bill type

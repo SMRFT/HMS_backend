@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.db import transaction
 from datetime import datetime, timedelta
 from pymongo import MongoClient
-import pytz, os
+import calendar, pytz, os
 
 from ..models import JRDReport
 
@@ -16,20 +16,19 @@ logger = logging.getLogger(__name__)
 _IST = pytz.timezone("Asia/Kolkata")
 
 
- 
 def _to_ist(dt):
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = pytz.utc.localize(dt)
     return dt.astimezone(_IST).strftime("%Y-%m-%dT%H:%M:%S")
- 
- 
+
+
 def _get_db():
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     return client, client['HMS']['hospital_jrdreport']
- 
- 
+
+
 def _next_jrd_id(col, hospital_code, branch_code):
     """Sequential jrd_id per hospital+branch."""
     last = col.find_one(
@@ -37,8 +36,8 @@ def _next_jrd_id(col, hospital_code, branch_code):
         sort=[('jrd_id', -1)],
     )
     return (last['jrd_id'] + 1) if last else 1
- 
- 
+
+
 def _serialize(doc):
     if hasattr(doc, '__dict__'):  # Django model instance
         get = lambda key, default='': getattr(doc, key, default)
@@ -60,21 +59,48 @@ def _serialize(doc):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_anc_register(request):
+    """
+    Query params:
+      from_date  YYYY-MM-DD   (used when filter_mode=date or omitted)
+      to_date    YYYY-MM-DD   (used when filter_mode=date or omitted)
+      month      YYYY-MM      (used when filter_mode=month)
+      filter_mode  'date' | 'month'   default: 'date'
+    
+    Response includes extra top-level keys:
+      type_counts: { ANC: N, GENERAL: N, ... }
+      total: N
+    """
     try:
-        from_date_str = request.GET.get('from_date')
-        to_date_str   = request.GET.get('to_date')
-
-        if not from_date_str or not to_date_str:
-            return JsonResponse({'error': 'from_date and to_date are required'}, status=400)
-
-        try:
-            from_dt = datetime.strptime(from_date_str, '%Y-%m-%d')
-            to_dt   = datetime.strptime(to_date_str, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
-        except ValueError:
-            return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
-
+        filter_mode = request.GET.get('filter_mode', 'date')
         hospital_code = request.data.get('auth-hospital-code', 'system')
         branch_code   = request.data.get('auth-branch-code',   'system')
+
+        # ── Build date range ──────────────────────────────────────────────────
+        if filter_mode == 'month':
+            month_str = request.GET.get('month')  # e.g. "2026-05"
+            if not month_str:
+                return JsonResponse({'error': 'month is required when filter_mode=month'}, status=400)
+            try:
+                year, mon = int(month_str[:4]), int(month_str[5:7])
+                if not (1 <= mon <= 12):
+                    raise ValueError("month out of range")
+                # calendar.monthrange(year, mon) returns (weekday_of_day1, total_days_in_month).
+                # Correctly handles 28/29 (Feb leap year), 30, and 31-day months automatically.
+                last_day = calendar.monthrange(year, mon)[1]
+                from_dt = datetime(year, mon, 1,        0,  0,  0)   # 1st 00:00:00 UTC
+                to_dt   = datetime(year, mon, last_day, 23, 59, 59)   # last day 23:59:59 UTC
+            except (ValueError, IndexError):
+                return JsonResponse({'error': 'Invalid month format. Use YYYY-MM'}, status=400)
+        else:
+            from_date_str = request.GET.get('from_date')
+            to_date_str   = request.GET.get('to_date')
+            if not from_date_str or not to_date_str:
+                return JsonResponse({'error': 'from_date and to_date are required'}, status=400)
+            try:
+                from_dt = datetime.strptime(from_date_str, '%Y-%m-%d').replace(hour=0,  minute=0,  second=0)
+                to_dt   = datetime.strptime(to_date_str,   '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+            except ValueError:
+                return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
 
         client    = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db    = client['HMS']
@@ -86,54 +112,98 @@ def get_anc_register(request):
         profile_col = global_db['backend_diagnostics_profile']
 
         try:
-            # ── 1. Fetch approved ANC reports ─────────────────────────────────
-            report_filter = {
+            # ── 1. Fetch ALL approved reports in date range (all types) ───────
+            # We need GENERAL count too, but only ANC rows go into the register.
+            report_filter_all = {
                 'is_active':   True,
                 'is_approved': True,
-                'type':        'ANC',
                 'date':        {'$gte': from_dt, '$lte': to_dt},
             }
             if hospital_code and hospital_code != 'system':
-                report_filter['hospital_code'] = hospital_code
+                report_filter_all['hospital_code'] = hospital_code
             if branch_code and branch_code != 'system':
-                report_filter['branch_code'] = branch_code
+                report_filter_all['branch_code'] = branch_code
 
-            reports = list(report_col.find(report_filter, {'_id': 0}))
-            if not reports:
-                return JsonResponse([], safe=False)
+            all_reports = list(report_col.find(
+                report_filter_all,
+                {'_id': 0, 'type': 1, 'investBillNo': 1, 'item_id': 1,
+                 'date': 1, 'itemName': 1, 'valuedetails': 1,
+                 'approved_by': 1, 'approved_date': 1, 'uhid': 1}
+            ))
 
-            # Serialize datetime fields
+            # ── 2. Compute type counts ─────────────────────────────────────────
+            from collections import Counter
+            type_counts = dict(Counter(
+                r.get('type', 'UNKNOWN') for r in all_reports
+            ))
+            total = len(all_reports)
+
+            # ── 2b. Gender split for GENERAL type ─────────────────────────────
+            # Fetch billing → uhid → patient gender for all GENERAL reports
+            general_reports = [r for r in all_reports if r.get('type') == 'GENERAL']
+            general_gender_counts = {'Male': 0, 'Female': 0, 'Unknown': 0}
+
+            if general_reports:
+                gen_bill_nos = list({r['investBillNo'] for r in general_reports if r.get('investBillNo')})
+
+                gen_billing_docs = list(billing_col.find(
+                    {'investBillNo': {'$in': gen_bill_nos}, 'is_active': True},
+                    {'_id': 0, 'investBillNo': 1, 'uhid': 1}
+                ))
+                gen_billing_map = {b['investBillNo']: b.get('uhid', '') for b in gen_billing_docs}
+
+                gen_uhids = list({uid for uid in gen_billing_map.values() if uid})
+                gen_patient_docs = list(patient_col.find(
+                    {'uhid': {'$in': gen_uhids}},
+                    {'_id': 0, 'uhid': 1, 'gender': 1}
+                ))
+                gen_patient_map = {p['uhid']: (p.get('gender') or '').strip().capitalize() for p in gen_patient_docs}
+
+                for r in general_reports:
+                    uhid   = gen_billing_map.get(r.get('investBillNo', ''), '')
+                    gender = gen_patient_map.get(uhid, '') if uhid else ''
+                    if gender == 'Male':
+                        general_gender_counts['Male'] += 1
+                    elif gender == 'Female':
+                        general_gender_counts['Female'] += 1
+                    else:
+                        general_gender_counts['Unknown'] += 1
+
+            # ── 3. Filter ANC reports for the register rows ───────────────────
+            reports = [r for r in all_reports if r.get('type') == 'ANC']
+
+            # Serialize datetime fields on ANC reports
             for r in reports:
                 for field in ['date', 'created_date', 'lastmodified_date',
                               'approved_date', 'patientIn_DateTime',
                               'scan_started_DateTime', 'dispatch_DateTime']:
                     if field in r and isinstance(r[field], datetime):
                         r[field] = _to_ist(r[field])
-                if 'slot_DateTime' in r and isinstance(r['slot_DateTime'], datetime):
+                if 'slot_DateTime' in r and isinstance(r.get('slot_DateTime'), datetime):
                     r['slot_DateTime'] = r['slot_DateTime'].strftime('%Y-%m-%dT%H:%M:%S')
 
-            # ── 2. Collect unique bill numbers ────────────────────────────────
+            if not reports:
+                return JsonResponse({
+                    'data':                  [],
+                    'type_counts':           type_counts,
+                    'general_gender_counts': general_gender_counts,
+                    'total':                 total,
+                }, safe=False)
+
+            # ── 4. Collect unique bill numbers ────────────────────────────────
             bill_nos = list({r['investBillNo'] for r in reports if r.get('investBillNo')})
 
-            # ── 3. Fetch billing records ──────────────────────────────────────
-            # billing holds the real uhid, referredBy, doctor
+            # ── 5. Fetch billing records ──────────────────────────────────────
             billing_docs = list(billing_col.find(
                 {'investBillNo': {'$in': bill_nos}, 'is_active': True},
-                {
-                    '_id': 0,
-                    'investBillNo': 1,
-                    'uhid':         1,
-                    'referredBy':   1,
-                    'doctor':       1,
-                }
+                {'_id': 0, 'investBillNo': 1, 'uhid': 1, 'referredBy': 1, 'doctor': 1}
             ))
             billing_map = {b['investBillNo']: b for b in billing_docs}
 
-            # ── 4. Collect uhids from billing (report.uhid is often empty) ────
+            # ── 6. Collect uhids ──────────────────────────────────────────────
             uhid_list = list({b['uhid'] for b in billing_docs if b.get('uhid')})
 
-            # ── 5. Collect employee IDs ───────────────────────────────────────
-            # referredBy comes from billing, received/approved from report
+            # ── 7. Collect employee IDs ───────────────────────────────────────
             emp_ids = set()
             for r in reports:
                 bill = billing_map.get(r.get('investBillNo'), {})
@@ -142,7 +212,6 @@ def get_anc_register(request):
                 if ref.isdigit():  emp_ids.add(ref)
                 if appr.isdigit(): emp_ids.add(appr)
 
-            # ── 6. Batch-fetch employee profiles ──────────────────────────────
             emp_docs = list(profile_col.find(
                 {'employeeId': {'$in': list(emp_ids)}},
                 {'_id': 0, 'employeeId': 1, 'employeeName': 1, 'designation': 1}
@@ -156,7 +225,7 @@ def get_anc_register(request):
                     return emp_map.get(sid, {}).get('employeeName', sid)
                 return sid
 
-            # ── 7. Fetch patient records ──────────────────────────────────────
+            # ── 8. Fetch patient records ──────────────────────────────────────
             patient_docs = list(patient_col.find(
                 {'uhid': {'$in': uhid_list}},
                 {
@@ -186,22 +255,19 @@ def get_anc_register(request):
                     p.get('zipcode',           ''),
                 ] if x)
 
-            # ── 8. Assemble result rows ───────────────────────────────────────
+            # ── 9. Assemble result rows ───────────────────────────────────────
             result = []
             for idx, r in enumerate(reports):
                 anc  = r.get('valuedetails', {}).get('anc_fields', {}) or {}
                 bill = billing_map.get(r.get('investBillNo'), {})
 
-                # uhid: billing first (report.uhid is usually blank)
                 uhid    = bill.get('uhid') or r.get('uhid') or ''
                 patient = patient_map.get(uhid, {})
 
-                # doctors
                 ref_id  = str(bill.get('referredBy', '') or '').strip()
                 appr_id = str(r.get('approved_by',   '') or '').strip()
 
-                # ANC fields
-                ga_usg = anc.get('ga_usg', '')   # e.g. "5W2D"
+                ga_usg = anc.get('ga_usg', '')
 
                 lmp = anc.get('lmp', '')
                 if lmp:
@@ -210,13 +276,11 @@ def get_anc_register(request):
                     except ValueError:
                         pass
 
-                # marital status: use stored value;
-                # if blank but spouse name present → "Married"
                 spouse_name    = patient.get('spouse_name', '') or ''
                 raw_marital    = patient.get('maritalStatus', '') or ''
                 marital_status = (
                     raw_marital if raw_marital.strip()
-                    else ('Married' if spouse_name.strip() else '')
+                    else ('Married' if spouse_name.strip() else 'Unmarried')
                 )
 
                 invest_bill_no = r.get('investBillNo', '')
@@ -256,7 +320,12 @@ def get_anc_register(request):
                     'type':          r.get('type', ''),
                 })
 
-            return JsonResponse(result, safe=False)
+            return JsonResponse({
+                'data':                  result,
+                'type_counts':           type_counts,
+                'general_gender_counts': general_gender_counts,
+                'total':                 total,
+            }, safe=False)
 
         finally:
             client.close()
@@ -264,6 +333,7 @@ def get_anc_register(request):
     except Exception as e:
         import traceback; traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
+
 
 # ─── LIST ─────────────────────────────────────────────────────────────────────
 
@@ -274,7 +344,6 @@ def list_jrd_reports(request):
         hospital_code = request.data.get('auth-hospital-code', '')
         branch_code   = request.data.get('auth-branch-code', '')
 
-        # djongo-safe: use __in=[True] instead of =True
         qs = JRDReport.objects.filter(is_active__in=[True])
 
         if hospital_code and hospital_code != 'system':
@@ -284,10 +353,24 @@ def list_jrd_reports(request):
 
         from_date_str = request.GET.get('from_date')
         to_date_str   = request.GET.get('to_date')
-        if from_date_str and to_date_str:
+        month_str     = request.GET.get('month')
+        filter_mode   = request.GET.get('filter_mode', 'date')
+
+        if filter_mode == 'month' and month_str:
             try:
-                from_dt = datetime.strptime(from_date_str, '%Y-%m-%d')
-                to_dt   = datetime.strptime(to_date_str, '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
+                year, mon = int(month_str[:4]), int(month_str[5:7])
+                if not (1 <= mon <= 12):
+                    raise ValueError("month out of range")
+                last_day = calendar.monthrange(year, mon)[1]
+                from_dt = datetime(year, mon, 1,        0,  0,  0)
+                to_dt   = datetime(year, mon, last_day, 23, 59, 59)
+                qs = qs.filter(created_date__gte=from_dt, created_date__lte=to_dt)
+            except (ValueError, IndexError):
+                return JsonResponse({'error': 'Invalid month format'}, status=400)
+        elif from_date_str and to_date_str:
+            try:
+                from_dt = datetime.strptime(from_date_str, '%Y-%m-%d').replace(hour=0,  minute=0,  second=0)
+                to_dt   = datetime.strptime(to_date_str,   '%Y-%m-%d').replace(hour=23, minute=59, second=59)
                 qs = qs.filter(created_date__gte=from_dt, created_date__lte=to_dt)
             except ValueError:
                 return JsonResponse({'error': 'Invalid date format'}, status=400)
@@ -309,7 +392,7 @@ def create_jrd_report(request):
         data          = request.data
         user_id       = data.get('auth-user-id', 'system')
         hospital_code = data.get('auth-hospital-code', '')
-        branch_code   = data.get('auth-branch-code', '')        
+        branch_code   = data.get('auth-branch-code', '')
         outlet_code   = data.get('auth-outlet-code', '')
 
         invest_bill_no = str(data.get('investBillNo', '')).strip()
@@ -326,8 +409,6 @@ def create_jrd_report(request):
 
         form_no    = str(data.get('form_no',    '')).strip()
         mtp_advice = str(data.get('mtp_advice', '')).strip()
-
-        # ── djongo-safe boolean filters using __in ────────────────────────────
 
         # 1. Active record exists → 409
         existing = JRDReport.objects.filter(
@@ -363,21 +444,21 @@ def create_jrd_report(request):
         client, col = _get_db()
         try:
             jrd_id = _next_jrd_id(col, hospital_code, branch_code)
-            obj = JRDReport.objects.create(...)
+            obj = JRDReport.objects.create(
+                jrd_id        = jrd_id,
+                hospital_code = hospital_code,
+                branch_code   = branch_code,
+                outlet_code   = outlet_code,
+                investBillNo  = invest_bill_no,
+                item_id       = item_id,
+                form_no       = form_no,
+                mtp_advice    = mtp_advice,
+                is_active     = True,
+                created_by    = user_id,
+            )
         finally:
             client.close()
-        obj = JRDReport.objects.create(
-            jrd_id        = jrd_id,
-            hospital_code = hospital_code,
-            branch_code   = branch_code,
-            outlet_code   = outlet_code,
-            investBillNo  = invest_bill_no,
-            item_id       = item_id,
-            form_no       = form_no,
-            mtp_advice    = mtp_advice,
-            is_active     = True,
-            created_by    = user_id,
-        )
+
         return JsonResponse(
             {'jrd_id': obj.jrd_id, 'message': 'Created'},
             status=201,
@@ -388,9 +469,8 @@ def create_jrd_report(request):
         return JsonResponse({'error': str(e)}, status=500)
 
 
- 
 # ─── UPDATE ───────────────────────────────────────────────────────────────────
- 
+
 @csrf_exempt
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
@@ -400,42 +480,42 @@ def update_jrd_report(request, jrd_id):
         hospital_code = request.data.get('auth-hospital-code', '')
         branch_code   = request.data.get('auth-branch-code',   '')
         user_id       = request.data.get('auth-user-id',       'system')
- 
+
         query = {'jrd_id': int(jrd_id), 'is_active': True}
         if hospital_code and hospital_code != 'system':
             query['hospital_code'] = hospital_code
         if branch_code and branch_code != 'system':
             query['branch_code'] = branch_code
- 
+
         doc = col.find_one(query)
         if not doc:
             return JsonResponse({'error': f'JRD-{jrd_id} not found'}, status=404)
- 
+
         data   = request.data
         fields = {}
         if 'form_no'    in data: fields['form_no']    = str(data['form_no']).strip()
         if 'mtp_advice' in data: fields['mtp_advice'] = str(data['mtp_advice']).strip()
- 
+
         if not fields:
             return JsonResponse({'message': 'No fields to update'}, status=200)
- 
+
         fields['lastmodified_by']   = user_id
         fields['lastmodified_date'] = datetime.utcnow()
- 
+
         col.update_one({'_id': doc['_id']}, {'$set': fields})
- 
+
         updated = col.find_one({'_id': doc['_id']}, {'_id': 0})
         return JsonResponse({**_serialize(updated), 'message': 'Updated'})
- 
+
     except Exception as e:
         import traceback; traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
     finally:
         client.close()
- 
- 
+
+
 # ─── DELETE ───────────────────────────────────────────────────────────────────
- 
+
 @csrf_exempt
 @api_view(['DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -445,17 +525,17 @@ def delete_jrd_report(request, jrd_id):
         hospital_code = request.data.get('auth-hospital-code', '')
         branch_code   = request.data.get('auth-branch-code',   '')
         user_id       = request.data.get('auth-user-id',       'system')
- 
+
         query = {'jrd_id': int(jrd_id), 'is_active': True}
         if hospital_code and hospital_code != 'system':
             query['hospital_code'] = hospital_code
         if branch_code and branch_code != 'system':
             query['branch_code'] = branch_code
- 
+
         doc = col.find_one(query)
         if not doc:
             return JsonResponse({'error': f'JRD-{jrd_id} not found'}, status=404)
- 
+
         col.update_one(
             {'_id': doc['_id']},
             {'$set': {
@@ -465,7 +545,7 @@ def delete_jrd_report(request, jrd_id):
             }}
         )
         return JsonResponse({'message': f'JRD-{jrd_id} deleted'})
- 
+
     except Exception as e:
         import traceback; traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
