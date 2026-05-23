@@ -53,7 +53,7 @@ def get_patient_admission_details(request):
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=500)
 
-@api_view(['GET', 'POST', 'PATCH'])
+@api_view(['GET', 'POST', 'PATCH', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
 def insurance_claim_view(request, claim_id=None):
     hospital_code = request.headers.get("auth-hospital-code") or "system"
@@ -73,8 +73,13 @@ def insurance_claim_view(request, claim_id=None):
             from_date = request.GET.get('from_date')
             to_date = request.GET.get('to_date')
             company = request.GET.get('company')
+            show_deleted = request.GET.get('show_deleted') == 'true'
 
-            query = InsuranceClaim.objects.filter(hospital_code=hospital_code, is_active=True)
+            query = InsuranceClaim.objects.filter(hospital_code=hospital_code)
+            
+            if not show_deleted:
+                query = query.filter(is_active=True)
+            
             if from_date:
                 query = query.filter(claim_date__gte=from_date)
             if to_date:
@@ -123,6 +128,25 @@ def insurance_claim_view(request, claim_id=None):
                 serializer.save()
                 return Response({"success": True, "message": "Claim updated successfully", "data": serializer.data})
             return Response({"success": False, "error": serializer.errors}, status=400)
+        except Exception as e:
+            traceback.print_exc()
+            return Response({"success": False, "error": str(e)}, status=500)
+
+    elif request.method == 'DELETE':
+        try:
+            if not claim_id:
+                return Response({"success": False, "error": "Claim ID required"}, status=400)
+            
+            claim = InsuranceClaim.objects.filter(claim_id=claim_id, hospital_code=hospital_code).first()
+            if not claim:
+                return Response({"success": False, "error": "Claim not found"}, status=404)
+            
+            # Soft delete
+            claim.is_active = False
+            claim.lastmodified_by = employee_id
+            claim.save()
+            
+            return Response({"success": True, "message": "Claim deleted successfully"})
         except Exception as e:
             traceback.print_exc()
             return Response({"success": False, "error": str(e)}, status=500)

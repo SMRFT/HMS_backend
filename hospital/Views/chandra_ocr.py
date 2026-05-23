@@ -20,9 +20,23 @@ from typing import Any
 from rest_framework.decorators import api_view, permission_classes,parser_classes
 from django.views.decorators.csrf import csrf_exempt
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+import shutil
 
+# Auto-detect Tesseract binary path dynamically based on platform and PATH
+tesseract_in_path = shutil.which("tesseract")
+if tesseract_in_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
+elif os.path.exists("/usr/bin/tesseract"):
+    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+elif os.path.exists("/opt/homebrew/bin/tesseract"):
+    pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+else:
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+try:
+    print("Tesseract Version:", pytesseract.get_tesseract_version())
+except Exception as e:
+    print("Warning: Tesseract version could not be retrieved:", e)
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission
 
@@ -365,20 +379,26 @@ def _pdf_to_images(pdf_bytes: bytes) -> list[bytes]:
     if pdf2image is None:
         raise ImportError("pdf2image not installed")
 
-    # Auto-detect poppler: prefer explicit env var, then common Windows paths, then PATH
-    poppler_path = r"C:\Users\Siva\Downloads\Release-26.02.0-0\poppler-26.02.0\Library\bin"
+    # Dynamic poppler path detection: check PATH, then macOS, Ubuntu, and Windows candidates
+    poppler_in_path = shutil.which("pdftoppm")
+    poppler_path = None
 
-    if not poppler_path:
-        candidates = [
-            r"C:\poppler\Library\bin",
-            r"C:\poppler\bin",
-            r"C:\Program Files\poppler\Library\bin",
-            r"C:\Program Files\poppler\bin",
-        ]
-        for candidate in candidates:
-            if os.path.isfile(os.path.join(candidate, "pdfinfo.exe")):
-                poppler_path = candidate
-                break
+    if not poppler_in_path:
+        if os.path.exists("/opt/homebrew/bin/pdftoppm"):
+            poppler_path = "/opt/homebrew/bin"
+        elif os.path.exists("/usr/bin/pdftoppm"):
+            poppler_path = "/usr/bin"
+        else:
+            candidates = [
+                r"C:\poppler\Library\bin",
+                r"C:\poppler\bin",
+                r"C:\Program Files\poppler\Library\bin",
+                r"C:\Program Files\poppler\bin",
+            ]
+            for candidate in candidates:
+                if os.path.isfile(os.path.join(candidate, "pdfinfo.exe")):
+                    poppler_path = candidate
+                    break
 
     # If still not found, let pdf2image try PATH (will raise clear error if missing)
     kwargs = {"dpi": 300}
