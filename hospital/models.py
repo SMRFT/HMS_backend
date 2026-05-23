@@ -500,7 +500,6 @@ class PurchaseRequisition(AuditModel):
 
       pr_number           = models.CharField(max_length=30, unique=True)
       medicine_name       = models.CharField(max_length=255)
-      item_id             = models.IntegerField(null=True, blank=True)
       chemical_composition= models.TextField(blank=True, default="")
       consultant_name     = models.CharField(max_length=255, blank=True, default="")
       request_date        = models.DateTimeField()
@@ -522,12 +521,46 @@ class PurchaseRequisition(AuditModel):
       edited_reason       = models.TextField(blank=True, default="")
       edited_date         = models.DateTimeField(null=True, blank=True)
 
-      hospital_code       = models.CharField(max_length=50)
-      branch_code         = models.CharField(max_length=50)
-      is_active           = models.BooleanField(default=True)
-
       def __str__(self):
           return f"{self.pr_number} — {self.medicine_name}"
+      
+class PurchaseOrder(AuditModel):
+
+    STATUS_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Verified", "Verified"),
+        ("Rejected", "Rejected"),
+    ]
+ 
+    po_number     = models.CharField(max_length=30, primary_key=True)
+ 
+    # Vendor
+    vendor_id     = models.IntegerField()
+ 
+    # Medicine items — stored as JSON text
+    items = models.JSONField(default=list, blank=True)
+ 
+    # Workflow
+    status        = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="Draft"
+    )
+ 
+    # Approval
+    approved_by   = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
+ 
+    # Rejection
+    rejected_by     = models.CharField(max_length=100, blank=True, default="")
+    rejected_reason = models.TextField(blank=True, default="")
+    rejected_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # Edit audit
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_reason = models.TextField(blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+ 
+    def __str__(self):
+        return self.po_number
 
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)

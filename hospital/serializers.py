@@ -91,6 +91,13 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+from .models import PurchaseOrder
+class PurchaseOrderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model  = PurchaseOrder
+        fields = "__all__"
+
 
 from .models import Block, RoomCategory, Room, NursingStation, RoomKitItems, RoomServiceDescription
 class BlockSerializer(serializers.ModelSerializer):
