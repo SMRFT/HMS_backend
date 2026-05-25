@@ -260,12 +260,14 @@ def get_investigations(request):
 
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db = client['HMS']
-    invest_billing_collection   = db['hospital_investbilling']
-    ct_report_collection        = db['hospital_radiologyreport']
-    patient_collection          = db['hospital_patient']
-    invest_price_collection     = db['hospital_investigationprice']
-    refund_collection           = db['hospital_investrefund']
-    radiology_format_collection = db['hospital_radiology_formats']
+    global_db = client['Global']
+    invest_billing_collection    = db['hospital_investbilling']
+    ct_report_collection         = db['hospital_radiologyreport']
+    patient_collection           = db['hospital_patient']
+    invest_price_collection      = db['hospital_investigationprice']
+    refund_collection            = db['hospital_investrefund']
+    radiology_format_collection  = db['hospital_radiology_formats']
+    diagnostics_profile_coll     = global_db['backend_diagnostics_profile']   # ← new
 
     try:
         # ── 0. Build item_id → itemName map from investigationprice ──────────
@@ -392,16 +394,15 @@ def get_investigations(request):
         report_map = {}
         for r in ct_reports:
             for field in ['date', 'created_date', 'lastmodified_date',
-              'approved_date', 'deleted_date',
-              'patientIn_DateTime', 'scan_started_DateTime', 'dispatch_DateTime']:
+                          'approved_date', 'deleted_date',
+                          'patientIn_DateTime', 'scan_started_DateTime', 'dispatch_DateTime']:
                 if field in r:
                     r[field] = _to_ist(r[field])
 
             # slot_DateTime: return raw UTC ISO string, no timezone shift
             if 'slot_DateTime' in r and isinstance(r['slot_DateTime'], datetime):
                 r['slot_DateTime'] = r['slot_DateTime'].strftime('%Y-%m-%dT%H:%M:%S')
-                if field in r:
-                    r[field] = _to_ist(r[field])
+
             raw_item_id        = r.get('item_id')
             normalized_item_id = int(raw_item_id) if raw_item_id is not None else None
             report_map[(r.get('investBillNo'), normalized_item_id)] = r
@@ -420,6 +421,32 @@ def get_investigations(request):
              'lastName': 1, 'gender': 1}
         ))
         patient_map = {p['uhid']: p for p in patients}
+
+        # ── 5b. Doctor / ReferredBy Cache ─────────────────────────────────────
+        doctor_ids      = set()
+        referred_by_ids = set()
+
+        for record in filtered_records:
+            doc_val = record.get('doctor', '')
+            ref_val = record.get('referredBy', '')
+
+            if doc_val and str(doc_val).upper() != 'SELF':
+                doctor_ids.add(str(doc_val))
+            if ref_val and str(ref_val).upper() != 'SELF':
+                referred_by_ids.add(str(ref_val))
+
+        diagnostics_profile_cache = {}  # employeeId → employeeName
+
+        all_profile_ids = doctor_ids | referred_by_ids
+        if all_profile_ids:
+            profile_docs = diagnostics_profile_coll.find(
+                {'employeeId': {'$in': list(all_profile_ids)}},
+                {'_id': 0, 'employeeId': 1, 'employeeName': 1}
+            )
+            for p in profile_docs:
+                emp_id = str(p.get('employeeId', ''))
+                if emp_id:
+                    diagnostics_profile_cache[emp_id] = p.get('employeeName', '')
 
         # ── 6. Batch Radiology Format Cache ──────────────────────────────────
         all_item_ids = set()
@@ -487,6 +514,20 @@ def get_investigations(request):
             base['lastName']    = patient.get('lastName',    '')
             base['gender']      = patient.get('gender',      '')
 
+            # ── Doctor name ───────────────────────────────────────────────────
+            doc_val = record.get('doctor', '')
+            if doc_val and str(doc_val).upper() == 'SELF':
+                base['doctorName'] = 'SELF'
+            else:
+                base['doctorName'] = diagnostics_profile_cache.get(str(doc_val), '')
+
+            # ── ReferredBy name ───────────────────────────────────────────────
+            ref_val = record.get('referredBy', '')
+            if ref_val and str(ref_val).upper() == 'SELF':
+                base['referredByName'] = 'SELF'
+            else:
+                base['referredByName'] = diagnostics_profile_cache.get(str(ref_val), '')
+
             for item in matched_items:
                 raw_item_id = item.get('item_id') or item.get('test_id')
                 item_id     = int(raw_item_id) if raw_item_id is not None else None
@@ -509,12 +550,12 @@ def get_investigations(request):
                     fmt_base['format_titles'] = fmt_doc.get(gender_key, [])
                     row['radiology_format'] = fmt_base
 
-                    tat_minutes = _parse_tat_minutes(fmt_doc.get('TAT_Time')) if fmt_doc else None
-                    patient_in  = report.get('patientIn_DateTime') if report else None
-                    scan_started = report.get('scan_started_DateTime')     if report else None 
-                    dispatch_dt = report.get('dispatch_DateTime')  if report else None
-                    slot_dt_raw = report.get('slot_DateTime') if report else None
-                    row['tat_info'] = _calc_tat(patient_in, scan_started, dispatch_dt, tat_minutes, slot_DateTime=slot_dt_raw)
+                    tat_minutes  = _parse_tat_minutes(fmt_doc.get('TAT_Time')) if fmt_doc else None
+                    patient_in   = report.get('patientIn_DateTime')   if report else None
+                    scan_started = report.get('scan_started_DateTime') if report else None
+                    dispatch_dt  = report.get('dispatch_DateTime')     if report else None
+                    slot_dt_raw  = report.get('slot_DateTime')         if report else None
+                    row['tat_info']  = _calc_tat(patient_in, scan_started, dispatch_dt, tat_minutes, slot_DateTime=slot_dt_raw)
                     row['scan_type'] = (fmt_doc.get('type') or '').upper() if fmt_doc else ''
                 else:
                     row['radiology_format'] = None
@@ -530,8 +571,6 @@ def get_investigations(request):
 
     finally:
         client.close()
-
-
 # ─── POST: Create scan report (with optional slot_DateTime) ───────────────────
 
 @csrf_exempt
