@@ -468,6 +468,9 @@ class GRN(AuditModel):
     payment_status      = models.TextField(default="[]")
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+    edited_reason = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -486,6 +489,78 @@ class GRN(AuditModel):
 
     def __str__(self):
         return f"{self.grn_number or self.draft_number} ({self.vendor_id})"
+
+class PurchaseRequisition(AuditModel):
+      STATUS_CHOICES = [
+          ("Draft",    "Draft"),
+          ("Verified", "Verified"),
+          ("Approved", "Approved"),
+          ("Rejected", "Rejected"),
+      ]
+
+      pr_number           = models.CharField(max_length=30, unique=True)
+      medicine_name       = models.CharField(max_length=255)
+      chemical_composition= models.TextField(blank=True, default="")
+      consultant_name     = models.CharField(max_length=255, blank=True, default="")
+      request_date        = models.DateTimeField()
+      quantity            = models.PositiveIntegerField(default=1)
+      remarks             = models.TextField(blank=True, default="")
+      status              = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Draft")
+
+      # Approval
+      approved_by         = models.CharField(max_length=100, blank=True, default="")
+      approved_date       = models.DateTimeField(null=True, blank=True)
+
+      # Rejection
+      rejected_by         = models.CharField(max_length=100, blank=True, default="")
+      rejected_reason     = models.TextField(blank=True, default="")
+      rejected_date       = models.DateTimeField(null=True, blank=True)
+
+      # Edit audit
+      edited_by           = models.CharField(max_length=100, blank=True, default="")
+      edited_reason       = models.TextField(blank=True, default="")
+      edited_date         = models.DateTimeField(null=True, blank=True)
+
+      def __str__(self):
+          return f"{self.pr_number} — {self.medicine_name}"
+      
+class PurchaseOrder(AuditModel):
+
+    STATUS_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Verified", "Verified"),
+        ("Rejected", "Rejected"),
+    ]
+ 
+    po_number     = models.CharField(max_length=30, primary_key=True)
+ 
+    # Vendor
+    vendor_id     = models.IntegerField()
+ 
+    # Medicine items — stored as JSON text
+    items = models.JSONField(default=list, blank=True)
+ 
+    # Workflow
+    status        = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="Draft"
+    )
+ 
+    # Approval
+    approved_by   = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
+ 
+    # Rejection
+    rejected_by     = models.CharField(max_length=100, blank=True, default="")
+    rejected_reason = models.TextField(blank=True, default="")
+    rejected_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # Edit audit
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_reason = models.TextField(blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+ 
+    def __str__(self):
+        return self.po_number
 
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)

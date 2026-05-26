@@ -643,250 +643,266 @@ def _grn_number_from_draft(draft_number, purchase_category):
 from ..models import GRN, PharmacyStock
 @api_view(["GET", "POST", "PUT"])
 @permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
 def grn_view(request, pk=None):
-
+ 
     data = _get_request_data(request)
-
+ 
     employee_id = (
         data.get("auth-user-id") or
         request.headers.get("auth-user-id") or
         "system"
     )
-
+ 
     hospital_code = (
         data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
         None
     )
-
+ 
     branch_code = (
         data.get("auth-branch-code") or
         request.headers.get("Branch-Code") or
         None
     )
-
+ 
     # ───────────────── GET ─────────────────
     if request.method == "GET":
-
+ 
         try:
             if pk:
                 grn = None
-
+ 
                 try:
                     grn = GRN.objects.get(pk=pk)
-                except:
+                except Exception:
                     try:
                         grn = GRN.objects.get(draft_number=pk)
                     except GRN.DoesNotExist:
                         pass
-
+ 
                 if not grn:
                     return Response({"error": "GRN not found"}, status=404)
-
+ 
                 if (
                     getattr(grn, "hospital_code", None) != hospital_code or
                     getattr(grn, "branch_code", None) != branch_code
                 ):
                     return Response({"error": "GRN not found"}, status=404)
-
+ 
                 return Response(GRNSerializer(grn).data)
-
-            # Djongo-safe fetch
+ 
+            # Djongo-safe fetch — list all for this hospital+branch
             all_grns = GRN.objects.all()
-
+ 
             grns = [
                 g for g in all_grns
-                if getattr(g, "hospital_code", None) == hospital_code and
-                getattr(g, "branch_code", None) == branch_code
+                if getattr(g, "hospital_code", None) == hospital_code
+                and getattr(g, "branch_code", None) == branch_code
             ]
-
+ 
             grns = sorted(
                 grns,
                 key=lambda x: getattr(x, "created_date", timezone.now()),
-                reverse=True
+                reverse=True,
             )
-
-            return Response(GRNSerializer(grns, many=True).data)
-
+ 
+            return Response({"success": True, "data": GRNSerializer(grns, many=True).data})
+ 
         except Exception as e:
+            logger.error("[grn_view GET] %s", e, exc_info=True)
             return Response({"error": str(e)}, status=500)
-
+ 
     # ───────────────── POST ─────────────────
     if request.method == "POST":
-
+ 
         payload = data.copy()
-
+ 
         if isinstance(payload.get("items"), (list, dict)):
             payload["items"] = json.dumps(payload["items"])
-
+ 
         if isinstance(payload.get("payment_status"), (list, dict)):
             payload["payment_status"] = json.dumps(payload["payment_status"])
-
+ 
         payload["hospital_code"] = hospital_code
-        payload["branch_code"] = branch_code
-        payload["status"] = "Draft"
-        payload["grn_number"] = ""
-        payload["draft_number"] = _next_draft_number()
-
+        payload["branch_code"]   = branch_code
+        payload["status"]        = "Draft"
+        payload["grn_number"]    = ""
+        payload["draft_number"]  = _next_draft_number()
+ 
+        # Clear edit-audit fields on fresh creation
+        payload["edited_by"]     = ""
+        payload["edited_date"]   = None
+        payload["edited_reason"] = ""
+ 
         serializer = GRNSerializer(data=payload)
-
+ 
         if serializer.is_valid():
             saved = serializer.save(
                 created_by=employee_id,
                 created_date=timezone.now(),
-                is_active=True
+                is_active=True,
             )
-
-            return Response(GRNSerializer(saved).data, status=201)
-
+            return Response({"success": True, "data": GRNSerializer(saved).data}, status=201)
+ 
         logger.error("GRN POST errors: %s", serializer.errors)
-        return Response(serializer.errors, status=400)
-
+        return Response({"success": False, "error": serializer.errors}, status=400)
+ 
     # ───────────────── PUT ─────────────────
     if request.method == "PUT":
-
+ 
         incoming = data.copy()
-
+ 
         if isinstance(incoming.get("items"), (list, dict)):
             incoming["items"] = json.dumps(incoming["items"])
-
+ 
         if isinstance(incoming.get("payment_status"), (list, dict)):
             incoming["payment_status"] = json.dumps(incoming["payment_status"])
-
+ 
         draft_no_in_body = incoming.get("draft_number", "")
         grn = None
-
-        # Resolve GRN
+ 
+        # Resolve GRN object — try body draft_number first, then URL pk
         if draft_no_in_body:
             try:
                 grn = GRN.objects.get(draft_number=draft_no_in_body)
             except GRN.DoesNotExist:
                 pass
-
+ 
         if grn is None and pk:
             try:
                 grn = GRN.objects.get(pk=pk)
             except GRN.DoesNotExist:
                 pass
-
+ 
         if grn is None:
-            return Response({"error": "GRN not found"}, status=404)
-
-        # Hospital/Branch security
+            return Response({"success": False, "error": "GRN not found"}, status=404)
+ 
+        # Hospital / Branch security
         if (
             getattr(grn, "hospital_code", None) != hospital_code or
             getattr(grn, "branch_code", None) != branch_code
         ):
-            return Response({"error": "GRN not found"}, status=404)
-
-        # Verified guard
+            return Response({"success": False, "error": "GRN not found"}, status=404)
+ 
+        # Verified guard — no edits once verified
         if grn.status == "Verified":
             return Response(
-                {"error": "Verified GRN cannot be edited."},
+                {"success": False, "error": "Verified GRN cannot be edited."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-
+ 
         incoming_status = incoming.get("status", grn.status)
-        going_verified = (grn.status == "Draft" and incoming_status == "Verified")
-
+        going_verified  = (grn.status == "Draft" and incoming_status == "Verified")
+ 
         if going_verified:
+            # ── Draft → Verified: assign GRN number, clear edit-audit fields ──
             category = incoming.get("purchase_category") or grn.purchase_category or ""
-            incoming["grn_number"] = _grn_number_from_draft(
-                grn.draft_number,
-                category
-            )
+            incoming["grn_number"]   = _grn_number_from_draft(grn.draft_number, category)
             incoming["draft_number"] = grn.draft_number
-            incoming["status"] = "Verified"
+            incoming["status"]       = "Verified"
+ 
+            # Edit-audit fields should not be touched during verification
+            incoming.pop("edited_by",     None)
+            incoming.pop("edited_date",   None)
+            incoming.pop("edited_reason", None)
+ 
         else:
-            incoming["grn_number"] = ""
+            # ── Draft → Draft (edit): require edited_reason ──────────────────
+            edited_reason = str(incoming.get("edited_reason", "")).strip()
+            if not edited_reason:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "edited_reason is required when updating a Draft GRN",
+                    },
+                    status=400,
+                )
+ 
+            incoming["edited_reason"] = edited_reason
+            incoming["edited_by"]     = employee_id
+            incoming["edited_date"]   = timezone.now()
+ 
+            incoming["grn_number"]   = ""
             incoming["draft_number"] = grn.draft_number
-            incoming["status"] = "Draft"
-
-        # Immutable fields
-        for field in (
-            "created_by",
-            "created_date",
-            "hospital_code",
-            "branch_code",
-        ):
+            incoming["status"]       = "Draft"
+ 
+        # Immutable fields — never allow overwrite
+        for field in ("created_by", "created_date", "hospital_code", "branch_code"):
             incoming.pop(field, None)
-
-        incoming["lastmodified_by"] = employee_id
+ 
+        incoming["lastmodified_by"]   = employee_id
         incoming["lastmodified_date"] = timezone.now()
-
+ 
         serializer = GRNSerializer(grn, data=incoming, partial=True)
-
+ 
         if not serializer.is_valid():
             logger.error("GRN PUT errors: %s", serializer.errors)
-            return Response(serializer.errors, status=400)
-
+            return Response({"success": False, "error": serializer.errors}, status=400)
+ 
         saved = serializer.save()
-
-        # ───────── Auto-create PharmacyStock on Verification ─────────
+ 
+        # ── Auto-create PharmacyStock on Verification ─────────────────────────
         if going_verified:
-
+ 
             DEPT_CODE_MAP = {
-                "OP PHARMACY": "OLET002",
-                "IP PHARMACY": "OLET001",
-                "DRUG PURCHASE": ""
+                "OP PHARMACY":   "OLET002",
+                "IP PHARMACY":   "OLET001",
+                "DRUG PURCHASE": "",
             }
-
-            outlet_code = DEPT_CODE_MAP.get(
-                saved.purchase_category,
-                "OP PHARMACY"
-            )
-
+ 
+            outlet_code     = DEPT_CODE_MAP.get(saved.purchase_category, "OLET002")
             assigned_grn_no = saved.grn_number
-
+ 
             try:
                 items = json.loads(saved.items or "[]")
-            except:
+            except Exception:
                 items = []
-
+ 
             for it in items:
                 expiry_date = None
-                expiry_raw = it.get("expiry", "")
-
+                expiry_raw  = it.get("expiry", "")
+ 
                 if expiry_raw:
                     parts = expiry_raw.split("/")
                     if len(parts) == 2:
                         try:
                             expiry_date = datetime.strptime(
-                                f"01/{parts[0]}/{parts[1]}",
-                                "%d/%m/%Y"
+                                f"01/{parts[0]}/{parts[1]}", "%d/%m/%Y"
                             ).date()
-                        except:
+                        except Exception:
                             expiry_date = None
-
+ 
                 cgst_pct = float(it.get("selling_cgst_percent", 0) or 0)
                 sgst_pct = float(it.get("selling_sgst_percent", 0) or 0)
-
+ 
                 PharmacyStock.objects.create(
-                    hospital_code=hospital_code,
-                    branch_code=branch_code,
-                    outlet_code=outlet_code,
-                    item_id=int(it.get("item_id") or 0),
-                    batch_number=str(it.get("batch") or ""),
-                    expiry_date=expiry_date,
-                    mrp=float(it.get("mrp") or 0),
-                    grn_number=assigned_grn_no,
-                    total_stock=int(it.get("quantity") or 0),
-                    sold_quantity=0,
-                    transferred_out_quantity=0,
-                    stock_type="grn",
-                    stock_ref_id=0,
-                    grn_return_quantity=0,
-                    blocked_quantity=0,
-                    sales_return_quantity=0,
-                    CGST_Percentage=cgst_pct,
-                    SGST_Percentage=sgst_pct,
-                    CGST_Amt=float(it.get("selling_cgst_amt", 0) or 0),
-                    SGST_Amt=float(it.get("selling_sgst_amt", 0) or 0),
-                    Selling_Price=float(it.get("selling_price", 0) or 0),
-                    created_by=employee_id,
-                    created_date=timezone.now(),
+                    hospital_code            = hospital_code,
+                    branch_code              = branch_code,
+                    outlet_code              = outlet_code,
+                    item_id                  = int(it.get("item_id") or 0),
+                    batch_number             = str(it.get("batch") or ""),
+                    expiry_date              = expiry_date,
+                    mrp                      = float(it.get("mrp") or 0),
+                    grn_number               = assigned_grn_no,
+                    total_stock              = int(it.get("quantity") or 0),
+                    sold_quantity            = 0,
+                    transferred_out_quantity = 0,
+                    stock_type               = "grn",
+                    stock_ref_id             = 0,
+                    grn_return_quantity      = 0,
+                    blocked_quantity         = 0,
+                    sales_return_quantity    = 0,
+                    CGST_Percentage          = cgst_pct,
+                    SGST_Percentage          = sgst_pct,
+                    CGST_Amt                 = float(it.get("selling_cgst_amt", 0) or 0),
+                    SGST_Amt                 = float(it.get("selling_sgst_amt", 0) or 0),
+                    Selling_Price            = float(it.get("selling_price", 0) or 0),
+                    created_by               = employee_id,
+                    created_date             = timezone.now(),
                 )
-        return Response(GRNSerializer(saved).data)
+ 
+        return Response({"success": True, "data": GRNSerializer(saved).data})
     
 
 @api_view(["GET"])

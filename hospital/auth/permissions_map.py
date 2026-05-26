@@ -86,6 +86,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
 
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POL',
+
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
