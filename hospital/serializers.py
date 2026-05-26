@@ -84,10 +84,11 @@ class GRNSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import PurchaseRequisition
-class PurchaseRequisitionSerializer(serializers.ModelSerializer):
+from .models import MedicineRequisition
+class MedicineRequisitionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
     class Meta:
-        model  = PurchaseRequisition
+        model = MedicineRequisition
         fields = "__all__"
 
 

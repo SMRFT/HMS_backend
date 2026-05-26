@@ -490,20 +490,18 @@ class GRN(AuditModel):
     def __str__(self):
         return f"{self.grn_number or self.draft_number} ({self.vendor_id})"
 
-class PurchaseRequisition(AuditModel):
+class MedicineRequisition(AuditModel):
       STATUS_CHOICES = [
           ("Draft",    "Draft"),
-          ("Verified", "Verified"),
           ("Approved", "Approved"),
           ("Rejected", "Rejected"),
       ]
 
-      pr_number           = models.CharField(max_length=30, unique=True)
+      mr_number           = models.CharField(max_length=30, primary_key=True)
       medicine_name       = models.CharField(max_length=255)
       chemical_composition= models.TextField(blank=True, default="")
       consultant_name     = models.CharField(max_length=255, blank=True, default="")
       request_date        = models.DateTimeField()
-      quantity            = models.PositiveIntegerField(default=1)
       remarks             = models.TextField(blank=True, default="")
       status              = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Draft")
 
