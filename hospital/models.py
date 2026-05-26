@@ -830,7 +830,10 @@ class InsuranceProvider(AuditModel):
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
     slot_DateTime = models.DateTimeField()
+    patientIn_DateTime = models.DateTimeField(null=True, blank=True)
+    scan_started_DateTime = models.DateTimeField(null=True, blank=True)
     investBillNo = models.CharField(max_length=50, blank=True)
+    uhid = models.TextField()    
     billTypeNo = models.TextField()    
     itemName = models.TextField()
     item_id = models.IntegerField()
@@ -841,10 +844,41 @@ class RadiologyReport(AuditModel):
     is_active = models.BooleanField(default=True)   # ✅ add this
     has_report = models.BooleanField(default=False)   # ✅ add this
     type = models.TextField()    
+    is_Dispatched = models.BooleanField(default=False)
+    dispatch_DateTime = models.DateTimeField(null=True, blank=True)
+    dispatched_by = models.CharField(max_length=100, blank=True)
 
 
     def __str__(self):
         return f"Radiology Report - {self.investBillNo} ({self.uhid})"
+    
+class JRDReport(AuditModel):
+    """
+    Stores the JRD (Form-F) register data captured from the ANC Register UI.
+    One record per ANC report line — linked via investBillNo + item_id.
+ 
+    jrd_id  → sequential business key (1, 2, 3 …) scoped per hospital+branch.
+              Generated once on creation and never changed.
+    """
+    jrd_id       = models.IntegerField(db_index=True)           # sequential business key
+    hospital_code = models.CharField(max_length=50, blank=True)
+    branch_code   = models.CharField(max_length=50, blank=True)
+ 
+    investBillNo = models.CharField(max_length=50, db_index=True)
+    item_id      = models.IntegerField(db_index=True)
+    form_no      = models.CharField(max_length=100, blank=True)  # S. No of Form -F
+    mtp_advice   = models.CharField(max_length=500, blank=True)  # MTP Advice if Any
+    is_active    = models.BooleanField(default=True)
+ 
+    class Meta:
+        unique_together = [
+            ('investBillNo', 'item_id'),                          # one record per ANC scan
+            ('hospital_code', 'branch_code', 'jrd_id'),          # jrd_id unique per branch
+        ]
+        ordering = ['jrd_id']
+ 
+    def __str__(self):
+        return f"JRD-{self.jrd_id} [{self.investBillNo} / item {self.item_id}]"
 
 
 class Summary(AuditModel):
@@ -877,6 +911,9 @@ class EstimateBilling(AuditModel):
     EstBillNo = models.CharField(max_length=50, blank=True)
     EstBillDate = models.DateTimeField() 
     uhid = models.CharField(max_length=50)
+    age = models.CharField(max_length=50)
+    age_type = models.CharField(max_length=50)
+    roomNo = models.CharField(max_length=50)
     ipNumber = models.CharField(max_length=50,blank=True)
     bill_type       = models.CharField(max_length=100, blank=True, null=True)  # collection / category key
     billTypeNo      = models.CharField(max_length=50, blank=True, null=True)

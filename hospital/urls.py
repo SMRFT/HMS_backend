@@ -16,6 +16,7 @@ from .Views import (
     pharmacy,
     cashcounter,
     radiology,
+    jrdReport,
     room,
     pharmacynotification,
     NursingStation,
@@ -201,12 +202,23 @@ urlpatterns = [
     #Radiology Reports :
     path('investigations/', radiology.get_investigations, name='get_investigations'),
     path('scan-reports/', radiology.create_scan_report, name='create_scan_report'),  
+    path('hard-bill-types/', radiology.get_hard_bill_types, name='get_hard_bill_types'),  
     re_path(r'^scan-reports/slot/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.update_slot_datetime, name='update_slot_datetime'),   
     re_path(r'^scan-reports/approve/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.approve_scan_report, name='approve_scan_report'),
     re_path(r'^scan-reports/delete/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.soft_delete_scan_report, name='soft_delete_scan_report'),
     re_path(r'^scan-reports/edit/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.edit_scan_report_impression, name='edit_scan_report_impression'),
+    re_path(r'^scan-reports/checkin/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.patient_checkin, name='patient_checkin'),
+    re_path(r'^scan-reports/scan-started/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.scan_started, name='scan_started'),
+    re_path(r'^scan-reports/dispatch/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.dispatch_report, name='dispatch_report'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
-    path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),   
+    path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),  
+
+    #JRD Reports : 
+    path('anc-register/', jrdReport.get_anc_register,  name='get_anc_register'),
+    path('jrd-reports/', jrdReport.list_jrd_reports,  name='jrd_list'),
+    path('jrd-reports/create/',jrdReport.create_jrd_report, name='jrd_create'),
+    re_path(r'^jrd-reports/update/(?P<jrd_id>\d+)/$',jrdReport.update_jrd_report, name='update_jrd_report'),
+    re_path(r'^jrd-reports/delete/(?P<jrd_id>\d+)/$',jrdReport.delete_jrd_report, name='delete_jrd_report'),
     
     #Summary:
     path('summaries/', summary.get_summaries, name='get_summaries'),
