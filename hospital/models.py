@@ -323,16 +323,18 @@ class PharmacyItem(AuditModel):
         return f"{self.item_id} {self.item_name}"
     
 class StockTransfer(AuditModel):
-    transfer_ref_number = models.CharField(max_length=30,unique=True)
+    transfer_ref_number = models.CharField(max_length=30, unique=True)
     to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
+    remarks = models.TextField(blank=False, default="")          # NEW — mandatory
+    approved_by = models.CharField(max_length=100, blank=True, default="")   # NEW
+    approved_date = models.DateTimeField(null=True, blank=True)              # NEW
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
-        ("Rejected", "Rejected")
+        ("Rejected", "Rejected"),
     ]
-    is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
-
+    is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
     
 # Correctly using djongo models below
 from django.utils import timezone
@@ -386,7 +388,6 @@ class PharmacyBilling(AuditModel):
 
         
 class PharmacyStock(AuditModel):
-
     stock_id = models.IntegerField(primary_key=True)
     item_id = models.IntegerField()
     batch_number = models.CharField(max_length=50)
@@ -407,12 +408,10 @@ class PharmacyStock(AuditModel):
     stock_ref_id = models.IntegerField(default=0)
 
     grn_return_quantity = models.IntegerField(default=0)
-    grn_return_ref_id = models.IntegerField(null=True, blank=True)
 
     blocked_quantity = models.IntegerField(default=0)
 
     sales_return_quantity = models.IntegerField(default=0)
-    sales_return_ref_id = models.IntegerField(null=True, blank=True)
 
     CGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     SGST_Percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -469,6 +468,9 @@ class GRN(AuditModel):
     payment_status      = models.TextField(default="[]")
     remarks             = models.TextField(blank=True, default="")
     status              = models.CharField(max_length=50, default="Draft")
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+    edited_reason = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
@@ -487,6 +489,78 @@ class GRN(AuditModel):
 
     def __str__(self):
         return f"{self.grn_number or self.draft_number} ({self.vendor_id})"
+
+class PurchaseRequisition(AuditModel):
+      STATUS_CHOICES = [
+          ("Draft",    "Draft"),
+          ("Verified", "Verified"),
+          ("Approved", "Approved"),
+          ("Rejected", "Rejected"),
+      ]
+
+      pr_number           = models.CharField(max_length=30, unique=True)
+      medicine_name       = models.CharField(max_length=255)
+      chemical_composition= models.TextField(blank=True, default="")
+      consultant_name     = models.CharField(max_length=255, blank=True, default="")
+      request_date        = models.DateTimeField()
+      quantity            = models.PositiveIntegerField(default=1)
+      remarks             = models.TextField(blank=True, default="")
+      status              = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Draft")
+
+      # Approval
+      approved_by         = models.CharField(max_length=100, blank=True, default="")
+      approved_date       = models.DateTimeField(null=True, blank=True)
+
+      # Rejection
+      rejected_by         = models.CharField(max_length=100, blank=True, default="")
+      rejected_reason     = models.TextField(blank=True, default="")
+      rejected_date       = models.DateTimeField(null=True, blank=True)
+
+      # Edit audit
+      edited_by           = models.CharField(max_length=100, blank=True, default="")
+      edited_reason       = models.TextField(blank=True, default="")
+      edited_date         = models.DateTimeField(null=True, blank=True)
+
+      def __str__(self):
+          return f"{self.pr_number} — {self.medicine_name}"
+      
+class PurchaseOrder(AuditModel):
+
+    STATUS_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Verified", "Verified"),
+        ("Rejected", "Rejected"),
+    ]
+ 
+    po_number     = models.CharField(max_length=30, primary_key=True)
+ 
+    # Vendor
+    vendor_id     = models.IntegerField()
+ 
+    # Medicine items — stored as JSON text
+    items = models.JSONField(default=list, blank=True)
+ 
+    # Workflow
+    status        = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="Draft"
+    )
+ 
+    # Approval
+    approved_by   = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
+ 
+    # Rejection
+    rejected_by     = models.CharField(max_length=100, blank=True, default="")
+    rejected_reason = models.TextField(blank=True, default="")
+    rejected_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # Edit audit
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_reason = models.TextField(blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+ 
+    def __str__(self):
+        return self.po_number
 
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)
@@ -756,7 +830,10 @@ class InsuranceProvider(AuditModel):
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
     slot_DateTime = models.DateTimeField()
+    patientIn_DateTime = models.DateTimeField(null=True, blank=True)
+    scan_started_DateTime = models.DateTimeField(null=True, blank=True)
     investBillNo = models.CharField(max_length=50, blank=True)
+    uhid = models.TextField()    
     billTypeNo = models.TextField()    
     itemName = models.TextField()
     item_id = models.IntegerField()
@@ -767,10 +844,41 @@ class RadiologyReport(AuditModel):
     is_active = models.BooleanField(default=True)   # ✅ add this
     has_report = models.BooleanField(default=False)   # ✅ add this
     type = models.TextField()    
+    is_Dispatched = models.BooleanField(default=False)
+    dispatch_DateTime = models.DateTimeField(null=True, blank=True)
+    dispatched_by = models.CharField(max_length=100, blank=True)
 
 
     def __str__(self):
         return f"Radiology Report - {self.investBillNo} ({self.uhid})"
+    
+class JRDReport(AuditModel):
+    """
+    Stores the JRD (Form-F) register data captured from the ANC Register UI.
+    One record per ANC report line — linked via investBillNo + item_id.
+ 
+    jrd_id  → sequential business key (1, 2, 3 …) scoped per hospital+branch.
+              Generated once on creation and never changed.
+    """
+    jrd_id       = models.IntegerField(db_index=True)           # sequential business key
+    hospital_code = models.CharField(max_length=50, blank=True)
+    branch_code   = models.CharField(max_length=50, blank=True)
+ 
+    investBillNo = models.CharField(max_length=50, db_index=True)
+    item_id      = models.IntegerField(db_index=True)
+    form_no      = models.CharField(max_length=100, blank=True)  # S. No of Form -F
+    mtp_advice   = models.CharField(max_length=500, blank=True)  # MTP Advice if Any
+    is_active    = models.BooleanField(default=True)
+ 
+    class Meta:
+        unique_together = [
+            ('investBillNo', 'item_id'),                          # one record per ANC scan
+            ('hospital_code', 'branch_code', 'jrd_id'),          # jrd_id unique per branch
+        ]
+        ordering = ['jrd_id']
+ 
+    def __str__(self):
+        return f"JRD-{self.jrd_id} [{self.investBillNo} / item {self.item_id}]"
 
 
 class Summary(AuditModel):
@@ -803,6 +911,9 @@ class EstimateBilling(AuditModel):
     EstBillNo = models.CharField(max_length=50, blank=True)
     EstBillDate = models.DateTimeField() 
     uhid = models.CharField(max_length=50)
+    age = models.CharField(max_length=50)
+    age_type = models.CharField(max_length=50)
+    roomNo = models.CharField(max_length=50)
     ipNumber = models.CharField(max_length=50,blank=True)
     bill_type       = models.CharField(max_length=100, blank=True, null=True)  # collection / category key
     billTypeNo      = models.CharField(max_length=50, blank=True, null=True)

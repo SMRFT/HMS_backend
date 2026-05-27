@@ -530,6 +530,13 @@ def stock_transfer_view(request, pk=None):
                 {"success": False, "error": "At least one item is required"},
                 status=400,
             )
+        
+        remarks = str(data.get("remarks", "")).strip()
+        if not remarks:
+            return Response(
+                {"success": False, "error": "Remarks are required"},
+                status=400,
+            )
 
         from_outlet = str(data.get("from_outlet") or "").strip()
         to_outlet   = str(data.get("to_outlet")   or "").strip()
@@ -613,11 +620,12 @@ def stock_transfer_view(request, pk=None):
             return Response({"success": False, "error": errors}, status=400)
 
         transfer_payload = {
-            "outlet_code":         from_outlet,   # "" = Drug Purchase
+            "outlet_code":         from_outlet,
             "to_outlet":           to_outlet,
             "transfer_ref_number": _next_transfer_ref_number(),
             "items":               processed_items,
             "is_verified":         "Draft",
+            "remarks":             remarks,          # ← NEW
             "hospital_code":       hospital_code,
             "branch_code":         branch_code,
         }
@@ -851,6 +859,8 @@ def stock_transfer_action_view(request):
 
         StockTransfer.objects.filter(transfer_ref_number=pk).update(
             is_verified       = "Approved",
+            approved_by       = user_id,            # ← NEW
+            approved_date     = timezone.now(),     # ← NEW
             lastmodified_by   = user_id,
             lastmodified_date = timezone.now(),
         )
@@ -877,8 +887,18 @@ def stock_transfer_action_view(request):
         if current_status == "Rejected":
             return Response({"success": False, "error": "Transfer is already Cancelled"}, status=400)
 
+        rejected_reason = str(request_data.get("rejected_reason", "")).strip()
+        if not rejected_reason:
+            return Response(
+                {"success": False, "error": "Rejection reason is required"},
+                status=400,
+            )
+
         StockTransfer.objects.filter(transfer_ref_number=pk).update(
             is_verified       = "Rejected",
+            rejected_by       = user_id,            # ← NEW
+            rejected_date     = timezone.now(),     # ← NEW
+            rejected_reason   = rejected_reason,    # ← NEW
             lastmodified_by   = user_id,
             lastmodified_date = timezone.now(),
         )
