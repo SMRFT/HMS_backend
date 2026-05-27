@@ -33,6 +33,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
+from .Views.Reports import roomoccupencyreport
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -270,6 +271,8 @@ urlpatterns = [
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
     path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
+    path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
+    path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),

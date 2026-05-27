@@ -9,6 +9,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/update-registration-visit/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/referred-patients-report/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
+    r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
 
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
 
@@ -332,6 +334,9 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/[^/]+/?(\?.*)?$' : 'HMS-P-ICD',
         r'^/_b_a_c_k_e_n_d/HMS/patient-admission-details/?(\?.*)?$' : 'HMS-P-ICD',
 
+        r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$' : 'HMS-P-ROR',
+        r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$' : 'HMS-P-ROR',
+        
 }
 
 

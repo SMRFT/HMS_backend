@@ -6,6 +6,7 @@ import os
 from pymongo import MongoClient
 from ...models import Patient, PharmacyBilling, Cashcountershiftdetails
 from pyauth.auth import HasRoleAndDataPermission
+from .accounting_reports import fetch_detailed_billing_data
 
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
@@ -23,8 +24,18 @@ def shift_basis_accounts_report(request):
         shiftno_filter = data.get("shiftno")
 
         # AUTH CODES
-        hospital_code = data.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code")
+        hospital_code = (
+            data.get("auth-hospital-code") or 
+            request.META.get("HTTP_AUTH_HOSPITAL_CODE") or 
+            request.META.get("HTTP_HOSPITAL_CODE") or 
+            (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+        )
+        branch_code = (
+            data.get("auth-branch-code") or 
+            request.META.get("HTTP_AUTH_BRANCH_CODE") or 
+            request.META.get("HTTP_BRANCH_CODE") or 
+            (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+        )
 
         # 2. Date normalization
         if not from_date_str:
@@ -39,76 +50,42 @@ def shift_basis_accounts_report(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
         
-        # Helper to convert MongoDB decimal/date
-        def clean_val(v):
-            from bson import Decimal128
-            if v is None: return ""
-            if isinstance(v, Decimal128): return float(v.to_decimal())
-            if isinstance(v, datetime): return v.isoformat()
-            return v
-
-        def clean_amt(v):
-            from bson import Decimal128
-            if v is None: return 0.0
-            if isinstance(v, Decimal128): return float(v.to_decimal())
-            try: return float(v)
-            except: return 0.0
-
-        report_data = []
-        
-        # Query Builder for Mongo
-        # We search by created_date or specific bill date depending on collection
+        # Query Builder for Cash Counter Collection
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
         if outlet_code_filter and outlet_code_filter != "all":
             mongo_query["outlet_code"] = outlet_code_filter
         if shiftno_filter:
-            mongo_query["shiftno"] = shiftno_filter
+            mongo_query["shift_no"] = shiftno_filter
 
-        # COLLECTIONS TO SCAN
-        # format: (collection_name, date_field, type_label, id_field, amt_field, status_query, uhid_field)
-        scans = [
-            ("hospital_billing", "created_date", "Registration", "bill_number", "total_fees", {"payment_status": "Paid"}, "uhid"),
-            ("hospital_investbilling", "investBillDate", "Investigation", "investBillNo", "finalPrice", {"paymentStatus": "Paid"}, "uhid"),
-            ("hospital_pharmacybilling", "bill_date", "Pharmacy", "bill_no", "net_amount", {"billing_status": "Paid"}, "uhid"),
-            ("hospital_dischargebilling", "bill_date", "Discharge", "bill_no", "net_amount", {"status": "Paid"}, "uhid"),
-            ("hospital_receiptandpayment", "created_date", "Receipt", "voucher_no", "amount", {"receipt_type": "Receipt"}, None),
-            ("hospital_receiptandpayment", "created_date", "Payment", "voucher_no", "amount", {"receipt_type": "Payment"}, None),
-        ]
+        # Date filter only if shift_no is NOT provided
+        if not shiftno_filter:
+            mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
-        for col_name, date_f, label, id_f, amt_f, status_q, uhid_f in scans:
-            q = mongo_query.copy()
-            q.update(status_q)
-            
-            # Date filter only if shiftno is NOT provided (if shiftno is provided, we want all items in that shift regardless of date)
-            if not shiftno_filter:
-                q[date_f] = {"$gte": from_date, "$lte": to_date}
-            
-            docs = list(db[col_name].find(q))
-            for d in docs:
-                amt = clean_amt(d.get(amt_f, 0))
-                # For payments, we treat as negative for net total
-                display_amt = -amt if label == "Payment" else amt
+        ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
+        
+        # Enrich the records
+        enriched_data = fetch_detailed_billing_data(db, ccc_docs)
+        
+        # Map type representations to match shift basis report expectations
+        report_data = []
+        for r in enriched_data:
+            mapped_type = r["type"]
+            if mapped_type in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"]:
+                r["type"] = "Pharmacy"
+            elif mapped_type in ["Investigation", "InvestigationBills"]:
+                r["type"] = "Investigation"
+            elif mapped_type in ["Billing", "Registration", "RegistrationBills"]:
+                r["type"] = "Registration"
+            elif mapped_type in ["Discharge", "DischargeBills"]:
+                r["type"] = "Discharge"
+            elif mapped_type in ["IPAdvance", "IPAdvanceBills"]:
+                r["type"] = "IPAdvance"
+            elif mapped_type in ["Sales Return", "sales_return"]:
+                r["type"] = "Sales Return"
                 
-                # Extract items if they exist
-                items = d.get("items") or d.get("item") or []
-                
-                report_data.append({
-                    "type": label,
-                    "bill_no": d.get(id_f),
-                    "bill_date": clean_val(d.get(date_f)),
-                    "uhid": d.get(uhid_f) if uhid_f else "",
-                    "patient_name": "", # Will fill later
-                    "net_amount": amt,
-                    "display_amount": display_amt,
-                    "payment_mode": d.get("payment_mode") or d.get("paymentMethod") or d.get("payment_method") or "Cash",
-                    "outlet_code": d.get("outlet_code"),
-                    "shiftno": d.get("shiftno"),
-                    "cashier_id": d.get("cashier_id") or d.get("created_by") or d.get("CashierID"),
-                    "status": "Paid",
-                    "items": clean_val(items) # Sanitize items list
-                })
+            report_data.append(r)
 
         # 4. Fetch Patient Names
         uhids = list(set([r["uhid"] for r in report_data if r["uhid"]]))
