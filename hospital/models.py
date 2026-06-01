@@ -346,8 +346,8 @@ class PharmacyBilling(AuditModel):
     billing_mode = models.CharField(max_length=20)
     payment_details = models.JSONField(null=True, blank=True)
     Esimated_id=models.CharField(max_length=150)
-    Edit_reason = models.TextField(null=True, blank=True)
-    Edited_by =models.CharField(max_length=150)
+    edit_reason = models.TextField(null=True, blank=True)
+    edited_by = models.CharField(max_length=150)
     is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
     deleted_by =models.CharField(max_length=150)
@@ -999,6 +999,7 @@ class Cashcountershiftdetails(AuditModel):
     closingTime    = models.DateTimeField(null=True, blank=True)
     date         = models.DateField(auto_now_add=True)
     collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -1220,11 +1221,24 @@ class SalesReturn(AuditModel):
     return_bill_date = models.DateTimeField(auto_now_add=True)
     bill_no = models.CharField(max_length=200)
     uhid = models.CharField(max_length=20)
-    return_amount= models.CharField(max_length=200)
+    return_amount = models.CharField(max_length=200)
     medicine_particulars = models.JSONField()
     pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
-    cashier_id = models.CharField(max_length=500, blank=True, null=True)
-    shiftno = models.CharField(max_length=100, blank=True, null=True)
+    PaymentType= models.CharField(max_length=500, blank=True, null=True)
+   
+
+    # ✅ ADD THIS
+    status = models.CharField(
+        max_length=100,
+        default="Pending",
+        blank=True,
+        null=True
+    )
+
+    bill_type = models.IntegerField(
+        null=True,
+        blank=True
+    )
 
     def save(self, *args, **kwargs):
         # 1. Standard Django Save
@@ -1249,7 +1263,13 @@ class SalesReturn(AuditModel):
 
             db["hospital_salesreturn"].update_one(
                 {"return_bill_no": self.return_bill_no},
-                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+                {
+                    "$set": {
+                        "medicine_particulars": meds if isinstance(meds, list) else [],
+                        "status": self.status  ,
+                        "bill_type": self.bill_type,  
+                    }
+                }
             )
 
             client.close()
@@ -1279,3 +1299,234 @@ class DietExtraMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - {self.price}"
+    
+
+
+
+
+class CashCounterCollection(AuditModel):
+
+    collection_id = models.AutoField(primary_key=True)
+
+    Bill_id = models.IntegerField(
+        null=True,
+        blank=True
+    )
+
+    bill_no = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    return_bill_no= models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    bill_type = models.IntegerField(
+        null=True,
+        blank=True
+    )
+
+    counter_code = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True
+    )
+
+    # ✅ CHANGED TO CHARFIELD
+    shift_no = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    billing_category = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    bill_number = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    transaction_type = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    collected_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00
+    )
+
+    Returned_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        null=True,
+        blank=True
+    )
+
+    RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0,null=True,blank=True)
+    
+    HandOverAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0,null=True,blank=True)
+
+    remarks = models.TextField(
+        null=True,
+        blank=True
+    )
+
+    def __str__(self):
+        return f"{self.bill_number} - {self.collected_amount}"
+    
+
+
+
+
+
+import json
+import os
+from pymongo import MongoClient
+from django.db import models
+
+
+class DialysisDischargeSummary(AuditModel):
+
+    # Patient Details
+    name = models.CharField(max_length=255)
+    age = models.PositiveIntegerField()
+    gender = models.CharField(max_length=100)
+
+    uhid = models.CharField(max_length=100, unique=True)
+    consultant = models.CharField(max_length=255)
+    id_no = models.CharField(max_length=100)
+
+    address = models.TextField()
+    diagnosis = models.TextField()
+
+    blood_investigations = models.JSONField(default=list, blank=True)
+
+    hd_sessions = models.JSONField(default=list, blank=True)
+
+    complications_during_hd = models.JSONField(
+        default=list,
+        blank=True
+    )
+
+    condition_on_discharge = models.TextField()
+
+    advice_on_discharge = models.JSONField(
+        default=list,
+        blank=True
+    )
+
+    next_hd_session_on = models.DateField()
+
+    def save(self, *args, **kwargs):
+
+        # ==========================================
+        # NORMAL DJANGO SAVE
+        # ==========================================
+
+        super().save(*args, **kwargs)
+
+        # ==========================================
+        # FORCE BSON ARRAY SAVE
+        # ==========================================
+
+        try:
+
+            client = MongoClient(
+                os.getenv("GLOBAL_DB_HOST")
+            )
+
+            db = client["HMS"]
+
+            # --------------------------------------
+            # BLOOD INVESTIGATIONS
+            # --------------------------------------
+
+            blood = self.blood_investigations
+
+            if isinstance(blood, str):
+
+                try:
+                    blood = json.loads(blood)
+                except:
+                    blood = []
+
+            # --------------------------------------
+            # HD SESSIONS
+            # --------------------------------------
+
+            hd = self.hd_sessions
+
+            if isinstance(hd, str):
+
+                try:
+                    hd = json.loads(hd)
+                except:
+                    hd = []
+
+            # --------------------------------------
+            # COMPLICATIONS
+            # --------------------------------------
+
+            complications = self.complications_during_hd
+
+            if isinstance(complications, str):
+
+                try:
+                    complications = json.loads(complications)
+                except:
+                    complications = []
+
+            # --------------------------------------
+            # ADVICE
+            # --------------------------------------
+
+            advice = self.advice_on_discharge
+
+            if isinstance(advice, str):
+
+                try:
+                    advice = json.loads(advice)
+                except:
+                    advice = []
+
+            # ==========================================
+            # UPDATE BSON ARRAYS
+            # ==========================================
+
+            db["hospital_dialysisdischargesummary"].update_one(
+                {
+                    "uhid": self.uhid
+                },
+                {
+                    "$set": {
+                        "blood_investigations": blood,
+                        "hd_sessions": hd,
+                        "complications_during_hd": complications,
+                        "advice_on_discharge": advice,
+                    }
+                }
+            )
+
+            client.close()
+
+        except Exception as e:
+
+            print(
+                f"DialysisDischargeSummary pymongo update failed: {e}"
+            )
+
+    def __str__(self):
+        return f"{self.name} - {self.uhid}"

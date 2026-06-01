@@ -494,15 +494,16 @@ def admission_view(request):
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
     outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
-    print("*****************",employee_id,hospital_code,branch_code,outlet_code)
+    print("*****************", employee_id, hospital_code, branch_code, outlet_code)
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
         try:
-            from_date_str = request.GET.get('from_date', '').strip()
-            to_date_str   = request.GET.get('to_date',   '').strip()
-            status_filter = request.GET.get('status',    '').strip()
+            from_date_str = request.GET.get('from_date',        '').strip()
+            to_date_str   = request.GET.get('to_date',          '').strip()
+            status_filter = request.GET.get('status',           '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
+            ip_filter     = request.GET.get('ip_number',        '').strip()  # ← NEW
 
             from_date = to_date = None
             if from_date_str:
@@ -518,11 +519,29 @@ def admission_view(request):
                 branch_code=branch_code,
                 outlet_code=outlet_code
             ):
+                # ── IP Number filter ─────────────────────────────────────────
+                # Full IP typed  (contains "/") → exact match:  "S026/500008" == ipNumber
+                # Suffix typed   (no "/")       → suffix match: "500008" in "S026/500008"
+                if ip_filter:
+                    ip = (adm.ipNumber or "").strip()
+                    if "/" in ip_filter:
+                        # Full IP: must match exactly (case-insensitive)
+                        if ip.lower() != ip_filter.lower():
+                            continue
+                    else:
+                        # Suffix match: "500008" matches "S026/500008", "S027/500008" …
+                        slash_idx = ip.rfind("/")
+                        suffix = ip[slash_idx + 1:] if slash_idx != -1 else ip
+                        if ip_filter.lower() not in suffix.lower():
+                            continue
+
+                # ── Status filter ────────────────────────────────────────────
                 if status_filter == 'Admitted':
                     if not (adm.is_admitted and not adm.is_discharged): continue
                 elif status_filter == 'Discharged':
                     if not adm.is_discharged: continue
 
+                # ── Date filter ──────────────────────────────────────────────
                 if from_date or to_date:
                     adm_date = None
                     if adm.admissionDateTime:
@@ -534,6 +553,7 @@ def admission_view(request):
                     else:
                         continue
 
+                # ── Doctor filter ────────────────────────────────────────────
                 if doctor_filter and doctor_filter.lower() not in (adm.admittingDoctor or '').lower():
                     continue
 
@@ -548,7 +568,6 @@ def admission_view(request):
                     "admissionDateTime":  adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                     "admittingDoctor":    adm.admittingDoctor  or "",
                     "consultingDoctor":   adm.consultingDoctor or "",
-                    # packageName field stores packageNo — return as "packageNo" for frontend resolution
                     "packageNo":          adm.packageName or "",
                     "reasonForAdmission": adm.reasonForAdmission or "",
                     "room_details":       parse_json_field(adm.room_details),
@@ -628,7 +647,6 @@ def admission_view(request):
                 "endDateTime":    None,
             }]
 
-            # Store packageNo value in the packageName field (model has no packageNo column)
             package_no_value = data.get('packageNo') or ""
 
             adm = Admission.objects.create(
@@ -640,7 +658,6 @@ def admission_view(request):
                 outlet_code=outlet_code,
                 admittingDoctor=str(data.get('admittingDoctor') or ""),
                 consultingDoctor=data.get('consultingDoctor'),
-                # packageName field stores packageNo value
                 packageName=str(package_no_value) if package_no_value else "",
                 room_details=room_details,
                 roomShitingDetails=[],
@@ -662,7 +679,6 @@ def admission_view(request):
                 "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                 "admittingDoctor":   adm.admittingDoctor  or "",
                 "consultingDoctor":  adm.consultingDoctor or "",
-                # Return stored packageNo so frontend resolves display name from packages API
                 "packageNo":         adm.packageName or "",
                 "reasonForAdmission": adm.reasonForAdmission or "",
                 "room_details":      parse_json_field(adm.room_details),
@@ -682,7 +698,10 @@ def admission_view(request):
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"success": False, "error": str(e)}, status=500)
+        
 
+        
+        
 
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
