@@ -1,5 +1,3 @@
-
-
 from django.urls import path, re_path
 from . import views
 from .Views import (
@@ -91,15 +89,14 @@ urlpatterns = [
     path("purchase-return/<str:pk>/", purchasereturn.purchase_return_view,     name="purchase-return-detail"),
     path("grn-items/",                purchasereturn.get_grn_items,            name="grn-items"),
 
-    path('medicine-requisition/', medicine_requisition.purchase_requisition_view, name='purchase-requisition-list'),
-    path('medicine-requisition/<str:pk>/', medicine_requisition.purchase_requisition_view, name='medicine-requisition-detail'),
-    path('medicine-requisition/<str:pk>/approve/', medicine_requisition.purchase_requisition_view, name='approve-medicine-requisition'),
-    path('medicine-requisition/<str:pk>/reject/', medicine_requisition.purchase_requisition_view, name='reject-medicine-requisition'),
-    path('medicine-requisition/<str:pk>/edit/', medicine_requisition.purchase_requisition_view, name='edit-medicine-requisition'),
+    path("medicine-requisition/",medicine_requisition.medicine_requisition_view,name="medicine_requisition_list",),
+    path("medicine-requisition/<path:pk>/",medicine_requisition.medicine_requisition_view,name="medicine_requisition_detail",),
+    path("medicine-requisition-action/",medicine_requisition.medicine_requisition_action_view,name="medicine_requisition_action",),
 
     path("purchase-order/",purchase_order.purchase_order_view,name="purchase_order_list"),
     path("purchase-order/<path:pk>/",purchase_order.purchase_order_view,name="purchase_order_detail"),
     path("purchase-order-action/",purchase_order.purchase_order_action_view,name="purchase_order_action"),
+    path("purchase-order-email/",purchase_order.purchase_order_email_view,name="purchase_order_email"),
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 

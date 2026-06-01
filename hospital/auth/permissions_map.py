@@ -91,6 +91,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-POL',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POL',
+
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/?$":       "HMS-P-MR",
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/.+/?$":    "HMS-P-MRL",
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition-action/?$":"HMS-P-MRA",
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
