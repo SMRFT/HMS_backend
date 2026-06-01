@@ -4487,3 +4487,255 @@ def pharmacy_view_bills(request):
         "allowed_bill_type_details": allowed_bill_type_details,
         "data": data
     }, status=status.HTTP_200_OK)
+
+
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def pharmacy_expiry_report(request):
+    try:
+        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
+        
+        # Optional filters
+        outlet_code = request.data.get("outlet_code")
+        start_date_str = request.data.get("start_date")
+        end_date_str = request.data.get("end_date")
+        search_query = request.data.get("search_query")
+        all_time = request.data.get("all_time", False)
+        report_type = request.data.get("report_type", "expiry") # "fast_moving", "not_sold", "stock_transfer", "expiry", "reorder_level"
+        
+        if not hospital_code or not branch_code:
+            return Response({
+                "success": False,
+                "message": "Missing hospital_code / branch_code"
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Match stage for stock query
+        match_stage = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code
+        }
+        if outlet_code:
+            match_stage["outlet_code"] = outlet_code
+            
+        # Apply report_type specific match filters
+        if report_type == "fast_moving":
+            match_stage["sold_quantity"] = {"$gt": 0}
+        elif report_type == "not_sold":
+            match_stage["$or"] = [
+                {"sold_quantity": {"$exists": False}},
+                {"sold_quantity": {"$eq": 0}},
+                {"sold_quantity": None}
+            ]
+            match_stage["total_stock"] = {"$gt": 0}
+        elif report_type == "stock_transfer":
+            match_stage["transferred_out_quantity"] = {"$gt": 0}
+        # reorder_level filter will be applied after $addFields (post-pipeline stage)
+
+        # Parse start & end dates
+        date_filter = {}
+        if start_date_str:
+            try:
+                start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+                date_filter["$gte"] = start_dt
+            except ValueError:
+                pass
+        if end_date_str:
+            try:
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                date_filter["$lte"] = end_dt
+            except ValueError:
+                pass
+                
+        if date_filter:
+            match_stage["expiry_date"] = date_filter
+        elif not all_time and report_type not in ["fast_moving", "not_sold", "stock_transfer"]:
+            match_stage["expiry_date"] = {"$ne": None} # by default exclude nulls
+            
+        pipeline = [
+            # 1. Match stock
+            {"$match": match_stage},
+            
+            # 2. Join with Item details
+            {
+                "$lookup": {
+                    "from": "hospital_pharmacyitem",
+                    "let": {
+                        "item_id": "$item_id",
+                        "branch_code": "$branch_code",
+                        "hospital_code": "$hospital_code"
+                    },
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$item_id", "$$item_id"]},
+                                        {"$eq": ["$branch_code", "$$branch_code"]},
+                                        {"$eq": ["$hospital_code", "$$hospital_code"]}
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "as": "item_details"
+                }
+            },
+            
+            # 3. Unwind item details
+            {
+                "$unwind": {
+                    "path": "$item_details",
+                    "preserveNullAndEmptyArrays": False
+                }
+            },
+            
+            # 4. Filter active/non-blocked items
+            {
+                "$match": {
+                    "item_details.is_blocked": False,
+                    "item_details.is_active": True
+                }
+            },
+            
+            # 5. Stock calculation + reorder_level computation
+            {
+                "$addFields": {
+                    "available_stock": {
+                        "$add": [
+                            {
+                                "$subtract": [
+                                    {
+                                        "$subtract": [
+                                            {
+                                                "$subtract": [
+                                                    {
+                                                        "$subtract": [
+                                                            "$total_stock",
+                                                            {"$ifNull": ["$sold_quantity", 0]}
+                                                        ]
+                                                    },
+                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
+                                                ]
+                                            },
+                                            {"$ifNull": ["$grn_return_quantity", 0]}
+                                        ]
+                                    },
+                                    {"$ifNull": ["$blocked_quantity", 0]}
+                                ]
+                            },
+                            {"$ifNull": ["$sales_return_quantity", 0]}
+                         ]
+                    },
+                    "reorder_level": {
+                        "$ifNull": ["$item_details.reorder_level", 0]
+                    }
+                }
+            },
+            # 5b. Compute is_below_reorder flag
+            {
+                "$addFields": {
+                    "is_below_reorder": {
+                        "$lte": ["$available_stock", "$reorder_level"]
+                    }
+                }
+            }
+        ]
+        
+        # 6. Apply Search Query if present
+        if search_query:
+            pipeline.append({
+                "$match": {
+                    "$or": [
+                        {"item_details.item_name": {"$regex": search_query, "$options": "i"}},
+                        {"batch_number": {"$regex": search_query, "$options": "i"}}
+                    ]
+                }
+            })
+            
+        # 7. Filter reorder_level items AFTER available_stock is computed
+        if report_type == "reorder_level":
+            pipeline.append({
+                "$match": {
+                    "is_below_reorder": True
+                }
+            })
+
+        # 8. Final projection
+        pipeline.append({
+            "$project": {
+                "_id": 0,
+                "stock_id": 1,
+                "item_id": 1,
+                "batch_number": 1,
+                "expiry_date": 1,
+                "mrp": 1,
+                "Selling_Price": 1,
+                "total_stock": 1,
+                "available_stock": 1,
+                "sold_quantity": {"$ifNull": ["$sold_quantity", 0]},
+                "transferred_out_quantity": {"$ifNull": ["$transferred_out_quantity", 0]},
+                "reorder_level": 1,
+                "is_below_reorder": 1,
+                "item_name": "$item_details.item_name",
+                "brand_name": "$item_details.brand_name",
+                "category": "$item_details.category",
+                "hsn": "$item_details.hsn",
+                "outlet_code": 1
+            }
+        })
+        
+        # 9. Sort by relevant field based on report type
+        if report_type == "fast_moving":
+            pipeline.append({
+                "$sort": {"sold_quantity": -1}
+            })
+        elif report_type == "stock_transfer":
+            pipeline.append({
+                "$sort": {"transferred_out_quantity": -1}
+            })
+        elif report_type == "not_sold":
+            pipeline.append({
+                "$sort": {"total_stock": -1}
+            })
+        elif report_type == "reorder_level":
+            # Sort by available_stock ascending — most critical (lowest stock) first
+            pipeline.append({
+                "$sort": {"available_stock": 1}
+            })
+        else:
+            pipeline.append({
+                "$sort": {"expiry_date": 1}
+            })
+        
+        results = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
+        
+        # Convert decimal fields and ObjectId
+        results = convert_decimals(results)
+        
+        # Serialize datetime / date fields properly
+        def serialize_datetime(obj):
+            if isinstance(obj, list):
+                return [serialize_datetime(i) for i in obj]
+            elif isinstance(obj, dict):
+                return {k: serialize_datetime(v) for k, v in obj.items()}
+            elif isinstance(obj, (datetime, date)):
+                return obj.strftime("%Y-%m-%d")
+            return obj
+            
+        results = serialize_datetime(results)
+        
+        return Response({
+            "success": True,
+            "data": results
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({
+            "success": False,
+            "message": f"Internal server error: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

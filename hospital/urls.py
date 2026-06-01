@@ -111,7 +111,7 @@ urlpatterns = [
     path('pharmacy_view_bills/', pharmacy.pharmacy_view_bills, name='pharmacy_view_bills'),
     path('get_estimate_bills/',    pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/',  pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
-    path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+    # path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
@@ -149,7 +149,7 @@ urlpatterns = [
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
 
     # Stock Transfer URLs
-    path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
+    # path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
@@ -366,7 +366,7 @@ urlpatterns = [
     # Insurance Provider URLs
     path('insurance-providers/', insurance_provider.insurance_provider_list_create, name='insurance_provider_list_create'),
     path('insurance-providers/<str:pk>/', insurance_provider.insurance_provider_detail, name='insurance_provider_detail'),
-
+  
     # Stores URLs
     path('item-master/', stores.item_master_list_create, name='item_master_list_create'),
     path('item-master/price-history/<str:item_id>/', stores.item_price_history, name='item_price_history'),
@@ -456,4 +456,5 @@ urlpatterns = [
     path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
     path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
     path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
+    path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
 ]

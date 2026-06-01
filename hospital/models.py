@@ -1668,3 +1668,48 @@ class DialysisDischargeSummary(AuditModel):
 
     def __str__(self):
         return f"{self.name} - {self.uhid}"
+
+
+class Refund(AuditModel):
+    id = models.AutoField(primary_key=True)
+    refund_bill_no = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    refund_date = models.DateTimeField(auto_now_add=True)
+    bill_no = models.CharField(max_length=50) # Original Bill Number
+    uhid = models.CharField(max_length=50)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    bill_type = models.CharField(max_length=50, null=True, blank=True)
+    remarks = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='Pending') # Pending, Approved, etc.
+    
+    # Audit info is inherited from AuditModel (created_by, created_date, etc.)
+
+    def save(self, *args, **kwargs):
+        if not self.refund_bill_no:
+            from django.utils import timezone
+            
+            # Generate refund bill number: YY-YY/000001 (matching user example)
+            now = timezone.now()
+            year = now.year
+            if now.month >= 4:
+                fy = f"{str(year)[2:]}{str(year+1)[2:]}"
+            else:
+                fy = f"{str(year-1)[2:]}{str(year)[2:]}"
+            
+            prefix = f"{fy}/"
+            
+            last_refund = Refund.objects.filter(refund_bill_no__startswith=prefix).order_by('-refund_bill_no').first()
+            if last_refund:
+                try:
+                    last_no = int(last_refund.refund_bill_no.split('/')[-1])
+                    new_no = last_no + 1
+                except (ValueError, IndexError):
+                    new_no = 1
+            else:
+                new_no = 1
+            
+            self.refund_bill_no = f"{prefix}{new_no:06d}"
+            
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.refund_bill_no} - {self.uhid} (₹{self.refund_amount})"
