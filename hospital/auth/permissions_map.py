@@ -5,16 +5,19 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/process-registration-refund/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/update-registration-visit/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/referred-patients-report/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
+    r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
 
-
-
-    
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+
     # ==================== WARD REQUEST ====================
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-WR',
-
 
     # ==================== DIET ====================
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
@@ -27,10 +30,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/update_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
     
-
-    
-
-
     # ==================== ROOMS ====================
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
     r'^/_b_a_c_k_e_n_d/HMS/block/[0-9]+/?(\?.*)?$': 'HMS-P-BLKD',
@@ -80,21 +79,23 @@ PAGE_MAPPING = {
 
     '/_b_a_c_k_e_n_d/HMS/grn/': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-PSH',
 
-    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-GRN',
 
-    # ==================== PHARMACY STOCK ====================
-    r'^/_b_a_c_k_e_n_d/HMS/ip-pharmacy-stock/?(\?.*)?$': 'HMS-P-IPPS',
-    r'^/_b_a_c_k_e_n_d/HMS/ip-pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-IPPSD',
-    r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-stock/?(\?.*)?$': 'HMS-P-OPPS',
-    r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-OPPSD',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-PSG',
+    r'^/_b_a_c_k_e_n_d/HMS/get_active_outlets/?(\?.*)?$': 'HMS-P-OS',
 
-    # ==================== GRN ====================
-    r'^/_b_a_c_k_e_n_d/HMS/ip-grn/?(\?.*)?$': 'HMS-P-IPGRN',
-    r'^/_b_a_c_k_e_n_d/HMS/ip-grn/[^/]+/?(\?.*)?$': 'HMS-P-IPGRND',
-    r'^/_b_a_c_k_e_n_d/HMS/op-grn/?(\?.*)?$': 'HMS-P-OPGRN',
-    r'^/_b_a_c_k_e_n_d/HMS/op-grn/[^/]+/?(\?.*)?$': 'HMS-P-OPGRND',
+    r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
+    '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
 
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POL',
+
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/?$":       "HMS-P-MR",
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/.+/?$":    "HMS-P-MRL",
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition-action/?$":"HMS-P-MRA",
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
@@ -102,7 +103,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
     '^/_b_a_c_k_e_n_d/HMS/dialysis-discharge-summary/': 'HMS-P-DDS',
 
-    # ==================== NURSING ====================
+    # ==================== NURSING ======================
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
@@ -119,16 +120,29 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/estimateBilling/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/get-estimate-billings/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/delete-bill/': 'HMS-P-IB',       
+    '/_b_a_c_k_e_n_d/HMS/invest-refund/': 'HMS-P-IB',       
 
     #Investigation Reports (RD):
     r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-API-RD',                
     '/_b_a_c_k_e_n_d/HMS/scan-reports/': 'HMS-API-RD',                 
+    '/_b_a_c_k_e_n_d/HMS/hard-bill-types/': 'HMS-API-RD',                 
     r'^/_b_a_c_k_e_n_d/HMS/scan_reports/?(\?.*)?$': 'HMS-API-RD',                 
     r'^/_b_a_c_k_e_n_d/HMS/scan_reports(?:/[^/]+)+/$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/slot(?:/[^/]+)+/$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/checkin(?:/[^/]+)+/$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/scan-started(?:/[^/]+)+/$': 'HMS-API-RD',                 
+    r'^/_b_a_c_k_e_n_d/HMS/scan-reports/dispatch(?:/[^/]+)+/$': 'HMS-API-RD',                 
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/approve(?:/[^/]+)+/$': 'HMS-API-RDA',                 
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-API-RDD',  
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
     r'^/_b_a_c_k_e_n_d/HMS/employee-signature/?(\?.*)?$': 'HMS-API-RD',  
+
+     #Investigation Reports (RD):      
+    r'^/_b_a_c_k_e_n_d/HMS/anc-register/?(\?.*)?$': 'HMS-API-JRD',  
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/?(\?.*)?$': 'HMS-API-JRD',  
+    '/_b_a_c_k_e_n_d/HMS/jrd-reports/create/': 'HMS-API-JRD', 
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/update(?:/[^/]+)+/$': 'HMS-P-JRDE',  
+    r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/delete(?:/[^/]+)+/$': 'HMS-P-JRDD',  
 
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
@@ -169,7 +183,9 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/investigation-prices_get/': 'HMS-P-IP',                  
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/create/': 'HMS-P-IP',                        
     r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update(?:/[^/]+)+/$': 'HMS-P-IPE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update_item(?:/[^/]+)+/$': 'HMS-P-IPE',                  
     r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete(?:/[^/]+)+/$': 'HMS-P-IPD',  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete_item(?:/[^/]+)+/$': 'HMS-P-IPD',  
 
     #Report:
     r'^/_b_a_c_k_e_n_d/HMS/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',   
@@ -214,12 +230,26 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/update_surgery_schedule/': 'HMS-P-OTSSU',                
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSSA',                
-    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',                
+    '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
+
+    
+
+                  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
     r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
     r'^/_b_a_c_k_e_n_d/HMS/get_ippharmacy_stock/?(\?.*)?$': 'HMS-P-OTMB',  
-    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',    
+    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',  
+    '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
+    '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
+    '/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/': 'HMS-P-IB',
+    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-OTMBD',    
+                
+
+
+    
+    
+     
 
     #Assets Management:
     '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
@@ -263,12 +293,24 @@ PAGE_MAPPING = {
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
-        '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
+        # '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
+        r'^/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/?(\?.*)?$': 'HMS-P-IB',
         '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
         '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
         '/_b_a_c_k_e_n_d/HMS/cashcounter_pending_bills/': 'HMS-P-CCOPPB',
+        # '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-PGLBU',
+        '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
+        '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
+        '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+        '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
+        '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
+        '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
+        #   '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-PIPA',
+        '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
+        r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
          '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
          '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
@@ -286,11 +328,16 @@ PAGE_MAPPING = {
          '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-POPSRBD',
           '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-CCGSRD',
 
-        # Central cah counter
 
+        '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
+        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
+         '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
+         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCC',
+         '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCC',           
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
-  
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
   
