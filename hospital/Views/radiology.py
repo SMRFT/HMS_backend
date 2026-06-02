@@ -408,7 +408,7 @@ def get_investigations(request):
             report_map[(r.get('investBillNo'), normalized_item_id)] = r
 
         # ── 5. Fetch patients ─────────────────────────────────────────────────
-        uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid')})
+        uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid', '').strip()})
         patient_filter = {'uhid': {'$in': uhid_list}}
         if hospital_code:
             patient_filter['hospital_code'] = hospital_code
@@ -487,13 +487,20 @@ def get_investigations(request):
             if not invest_bill_no:
                 continue
 
-            uhid    = record.get('uhid', '')
-            patient = patient_map.get(uhid, {})
-            gender  = patient.get('gender', '').strip().upper()
+            uhid    = record.get('uhid', '').strip()
+            patient = patient_map.get(uhid, {}) if uhid else {}
 
-            if gender in ('M', 'MALE'):
+            # ── Patient info: prefer patient_cache, fall back to billing doc ──
+            salutation  = patient.get('salutation',  '') or record.get('salutation',  '')
+            first_name  = patient.get('firstName',   '') or record.get('firstName',   '')
+            middle_name = patient.get('middleName',  '') or record.get('middleName',  '')
+            last_name   = patient.get('lastName',    '') or record.get('lastName',    '')
+            gender      = patient.get('gender',      '') or record.get('gender',      '')
+
+            gender_clean = gender.strip().upper()
+            if gender_clean in ('M', 'MALE'):
                 gender_key = 'male'
-            elif gender in ('F', 'FEMALE'):
+            elif gender_clean in ('F', 'FEMALE'):
                 gender_key = 'female'
             else:
                 gender_key = 'male'
@@ -508,11 +515,11 @@ def get_investigations(request):
                 if field in base:
                     base[field] = _to_ist(base[field])
 
-            base['salutation']  = patient.get('salutation',  '')
-            base['firstName']   = patient.get('firstName',   '')
-            base['middleName']  = patient.get('middleName',  '')
-            base['lastName']    = patient.get('lastName',    '')
-            base['gender']      = patient.get('gender',      '')
+            base['salutation']  = salutation
+            base['firstName']   = first_name
+            base['middleName']  = middle_name
+            base['lastName']    = last_name
+            base['gender']      = gender
 
             # ── Doctor name ───────────────────────────────────────────────────
             doc_val = record.get('doctor', '')
