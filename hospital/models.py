@@ -560,6 +560,44 @@ class PurchaseOrder(AuditModel):
     def __str__(self):
         return self.po_number
 
+
+from django.db import models
+
+
+# ── PhysicalStockEntry ────────────────────────────────────────────────────────
+# Stores the physical stock count entered by staff, saved separately from
+# PharmacyStock.  Approval workflow: is_approved=False until a manager approves.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PhysicalStockEntry(models.Model):
+    entry_id        = models.AutoField(primary_key=True)
+
+    # ── Item / batch reference (denormalised for quick reads) ──────────────
+    item_id         = models.IntegerField()
+    item_name       = models.CharField(max_length=255)
+    batch_number    = models.CharField(max_length=100)
+    stock_id        = models.IntegerField(null=True, blank=True)   # FK to PharmacyStock.stock_id
+
+    # ── Stock snapshot at time of entry ───────────────────────────────────
+    computer_stock  = models.IntegerField(default=0)   # calculated at save time
+    physical_stock  = models.IntegerField(default=0)   # manually entered
+    stock_date      = models.DateField()               # date of physical count
+
+    # ── Variance (computed on approval or save) ───────────────────────────
+    variance        = models.IntegerField(default=0)   # physical - computer
+
+    # ── Approval workflow ─────────────────────────────────────────────────
+    is_approved     = models.BooleanField(default=False)
+    approved_by     = models.CharField(max_length=100, null=True, blank=True)
+    approved_date   = models.DateTimeField(null=True, blank=True)
+    approval_notes  = models.TextField(null=True, blank=True)
+
+    # ── Audit ──────────────────────────────────────────────────────────────
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.item_name} | {self.batch_number} | {self.stock_date}"
+
 class NursingStation(AuditModel):
     ward_id = models.IntegerField(primary_key=True)
     ward_name = models.CharField(max_length=100)
