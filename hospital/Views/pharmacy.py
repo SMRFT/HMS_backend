@@ -49,7 +49,7 @@ def convert_decimals(obj):
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
-def get_oppharmacy_stock(request):
+def get_pharmacy_stock(request):
     try:
         # ✅ Get values
         print("test", request.data.get("outlet_code"))
@@ -291,7 +291,10 @@ def get_oppharmacy_stock(request):
                     "rack_no": 1,    
 
                     "CGST_Percentage": 1,
-                    "SGST_Percentage": 1
+                    "SGST_Percentage": 1,
+
+                    "CGST_Amt": 1,
+                    "SGST_Amt": 1
                 }
             }
         ]
@@ -342,6 +345,7 @@ def sanitize_medicines(medicines):
         })
 
     return clean
+
 
 # ----------------------------------------------------------
 # STOCK UPDATE (NO department_code)
@@ -451,15 +455,15 @@ def build_edit_history(old_meds, new_meds, employee_id):
 # ----------------------------------------------------------
 @api_view(["POST", "PATCH"])
 @permission_classes([HasRoleAndDataPermission])
-def save_oppharmacy_bill(request):
+def save_pharmacy_bill(request):
 
     data = request.data
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code") 
-    branch_code = data.get("auth-branch-code") 
-    outlet_code = data.get("auth-outlet-code") 
+    hospital_code = data.get("auth-hospital-code")
+    branch_code   = data.get("auth-branch-code")
+    outlet_code   = data.get("auth-outlet-code")
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -476,23 +480,30 @@ def save_oppharmacy_bill(request):
     Bill_id = data.get("Bill_id")
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
-    print("sanitize_medicines",(data.get("medicine_particulars", [])))
+
+    # --------------------------------------------------
+    # FIX 1 — uhid is NOT mandatory; store None if missing
+    # --------------------------------------------------
+    uhid = data.get("uhid") or None   # blank string → None (allowed)
 
     # --------------------------------------------------
     # COMMON FIELDS
     # --------------------------------------------------
     fields = {
-        "uhid": data.get("uhid"),
-        "inpatient_number": data.get("inpatient_number"),
-        "bill_type": data.get("bill_type"),
-        "doctor_id": data.get("doctor_id"),
-        "room_no": data.get("room_no"),
-        "total_amount": float(data.get("total_amount", 0)),
-        "overall_discount_type": data.get("overall_discount_type"),
-        "overall_discount_value": float(data.get("overall_discount_value", 0)),
-        "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
-        "net_amount": float(data.get("net_amount", 0)),
-        "shiftno": data.get("shiftno"),
+        # FIX 1: uhid is optional — stored as-is (None if not provided)
+        "uhid":                     uhid,
+        "inpatient_number":         data.get("inpatient_number"),
+        "bill_type":                data.get("bill_type"),
+        "doctor_id":                data.get("doctor_id"),
+        # FIX 3: age stored as integer; also returned in every response
+        "age":                      int(data.get("age", 0) or 0),
+        "room_no":                  data.get("room_no"),
+        "total_amount":             float(data.get("total_amount", 0)),
+        "overall_discount_type":    data.get("overall_discount_type"),
+        "overall_discount_value":   float(data.get("overall_discount_value", 0)),
+        "overall_discount_amount":  float(data.get("overall_discount_amount", 0)),
+        "net_amount":               float(data.get("net_amount", 0)),
+        "shiftno":                  data.get("shiftno"),
     }
 
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -533,15 +544,15 @@ def save_oppharmacy_bill(request):
 
         update_data = {**fields}
         update_data["medicine_particulars"] = updated_meds
-        update_data["lastmodified_by"] = employee_id
-        update_data["lastmodified_date"] = datetime.utcnow()
-        update_data["edit_reason"] = data.get("edit_reason", "")
-        update_data["edited_by"] = employee_id
+        update_data["lastmodified_by"]      = employee_id
+        update_data["lastmodified_date"]    = datetime.utcnow()
+        update_data["edit_reason"]          = data.get("edit_reason", "")
+        update_data["edited_by"]            = employee_id
 
         # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
             update_data["billing_status"] = "Estimate"
-            update_data["billing_mode"] = "ESTIMATE"
+            update_data["billing_mode"]   = "ESTIMATE"
 
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
@@ -549,21 +560,23 @@ def save_oppharmacy_bill(request):
                 update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
 
             update_data["billing_status"] = "Billed"
-            update_data["billing_mode"] = "ESTIMATE"
-            update_data["bill_date"] = datetime.utcnow()
+            update_data["billing_mode"]   = "ESTIMATE"
+            update_data["bill_date"]      = datetime.utcnow()
 
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
             {"$set": update_data}
         )
 
+        # FIX 3: return bill_no + age immediately in PATCH response
         return Response({
-            "success": True,
-            "Bill_id": record.Bill_id,
-            "bill_no": update_data.get("bill_no"),
+            "success":     True,
+            "Bill_id":     record.Bill_id,
+            "bill_no":     update_data.get("bill_no") or record.bill_no,
             "estimate_no": record.estimate_no,
+            "age":         update_data.get("age", record.age or 0),   # ✅ FIX 3
             "edit_reason": update_data.get("edit_reason"),
-            "edited_by": update_data.get("edited_by")
+            "edited_by":   update_data.get("edited_by"),
         })
 
     # ======================================================
@@ -575,15 +588,15 @@ def save_oppharmacy_bill(request):
         next_Bill_id = (last.Bill_id + 1) if last else 1
 
         record_doc = {
-            "Bill_id": next_Bill_id,
+            "Bill_id":              next_Bill_id,
             "medicine_particulars": medicines,
-            "billing_status": status,
-            "created_by": employee_id,
-            "created_date": datetime.utcnow(),
-            "bill_date": datetime.utcnow(),
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code,
+            "billing_status":       status,
+            "created_by":           employee_id,
+            "created_date":         datetime.utcnow(),
+            "bill_date":            datetime.utcnow(),
+            "hospital_code":        hospital_code,
+            "branch_code":          branch_code,
+            "outlet_code":          outlet_code,
             **fields
         }
 
@@ -592,8 +605,8 @@ def save_oppharmacy_bill(request):
             bill_no = get_last_oppharmacy_billno(get_financial_year())
 
             record_doc.update({
-                "bill_no": bill_no,
-                "estimate_no": None,
+                "bill_no":      bill_no,
+                "estimate_no":  None,
                 "billing_mode": "DIRECT",
             })
 
@@ -607,10 +620,12 @@ def save_oppharmacy_bill(request):
                 outlet_code
             )
 
+            # FIX 3: return bill_no + age immediately
             return Response({
                 "success": True,
                 "bill_no": bill_no,
-                "Bill_id": next_Bill_id
+                "Bill_id": next_Bill_id,
+                "age":     record_doc.get("age", 0),   # ✅ FIX 3
             })
 
         # 🔥 ESTIMATE
@@ -618,8 +633,8 @@ def save_oppharmacy_bill(request):
             estimate_no = generate_estimate_no()
 
             record_doc.update({
-                "bill_no": None,
-                "estimate_no": estimate_no,
+                "bill_no":      None,
+                "estimate_no":  estimate_no,
                 "billing_mode": "ESTIMATE",
             })
 
@@ -633,13 +648,17 @@ def save_oppharmacy_bill(request):
                 outlet_code
             )
 
+            # FIX 3: return estimate_no + age immediately
             return Response({
-                "success": True,
+                "success":     True,
                 "estimate_no": estimate_no,
-                "Bill_id": next_Bill_id
+                "Bill_id":     next_Bill_id,
+                "age":         record_doc.get("age", 0),   # ✅ FIX 3
             })
 
     return Response({"success": False, "error": "Invalid request"})
+
+
 
 
 @api_view(["GET"])
@@ -1677,7 +1696,7 @@ from ..models import PharmacyBilling, PharmacyStock
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
-def oppharmacy_deletebill(request):
+def pharmacy_deletebill(request):
     try:
         data = request.data
         employee_id = data.get("auth-user-id") 

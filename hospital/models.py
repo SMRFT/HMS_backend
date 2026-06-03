@@ -319,7 +319,7 @@ class StockTransfer(AuditModel):
     is_verified = models.CharField(max_length=20,choices=IS_VERIFIED_CHOICES,default="Draft")
 
     
-# Correctly using djongo models below
+
 from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
@@ -328,8 +328,9 @@ class PharmacyBilling(AuditModel):
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
-    uhid = models.CharField(max_length=50)
+    uhid = models.CharField(max_length=5,blank=True, null=True)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    age = models.IntegerField(blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
