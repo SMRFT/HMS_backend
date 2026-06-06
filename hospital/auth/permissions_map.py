@@ -281,10 +281,10 @@ PAGE_MAPPING = {
           '/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/': 'HMS-P-PHVSB',
 
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
-         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-POPSR',
-         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-PSRBD',
-         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-POPSRBD',
-          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-CCGSRD',
+         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-SRGPD',
+         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-SRBD',
+         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-OPSRBD',
+          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-OPGSRD',
 
         # Central cah counter
 
