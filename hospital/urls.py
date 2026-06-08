@@ -39,6 +39,8 @@ from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
 from .Views.Reports import roomoccupencyreport
+from .Views.Complaints import complaints
+
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -445,6 +447,7 @@ urlpatterns = [
     path('discharge-bills-report/', accounting_reports.discharge_bills_report, name='discharge_bills_report'),
     path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
+    path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
 
     # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
     # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
@@ -457,4 +460,11 @@ urlpatterns = [
     path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
     path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
+
+    # Complaints & Tickets
+    path('complaints/', complaints.complaint_list_create, name='complaint_list_create'),
+    path('complaints/departments/', complaints.complaints_departments, name='complaints_departments'),
+    path('complaints/admin/', complaints.complaints_admin_list, name='complaints_admin_list_legacy'),
+    path('complaints/admin-list/', complaints.complaints_admin_list, name='complaints_admin_list'),
+    path('complaints/<path:pk>/', complaints.complaint_detail, name='complaint_detail'),
 ]
