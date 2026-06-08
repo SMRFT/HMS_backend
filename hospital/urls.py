@@ -27,7 +27,8 @@ from .Views import (
     purchasereturn,
     purchase_order,
     front_office_reports,
-    registration_updates
+    registration_updates,
+    physicalstockentry
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -97,6 +98,36 @@ urlpatterns = [
     path("purchase-order/<path:pk>/",purchase_order.purchase_order_view,name="purchase_order_detail"),
     path("purchase-order-action/",purchase_order.purchase_order_action_view,name="purchase_order_action"),
     path("purchase-order-email/",purchase_order.purchase_order_email_view,name="purchase_order_email"),
+
+    path(
+        "pharmacy-stock-batches/",
+        physicalstockentry.pharmacy_stock_batches_view,
+        name="pharmacy-stock-batches",
+    ),
+ 
+    # Physical stock entry CRUD
+    path(
+        "physical-stock-entry/",
+        physicalstockentry.physical_stock_entry_view,
+        name="physical-stock-entry-list",
+    ),
+    path(
+        "physical-stock-entry/<int:pk>/",
+        physicalstockentry.physical_stock_entry_view,
+        name="physical-stock-entry-detail",
+    ),
+ 
+    # Approval
+    path(
+        "physical-stock-approval/",
+        physicalstockentry.physical_stock_approval_view,
+        name="physical-stock-approval-list",
+    ),
+    path(
+        "physical-stock-approval/<int:pk>/",
+        physicalstockentry.physical_stock_approval_view,
+        name="physical-stock-approval-detail",
+    ),
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 

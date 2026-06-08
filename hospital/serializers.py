@@ -92,6 +92,14 @@ class MedicineRequisitionSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+from .models import PhysicalStockEntry
+class PhysicalStockEntrySerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = PhysicalStockEntry
+        fields = "__all__"
+
+
 from .models import PurchaseOrder
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
