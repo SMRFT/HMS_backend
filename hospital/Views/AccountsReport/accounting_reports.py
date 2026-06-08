@@ -630,3 +630,169 @@ def advance_registration_report(request):
         print("Advance Registration Error:", str(e))
         print(traceback.format_exc())
         return Response({"success": False, "message": str(e)}, status=500)
+
+@api_view(["POST", "GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def bill_cancel_report(request):
+    try:
+        # Connect MongoDB
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        
+        # 1. Fetch cancelled discharge billing where is_cancelled = True or status = "Cancelled"
+        discharge_query = {
+            "$or": [
+                {"is_cancelled": True},
+                {"status": "Cancelled"}
+            ]
+        }
+        discharge_bills = list(db["hospital_dischargebilling"].find(discharge_query))
+        
+        # 2. Fetch admissions containing cancelled advance payments or cancelled admission itself
+        admission_query = {
+            "$or": [
+                {"is_cancelled": True},
+                {"status": "Cancelled"},
+                {"advance_payments.status": "Cancelled"},
+                {"advance_payments.is_cancelled": True}
+            ]
+        }
+        admissions = list(db["hospital_admission"].find(admission_query))
+        
+        # 3. Gather all unique UHIDs
+        uhids = []
+        for b in discharge_bills:
+            uhid = b.get("uhid")
+            if uhid: uhids.append(uhid)
+        for a in admissions:
+            uhid = a.get("uhid")
+            if uhid: uhids.append(uhid)
+            
+        uhids = list(set(uhids))
+        
+        # 4. Resolve patients info in bulk
+        patient_map = {}
+        if uhids:
+            patients = list(db["hospital_patient"].find({"uhid": {"$in": uhids}}))
+            for p in patients:
+                patient_map[p["uhid"]] = p
+                
+        # 5. Build results
+        results = []
+        
+        # A. Discharge Billing
+        for b in discharge_bills:
+            uhid = b.get("uhid")
+            p = patient_map.get(uhid, {})
+            
+            bill_date = b.get("bill_date") or b.get("created_date")
+            cancelled_date = b.get("lastmodified_date") or bill_date
+            
+            results.append({
+                "bill_no": b.get("bill_no") or b.get("estimate_number") or f"DCH-{b.get('discharge_id')}",
+                "uhid": uhid,
+                "patient_name": f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or "Unknown",
+                "age": p.get("age"),
+                "gender": p.get("gender"),
+                "bill_type": "Discharge Bill",
+                "bill_date": _format_dt(bill_date),
+                "cancelled_date": _format_dt(cancelled_date),
+                "net_amount": _to_float(b.get("net_amount") or b.get("total_amount")),
+                "created_by": b.get("created_by") or "",
+                "cancelled_by": b.get("lastmodified_by") or b.get("created_by") or "",
+                "remarks": b.get("remarks") or b.get("disc_reason") or "",
+                "status": "Cancelled"
+            })
+            
+        # B. IP Advance / Admission from Admission
+        for adm in admissions:
+            uhid = adm.get("uhid")
+            p = patient_map.get(uhid, {})
+            
+            # 1. Check if the admission document itself is cancelled
+            if adm.get("is_cancelled") == True:
+                bill_date = adm.get("admissionDateTime") or adm.get("created_date")
+                cancelled_date = adm.get("lastmodified_date") or bill_date
+                
+                results.append({
+                    "bill_no": adm.get("ipNumber") or "N/A",
+                    "uhid": uhid,
+                    "patient_name": f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or "Unknown",
+                    "age": p.get("age"),
+                    "gender": p.get("gender"),
+                    "bill_type": "IP Admission",
+                    "bill_date": _format_dt(bill_date),
+                    "cancelled_date": _format_dt(cancelled_date),
+                    "net_amount": 0.0,
+                    "created_by": adm.get("created_by") or "",
+                    "cancelled_by": adm.get("lastmodified_by") or adm.get("created_by") or "",
+                    "remarks": adm.get("mlc_remarks") or adm.get("remarks") or "Admission Cancelled",
+                    "status": "Cancelled"
+                })
+            
+            # 2. Check individual advance payments inside the admission document
+            adv_payments = adm.get("advance_payments") or []
+            if isinstance(adv_payments, str):
+                try: adv_payments = _json.loads(adv_payments)
+                except: adv_payments = []
+                
+            for pay in adv_payments:
+                if not isinstance(pay, dict):
+                    continue
+                    
+                is_cancelled_pay = (pay.get("status") == "Cancelled" or pay.get("is_cancelled") == True)
+                if is_cancelled_pay:
+                    bill_date = pay.get("bill_date") or pay.get("created_date") or pay.get("date")
+                    cancelled_date = pay.get("cancelled_date") or pay.get("lastmodified_date") or bill_date
+                    
+                    results.append({
+                        "bill_no": pay.get("bill_no") or pay.get("advance_id") or "N/A",
+                        "uhid": uhid,
+                        "patient_name": f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or "Unknown",
+                        "age": p.get("age"),
+                        "gender": p.get("gender"),
+                        "bill_type": "IP Advance",
+                        "bill_date": _format_dt(bill_date),
+                        "cancelled_date": _format_dt(cancelled_date),
+                        "net_amount": _to_float(pay.get("advance_amount") or pay.get("amount")),
+                        "created_by": pay.get("created_by") or adm.get("created_by") or "",
+                        "cancelled_by": pay.get("cancelled_by") or pay.get("lastmodified_by") or "",
+                        "remarks": pay.get("remarks") or pay.get("disc_reason") or "",
+                        "status": "Cancelled"
+                    })
+                    
+        client.close()
+        
+        # 6. Apply Date Filtering
+        params = request.data if request.method == "POST" else request.GET
+        from_date = params.get("from_date")
+        to_date = params.get("to_date")
+        
+        filtered_results = []
+        if from_date or to_date:
+            f_dt = _parse_date(from_date) if from_date else None
+            t_dt = _parse_date(to_date) if to_date else None
+            
+            for r in results:
+                c_date_str = r.get("cancelled_date") or r.get("bill_date")
+                c_date = _parse_date(c_date_str)
+                if c_date:
+                    if f_dt and c_date < f_dt:
+                        continue
+                    if t_dt and c_date > t_dt:
+                        continue
+                filtered_results.append(r)
+        else:
+            filtered_results = results
+            
+        # Sort by cancelled_date desc
+        filtered_results.sort(key=lambda x: x["cancelled_date"] or x["bill_date"] or "", reverse=True)
+        
+        return Response({"success": True, "data": filtered_results})
+        
+    except Exception as e:
+        import traceback
+        print("Bill Cancel Report Error:", str(e))
+        print(traceback.format_exc())
+        return Response({"success": False, "message": str(e)}, status=500)
+

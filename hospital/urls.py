@@ -28,7 +28,8 @@ from .Views import (
     purchase_order,
     front_office_reports,
     registration_updates,
-    laundry
+    laundry,
+    physicalstockentry
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -40,6 +41,9 @@ from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
 from .Views.Reports import roomoccupencyreport, marketing_reports
+from .Views.Reports import roomoccupencyreport
+from .Views.Complaints import complaints
+
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -98,6 +102,36 @@ urlpatterns = [
     path("purchase-order/<path:pk>/",purchase_order.purchase_order_view,name="purchase_order_detail"),
     path("purchase-order-action/",purchase_order.purchase_order_action_view,name="purchase_order_action"),
     path("purchase-order-email/",purchase_order.purchase_order_email_view,name="purchase_order_email"),
+
+    path(
+        "pharmacy-stock-batches/",
+        physicalstockentry.pharmacy_stock_batches_view,
+        name="pharmacy-stock-batches",
+    ),
+ 
+    # Physical stock entry CRUD
+    path(
+        "physical-stock-entry/",
+        physicalstockentry.physical_stock_entry_view,
+        name="physical-stock-entry-list",
+    ),
+    path(
+        "physical-stock-entry/<int:pk>/",
+        physicalstockentry.physical_stock_entry_view,
+        name="physical-stock-entry-detail",
+    ),
+ 
+    # Approval
+    path(
+        "physical-stock-approval/",
+        physicalstockentry.physical_stock_approval_view,
+        name="physical-stock-approval-list",
+    ),
+    path(
+        "physical-stock-approval/<int:pk>/",
+        physicalstockentry.physical_stock_approval_view,
+        name="physical-stock-approval-detail",
+    ),
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
@@ -457,6 +491,7 @@ urlpatterns = [
     path('discharge-bills-report/', accounting_reports.discharge_bills_report, name='discharge_bills_report'),
     path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
+    path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
 
     # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
     # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
@@ -469,4 +504,11 @@ urlpatterns = [
     path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
     path('patient-admission-details/', insurance.get_patient_admission_details, name='patient_admission_details'),
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
+
+    # Complaints & Tickets
+    path('complaints/', complaints.complaint_list_create, name='complaint_list_create'),
+    path('complaints/departments/', complaints.complaints_departments, name='complaints_departments'),
+    path('complaints/admin/', complaints.complaints_admin_list, name='complaints_admin_list_legacy'),
+    path('complaints/admin-list/', complaints.complaints_admin_list, name='complaints_admin_list'),
+    path('complaints/<path:pk>/', complaints.complaint_detail, name='complaint_detail'),
 ]
