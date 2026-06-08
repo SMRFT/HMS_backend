@@ -129,21 +129,25 @@ def get_admission_list(request):
             # ROOM DETAILS MAPPING
             # -----------------------------
             room_no = item.get("roomNo")
+            bed_no = item.get("bedNo")
 
             # --- Room/Bed Fallback Logic (Manual Mongo Fetch) ---
-            if not room_no or not item.get("bedNo"):
-                # Fetching raw document for native arrays
-                raw_admission = mongo_db.hospital_admission.find_one({"ipNumber": item.get("ipNumber")})
-                if raw_admission:
-                    for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
-                        shifting = raw_admission.get(field, [])
-                        if shifting and isinstance(shifting, list):
-                            active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
-                            if active_shift:
-                                item["roomNo"] = active_shift.get("roomNo", "")
-                                item["bedNo"] = active_shift.get("bedNo", "")
-                                room_no = item["roomNo"]
-                                break
+            # Always check for active room in the arrays to get the latest room
+            raw_admission = mongo_db.hospital_admission.find_one({"ipNumber": item.get("ipNumber")})
+            if raw_admission:
+                active_found = False
+                for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                    shifting = raw_admission.get(field, [])
+                    if shifting and isinstance(shifting, list):
+                        active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                        if active_shift:
+                            item["roomNo"] = active_shift.get("newRoomNo", active_shift.get("roomNo", ""))
+                            item["bedNo"] = active_shift.get("newBedNo", active_shift.get("bedNo", ""))
+                            room_no = item["roomNo"]
+                            active_found = True
+                            break
+                if not active_found and (not room_no or not bed_no):
+                    pass # Fallback to existing roomNo if no active room found in arrays
             
             print("Final Room number for lookup:", room_no)
 
@@ -265,13 +269,13 @@ def get_location_mapping(request):
     try:
         rooms = list(mongo_db["hospital_room"].find(
             {"is_active": True},
-            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1, "beds": 1, "capacity": 1}
         ))
         
         # Pre-fetch ID mappings to avoid repeated lookups
-        blocks_map = {b["block_name"]: str(b["block_id"]) for b in mongo_db["hospital_block"].find({}, {"block_name": 1, "block_id": 1})}
-        cats_map = {c["category_name"]: str(c["room_category_id"]) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1})}
-        wards_map = {w["ward_name"]: str(w["_id"]) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1})}
+        blocks_map = {b.get("block_name"): str(b.get("block_id")) for b in mongo_db["hospital_block"].find({}, {"block_name": 1, "block_id": 1}) if b.get("block_name")}
+        cats_map = {c.get("category_name"): str(c.get("room_category_id")) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1}) if c.get("category_name")}
+        wards_map = {w.get("ward_name"): str(w.get("_id")) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1}) if w.get("ward_name")}
 
         enriched = []
         for r in rooms:
@@ -281,12 +285,16 @@ def get_location_mapping(request):
             
             enriched.append({
                 "room_no": r.get("room_number"),
+                "room_number": r.get("room_number"),
                 "block": b_name,
                 "block_id": blocks_map.get(b_name),
                 "category": c_name,
+                "room_category": c_name,
                 "room_category_id": cats_map.get(c_name),
                 "nursing_station": s_name,
-                "nursing_station_id": wards_map.get(s_name)
+                "nursing_station_id": wards_map.get(s_name),
+                "beds": r.get("beds", []),
+                "capacity": r.get("capacity", 0)
             })
             
         return Response({"success": True, "data": enriched})
@@ -1326,3 +1334,32 @@ def remove_individual_test_from_radiology_ward_request(request):
     except Exception as e:
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+def update_admission_status(request):
+    try:
+        ip_number = request.data.get("ip_number") or request.data.get("ipNumber")
+        ward_status = request.data.get("status")
+
+        if not ip_number or not ward_status:
+            return Response({"error": "ip_number and status are required"}, status=400)
+
+        # Map to specific logical statuses if needed, e.g., Sent for billing -> is_billed = True?
+        update_fields = {"ward_status": ward_status}
+        
+        if ward_status == "Sent for billing":
+            update_fields["billing_status"] = "Pending"
+            update_fields["is_billed"] = False # Optional, based on existing logic
+            
+        result = mongo_db["hospital_admission"].update_one(
+            {"ipNumber": ip_number},
+            {"$set": update_fields}
+        )
+
+        if result.matched_count == 0:
+            return Response({"error": "Admission record not found"}, status=404)
+
+        return Response({"success": True, "message": "Status updated successfully"})
+    except Exception as e:
+        print(f"Error updating admission status: {e}")
+        return Response({"error": str(e)}, status=500)
