@@ -1713,3 +1713,60 @@ class Refund(AuditModel):
 
     def __str__(self):
         return f"{self.refund_bill_no} - {self.uhid} (₹{self.refund_amount})"
+
+
+class LaundryWardRequest(AuditModel):
+    id = models.IntegerField(primary_key=True)
+    STATUS_CHOICES = [
+        ("Pending", "Pending"),
+        ("Processing", "Processing"),
+        ("Completed", "Completed"),
+        ("Cancelled", "Cancelled"),
+    ]
+    REQUEST_TYPE_CHOICES = [
+        ("Normal", "Normal"),
+        ("Urgent", "Urgent"),
+    ]
+
+    patient_name = models.CharField(max_length=200, null=True, blank=True)
+    uhid = models.CharField(max_length=50)
+    ipNumber = models.CharField(max_length=50, null=True, blank=True)
+    wardName = models.CharField(max_length=100, null=True, blank=True)
+    roomNo = models.CharField(max_length=50, null=True, blank=True)
+    bedNo = models.CharField(max_length=50, null=True, blank=True)
+    
+    # Store laundry items (e.g., {"Bedsheets": 2, "Towels": 1})
+    items = models.JSONField(default=list)
+    
+    request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default="Normal")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
+    remarks = models.TextField(null=True, blank=True)
+    
+    requested_by = models.CharField(max_length=100, null=True, blank=True)
+    requested_date = models.DateTimeField(default=timezone.now)
+
+    def save(self, *args, **kwargs):
+        if self.id is None:
+            last = LaundryWardRequest.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last and last.id else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Laundry Request - {self.uhid} - {self.status}"
+
+
+class LaundryItemMaster(AuditModel):
+    id = models.IntegerField(primary_key=True)
+    item_name = models.CharField(max_length=200, unique=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.id is None:
+            last = LaundryItemMaster.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last and last.id else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.item_name} - ₹{self.price}"
+

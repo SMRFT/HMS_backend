@@ -27,7 +27,8 @@ from .Views import (
     purchasereturn,
     purchase_order,
     front_office_reports,
-    registration_updates
+    registration_updates,
+    laundry
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -38,7 +39,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport
+from .Views.Reports import roomoccupencyreport, marketing_reports
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
     # Admission URLs
@@ -274,6 +275,7 @@ urlpatterns = [
     path('doctor_schedule_upsert/<str:employee_id>/', doctormaster.doctor_schedule_upsert, name='doctor_schedule_upsert'),
 
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
+    path("update_admission_status/", NursingStation.update_admission_status, name="update_admission_status"),
     path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
     path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
@@ -324,6 +326,7 @@ urlpatterns = [
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
+    path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
 
     #Velavan Items:    
     path('velavan_items/list/', velavan.list_items, name='list_items'),
@@ -437,6 +440,15 @@ urlpatterns = [
     path("save_diet_extra_master/", DietOrder.save_diet_extra_master, name="save_diet_extra_master"),
     path("add_extra_to_order/", DietOrder.add_extra_to_order, name="add_extra_to_order"),
     path("update_diet_order_extras/", DietOrder.update_diet_order_extras, name="update_diet_order_extras"),
+
+    # Laundry Ward Request
+    path("save_laundry_request/", laundry.save_laundry_request, name="save_laundry_request"),
+    path("get_laundry_requests/", laundry.get_laundry_requests, name="get_laundry_requests"),
+    path("update_laundry_status/", laundry.update_laundry_status, name="update_laundry_status"),
+    path("get_all_laundry_requests/", laundry.get_all_laundry_requests, name="get_all_laundry_requests"),
+    path("save_laundry_item_master/", laundry.save_laundry_item_master, name="save_laundry_item_master"),
+    path("get_laundry_items_master/", laundry.get_laundry_items_master, name="get_laundry_items_master"),
+    path("delete_laundry_item_master/", laundry.delete_laundry_item_master, name="delete_laundry_item_master"),
 
     # Accounts Report URLs
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),

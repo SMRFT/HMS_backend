@@ -29,6 +29,15 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/save_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/update_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
+
+    # ==================== LAUNDRY ====================
+    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_request/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_requests/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/update_laundry_status/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/get_all_laundry_requests/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_items_master/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_item_master/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/delete_laundry_item_master/?(\?.*)?$': 'HMS-P-LND',
     
     # ==================== ROOMS ====================
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
