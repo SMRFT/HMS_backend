@@ -347,10 +347,21 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCMBPB',
         '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
          
-        '/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/' : 'HMS-P-CCC',
-        '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
-        '/_b_a_c_k_e_n_d/HMS/get_return_bills/' : 'HMS-P-CCGRB',
-        '/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/' :'HMS-P-CCCRB',
+        r'^/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/bill_wise_report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/bill-cancel-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/discharge-bills-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/advance-registration-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/get_return_bills/?(\?.*)?$': 'HMS-P-CCGRB',
+        r'^/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/?(\?.*)?$': 'HMS-P-CCCRB',
+
+        # // -----------------------------Helpdesk Module-----------------------------
+        '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/admin/?(\\?.*)?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/admin-list/?(\\?.*)?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTIA',
+        
              
 }
 
