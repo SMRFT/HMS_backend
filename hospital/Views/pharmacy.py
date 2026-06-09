@@ -506,6 +506,10 @@ def save_pharmacy_bill(request):
         "shiftno":                  data.get("shiftno"),
     }
 
+    # ✅ Save patient_name ONLY when uhid is not provided
+    if not uhid:
+        fields["patient_name"] = data.get("patient_name")
+
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
     db = client["HMS"]
     bill_collection = db["hospital_pharmacybilling"]
