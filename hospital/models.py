@@ -326,17 +326,40 @@ class StockTransfer(AuditModel):
     transfer_ref_number = models.CharField(max_length=30, unique=True)
     to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
-    remarks = models.TextField(blank=False, default="")          # NEW — mandatory
-    approved_by = models.CharField(max_length=100, blank=True, default="")   # NEW
-    approved_date = models.DateTimeField(null=True, blank=True)              # NEW
+    remarks = models.TextField(blank=False, default="")
+    approved_by = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
         ("Rejected", "Rejected"),
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
+
+class PurchaseReturn(AuditModel):
+    purchase_return_bill_no   = models.CharField(max_length=30, unique=True)
+    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
+    grn_number                = models.CharField(max_length=50)
+    vendor_code               = models.CharField(max_length=50, blank=True, default="")
+    vendor_name               = models.CharField(max_length=255, blank=True, default="")
+    outlet_code               = models.CharField(max_length=50, blank=True, default="")
+    # items stores: item_id, item_name, stock_id, batch_number,
+    #               return_qty, price, cause_of_return
+    items                     = models.JSONField(default=list)
+    purchase_return_amount    = models.CharField(max_length=50, default="0.00")
+    # Charge breakdowns (stored as strings to avoid float precision issues)
+    gst_amount                = models.CharField(max_length=30, default="0.00")
+    cgst_amount               = models.CharField(max_length=30, default="0.00")
+    sgst_amount               = models.CharField(max_length=30, default="0.00")
+    other_amount              = models.CharField(max_length=30, default="0.00")
+    round_amount              = models.CharField(max_length=30, default="0.00")
+    return_remark             = models.TextField(blank=True, default="")
+    status                    = models.CharField(max_length=50, default="Returned")
+ 
+    def __str__(self):
+        return f"{self.purchase_return_bill_no} — {self.grn_number}"
     
-# Correctly using djongo models below
+    
 from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
@@ -442,7 +465,7 @@ class GRN(AuditModel):
     CATEGORY_PREFIX = {
         "MEDICINE_PURCHASE":    "OP",
         "MEDICINE_PURCHASE_IP": "IP",
-        "OPENING_STOCK_DRUG":   "OSD",
+        "OPENING_STOCK_DRUG":   "DP",
     }
 
     draft_number        = models.CharField(max_length=50, primary_key=True)
