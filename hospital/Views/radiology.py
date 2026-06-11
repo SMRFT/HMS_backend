@@ -459,11 +459,6 @@ def get_investigations(request):
                     except (ValueError, TypeError):
                         pass
 
-        report_fetus_map = {}
-        for (bill_no, iid), rpt in report_map.items():
-            fetus_val = rpt.get('valuedetails', {}).get('fetus', '') if rpt else ''
-            report_fetus_map[(bill_no, iid)] = fetus_val
-
         format_map = {}
         if all_item_ids:
             format_docs = radiology_format_collection.find(
@@ -481,8 +476,7 @@ def get_investigations(request):
                 fid = fdoc.get('item_id')
                 if fid is not None:
                     try:
-                        key = (int(fid), fdoc.get('fetus', ''))
-                        format_map[key] = fdoc
+                        format_map[int(fid)] = fdoc
                     except (ValueError, TypeError):
                         pass
 
@@ -554,9 +548,7 @@ def get_investigations(request):
                 row['report']    = report
                 row['hasReport'] = report.get('has_report', False) if report else False
 
-                saved_fetus = report_fetus_map.get((invest_bill_no, item_id), '') if report else ''
-                fmt_doc = format_map.get((item_id, saved_fetus)) or format_map.get((item_id, ''))
-
+                fmt_doc = format_map.get(item_id)
                 if fmt_doc:
                     fmt_base = {
                         k: v for k, v in fmt_doc.items()
@@ -635,13 +627,11 @@ def create_scan_report(request):
                 })
 
         anc_fields = data.get('anc_fields', None)
-        fetus = data.get('fetus', '')
 
         valuedetails = {
             "device_id":    data.get('device_id', []),
             "value":        value_list,
             **({"anc_fields": anc_fields} if anc_fields else {}),
-            **({"fetus": fetus} if fetus else {}), 
         }
 
         impression    = data.get('impression', '')
@@ -976,17 +966,28 @@ def soft_delete_scan_report(request, investBillNo, item_id):
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
 def get_radiology_format(request):
+    """
+    GET /scan-reports/format/
+    Query params:
+        - billTypeNo  (required)
+        - test_id     (required)
+        - gender      (required: 'Male' or 'Female')
+    Returns gender-specific fields + common fields from hospital_radiology_formats.
+    """
+
     bill_type_no = request.GET.get('billTypeNo')
     test_id      = request.GET.get('test_id')
     gender       = request.GET.get('gender', '').strip().lower()
-    fetus        = request.GET.get('fetus', '').strip()   # NEW: optional
 
     if not bill_type_no:
         return JsonResponse({'error': 'billTypeNo is required'}, status=400)
     if not test_id:
         return JsonResponse({'error': 'test_id is required'}, status=400)
     if gender not in ('male', 'female'):
-        return JsonResponse({'error': "gender must be 'Male' or 'Female'"}, status=400)
+        return JsonResponse(
+            {'error': "gender must be 'Male' or 'Female'"},
+            status=400
+        )
 
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db     = client['HMS']
@@ -998,53 +999,50 @@ def get_radiology_format(request):
         except (ValueError, TypeError):
             test_id_query = test_id
 
-        query = {
-            'billTypeNo': bill_type_no,
-            'item_id':    test_id_query,
-            'is_active':  True,
-        }
+        doc = collection.find_one(
+            {
+                'billTypeNo': bill_type_no,
+                'item_id':    test_id_query,
+                'is_active':  True,
+            },
+            {'_id': 0}
+        )
 
-        # If fetus is specified, filter directly
-        if fetus:
-            query['fetus'] = fetus
-
-        docs = list(collection.find(query, {'_id': 0}))
-
-        if not docs:
+        if not doc:
             return JsonResponse(
                 {'error': 'No active format found for given billTypeNo and test_id'},
                 status=404
             )
 
-        # Multiple docs found and no fetus param — ask frontend to choose
-        if len(docs) > 1 and not fetus:
-            fetus_options = [d.get('fetus') for d in docs if d.get('fetus')]
-            return JsonResponse({
-                'requires_selection': True,
-                'selection_field': 'fetus',
-                'options': fetus_options,   # e.g. ["Single", "Twins"]
-            }, status=200)
-
-        doc = docs[0]
+        gender_fields = doc.get(gender, [])
 
         GENDER_KEYS   = {'male', 'female'}
         EXCLUDED_KEYS = {'last_modified_by', 'last_modified_date'}
 
-        gender_fields = doc.get(gender, [])
         common_fields = {
-            k: v for k, v in doc.items()
+            k: v
+            for k, v in doc.items()
             if k not in GENDER_KEYS and k not in EXCLUDED_KEYS
         }
+
         for key, value in common_fields.items():
             if isinstance(value, datetime):
                 common_fields[key] = value.isoformat()
 
-        return JsonResponse({**common_fields, 'format': gender_fields}, safe=False)
+        response_data = {
+            **common_fields,
+            'format': gender_fields,
+        }
+
+        return JsonResponse(response_data, safe=False)
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
     finally:
         client.close()
+
+
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
 def get_employee_signature_by_id(request):

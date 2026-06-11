@@ -328,8 +328,10 @@ class PharmacyBilling(AuditModel):
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
-    uhid = models.CharField(max_length=50)
+    uhid = models.CharField(max_length=5,blank=True, null=True)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    patientname = models.CharField(max_length=100, blank=True, null=True)
+    age = models.IntegerField(blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
@@ -346,8 +348,8 @@ class PharmacyBilling(AuditModel):
     billing_mode = models.CharField(max_length=20)
     payment_details = models.JSONField(null=True, blank=True)
     Esimated_id=models.CharField(max_length=150)
-    Edit_reason = models.TextField(null=True, blank=True)
-    Edited_by =models.CharField(max_length=150)
+    edit_reason = models.TextField(null=True, blank=True)
+    edited_by = models.CharField(max_length=150)
     is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
     deleted_by =models.CharField(max_length=150)
@@ -356,6 +358,8 @@ class PharmacyBilling(AuditModel):
     shiftno = models.CharField(max_length=100, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
+    is_dispatched = models.BooleanField(default=False)
+    pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
@@ -367,7 +371,7 @@ class PharmacyBilling(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"
+        return f"{self.billing_status} - {self.patient_name}"  
 
 
         
