@@ -538,12 +538,9 @@ def get_active_account_heads(request):
 
         # ✅ AUTH DATA (your requirement)
 
-        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE") 
-
+        hospital_code = request.data.get("auth-hospital-code") 
         branch_code   = request.data.get("auth-branch-code")   
-
         outlet_code   = request.data.get("auth-outlet-code")  
-
 
 
         # 🔍 Build query dynamically
@@ -801,7 +798,6 @@ import os, json
 
 
 @api_view(["POST"])
-
 @permission_classes([HasRoleAndDataPermission])
 
 def get_receipt_payments(request):
@@ -809,18 +805,10 @@ def get_receipt_payments(request):
     try:
 
         data = request.data
-
-
-
-        employee_id   = data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID") or request.META.get("HTTP_AUTH_USER_ID")
-
-        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-
-        branch_code   = data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
-
-        outlet_code   = data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
-
-
+        employee_id   = data.get("auth-user-id")
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code   = data.get("auth-branch-code") 
+        outlet_code   = data.get("auth-outlet-code") 
 
         if not employee_id:
 

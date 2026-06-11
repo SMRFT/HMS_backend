@@ -552,6 +552,8 @@ def save_pharmacy_bill(request):
         update_data["lastmodified_date"]    = datetime.utcnow()
         update_data["edit_reason"]          = data.get("edit_reason", "")
         update_data["edited_by"]            = employee_id
+        update_data["is_dispatched"]        = data.get("is_dispatched", False)   
+        update_data["pending_returns"]      = data.get("pending_returns", [])
 
         # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
@@ -601,6 +603,8 @@ def save_pharmacy_bill(request):
             "hospital_code":        hospital_code,
             "branch_code":          branch_code,
             "outlet_code":          outlet_code,
+            "is_dispatched":        False,        
+            "pending_returns":      [],     
             **fields
         }
 

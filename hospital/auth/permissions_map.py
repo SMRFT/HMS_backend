@@ -100,7 +100,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
     r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
-    '^/_b_a_c_k_e_n_d/HMS/dialysis-discharge-summary/': 'HMS-P-DDS',
+    '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
+    r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
 
     # ==================== NURSING ====================
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',

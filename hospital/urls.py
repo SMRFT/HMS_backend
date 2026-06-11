@@ -60,7 +60,7 @@ urlpatterns = [
     path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
 
     path('get_pharmacy_stock/', pharmacy.get_pharmacy_stock, name='get_pharmacy_stock'),
-    path('save_pharmacy_bill/', pharmacy.save_pharmacy_bill, name='save_oppharmacy_bill'),
+    path('save_pharmacy_bill/', pharmacy.save_pharmacy_bill, name='save_pharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
@@ -140,8 +140,9 @@ urlpatterns = [
     path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
     path("discharge-billing/<str:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
     path("discharge-billing/<str:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
-    path("dialysis-discharge-summary/",discharge.create_dialysis_discharge_summary,name="dialysis-discharge-summary"),
+    path("create_dialysis_discharge_summary/",discharge.create_dialysis_discharge_summary,name="dialysis-discharge-summary"),
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
+    path("Print_dialysis_dischargesummary/",discharge.Print_dialysis_dischargesummary,name="Print_dialysis_dischargesummary",),
 
     # Patient URLs
     path('patients/register/', views.patientCreateView, name='patient-register'),
