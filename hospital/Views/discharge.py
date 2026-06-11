@@ -439,7 +439,10 @@ def search_discharge_patient(request):
     except Exception:
         invest_items = []
 
-    return Response({"patient": patient_info, "invest_items": invest_items})
+    return Response({
+        "success": True,
+        "data": {"patient": patient_info, "invest_items": invest_items}
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,7 +503,10 @@ def discharge_billing_list_create(request):
             return (bd, o.discharge_id or 0)
 
         filtered.sort(key=_sort_key, reverse=True)
-        return Response([_obj_to_dict(o) for o in filtered])
+        return Response({
+            "success": True,
+            "data": [_obj_to_dict(o) for o in filtered]
+        })
 
     # ── POST ──────────────────────────────────────────────────────────────────
     # Flow 1: status="Billed"    → bill_no generated, estimate_number=None
@@ -533,7 +539,10 @@ def discharge_billing_list_create(request):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(_obj_to_dict(obj), status=status.HTTP_201_CREATED)
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(obj)
+        }, status=status.HTTP_201_CREATED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -557,7 +566,10 @@ def discharge_billing_detail(request, pk):
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
-        return Response(_obj_to_dict(billing))
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(billing)
+        })
 
     # ── PUT / PATCH  (Flow 3: edit estimate in-place) ─────────────────────────
     if request.method in ["PUT", "PATCH"]:
@@ -578,7 +590,10 @@ def discharge_billing_detail(request, pk):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(_obj_to_dict(billing))
+        return Response({
+            "success": True,
+            "data": _obj_to_dict(billing)
+        })
 
     # ── DELETE (soft) ─────────────────────────────────────────────────────────
     if request.method == "DELETE":
@@ -630,3 +645,310 @@ def convert_estimate_to_bill(request, pk):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(_obj_to_dict(estimate), status=status.HTTP_200_OK)
+
+
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from django.db.models import Q
+from pymongo import MongoClient
+import os
+
+from ..models import Patient, Billing
+from ..serializers import PatientSerializer
+from pyauth.auth import HasRoleAndDataPermission
+
+
+@api_view(['GET'])
+# @permission_classes([HasRoleAndDataPermission])
+def dialysis_patient_details(request):
+
+    uhid      = request.GET.get('uhid')
+    ip_number = request.GET.get('ip_number')
+    mobile    = request.GET.get('mobile')
+
+    # =========================================================
+    # STEP 1 : FILTER PATIENT
+    # =========================================================
+    if uhid:
+        patients = Patient.objects.filter(
+            Q(uhid__iexact=uhid) |
+            Q(uhid__iendswith=f'/{uhid}')
+        )
+
+    elif ip_number:
+        patients = Patient.objects.filter(ip_number=ip_number)
+
+    elif mobile:
+        patients = Patient.objects.filter(mobilePhone=mobile)
+
+    else:
+        return Response({
+            "success": False,
+            "message": "Please provide uhid, ip_number, or mobile."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # =========================================================
+    # STEP 2 : MONGODB CONNECTION
+    # =========================================================
+    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+
+    global_db = client["Global"]
+    hms_db    = client["HMS"]
+
+    employee_collection = global_db["backend_diagnostics_profile"]
+
+    insurance_collection = hms_db["hospital_insuranceprovider"]
+
+    # =========================================================
+    # STEP 3 : SERIALIZE PATIENT DATA
+    # =========================================================
+    serializer = PatientSerializer(patients, many=True)
+
+    patient_data = serializer.data
+
+    # =========================================================
+    # STEP 4 : ADD BILLING + COMPANY NAME
+    # =========================================================
+    for patient in patient_data:
+
+        patient_id = int(patient["id"])
+
+        # -----------------------------------------------------
+        # COMPANY NAME
+        # -----------------------------------------------------
+        company_code = patient.get("company_code")
+
+        company_data = insurance_collection.find_one({
+            "company_code": company_code
+        })
+
+        patient["company_name"] = (
+            company_data.get("company_name")
+            if company_data else None
+        )
+
+        # -----------------------------------------------------
+        # BILLING DETAILS
+        # -----------------------------------------------------
+        billings = Billing.objects.filter(patient_id=patient_id)
+
+        billing_list = []
+
+        for bill in billings:
+
+            doctor_id = bill.doctor_id
+
+            employee = employee_collection.find_one({
+                "employeeId": doctor_id
+            })
+
+            doctor_name = (
+                employee["employeeName"]
+                if employee else None
+            )
+
+            billing_list.append({
+                "bill_number": bill.bill_number,
+                "doctor_id": doctor_id,
+                "doctor_name": doctor_name,
+                "total_fees": str(bill.total_fees),
+                "payment_status": bill.payment_status,
+                "billed_date": bill.billed_date,
+            })
+
+        patient["billing"] = billing_list
+
+    # =========================================================
+    # STEP 5 : RESPONSE
+    # =========================================================
+    return Response({
+        "success": True,
+        "data": patient_data
+    }, status=status.HTTP_200_OK)
+
+
+
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+
+import json
+
+from ..serializers import DialysisDischargeSummarySerializer
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def create_dialysis_discharge_summary(request):
+
+    try:
+
+        data = request.data
+
+        # ============================================
+        # AUTH VALUES
+        # ============================================
+
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        employee_id   = data.get("auth-user-id")
+
+        # ============================================
+        # REQUIRED FIELD VALIDATION
+        # ============================================
+
+        required_fields = [
+            "name",
+            "age",
+            "gender",
+            "uhid",
+            "consultant"
+        ]
+
+        missing_fields = [
+            field for field in required_fields
+            if not data.get(field)
+        ]
+
+        if missing_fields:
+
+            return Response(
+                {
+                    "success": False,
+                    "status_code": 400,
+                    "message": "Required fields are missing",
+                    "missing_fields": missing_fields,
+                    "data": None
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ============================================
+        # PAYLOAD
+        # ============================================
+
+        payload = {
+            "name": data.get("name"),
+            "age": data.get("age"),
+            "gender": data.get("gender"),
+
+            "uhid": data.get("uhid"),
+            "consultant": data.get("consultant"),
+            "id_no": data.get("id_no"),
+
+            "address": data.get("address"),
+            "diagnosis": data.get("diagnosis"),
+
+            "blood_investigations":
+                json.loads(data.get("blood_investigations"))
+                if isinstance(data.get("blood_investigations"), str)
+                else data.get("blood_investigations", []),
+
+            "hd_sessions":
+                json.loads(data.get("hd_sessions"))
+                if isinstance(data.get("hd_sessions"), str)
+                else data.get("hd_sessions", []),
+
+            "complications_during_hd":
+                json.loads(data.get("complications_during_hd"))
+                if isinstance(data.get("complications_during_hd"), str)
+                else data.get("complications_during_hd", []),
+
+            "condition_on_discharge":
+                data.get("condition_on_discharge"),
+
+            "advice_on_discharge":
+                json.loads(data.get("advice_on_discharge"))
+                if isinstance(data.get("advice_on_discharge"), str)
+                else data.get("advice_on_discharge", []),
+
+            "next_hd_session_on":
+                data.get("next_hd_session_on"),
+        }
+
+        # ============================================
+        # SERIALIZER
+        # ============================================
+
+        serializer = DialysisDischargeSummarySerializer(
+            data=payload
+        )
+
+        # ============================================
+        # SUCCESS RESPONSE
+        # ============================================
+
+        if serializer.is_valid():
+
+            serializer.save(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code,
+                created_by=employee_id,
+                lastmodified_by=employee_id,
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "status_code": 201,
+                    "message": "Dialysis discharge summary created successfully",
+                    "data": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+        # ============================================
+        # VALIDATION ERROR RESPONSE
+        # ============================================
+
+        return Response(
+            {
+                "success": False,
+                "status_code": 400,
+                "message": "Validation failed",
+                "errors": serializer.errors,
+                "data": None
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ============================================
+    # JSON ERROR
+    # ============================================
+
+    except json.JSONDecodeError as e:
+
+        return Response(
+            {
+                "success": False,
+                "status_code": 400,
+                "message": "Invalid JSON format",
+                "error": str(e),
+                "data": None
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ============================================
+    # SERVER ERROR
+    # ============================================
+
+    except Exception as e:
+
+        return Response(
+            {
+                "success": False,
+                "status_code": 500,
+                "message": "Internal server error",
+                "error": str(e),
+                "data": None
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

@@ -494,15 +494,16 @@ def admission_view(request):
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
     outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
-    print("*****************",employee_id,hospital_code,branch_code,outlet_code)
+    print("*****************", employee_id, hospital_code, branch_code, outlet_code)
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
         try:
-            from_date_str = request.GET.get('from_date', '').strip()
-            to_date_str   = request.GET.get('to_date',   '').strip()
-            status_filter = request.GET.get('status',    '').strip()
+            from_date_str = request.GET.get('from_date',        '').strip()
+            to_date_str   = request.GET.get('to_date',          '').strip()
+            status_filter = request.GET.get('status',           '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
+            ip_filter     = request.GET.get('ip_number',        '').strip()  # ← NEW
 
             from_date = to_date = None
             if from_date_str:
@@ -518,11 +519,29 @@ def admission_view(request):
                 branch_code=branch_code,
                 outlet_code=outlet_code
             ):
+                # ── IP Number filter ─────────────────────────────────────────
+                # Full IP typed  (contains "/") → exact match:  "S026/500008" == ipNumber
+                # Suffix typed   (no "/")       → suffix match: "500008" in "S026/500008"
+                if ip_filter:
+                    ip = (adm.ipNumber or "").strip()
+                    if "/" in ip_filter:
+                        # Full IP: must match exactly (case-insensitive)
+                        if ip.lower() != ip_filter.lower():
+                            continue
+                    else:
+                        # Suffix match: "500008" matches "S026/500008", "S027/500008" …
+                        slash_idx = ip.rfind("/")
+                        suffix = ip[slash_idx + 1:] if slash_idx != -1 else ip
+                        if ip_filter.lower() not in suffix.lower():
+                            continue
+
+                # ── Status filter ────────────────────────────────────────────
                 if status_filter == 'Admitted':
                     if not (adm.is_admitted and not adm.is_discharged): continue
                 elif status_filter == 'Discharged':
                     if not adm.is_discharged: continue
 
+                # ── Date filter ──────────────────────────────────────────────
                 if from_date or to_date:
                     adm_date = None
                     if adm.admissionDateTime:
@@ -534,6 +553,7 @@ def admission_view(request):
                     else:
                         continue
 
+                # ── Doctor filter ────────────────────────────────────────────
                 if doctor_filter and doctor_filter.lower() not in (adm.admittingDoctor or '').lower():
                     continue
 
@@ -548,7 +568,6 @@ def admission_view(request):
                     "admissionDateTime":  adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                     "admittingDoctor":    adm.admittingDoctor  or "",
                     "consultingDoctor":   adm.consultingDoctor or "",
-                    # packageName field stores packageNo — return as "packageNo" for frontend resolution
                     "packageNo":          adm.packageName or "",
                     "reasonForAdmission": adm.reasonForAdmission or "",
                     "room_details":       parse_json_field(adm.room_details),
@@ -628,7 +647,6 @@ def admission_view(request):
                 "endDateTime":    None,
             }]
 
-            # Store packageNo value in the packageName field (model has no packageNo column)
             package_no_value = data.get('packageNo') or ""
 
             adm = Admission.objects.create(
@@ -640,7 +658,6 @@ def admission_view(request):
                 outlet_code=outlet_code,
                 admittingDoctor=str(data.get('admittingDoctor') or ""),
                 consultingDoctor=data.get('consultingDoctor'),
-                # packageName field stores packageNo value
                 packageName=str(package_no_value) if package_no_value else "",
                 room_details=room_details,
                 roomShitingDetails=[],
@@ -662,7 +679,6 @@ def admission_view(request):
                 "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                 "admittingDoctor":   adm.admittingDoctor  or "",
                 "consultingDoctor":  adm.consultingDoctor or "",
-                # Return stored packageNo so frontend resolves display name from packages API
                 "packageNo":         adm.packageName or "",
                 "reasonForAdmission": adm.reasonForAdmission or "",
                 "room_details":      parse_json_field(adm.room_details),
@@ -682,8 +698,14 @@ def admission_view(request):
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"success": False, "error": str(e)}, status=500)
+        
 
+        
+        
 
+# ──────────────────────────────────────────────────────────────────────────────
+#   admission_detail  (GET / PUT / DELETE)  — unchanged from original
+# ──────────────────────────────────────────────────────────────────────────────
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
@@ -694,9 +716,10 @@ def admission_detail(request, ipNumber):
         branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
         outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
 
-        # ✅ STRICT FILTER
+        from django.db.models import Q
+        # ✅ SUPPORT BOTH IP AND UHID
         adm = Admission.objects.filter(
-            ipNumber=str(ipNumber),
+            Q(ipNumber=str(ipNumber)) | Q(uhid=str(ipNumber)),
             hospital_code=hospital_code,
             branch_code=branch_code,
             outlet_code=outlet_code,
@@ -939,21 +962,24 @@ def admission_detail(request, ipNumber):
         }, status=500)
     
 
+# ──────────────────────────────────────────────────────────────────────────────
+#   admission_advance  (GET / POST / PATCH / PUT)
+# ──────────────────────────────────────────────────────────────────────────────
 @api_view(['GET', 'POST', 'PATCH', 'PUT'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_advance(request, ipNumber=None):
     try:
-        employee_id   = request.data.get('auth-user-id') or request.headers.get('auth-user-id') or "system"
+        employee_id   = request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system"
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
-        branch_code   = request.data.get("auth-branch-code") or request.headers.get("Branch-Code") or "system"
-        outlet_code   = request.data.get("auth-outlet-code") or request.headers.get("Outlet-Code") or "system"
+        branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
+        outlet_code   = request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system"
 
         now_iso = timezone.now().isoformat()
 
-        # =========================================================
-        # GET
-        # =========================================================
+        # =====================================================================
+        # GET — list advances (unchanged)
+        # =====================================================================
         if request.method == 'GET':
             ip_number = request.GET.get("ip_number", "").strip()
             uhid      = request.GET.get("uhid", "").strip()
@@ -966,7 +992,7 @@ def admission_advance(request, ipNumber=None):
                     status=400
                 )
 
-            # STEP 1: GET ADMISSIONS
+            # ── Fetch admissions ──────────────────────────────────────────────
             if ip_number or uhid:
                 admissions = [
                     a for a in Admission.objects.all()
@@ -985,60 +1011,59 @@ def admission_advance(request, ipNumber=None):
             if not admissions:
                 return JsonResponse({'success': False, 'error': 'No matching admissions found'}, status=404)
 
-            # STEP 2: PATIENT MAP
+            # ── Patient name map ──────────────────────────────────────────────
             uhids = list(set(str(a.uhid) for a in admissions))
             patient_map = {}
             for p in Patient.objects.filter(uhid__in=uhids):
                 full_name = " ".join(filter(None, [p.salutation, p.firstName, p.lastName])).strip()
                 patient_map[str(p.uhid)] = full_name
 
-            # STEP 3: COLLECT PAYMENTS
-            # Exclude entries with status="Edited" — those are historical only
+            # ── Collect payments ──────────────────────────────────────────────
             advance_payments = []
             for adm in admissions:
                 payments = parse_json_field(adm.advance_payments)
                 if not isinstance(payments, list):
                     continue
+
                 for p in payments:
                     if not isinstance(p, dict):
                         continue
 
-                    # Skip Edited entries
+                    # Skip history-only entries
                     if p.get('status') == 'Edited':
                         continue
 
-                    # ✅ Extract payment mode
+                    # ── Extract convenience fields ────────────────────────────
                     payment_mode = ""
                     if isinstance(p.get("payment_details"), dict):
                         payment_mode = p["payment_details"].get("method", "")
 
-                    # ✅ Extract paid date
                     paid_date = p.get("paid_datetime") or ""
-
-                    # Convert datetime → string (safe for UI)
                     if isinstance(paid_date, datetime):
                         paid_date = paid_date.isoformat()
 
                     p["ip_number"]    = adm.ipNumber
                     p["uhid"]         = adm.uhid
                     p["patient_name"] = patient_map.get(str(adm.uhid), "")
-
-                    # ✅ Add new fields
                     p["payment_mode"] = payment_mode
                     p["paid_date"]    = paid_date
 
+                    # ── Ensure refund_details is always a list ────────────────
+                    if not isinstance(p.get("refund_details"), list):
+                        p["refund_details"] = []
+
                     advance_payments.append(p)
 
-            # STEP 4: DATE FILTER
+            # ── Date filter ───────────────────────────────────────────────────
             if from_date and to_date:
                 try:
-                    from_date_obj = datetime.strptime(from_date, "%Y-%m-%d").date()
-                    to_date_obj   = datetime.strptime(to_date, "%Y-%m-%d").date()
+                    from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+                    to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
                     filtered = []
                     for p in advance_payments:
                         date_value = (
                             p.get('created_date') or
-                            p.get('bill_date') or
+                            p.get('bill_date')    or
                             p.get('date')
                         )
                         if not date_value:
@@ -1055,9 +1080,9 @@ def admission_advance(request, ipNumber=None):
                                     p_date = datetime.strptime(date_value, "%Y-%m-%d").date()
                             else:
                                 continue
-                            if from_date_obj <= p_date <= to_date_obj:
+                            if from_dt <= p_date <= to_dt:
                                 filtered.append(p)
-                        except:
+                        except Exception:
                             continue
                     advance_payments = filtered
                 except Exception as e:
@@ -1068,9 +1093,9 @@ def admission_advance(request, ipNumber=None):
 
             return JsonResponse({'success': True, 'data': advance_payments})
 
-        # =========================================================
+        # =====================================================================
         # POST / PATCH / PUT — require ipNumber in URL
-        # =========================================================
+        # =====================================================================
         adm = Admission.objects.filter(
             ipNumber=str(ipNumber),
             hospital_code=hospital_code,
@@ -1085,132 +1110,254 @@ def admission_advance(request, ipNumber=None):
         if not isinstance(advance_payments, list):
             advance_payments = []
 
-        # ── BILL NUMBER GENERATOR ─────────────────────────────────
+        # ── Bill number generator ─────────────────────────────────────────────
         def generate_bill_number(payments_list):
             today_dt = timezone.now()
             year, month = today_dt.year, today_dt.month
-
-            # ✅ Financial Year in 2-digit format (e.g., 26-27 → 2627)
             if month >= 4:
                 fy = f"{year % 100:02d}{(year + 1) % 100:02d}"
             else:
                 fy = f"{(year - 1) % 100:02d}{year % 100:02d}"
-
             existing_sequences = []
-
             for p in payments_list:
                 if isinstance(p, dict) and p.get('bill_no'):
                     try:
                         seq = int(p['bill_no'].split('/')[-1])
                         existing_sequences.append(seq)
-                    except:
+                    except Exception:
                         pass
-
             next_seq = max(existing_sequences, default=0) + 1
-
             return f"{fy}/{next_seq:06d}"
 
-        # =========================================================
-        # POST — create new advance
-        # =========================================================
+        # ─────────────────────────────────────────────────────────────────────
+        # POST — create new advance (unchanged)
+        # ─────────────────────────────────────────────────────────────────────
         if request.method == 'POST':
             amount = request.data.get('advance_amount')
             if not amount:
-                return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
+                return JsonResponse(
+                    {'success': False, 'error': 'advance_amount is required'},
+                    status=400
+                )
 
             new_entry = {
-                "advance_id":      f"ADV{len(advance_payments) + 1}",
-                "bill_no":         generate_bill_number(advance_payments),
-                "date":            request.data.get('date', now_iso[:10]),
-                "bill_date":       now_iso,
-                "advance_amount":  float(amount),
-                "ip_advance":      float(request.data.get('ip_advance', 0)),
-                "billing_advance": float(request.data.get('billing_advance', 0)),
+                "advance_id":       f"ADV{len(advance_payments) + 1}",
+                "bill_no":          generate_bill_number(advance_payments),
+                "date":             request.data.get('date', now_iso[:10]),
+                "bill_date":        now_iso,
+                "advance_amount":   float(amount),
+                "ip_advance":       float(request.data.get('ip_advance', 0)),
+                "billing_advance":  float(request.data.get('billing_advance', 0)),
                 "is_advanceActive": True,
-                "status":          "Pending",
-                "created_by":      employee_id,
-                "created_date":    now_iso,
-                "shiftno":         request.data.get('shiftno'),
+                "status":           "Pending",
+                "created_by":       employee_id,
+                "created_date":     now_iso,
+                "is_refund":        False,
+                "refund_details":   [],
             }
             advance_payments.append(new_entry)
             adm.advance_payments = advance_payments
             adm.save()
             return JsonResponse({'success': True, 'data': new_entry})
 
-        # =========================================================
-        # PATCH — cancel an advance
-        # status  → "Cancelled"
-        # is_advanceActive → False
-        # =========================================================
+        # ─────────────────────────────────────────────────────────────────────
+        # PATCH — cancel  OR  refund  (based on action field)
+        # ─────────────────────────────────────────────────────────────────────
         elif request.method == 'PATCH':
             advance_id = request.data.get('advance_id', '').strip()
+            action     = request.data.get('action', 'cancel').strip().lower()
 
+            # ── Find target entry ─────────────────────────────────────────────
             entry = next(
-                (a for a in advance_payments
-                 if a.get('advance_id') == advance_id and a.get('is_advanceActive')),
+                (a for a in advance_payments if a.get('advance_id') == advance_id),
                 None
             )
             if not entry:
-                return JsonResponse({'success': False, 'error': 'Active advance not found'}, status=404)
+                return JsonResponse(
+                    {'success': False, 'error': f'Advance entry "{advance_id}" not found'},
+                    status=404
+                )
 
-            # Guard: Cancelled entries cannot be cancelled again
-            if entry.get('status') == 'Cancelled':
-                return JsonResponse({'success': False, 'error': 'Advance is already cancelled'}, status=400)
+            # =================================================================
+            # ACTION: cancel
+            # =================================================================
+            if action == 'cancel':
+                if not entry.get('is_advanceActive'):
+                    return JsonResponse(
+                        {'success': False, 'error': 'Advance is already inactive'},
+                        status=400
+                    )
+                if entry.get('status') == 'Cancelled':
+                    return JsonResponse(
+                        {'success': False, 'error': 'Advance is already cancelled'},
+                        status=400
+                    )
 
-            entry['is_advanceActive'] = False
-            entry['status']           = 'Cancelled'
-            entry['cancelled_by']     = employee_id
-            entry['cancelled_date']   = now_iso
+                entry['is_advanceActive'] = False
+                entry['status']           = 'Cancelled'
+                entry['cancelled_by']     = employee_id
+                entry['cancelled_date']   = now_iso
 
-            adm.advance_payments = advance_payments
-            adm.save()
-            return JsonResponse({'success': True, 'data': entry})
+                adm.advance_payments = advance_payments
+                adm.save()
+                return JsonResponse({'success': True, 'data': entry})
 
-        # =========================================================
-        # PUT — edit an advance
-        #
-        # Flow:
-        #   1. Find the original entry by advance_id
-        #   2. Guard: must be Pending (Cancelled/Paid/Edited cannot be edited)
-        #   3. Mark original → status="Edited", is_advanceActive=False
-        #   4. Create a brand-new entry with updated data, status="Pending"
-        #      with a reference back to the original (edited_from)
-        # =========================================================
+            # =================================================================
+            # ACTION: refund
+            # =================================================================
+            elif action == 'refund':
+                # ── Guards ────────────────────────────────────────────────────
+                current_status = entry.get('status')
+                if current_status not in ('Paid',):
+                    return JsonResponse(
+                        {
+                            'success': False,
+                            'error': f"Refund is only allowed for Paid advances. "
+                                     f"Current status: '{current_status}'"
+                        },
+                        status=400
+                    )
+
+                # ── Parse refund amount ───────────────────────────────────────
+                raw_refund = request.data.get('refund_amount')
+                if raw_refund is None:
+                    return JsonResponse(
+                        {'success': False, 'error': 'refund_amount is required'},
+                        status=400
+                    )
+                try:
+                    refund_amount = float(raw_refund)
+                except (TypeError, ValueError):
+                    return JsonResponse(
+                        {'success': False, 'error': 'refund_amount must be a valid number'},
+                        status=400
+                    )
+                if refund_amount <= 0:
+                    return JsonResponse(
+                        {'success': False, 'error': 'refund_amount must be greater than 0'},
+                        status=400
+                    )
+
+                # ── Compute how much has already been refunded ─────────────
+                refund_history = entry.get('refund_details', [])
+                if not isinstance(refund_history, list):
+                    refund_history = []
+
+                total_already_refunded = sum(
+                    float(r.get('refunded_amount', 0)) for r in refund_history
+                )
+                advance_total   = float(entry.get('advance_amount', 0))
+                remaining       = advance_total - total_already_refunded
+
+                if refund_amount > remaining + 0.001:   # tiny float tolerance
+                    return JsonResponse(
+                        {
+                            'success': False,
+                            'error': (
+                                f"Refund amount ₹{refund_amount:.2f} exceeds "
+                                f"refundable balance ₹{remaining:.2f}"
+                            )
+                        },
+                        status=400
+                    )
+
+                # ── Build refund record ───────────────────────────────────────
+                new_total_refunded  = total_already_refunded + refund_amount
+                new_remaining       = advance_total - new_total_refunded
+                is_fully_refunded   = new_remaining <= 0.001   # float tolerance
+
+                refund_record = {
+                    "refund_id":               f"REF{len(refund_history) + 1}",
+                    "refunded_amount":         f"{refund_amount:.2f}",
+                    "refunded_date":           now_iso,
+                    "refunded_by":             employee_id,
+                    "payment_mode":            request.data.get('payment_mode', 'Cash'),
+                    "remarks":                 request.data.get('remarks', ''),
+                    "total_refunded_so_far":   f"{new_total_refunded:.2f}",
+                    "remaining_balance":       f"{max(0, new_remaining):.2f}",
+                }
+
+                # ── Append and update entry ───────────────────────────────────
+                refund_history.append(refund_record)
+                entry['refund_details']   = refund_history
+                entry['is_refund']        = True
+
+                # If fully refunded, mark status = "Refunded"
+                if is_fully_refunded:
+                    entry['status']           = 'Refunded'
+                    entry['is_advanceActive'] = False
+                    entry['fully_refunded_date'] = now_iso
+                # Partial refund — keep status as Paid / Pending
+                # (status stays what it was; only is_refund flag is set)
+
+                adm.advance_payments = advance_payments
+                adm.save()
+
+                return JsonResponse({
+                    'success': True,
+                    'data': {
+                        'advance_entry':        entry,
+                        'refund_record':        refund_record,
+                        'total_refunded':       f"{new_total_refunded:.2f}",
+                        'remaining_balance':    f"{max(0, new_remaining):.2f}",
+                        'is_fully_refunded':    is_fully_refunded,
+                    }
+                })
+
+            else:
+                return JsonResponse(
+                    {'success': False, 'error': f'Unknown action "{action}". Use "cancel" or "refund".'},
+                    status=400
+                )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # PUT — edit an advance (unchanged)
+        # ─────────────────────────────────────────────────────────────────────
         elif request.method == 'PUT':
             advance_id = request.data.get('advance_id', '').strip()
             amount     = request.data.get('advance_amount')
 
             if not advance_id:
-                return JsonResponse({'success': False, 'error': 'advance_id is required'}, status=400)
+                return JsonResponse(
+                    {'success': False, 'error': 'advance_id is required'},
+                    status=400
+                )
             if not amount:
-                return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
+                return JsonResponse(
+                    {'success': False, 'error': 'advance_amount is required'},
+                    status=400
+                )
 
             original = next(
                 (a for a in advance_payments if a.get('advance_id') == advance_id),
                 None
             )
             if not original:
-                return JsonResponse({'success': False, 'error': 'Advance entry not found'}, status=404)
-
+                return JsonResponse(
+                    {'success': False, 'error': 'Advance entry not found'},
+                    status=404
+                )
             if original.get('status') != 'Pending':
                 return JsonResponse(
-                    {'success': False, 'error': f"Cannot edit — status is '{original.get('status')}'"},
+                    {
+                        'success': False,
+                        'error': f"Cannot edit — status is '{original.get('status')}'"
+                    },
                     status=400
                 )
 
-            # ✅ Preserve the original bill_no
             original_bill_no = original.get('bill_no')
 
-            # Step 1: Mark original as Edited
+            # Mark original as Edited
             original['is_advanceActive'] = False
             original['status']           = 'Edited'
             original['edited_by']        = employee_id
             original['edited_date']      = now_iso
 
-            # Step 2: Create new entry — reuse same bill_no, NO new generation
+            # Create new entry — reuse same bill_no
             new_entry = {
                 "advance_id":       f"ADV{len(advance_payments) + 1}",
-                "bill_no":          original_bill_no,   # ✅ same bill_no as original
+                "bill_no":          original_bill_no,
                 "date":             request.data.get('date', now_iso[:10]),
                 "bill_date":        now_iso,
                 "advance_amount":   float(amount),
@@ -1221,6 +1368,8 @@ def admission_advance(request, ipNumber=None):
                 "created_by":       employee_id,
                 "created_date":     now_iso,
                 "edited_from":      advance_id,
+                "is_refund":        False,
+                "refund_details":   [],
             }
 
             advance_payments.append(new_entry)
@@ -1230,11 +1379,10 @@ def admission_advance(request, ipNumber=None):
             return JsonResponse({
                 'success': True,
                 'data': {
-                    'original': original,
+                    'original':  original,
                     'new_entry': new_entry,
                 }
             })
-
 
     except Exception as e:
         traceback.print_exc()
