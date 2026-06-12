@@ -1508,6 +1508,26 @@ def update_room_cleaned_view(request):
         admission.lastmodified_date = timezone.now()
         admission.save()
 
+        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+        try:
+            import os
+            from pymongo import MongoClient
+            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+            if MONGO_URI:
+                client = MongoClient(MONGO_URI)
+                mongo_db = client["HMS"]
+                
+                mongo_db["hospital_admission"].update_one(
+                    {"ipNumber": str(admission.ipNumber)},
+                    {"$set": {
+                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                    }}
+                )
+        except Exception as ex:
+            print("Failed to save admission fields natively:", str(ex))
+
+
         return Response({"success": True, "message": "Room cleaned status updated"})
 
     except Exception as exc:
@@ -1963,6 +1983,26 @@ def room_shifting_view(request):
 
         admission.save()
 
+        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+        try:
+            import os
+            from pymongo import MongoClient
+            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+            if MONGO_URI:
+                client = MongoClient(MONGO_URI)
+                mongo_db = client["HMS"]
+                
+                mongo_db["hospital_admission"].update_one(
+                    {"ipNumber": str(admission.ipNumber)},
+                    {"$set": {
+                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                    }}
+                )
+        except Exception as ex:
+            print("Failed to save admission fields natively:", str(ex))
+
+
         # ── Mark RoomBooking as shifted (if one existed) ──────────────────
         try:
             for rb in RoomBooking.objects.all():
@@ -2099,6 +2139,26 @@ def room_shifting_detail_view(request, ip_number):
     admission.lastmodified_by    = str(user_id)
     admission.lastmodified_date  = timezone.now()
     admission.save()
+
+    # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+    try:
+        import os
+        from pymongo import MongoClient
+        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+        if MONGO_URI:
+            client = MongoClient(MONGO_URI)
+            mongo_db = client["HMS"]
+            
+            mongo_db["hospital_admission"].update_one(
+                {"ipNumber": str(admission.ipNumber)},
+                {"$set": {
+                    "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                    "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                }}
+            )
+    except Exception as ex:
+        print("Failed to save admission fields natively:", str(ex))
+
 
     return Response(
         {

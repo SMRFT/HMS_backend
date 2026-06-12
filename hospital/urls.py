@@ -67,6 +67,7 @@ urlpatterns = [
     # Stock URLs
     path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
     path("pharmacy-items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
+    path("get_pharmacy_item_tracking/", inventory.get_pharmacy_item_tracking, name="get_pharmacy_item_tracking"),
 
     # Pharmacy Category URLs
     path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),
@@ -320,6 +321,9 @@ urlpatterns = [
     path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
     path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
     path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
+    path("return_medicine_ward_request/", NursingStation.return_medicine_ward_request, name="return_medicine_ward_request"),
+    path("get_pending_ward_returns/", NursingStation.get_pending_ward_returns, name="get_pending_ward_returns"),
+    path("approve_ward_return/", NursingStation.approve_ward_return, name="approve_ward_return"),
     path("update_medicine_ward_request/", NursingStation.update_medicine_ward_request, name="update_medicine_ward_request"),
     path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
     path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),

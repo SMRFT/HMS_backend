@@ -672,6 +672,25 @@ def admission_view(request):
                 lastmodified_date=timezone.now(),
             )
 
+            # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+            try:
+                import os
+                from pymongo import MongoClient
+                MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+                if MONGO_URI:
+                    client = MongoClient(MONGO_URI)
+                    mongo_db = client["HMS"]
+                    mongo_db["hospital_admission"].update_one(
+                        {"ipNumber": ip_number},
+                        {"$set": {
+                            "room_details": room_details,
+                            "roomShitingDetails": [],
+                            "advance_payments": []
+                        }}
+                    )
+            except Exception as ex:
+                print("Failed to save admission fields as native JSON array:", str(ex))
+
             d = {
                 "id":                str(adm.pk),
                 "ipNumber":          adm.ipNumber,
@@ -910,6 +929,29 @@ def admission_detail(request, ipNumber):
             adm.lastmodified_by = employee_id
             adm.lastmodified_date = timezone.now()
             adm.save()
+
+            # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+            try:
+                import os
+                from pymongo import MongoClient
+                MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+                if MONGO_URI:
+                    client = MongoClient(MONGO_URI)
+                    mongo_db = client["HMS"]
+                    
+                    # Also collect latest states of other fields
+                    import json
+                    from hospital.Views.admission import parse_json_field
+                    
+                    mongo_db["hospital_admission"].update_one(
+                        {"ipNumber": str(ipNumber)},
+                        {"$set": {
+                            "room_details": parse_json_field(adm.room_details) if not isinstance(adm.room_details, list) else adm.room_details
+                        }}
+                    )
+            except Exception as ex:
+                print("Failed to save admission fields as native JSON array in PUT:", str(ex))
+
 
             return JsonResponse({
                 "success": True,
