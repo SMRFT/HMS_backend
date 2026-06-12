@@ -28,7 +28,7 @@ def save_laundry_request(request):
     """
     if request.method == 'POST':
         try:
-            data = json.loads(request.body)
+            data = request.data
             
             laundry_req = LaundryWardRequest.objects.create(
                 uhid=data.get('uhid', ''),
@@ -112,7 +112,7 @@ def update_laundry_status(request):
     """
     if request.method == 'PATCH':
         try:
-            data = json.loads(request.body)
+            data = request.data
             req_id = data.get('id')
             new_status = data.get('status')
             
@@ -222,7 +222,7 @@ def get_laundry_items_master(request):
 def save_laundry_item_master(request):
     if request.method == 'POST':
         try:
-            data = json.loads(request.body)
+            data = request.data
             item_id = data.get('id')
             item_name = data.get('item_name', '')
             price = data.get('price', 0)
@@ -253,7 +253,7 @@ def save_laundry_item_master(request):
 def delete_laundry_item_master(request):
     if request.method == 'POST':
         try:
-            data = json.loads(request.body)
+            data = request.data
             item_id = data.get('id')
             
             if not item_id:

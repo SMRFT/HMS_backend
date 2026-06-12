@@ -18,6 +18,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/return_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_pending_ward_returns/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/approve_ward_return/?(\?.*)?$': 'HMS-P-WR',
 
     # ==================== DIET ====================
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
@@ -85,6 +88,7 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/?(\?.*)?$': 'HMS-P-PI',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
+    r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_item_tracking/?(\?.*)?$': 'HMS-P-PID',
 
     '/_b_a_c_k_e_n_d/HMS/grn/': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
