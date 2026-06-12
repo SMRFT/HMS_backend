@@ -11,17 +11,26 @@ from pyauth.auth import HasRoleAndDataPermission
 from .models import Complaint
 from .serializer import ComplaintSerializer
 
-def populate_reporter_names(data):
+def populate_reporter_and_assignee_names(data):
     if not data:
         return data
         
     is_list = isinstance(data, list)
     items = data if is_list else [data]
     
-    reporter_ids = list(set([item.get('reporter') for item in items if item.get('reporter')]))
-    if not reporter_ids:
+    # Extract unique reporter and assignee IDs
+    user_ids = set()
+    for item in items:
+        if item.get('reporter'):
+            user_ids.add(item.get('reporter'))
+        if item.get('assignee'):
+            user_ids.add(item.get('assignee'))
+            
+    user_ids = list(user_ids)
+    if not user_ids:
         for item in items:
             item['reporter_name'] = item.get('reporter')
+            item['assignee_name'] = item.get('assignee')
         return data
         
     try:
@@ -32,16 +41,19 @@ def populate_reporter_names(data):
         global_db = client['Global']
         profile_coll = global_db['backend_diagnostics_profile']
         
-        profiles = list(profile_coll.find({"employeeId": {"$in": reporter_ids}}, {"employeeId": 1, "employeeName": 1}))
+        profiles = list(profile_coll.find({"employeeId": {"$in": user_ids}}, {"employeeId": 1, "employeeName": 1}))
         profile_map = {p.get('employeeId'): p.get('employeeName') for p in profiles}
         client.close()
     except Exception as e:
-        print(f"Error populating reporter names: {e}")
+        print(f"Error populating reporter/assignee names: {e}")
         profile_map = {}
         
     for item in items:
         rep_id = item.get('reporter')
         item['reporter_name'] = profile_map.get(rep_id, rep_id)
+        
+        ass_id = item.get('assignee')
+        item['assignee_name'] = profile_map.get(ass_id, ass_id)
         
     return data
 
@@ -62,7 +74,7 @@ def complaint_list_create(request):
             complaints = Complaint.objects.all().order_by('-reported_date')
             
         serializer = ComplaintSerializer(complaints, many=True)
-        return Response(populate_reporter_names(serializer.data))
+        return Response(populate_reporter_and_assignee_names(serializer.data))
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -97,7 +109,7 @@ def complaint_detail(request, pk):
 
     if request.method == 'GET':
         serializer = ComplaintSerializer(complaint)
-        return Response(populate_reporter_names(serializer.data))
+        return Response(populate_reporter_and_assignee_names(serializer.data))
 
     elif request.method == 'PATCH':
         data = request.data.copy()
@@ -158,8 +170,8 @@ def complaints_admin_list(request):
     completed_serializer = ComplaintSerializer(completed_list, many=True)
 
     return Response({
-        "pending": populate_reporter_names(pending_serializer.data),
-        "completed": populate_reporter_names(completed_serializer.data),
+        "pending": populate_reporter_and_assignee_names(pending_serializer.data),
+        "completed": populate_reporter_and_assignee_names(completed_serializer.data),
         "from_date": from_date,
         "to_date": to_date
     })
