@@ -51,6 +51,43 @@ class StockTransferSerializer(serializers.ModelSerializer):
         model  = StockTransfer
         fields = "__all__"
 
+from .models import PurchaseReturn
+class PurchaseReturnSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+ 
+    class Meta:
+        model  = PurchaseReturn
+        fields = "__all__"
+ 
+    def validate_status(self, value):
+        valid = [
+            "Returned",
+            "Supplier Collected",
+            "Partial Credit Note",
+            "Credit Note Settled",
+        ]
+        if value not in valid:
+            raise serializers.ValidationError(
+                f"status must be one of {valid}"
+            )
+        return value
+ 
+    def validate_items(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("items must be a list")
+        valid_causes = [
+            "Broken", "Damage", "Nearing Expiry", "Non Moving",
+            "Price Difference", "Returns", "Shortage",
+        ]
+        for idx, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError(f"Item {idx + 1} must be an object")
+            cause = item.get("cause_of_return", "")
+            if cause and cause not in valid_causes:
+                raise serializers.ValidationError(
+                    f"Item {idx + 1}: cause_of_return '{cause}' is not valid"
+                )
+        return value
 
 from .models import Vendor
 class VendorSerializer(serializers.ModelSerializer):

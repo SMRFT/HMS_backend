@@ -326,17 +326,40 @@ class StockTransfer(AuditModel):
     transfer_ref_number = models.CharField(max_length=30, unique=True)
     to_outlet = models.CharField(max_length=50, blank=True, default="")
     items = models.JSONField(default=list)
-    remarks = models.TextField(blank=False, default="")          # NEW — mandatory
-    approved_by = models.CharField(max_length=100, blank=True, default="")   # NEW
-    approved_date = models.DateTimeField(null=True, blank=True)              # NEW
+    remarks = models.TextField(blank=False, default="")
+    approved_by = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
         ("Rejected", "Rejected"),
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
-    
 
+class PurchaseReturn(AuditModel):
+    purchase_return_bill_no   = models.CharField(max_length=30, unique=True)
+    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
+    grn_number                = models.CharField(max_length=50)
+    vendor_code               = models.CharField(max_length=50, blank=True, default="")
+    vendor_name               = models.CharField(max_length=255, blank=True, default="")
+    outlet_code               = models.CharField(max_length=50, blank=True, default="")
+    # items stores: item_id, item_name, stock_id, batch_number,
+    #               return_qty, price, cause_of_return
+    items                     = models.JSONField(default=list)
+    purchase_return_amount    = models.CharField(max_length=50, default="0.00")
+    # Charge breakdowns (stored as strings to avoid float precision issues)
+    gst_amount                = models.CharField(max_length=30, default="0.00")
+    cgst_amount               = models.CharField(max_length=30, default="0.00")
+    sgst_amount               = models.CharField(max_length=30, default="0.00")
+    other_amount              = models.CharField(max_length=30, default="0.00")
+    round_amount              = models.CharField(max_length=30, default="0.00")
+    return_remark             = models.TextField(blank=True, default="")
+    status                    = models.CharField(max_length=50, default="Returned")
+ 
+    def __str__(self):
+        return f"{self.purchase_return_bill_no} — {self.grn_number}"
+    
+    
 from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
@@ -445,7 +468,7 @@ class GRN(AuditModel):
     CATEGORY_PREFIX = {
         "MEDICINE_PURCHASE":    "OP",
         "MEDICINE_PURCHASE_IP": "IP",
-        "OPENING_STOCK_DRUG":   "OSD",
+        "OPENING_STOCK_DRUG":   "DP",
     }
 
     draft_number        = models.CharField(max_length=50, primary_key=True)
@@ -726,46 +749,51 @@ class RoomBooking(AuditModel):
 class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
-    ipserial_number     = models.IntegerField(blank=True, null=True)   # ✅ change to IntegerField
-
+    ipserial_number     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
-    admittingDoctor     = models.CharField(max_length=100)           
-    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)  
+    admittingDoctor     = models.CharField(max_length=100)
+    consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)
     packageName         = models.CharField(max_length=100, blank=True, null=True)
-
     room_details        = models.JSONField(default=list)
     roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
-
     advance_payments    = models.JSONField(default=list, blank=True, null=True)
-
     mlc_type            = models.CharField(max_length=50, blank=True, null=True)
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
-
-    is_admissionActive  = models.BooleanField(default=True)
+ 
+    # ── Cancellation tracking ─────────────────────────────────────────────────
+    is_cancelled        = models.BooleanField(default=False)
+    cancelled_by        = models.CharField(max_length=100, blank=True, null=True)
+    cancelled_Reason    = models.TextField(blank=True, null=True)
+ 
+    # ── Edit tracking ─────────────────────────────────────────────────────────
+    is_edited           = models.BooleanField(default=False)
+    edited_by           = models.CharField(max_length=100, blank=True, null=True)
+    edited_Reason       = models.TextField(blank=True, null=True)
+ 
+    # ── Ward / admission status ───────────────────────────────────────────────
+    ward_status         = models.CharField(max_length=50, blank=True, null=True)
+ 
+    # ── Core boolean flags ────────────────────────────────────────────────────
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
-
+ 
     class Meta:
         ordering = ['-admissionDateTime']
-
+ 
     def save(self, *args, **kwargs):
-
-        # 🔥 AUTO GENERATE SERIAL NUMBER
+        # Auto-generate IP serial number per UHID
         if not self.ipserial_number:
-
             last_admission = Admission.objects.filter(
                 uhid=self.uhid
             ).order_by('-ipserial_number').first()
-
             if last_admission and last_admission.ipserial_number:
                 self.ipserial_number = last_admission.ipserial_number + 1
             else:
                 self.ipserial_number = 1
-
         super().save(*args, **kwargs)
-
+ 
     def __str__(self):
         return f"{self.uhid} | {self.ipNumber}"
 
@@ -1818,4 +1846,4 @@ class LaundryItemMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - ₹{self.price}"
-
+
