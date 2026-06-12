@@ -990,3 +990,55 @@ def pharmacy_stock_history(request):
             "success": False,
             "error": str(e)
         }, status=500)
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_pharmacy_item_tracking(request):
+    try:
+        item_id = request.GET.get("item_id")
+        if not item_id:
+            return Response({"success": False, "error": "item_id is required"}, status=400)
+            
+        from hospital.models import PharmacyStock, GRN
+        stocks = PharmacyStock.objects.filter(item_id=item_id)
+        
+        batches = []
+        total_stock = 0
+        
+        for s in stocks:
+            available_qty = (
+                s.total_stock
+                - s.sold_quantity
+                - s.transferred_out_quantity
+                - s.grn_return_quantity
+                - s.blocked_quantity
+                + s.sales_return_quantity
+            )
+            total_stock += available_qty
+            
+            grn_date = None
+            if s.grn_number:
+                grn = GRN.objects.filter(grn_number=s.grn_number).first()
+                if grn and grn.date:
+                    grn_date = grn.date.strftime("%d-%m-%Y") if hasattr(grn.date, 'strftime') else str(grn.date)
+                    
+            expiry = "-"
+            if s.expiry_date:
+                expiry = s.expiry_date.strftime("%d-%m-%Y") if hasattr(s.expiry_date, 'strftime') else str(s.expiry_date)
+                    
+            batches.append({
+                "batch_number": s.batch_number,
+                "expiry_date": expiry,
+                "grn_number": s.grn_number,
+                "procured_date": grn_date or "-",
+                "current_stock": available_qty,
+                "total_stock": s.total_stock
+            })
+            
+        return Response({
+            "success": True,
+            "total_stock": total_stock,
+            "times_procured": stocks.count(),
+            "batches": batches
+        })
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)

@@ -129,21 +129,25 @@ def get_admission_list(request):
             # ROOM DETAILS MAPPING
             # -----------------------------
             room_no = item.get("roomNo")
+            bed_no = item.get("bedNo")
 
             # --- Room/Bed Fallback Logic (Manual Mongo Fetch) ---
-            if not room_no or not item.get("bedNo"):
-                # Fetching raw document for native arrays
-                raw_admission = mongo_db.hospital_admission.find_one({"ipNumber": item.get("ipNumber")})
-                if raw_admission:
-                    for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
-                        shifting = raw_admission.get(field, [])
-                        if shifting and isinstance(shifting, list):
-                            active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
-                            if active_shift:
-                                item["roomNo"] = active_shift.get("roomNo", "")
-                                item["bedNo"] = active_shift.get("bedNo", "")
-                                room_no = item["roomNo"]
-                                break
+            # Always check for active room in the arrays to get the latest room
+            raw_admission = mongo_db.hospital_admission.find_one({"ipNumber": item.get("ipNumber")})
+            if raw_admission:
+                active_found = False
+                for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                    shifting = raw_admission.get(field, [])
+                    if shifting and isinstance(shifting, list):
+                        active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                        if active_shift:
+                            item["roomNo"] = active_shift.get("newRoomNo", active_shift.get("roomNo", ""))
+                            item["bedNo"] = active_shift.get("newBedNo", active_shift.get("bedNo", ""))
+                            room_no = item["roomNo"]
+                            active_found = True
+                            break
+                if not active_found and (not room_no or not bed_no):
+                    pass # Fallback to existing roomNo if no active room found in arrays
             
             print("Final Room number for lookup:", room_no)
 
@@ -265,13 +269,13 @@ def get_location_mapping(request):
     try:
         rooms = list(mongo_db["hospital_room"].find(
             {"is_active": True},
-            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1, "beds": 1, "capacity": 1}
         ))
         
         # Pre-fetch ID mappings to avoid repeated lookups
-        blocks_map = {b["block_name"]: str(b["block_id"]) for b in mongo_db["hospital_block"].find({}, {"block_name": 1, "block_id": 1})}
-        cats_map = {c["category_name"]: str(c["room_category_id"]) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1})}
-        wards_map = {w["ward_name"]: str(w["_id"]) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1})}
+        blocks_map = {b.get("block_name"): str(b.get("block_id")) for b in mongo_db["hospital_block"].find({}, {"block_name": 1, "block_id": 1}) if b.get("block_name")}
+        cats_map = {c.get("category_name"): str(c.get("room_category_id")) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1}) if c.get("category_name")}
+        wards_map = {w.get("ward_name"): str(w.get("_id")) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1}) if w.get("ward_name")}
 
         enriched = []
         for r in rooms:
@@ -281,12 +285,16 @@ def get_location_mapping(request):
             
             enriched.append({
                 "room_no": r.get("room_number"),
+                "room_number": r.get("room_number"),
                 "block": b_name,
                 "block_id": blocks_map.get(b_name),
                 "category": c_name,
+                "room_category": c_name,
                 "room_category_id": cats_map.get(c_name),
                 "nursing_station": s_name,
-                "nursing_station_id": wards_map.get(s_name)
+                "nursing_station_id": wards_map.get(s_name),
+                "beds": r.get("beds", []),
+                "capacity": r.get("capacity", 0)
             })
             
         return Response({"success": True, "data": enriched})
@@ -766,6 +774,7 @@ def get_medicine_ward_requests(request):
                 "outlet_code": doc.get("outlet_code", ""),
                 "medicines": medicines,
                 "total_amount": doc.get("total_amount", 0),
+                "pending_returns": doc.get("pending_returns", []),
             })
 
         return Response({"success": True, "data": formatted_data})
@@ -1323,6 +1332,319 @@ def remove_individual_test_from_radiology_ward_request(request):
         else:
             return Response({"success": False, "error": "Test not found in request"}, status=404)
             
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+def update_admission_status(request):
+    try:
+        ip_number = request.data.get("ip_number") or request.data.get("ipNumber")
+        ward_status = request.data.get("status")
+
+        if not ip_number or not ward_status:
+            return Response({"error": "ip_number and status are required"}, status=400)
+
+        # Map to specific logical statuses if needed, e.g., Sent for billing -> is_billed = True?
+        update_fields = {"ward_status": ward_status}
+        
+        if ward_status == "Sent for billing":
+            update_fields["billing_status"] = "Pending"
+            update_fields["is_billed"] = False # Optional, based on existing logic
+            
+        result = mongo_db["hospital_admission"].update_one(
+            {"ipNumber": ip_number},
+            {"$set": update_fields}
+        )
+
+        if result.matched_count == 0:
+            return Response({"error": "Admission record not found"}, status=404)
+
+        return Response({"success": True, "message": "Status updated successfully"})
+    except Exception as e:
+        print(f"Error updating admission status: {e}")
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def return_medicine_ward_request(request):
+    import traceback
+    try:
+        data = request.data
+        bill_id = data.get("Bill_id")
+        returned_medicines = data.get("medicine_particulars", [])
+        changed_by = data.get("auth-user-id", "system")
+
+        if not bill_id:
+            return Response({"success": False, "error": "Bill_id is required"}, status=400)
+
+        try:
+            bill = PharmacyBilling.objects.get(Bill_id=bill_id)
+        except PharmacyBilling.DoesNotExist:
+            return Response({"success": False, "error": "Ward request not found"}, status=404)
+
+        existing = list(bill.medicine_particulars or [])
+
+        # Build a lookup map keyed by (item_id, batch_number)
+        existing_map = {}
+        for idx, itm in enumerate(existing):
+            if not isinstance(itm, dict):
+                continue
+            key = (str(itm.get("item_id", "")), str(itm.get("batch_number", "")))
+            existing_map[key] = (idx, itm)
+
+        # Instead of directly processing the return, append to pending_returns
+        changed_at = timezone.now().isoformat()
+        
+        # Load or initialize pending_returns
+        pending_returns = bill.pending_returns if hasattr(bill, "pending_returns") and bill.pending_returns else []
+        if not isinstance(pending_returns, list):
+            pending_returns = []
+
+        # Find a unique return ID for this request
+        import uuid
+        return_request_id = str(uuid.uuid4())
+
+        new_pending_items = []
+
+        for incoming in returned_medicines:
+            if not isinstance(incoming, dict):
+                continue
+            key = (str(incoming.get("item_id", "")), str(incoming.get("batch_number", "")))
+            if key not in existing_map:
+                continue
+
+            idx, current = existing_map[key]
+            
+            # The frontend sends 'returned_qty'
+            return_qty = float(incoming.get("returned_qty", incoming.get("return_qty", 0)))
+            if return_qty <= 0:
+                continue
+
+            # Just add to pending request
+            new_pending_items.append({
+                "item_id": incoming.get("item_id", ""),
+                "item_name": incoming.get("item_name", current.get("item_name", "")),
+                "batch_number": incoming.get("batch_number", ""),
+                "return_qty": return_qty,
+                "reason": incoming.get("reason", "Ward Return"),
+            })
+
+        if not new_pending_items:
+            return Response({"success": False, "error": "No valid items to return"}, status=400)
+
+        pending_returns.append({
+            "return_request_id": return_request_id,
+            "patient_name": request.data.get("patient_name", ""),
+            "requested_by": changed_by,
+            "requested_at": changed_at,
+            "items": new_pending_items,
+            "status": "Pending"
+        })
+
+        mongo_db["hospital_pharmacybilling"].update_one(
+            {"Bill_id": bill.Bill_id},
+            {"$set": {"pending_returns": pending_returns}}
+        )
+
+        return Response({"success": True, "message": "Return request sent to Pharmacy for approval"})
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_pending_ward_returns(request):
+    try:
+        # Fetch bills with pending returns
+        # PyMongo is safer for array queries
+        collection = mongo_db["hospital_pharmacybilling"]
+        
+        # Match only documents that have pending_returns array where status is "Pending"
+        pipeline = [
+            {"$match": {
+                "pending_returns": {"$exists": True, "$not": {"$size": 0}}
+            }},
+            {"$unwind": "$pending_returns"},
+            {"$match": {
+                "pending_returns.status": "Pending"
+            }},
+            {"$sort": {"pending_returns.requested_at": -1}}
+        ]
+        
+        results = list(collection.aggregate(pipeline))
+        
+        formatted_data = []
+        for doc in results:
+            pr = doc.get("pending_returns", {})
+            patient_name = pr.get("patient_name") or doc.get("patient_name") or ""
+            if not patient_name:
+                # Try fetching from admission
+                admission = mongo_db["hospital_admission"].find_one({"uhid": doc.get("uhid"), "is_admissionActive": True})
+                if admission and "patient_details" in admission:
+                    fname = admission["patient_details"].get("firstName", "")
+                    lname = admission["patient_details"].get("lastName", "")
+                    patient_name = f"{fname} {lname}".strip()
+
+            formatted_data.append({
+                "Bill_id": doc.get("Bill_id"),
+                "uhid": doc.get("uhid"),
+                "ip_number": doc.get("inpatient_number", doc.get("ip_number", "")),
+                "patient_name": patient_name,
+                "ward_name": doc.get("room_no", ""),
+                "return_request_id": pr.get("return_request_id"),
+                "requested_by": pr.get("requested_by"),
+                "requested_at": pr.get("requested_at"),
+                "items": pr.get("items", [])
+            })
+            
+        return Response({"success": True, "data": formatted_data})
+        
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def approve_ward_return(request):
+    import traceback
+    try:
+        data = request.data
+        bill_id = data.get("Bill_id")
+        return_request_id = data.get("return_request_id")
+        action = data.get("action", "Approve") # "Approve" or "Reject"
+        changed_by = data.get("auth-user-id", "system")
+
+        if not bill_id or not return_request_id:
+            return Response({"success": False, "error": "Bill_id and return_request_id are required"}, status=400)
+
+        try:
+            bill = PharmacyBilling.objects.get(Bill_id=bill_id)
+        except PharmacyBilling.DoesNotExist:
+            return Response({"success": False, "error": "Ward request not found"}, status=404)
+
+        pending_returns = bill.pending_returns or []
+        target_pr = None
+        target_idx = -1
+        
+        for idx, pr in enumerate(pending_returns):
+            if pr.get("return_request_id") == return_request_id and pr.get("status") == "Pending":
+                target_pr = pr
+                target_idx = idx
+                break
+                
+        if not target_pr:
+            return Response({"success": False, "error": "Pending return request not found or already processed"}, status=404)
+
+        if action == "Reject":
+            pending_returns[target_idx]["status"] = "Rejected"
+            pending_returns[target_idx]["processed_by"] = changed_by
+            pending_returns[target_idx]["processed_at"] = timezone.now().isoformat()
+            mongo_db["hospital_pharmacybilling"].update_one(
+                {"Bill_id": bill_id},
+                {"$set": {"pending_returns": pending_returns}}
+            )
+            return Response({"success": True, "message": "Return request rejected"})
+
+        # --- Approval Logic ---
+        existing = list(bill.medicine_particulars or [])
+        existing_map = {}
+        for idx, itm in enumerate(existing):
+            if not isinstance(itm, dict): continue
+            key = (str(itm.get("item_id", "")), str(itm.get("batch_number", "")))
+            existing_map[key] = (idx, itm)
+
+        # Generate Return Bill Number
+        from datetime import datetime
+        today = datetime.now()
+        financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}" if today.month < 4 else f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
+        prefix_key = f"{financial_year}/RET"
+        prefix = f"{prefix_key}/"
+
+        from pymongo import ReturnDocument
+        counters_collection = mongo_db["counters"]
+        counter = counters_collection.find_one_and_update(
+            {"_id": prefix_key},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        return_bill_no = f"{prefix}{counter['seq']:06d}"
+
+        processed_at = timezone.now().isoformat()
+        
+        for incoming in target_pr.get("items", []):
+            key = (str(incoming.get("item_id", "")), str(incoming.get("batch_number", "")))
+            if key not in existing_map:
+                continue
+                
+            idx, current = existing_map[key]
+            return_qty = float(incoming.get("return_qty", 0))
+            if return_qty <= 0: continue
+
+            old_qty = float(current.get("quantity", current.get("qty", 0)))
+            new_qty = old_qty - return_qty
+            if new_qty < 0: new_qty = 0
+
+            audit_entry = {
+                "changed_by": changed_by,
+                "changed_at": processed_at,
+                "action": "returned",
+                "return_qty": return_qty,
+                "old_qty": old_qty,
+                "new_qty": new_qty,
+                "reason": incoming.get("reason", "Ward Return"),
+                "return_bill_no": return_bill_no
+            }
+
+            eh = current.get("edit_history", [])
+            if not isinstance(eh, list): eh = []
+            eh.append(audit_entry)
+            current["edit_history"] = eh
+            current["quantity"] = new_qty
+            current["qty"] = new_qty
+
+            existing[idx] = current
+
+        pending_returns[target_idx]["status"] = "Approved"
+        pending_returns[target_idx]["processed_by"] = changed_by
+        pending_returns[target_idx]["processed_at"] = processed_at
+        pending_returns[target_idx]["return_bill_no"] = return_bill_no
+
+        # Recalculate totals
+        new_total = sum(
+            float(itm.get("quantity", itm.get("qty", 0))) * float(itm.get("price", 0))
+            for itm in existing if isinstance(itm, dict) and not itm.get("is_deleted")
+        )
+        
+        # Check if all items are fully returned (qty == 0)
+        all_returned = True
+        for itm in existing:
+            if isinstance(itm, dict) and not itm.get("is_deleted"):
+                if float(itm.get("quantity", itm.get("qty", 0))) > 0:
+                    all_returned = False
+                    break
+
+        update_data = {
+            "medicine_particulars": existing,
+            "pending_returns": pending_returns,
+            "total_amount": round(new_total, 2),
+            "net_amount": round(new_total, 2),
+            "lastmodified_by": changed_by
+        }
+        if all_returned:
+            update_data["billing_status"] = "Returned"
+
+        mongo_db["hospital_pharmacybilling"].update_one(
+            {"Bill_id": bill_id},
+            {"$set": update_data}
+        )
+
+        return Response({"success": True, "message": "Return request approved successfully"})
+
     except Exception as e:
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)

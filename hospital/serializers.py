@@ -592,7 +592,23 @@ class ReceiptAndPaymentSerializer(serializers.ModelSerializer):
 from .models import SalesReturn
 class SalesReturnSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+
     class Meta:
-        model = SalesReturn
+        model   = SalesReturn
+        exclude = ['lastmodified_by', 'lastmodified_date']
+
+from .models import CashCounterCollection
+class CashCounterCollectionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = CashCounterCollection
         fields = '__all__'
 
+
+
+from .models import DialysisDischargeSummary
+class DialysisDischargeSummarySerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = DialysisDischargeSummary
+        fields = '__all__'

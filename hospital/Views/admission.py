@@ -599,7 +599,10 @@ def admission_view(request):
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"success": False, "error": str(e)}, status=500)
+        
 
+        
+        
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET / PUT / DELETE  /admissions/<ipNumber>/

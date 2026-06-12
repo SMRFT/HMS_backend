@@ -8,6 +8,9 @@ import sys
 def main():
     """Run administrative tasks."""
     
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     environment = os.getenv('ENV_CLASSIFICATION', 'local')
 
     print(f"Initializing environment: {environment}" )
