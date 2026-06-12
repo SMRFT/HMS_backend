@@ -359,8 +359,8 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/admin/?(\\?.*)?$': 'HMS-P-CTIA',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/admin-list/?(\\?.*)?$': 'HMS-P-CTIA',
-        r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTIA',
-        r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTI',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTI',
         
              
 }
