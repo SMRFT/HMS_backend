@@ -430,16 +430,25 @@ def estimate_billing_list(request):
         result = []
 
         for doc in data:
-            uhid    = doc.get("uhid", "")
-            patient = patient_cache.get(uhid, {})
+            uhid = doc.get("uhid", "").strip()
+            
+            if uhid:
+                patient = patient_cache.get(uhid, {})
+                doc["salutation"] = patient.get("salutation", "")
+                doc["firstName"]  = patient.get("firstName",  "")
+                doc["lastName"]   = patient.get("lastName",   "")
+                doc["gender"]     = patient.get("gender",     "")
+            else:
+                # Manual entry — fields already stored directly on the estimate doc
+                doc["salutation"] = doc.get("salutation", "")
+                doc["firstName"]  = doc.get("firstName",  "")
+                doc["lastName"]   = doc.get("lastName",   "")
+                doc["gender"]     = doc.get("gender",     "")
 
-            doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"]  = patient.get("firstName",  "")
-            doc["lastName"]   = patient.get("lastName",   "")
-            doc["age"]        = doc.get("age")
-            doc["age_type"]   = doc.get("age_type", "")
-            doc["roomNo"]     = doc.get("roomNo",   "")
-            doc["gender"]     = patient.get("gender", "")
+            # Age / room — always from the estimate doc
+            doc["age"]      = doc.get("age",      "")
+            doc["age_type"] = doc.get("age_type", "")
+            doc["roomNo"]   = doc.get("roomNo",   "")
 
             try:
                 bt_key = int(doc.get("bill_type", 0))
@@ -480,6 +489,8 @@ def estimate_billing_list(request):
             {"error": "Failed to fetch estimate billing list", "details": str(e)},
             status=500,
         )
+
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
@@ -1147,15 +1158,25 @@ def billing_report_view(request):
 
         for doc in data:
 
-            # Patient
-            patient = patient_cache.get(doc.get("uhid"), {})
-            doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"]  = patient.get("firstName",  "")
-            doc["lastName"]   = patient.get("lastName",   "")
-            doc["age"]        = doc.get("age")
-            doc["age_type"]   = doc.get("age_type", "")
-            doc["roomNo"]     = doc.get("roomNo", "")
-            doc["gender"]     = patient.get("gender", "")
+            # Patient — use patient_cache if uhid exists, else fall back to doc fields
+            uhid = doc.get("uhid", "").strip()
+            if uhid:
+                patient = patient_cache.get(uhid, {})
+                doc["salutation"] = patient.get("salutation", "")
+                doc["firstName"]  = patient.get("firstName",  "")
+                doc["lastName"]   = patient.get("lastName",   "")
+                doc["gender"]     = patient.get("gender",     "")
+            else:
+                # Manual entry — fields already stored directly on the billing doc
+                doc["salutation"] = doc.get("salutation", "")
+                doc["firstName"]  = doc.get("firstName",  "")
+                doc["lastName"]   = doc.get("lastName",   "")
+                doc["gender"]     = doc.get("gender",     "")
+
+            # Age / room — always from the billing doc (not patient_cache)
+            doc["age"]      = doc.get("age",    "")
+            doc["age_type"] = doc.get("age_type", "")
+            doc["roomNo"]   = doc.get("roomNo",   "")
 
             # Bill type
             try:
@@ -1225,7 +1246,9 @@ def billing_report_view(request):
             {"error": "Failed to generate billing report", "details": str(e)},
             status=500
         )
-    
+
+
+
 @api_view(['PATCH'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])

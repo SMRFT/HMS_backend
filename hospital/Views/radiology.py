@@ -408,7 +408,7 @@ def get_investigations(request):
             report_map[(r.get('investBillNo'), normalized_item_id)] = r
 
         # ── 5. Fetch patients ─────────────────────────────────────────────────
-        uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid')})
+        uhid_list = list({r['uhid'] for r in filtered_records if r.get('uhid', '').strip()})
         patient_filter = {'uhid': {'$in': uhid_list}}
         if hospital_code:
             patient_filter['hospital_code'] = hospital_code
@@ -459,6 +459,11 @@ def get_investigations(request):
                     except (ValueError, TypeError):
                         pass
 
+        report_fetus_map = {}
+        for (bill_no, iid), rpt in report_map.items():
+            fetus_val = rpt.get('valuedetails', {}).get('fetus', '') if rpt else ''
+            report_fetus_map[(bill_no, iid)] = fetus_val
+
         format_map = {}
         if all_item_ids:
             format_docs = radiology_format_collection.find(
@@ -476,7 +481,8 @@ def get_investigations(request):
                 fid = fdoc.get('item_id')
                 if fid is not None:
                     try:
-                        format_map[int(fid)] = fdoc
+                        key = (int(fid), fdoc.get('fetus', ''))
+                        format_map[key] = fdoc
                     except (ValueError, TypeError):
                         pass
 
@@ -487,13 +493,20 @@ def get_investigations(request):
             if not invest_bill_no:
                 continue
 
-            uhid    = record.get('uhid', '')
-            patient = patient_map.get(uhid, {})
-            gender  = patient.get('gender', '').strip().upper()
+            uhid    = record.get('uhid', '').strip()
+            patient = patient_map.get(uhid, {}) if uhid else {}
 
-            if gender in ('M', 'MALE'):
+            # ── Patient info: prefer patient_cache, fall back to billing doc ──
+            salutation  = patient.get('salutation',  '') or record.get('salutation',  '')
+            first_name  = patient.get('firstName',   '') or record.get('firstName',   '')
+            middle_name = patient.get('middleName',  '') or record.get('middleName',  '')
+            last_name   = patient.get('lastName',    '') or record.get('lastName',    '')
+            gender      = patient.get('gender',      '') or record.get('gender',      '')
+
+            gender_clean = gender.strip().upper()
+            if gender_clean in ('M', 'MALE'):
                 gender_key = 'male'
-            elif gender in ('F', 'FEMALE'):
+            elif gender_clean in ('F', 'FEMALE'):
                 gender_key = 'female'
             else:
                 gender_key = 'male'
@@ -508,11 +521,11 @@ def get_investigations(request):
                 if field in base:
                     base[field] = _to_ist(base[field])
 
-            base['salutation']  = patient.get('salutation',  '')
-            base['firstName']   = patient.get('firstName',   '')
-            base['middleName']  = patient.get('middleName',  '')
-            base['lastName']    = patient.get('lastName',    '')
-            base['gender']      = patient.get('gender',      '')
+            base['salutation']  = salutation
+            base['firstName']   = first_name
+            base['middleName']  = middle_name
+            base['lastName']    = last_name
+            base['gender']      = gender
 
             # ── Doctor name ───────────────────────────────────────────────────
             doc_val = record.get('doctor', '')
@@ -541,7 +554,9 @@ def get_investigations(request):
                 row['report']    = report
                 row['hasReport'] = report.get('has_report', False) if report else False
 
-                fmt_doc = format_map.get(item_id)
+                saved_fetus = report_fetus_map.get((invest_bill_no, item_id), '') if report else ''
+                fmt_doc = format_map.get((item_id, saved_fetus)) or format_map.get((item_id, ''))
+
                 if fmt_doc:
                     fmt_base = {
                         k: v for k, v in fmt_doc.items()
@@ -610,20 +625,23 @@ def create_scan_report(request):
 
         for sec in sections:
             if sec.get('table_id'):
+                # Table entry — store as-is (has table_id + title_id + row values)
                 value_list.append(sec)
             else:
+                # Text entry — store only title_id and title_value, no title
                 value_list.append({
                     "title_id":    sec.get('title_id', ''),
-                    "title":       sec.get('title', ''),
                     "title_value": sec.get('title_value', ''),
                 })
 
         anc_fields = data.get('anc_fields', None)
+        fetus = data.get('fetus', '')
 
         valuedetails = {
             "device_id":    data.get('device_id', []),
             "value":        value_list,
             **({"anc_fields": anc_fields} if anc_fields else {}),
+            **({"fetus": fetus} if fetus else {}), 
         }
 
         impression    = data.get('impression', '')
@@ -901,12 +919,9 @@ def edit_scan_report_impression(request, investBillNo, item_id):
                     if title_id in existing_text_map:
                         idx = existing_text_map[title_id]
                         existing_value[idx]["title_value"] = new_val
-                        if incoming.get("title"):
-                            existing_value[idx]["title"] = incoming["title"]
                     else:
                         existing_value.append({
                             "title_id":    title_id,
-                            "title":       incoming.get("title", ""),
                             "title_value": new_val,
                         })
 
@@ -961,28 +976,17 @@ def soft_delete_scan_report(request, investBillNo, item_id):
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
 def get_radiology_format(request):
-    """
-    GET /scan-reports/format/
-    Query params:
-        - billTypeNo  (required)
-        - test_id     (required)
-        - gender      (required: 'Male' or 'Female')
-    Returns gender-specific fields + common fields from hospital_radiology_formats.
-    """
-
     bill_type_no = request.GET.get('billTypeNo')
     test_id      = request.GET.get('test_id')
     gender       = request.GET.get('gender', '').strip().lower()
+    fetus        = request.GET.get('fetus', '').strip()   # NEW: optional
 
     if not bill_type_no:
         return JsonResponse({'error': 'billTypeNo is required'}, status=400)
     if not test_id:
         return JsonResponse({'error': 'test_id is required'}, status=400)
     if gender not in ('male', 'female'):
-        return JsonResponse(
-            {'error': "gender must be 'Male' or 'Female'"},
-            status=400
-        )
+        return JsonResponse({'error': "gender must be 'Male' or 'Female'"}, status=400)
 
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db     = client['HMS']
@@ -994,50 +998,53 @@ def get_radiology_format(request):
         except (ValueError, TypeError):
             test_id_query = test_id
 
-        doc = collection.find_one(
-            {
-                'billTypeNo': bill_type_no,
-                'item_id':    test_id_query,
-                'is_active':  True,
-            },
-            {'_id': 0}
-        )
+        query = {
+            'billTypeNo': bill_type_no,
+            'item_id':    test_id_query,
+            'is_active':  True,
+        }
 
-        if not doc:
+        # If fetus is specified, filter directly
+        if fetus:
+            query['fetus'] = fetus
+
+        docs = list(collection.find(query, {'_id': 0}))
+
+        if not docs:
             return JsonResponse(
                 {'error': 'No active format found for given billTypeNo and test_id'},
                 status=404
             )
 
-        gender_fields = doc.get(gender, [])
+        # Multiple docs found and no fetus param — ask frontend to choose
+        if len(docs) > 1 and not fetus:
+            fetus_options = [d.get('fetus') for d in docs if d.get('fetus')]
+            return JsonResponse({
+                'requires_selection': True,
+                'selection_field': 'fetus',
+                'options': fetus_options,   # e.g. ["Single", "Twins"]
+            }, status=200)
+
+        doc = docs[0]
 
         GENDER_KEYS   = {'male', 'female'}
         EXCLUDED_KEYS = {'last_modified_by', 'last_modified_date'}
 
+        gender_fields = doc.get(gender, [])
         common_fields = {
-            k: v
-            for k, v in doc.items()
+            k: v for k, v in doc.items()
             if k not in GENDER_KEYS and k not in EXCLUDED_KEYS
         }
-
         for key, value in common_fields.items():
             if isinstance(value, datetime):
                 common_fields[key] = value.isoformat()
 
-        response_data = {
-            **common_fields,
-            'format': gender_fields,
-        }
-
-        return JsonResponse(response_data, safe=False)
+        return JsonResponse({**common_fields, 'format': gender_fields}, safe=False)
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
     finally:
         client.close()
-
-
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
 def get_employee_signature_by_id(request):

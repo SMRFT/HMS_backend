@@ -170,7 +170,8 @@ PAGE_MAPPING = {
 
     #Doctor Master: 
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
-    '/_b_a_c_k_e_n_d/HMS/doctor_schedule/': 'HMS-P-DRM',                  
+    '/_b_a_c_k_e_n_d/HMS/doctor_schedule/': 'HMS-P-DRM',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule(?:/[^/]+)+/$': 'HMS-P-DRM',                    
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
     r'^/_b_a_c_k_e_n_d/HMS/doctor-report/?.*': 'HMS-API-DLD',   
 
@@ -306,6 +307,8 @@ PAGE_MAPPING = {
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
+        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
+        '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSOPB',
         # '/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/': 'HMS-P-PGS',
         r'^/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/?(\?.*)?$': 'HMS-P-IB',
         '/_b_a_c_k_e_n_d/HMS/save_oppharmacy_bill/': 'HMS-P-PSOPB',
@@ -326,7 +329,7 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
 
          '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
-         '/_b_a_c_k_e_n_d/HMS/oppharmacy_deletebill/': 'HMS-P-POPPDB',
+         '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-POPPDB',
          '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
          '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
@@ -336,10 +339,10 @@ PAGE_MAPPING = {
           '/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/': 'HMS-P-PHVSB',
 
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
-         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-POPSR',
-         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-PSRBD',
-         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-POPSRBD',
-          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-CCGSRD',
+         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-SRGPD',
+         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-SRBD',
+         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-OPSRBD',
+          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-OPGSRD',
 
 
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/': 'HMS-P-CCC',

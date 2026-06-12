@@ -49,7 +49,7 @@ def convert_decimals(obj):
 
 @api_view(["POST","GET"])
 @permission_classes([HasRoleAndDataPermission])
-def get_oppharmacy_stock(request):
+def get_pharmacy_stock(request):
     try:
         # ✅ Get values
         print("test", request.data.get("outlet_code"))
@@ -291,7 +291,10 @@ def get_oppharmacy_stock(request):
                     "rack_no": 1,    
 
                     "CGST_Percentage": 1,
-                    "SGST_Percentage": 1
+                    "SGST_Percentage": 1,
+
+                    "CGST_Amt": 1,
+                    "SGST_Amt": 1
                 }
             }
         ]
@@ -342,6 +345,7 @@ def sanitize_medicines(medicines):
         })
 
     return clean
+
 
 # ----------------------------------------------------------
 # STOCK UPDATE (NO department_code)
@@ -451,15 +455,15 @@ def build_edit_history(old_meds, new_meds, employee_id):
 # ----------------------------------------------------------
 @api_view(["POST", "PATCH"])
 @permission_classes([HasRoleAndDataPermission])
-def save_oppharmacy_bill(request):
+def save_pharmacy_bill(request):
 
     data = request.data
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code") 
-    branch_code = data.get("auth-branch-code") 
-    outlet_code = data.get("auth-outlet-code") 
+    hospital_code = data.get("auth-hospital-code")
+    branch_code   = data.get("auth-branch-code")
+    outlet_code   = data.get("auth-outlet-code")
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -476,24 +480,35 @@ def save_oppharmacy_bill(request):
     Bill_id = data.get("Bill_id")
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
-    print("sanitize_medicines",(data.get("medicine_particulars", [])))
+
+    # --------------------------------------------------
+    # FIX 1 — uhid is NOT mandatory; store None if missing
+    # --------------------------------------------------
+    uhid = data.get("uhid") or None   # blank string → None (allowed)
 
     # --------------------------------------------------
     # COMMON FIELDS
     # --------------------------------------------------
     fields = {
-        "uhid": data.get("uhid"),
-        "inpatient_number": data.get("inpatient_number"),
-        "bill_type": data.get("bill_type"),
-        "doctor_id": data.get("doctor_id"),
-        "room_no": data.get("room_no"),
-        "total_amount": float(data.get("total_amount", 0)),
-        "overall_discount_type": data.get("overall_discount_type"),
-        "overall_discount_value": float(data.get("overall_discount_value", 0)),
-        "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
-        "net_amount": float(data.get("net_amount", 0)),
-        "shiftno": data.get("shiftno"),
+        # FIX 1: uhid is optional — stored as-is (None if not provided)
+        "uhid":                     uhid,
+        "inpatient_number":         data.get("inpatient_number"),
+        "bill_type":                data.get("bill_type"),
+        "doctor_id":                data.get("doctor_id"),
+        # FIX 3: age stored as integer; also returned in every response
+        "age":                      int(data.get("age", 0) or 0),
+        "room_no":                  data.get("room_no"),
+        "total_amount":             float(data.get("total_amount", 0)),
+        "overall_discount_type":    data.get("overall_discount_type"),
+        "overall_discount_value":   float(data.get("overall_discount_value", 0)),
+        "overall_discount_amount":  float(data.get("overall_discount_amount", 0)),
+        "net_amount":               float(data.get("net_amount", 0)),
+        "shiftno":                  data.get("shiftno"),
     }
+
+    # ✅ Save patient_name ONLY when uhid is not provided
+    if not uhid:
+        fields["patient_name"] = data.get("patient_name")
 
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
     db = client["HMS"]
@@ -533,15 +548,15 @@ def save_oppharmacy_bill(request):
 
         update_data = {**fields}
         update_data["medicine_particulars"] = updated_meds
-        update_data["lastmodified_by"] = employee_id
-        update_data["lastmodified_date"] = datetime.utcnow()
-        update_data["edit_reason"] = data.get("edit_reason", "")
-        update_data["edited_by"] = employee_id
+        update_data["lastmodified_by"]      = employee_id
+        update_data["lastmodified_date"]    = datetime.utcnow()
+        update_data["edit_reason"]          = data.get("edit_reason", "")
+        update_data["edited_by"]            = employee_id
 
         # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
             update_data["billing_status"] = "Estimate"
-            update_data["billing_mode"] = "ESTIMATE"
+            update_data["billing_mode"]   = "ESTIMATE"
 
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
@@ -549,21 +564,23 @@ def save_oppharmacy_bill(request):
                 update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
 
             update_data["billing_status"] = "Billed"
-            update_data["billing_mode"] = "ESTIMATE"
-            update_data["bill_date"] = datetime.utcnow()
+            update_data["billing_mode"]   = "ESTIMATE"
+            update_data["bill_date"]      = datetime.utcnow()
 
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
             {"$set": update_data}
         )
 
+        # FIX 3: return bill_no + age immediately in PATCH response
         return Response({
-            "success": True,
-            "Bill_id": record.Bill_id,
-            "bill_no": update_data.get("bill_no"),
+            "success":     True,
+            "Bill_id":     record.Bill_id,
+            "bill_no":     update_data.get("bill_no") or record.bill_no,
             "estimate_no": record.estimate_no,
+            "age":         update_data.get("age", record.age or 0),   # ✅ FIX 3
             "edit_reason": update_data.get("edit_reason"),
-            "edited_by": update_data.get("edited_by")
+            "edited_by":   update_data.get("edited_by"),
         })
 
     # ======================================================
@@ -575,15 +592,15 @@ def save_oppharmacy_bill(request):
         next_Bill_id = (last.Bill_id + 1) if last else 1
 
         record_doc = {
-            "Bill_id": next_Bill_id,
+            "Bill_id":              next_Bill_id,
             "medicine_particulars": medicines,
-            "billing_status": status,
-            "created_by": employee_id,
-            "created_date": datetime.utcnow(),
-            "bill_date": datetime.utcnow(),
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code,
+            "billing_status":       status,
+            "created_by":           employee_id,
+            "created_date":         datetime.utcnow(),
+            "bill_date":            datetime.utcnow(),
+            "hospital_code":        hospital_code,
+            "branch_code":          branch_code,
+            "outlet_code":          outlet_code,
             **fields
         }
 
@@ -592,8 +609,8 @@ def save_oppharmacy_bill(request):
             bill_no = get_last_oppharmacy_billno(get_financial_year())
 
             record_doc.update({
-                "bill_no": bill_no,
-                "estimate_no": None,
+                "bill_no":      bill_no,
+                "estimate_no":  None,
                 "billing_mode": "DIRECT",
             })
 
@@ -607,10 +624,12 @@ def save_oppharmacy_bill(request):
                 outlet_code
             )
 
+            # FIX 3: return bill_no + age immediately
             return Response({
                 "success": True,
                 "bill_no": bill_no,
-                "Bill_id": next_Bill_id
+                "Bill_id": next_Bill_id,
+                "age":     record_doc.get("age", 0),   # ✅ FIX 3
             })
 
         # 🔥 ESTIMATE
@@ -618,8 +637,8 @@ def save_oppharmacy_bill(request):
             estimate_no = generate_estimate_no()
 
             record_doc.update({
-                "bill_no": None,
-                "estimate_no": estimate_no,
+                "bill_no":      None,
+                "estimate_no":  estimate_no,
                 "billing_mode": "ESTIMATE",
             })
 
@@ -633,13 +652,17 @@ def save_oppharmacy_bill(request):
                 outlet_code
             )
 
+            # FIX 3: return estimate_no + age immediately
             return Response({
-                "success": True,
+                "success":     True,
                 "estimate_no": estimate_no,
-                "Bill_id": next_Bill_id
+                "Bill_id":     next_Bill_id,
+                "age":         record_doc.get("age", 0),   # ✅ FIX 3
             })
 
     return Response({"success": False, "error": "Invalid request"})
+
+
 
 
 @api_view(["GET"])
@@ -1677,7 +1700,7 @@ from ..models import PharmacyBilling, PharmacyStock
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
-def oppharmacy_deletebill(request):
+def pharmacy_deletebill(request):
     try:
         data = request.data
         employee_id = data.get("auth-user-id") 
@@ -4136,6 +4159,8 @@ def searchby_ip(request):
 
 
 
+
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from datetime import datetime
@@ -4151,9 +4176,9 @@ def pharmacy_view_bills(request):
     # =========================================================
     # ✅ Get values from REQUEST
     # =========================================================
-    employee_id   = request.data.get("auth-user-id")
-    hospital_code = request.data.get("auth-hospital-code")
-    branch_code   = request.data.get("auth-branch-code")
+    employee_id    = request.data.get("auth-user-id")
+    hospital_code  = request.data.get("auth-hospital-code")
+    branch_code    = request.data.get("auth-branch-code")
     request_outlet = request.data.get("auth-outlet-code")
 
     # =========================================================
@@ -4174,17 +4199,17 @@ def pharmacy_view_bills(request):
     profile_collection = global_db["backend_diagnostics_profile"]
 
     hms_db = client["HMS"]
-    billtype_collection       = hms_db["hospital_billtype"]
-    pharmacy_item_collection  = hms_db["hospital_pharmacyitem"]
-    pharmacy_stock_collection = hms_db["hospital_pharmacystock"]
-    oppharmacy_collection     = hms_db["hospital_pharmacybilling"]
+    billtype_collection          = hms_db["hospital_billtype"]
+    pharmacy_item_collection     = hms_db["hospital_pharmacyitem"]
+    pharmacy_stock_collection    = hms_db["hospital_pharmacystock"]
+    oppharmacy_collection        = hms_db["hospital_pharmacybilling"]
+    # ✅ Sales returns are read from oppharmacy_collection (edit_history) — NOT hospital_salesreturn
 
     # =========================================================
     # ✅ Employee Profile
     # =========================================================
     try:
         query_id = str(employee_id)
-
         search_query = {
             "employeeId": {
                 "$in": [
@@ -4193,16 +4218,15 @@ def pharmacy_view_bills(request):
                 ]
             }
         }
-
     except:
         search_query = {"employeeId": str(employee_id)}
 
     employee_profile = profile_collection.find_one(
         search_query,
         {
-            "employeeId": 1,
+            "employeeId":   1,
             "employeeName": 1,
-            "hms_outlets": 1
+            "hms_outlets":  1
         }
     )
 
@@ -4232,7 +4256,7 @@ def pharmacy_view_bills(request):
     billtype_cursor = billtype_collection.find(
         {
             "hospital_code": hospital_code,
-            "branch_code": branch_code
+            "branch_code":   branch_code
         },
         {
             "bill_type": 1,
@@ -4240,27 +4264,17 @@ def pharmacy_view_bills(request):
         }
     )
 
-    billtype_map = {}
-    allowed_bill_type_details = []
+    billtype_map       = {}
     allowed_bill_types = []
 
     for bt in billtype_cursor:
         bill_type = bt.get("bill_type")
-
         if bill_type is not None:
             allowed_bill_types.append(int(bill_type))
-
-            allowed_bill_type_details.append({
-                "bill_type": bill_type,
-                "bill_name": bt.get("bill_name", "")
-            })
-
             billtype_map[int(bill_type)] = bt.get("bill_name", "")
 
     # =========================================================
     # ✅ Django Bills
-    # ❌ Removed current date filter
-    # ❌ Removed cashcounter filter
     # =========================================================
     bills = list(
         PharmacyBilling.objects.filter(
@@ -4272,21 +4286,12 @@ def pharmacy_view_bills(request):
         ).order_by("-created_date")
     )
 
-    if not bills:
-        return Response({
-            "employee_id": employee_id,
-            "employee_name": emp_name,
-            "allowed_bill_type_details": allowed_bill_type_details,
-            "data": []
-        }, status=status.HTTP_200_OK)
-
     # =========================================================
     # ✅ Patient Mapping
     # =========================================================
     uhids = [bill.uhid for bill in bills if bill.uhid]
 
-    patients = Patient.objects.filter(uhid__in=uhids)
-
+    patients    = Patient.objects.filter(uhid__in=uhids)
     patient_map = {
         p.uhid: f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
         for p in patients
@@ -4295,63 +4300,57 @@ def pharmacy_view_bills(request):
     # =========================================================
     # ✅ Doctor Mapping
     # =========================================================
-    doctor_ids = list(set([
-        bill.doctor_id for bill in bills if bill.doctor_id
-    ]))
-
+    doctor_ids = list(set([bill.doctor_id for bill in bills if bill.doctor_id]))
     doctor_map = {}
 
     if doctor_ids:
-
         doctor_cursor = profile_collection.find(
             {"employeeId": {"$in": doctor_ids}},
             {"employeeId": 1, "employeeName": 1}
         )
-
         doctor_map = {
             str(doc["employeeId"]): doc.get("employeeName", "")
             for doc in doctor_cursor
         }
 
     # =========================================================
-    # ✅ Collect Items
+    # ✅ Collect Bill Items from MongoDB (oppharmacy_collection)
+    #    This collection also holds edit_history with sales_return entries
     # =========================================================
-    bill_ids = [bill.Bill_id for bill in bills]
+    bill_ids    = [bill.Bill_id for bill in bills]
+    mongo_bills = []
 
-    mongo_bills = list(
-        oppharmacy_collection.find(
-            {
-                "Bill_id": {"$in": bill_ids},
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": matched_outlet
-            },
-            {
-                "Bill_id": 1,
-                "medicine_particulars": 1
-            }
+    if bill_ids:
+        mongo_bills = list(
+            oppharmacy_collection.find(
+                {
+                    "Bill_id":       {"$in": bill_ids},
+                    "hospital_code": hospital_code,
+                    "branch_code":   branch_code,
+                    "outlet_code":   matched_outlet
+                },
+                {
+                    "Bill_id":              1,
+                    "medicine_particulars": 1,
+                    "billing_status":       1,
+                }
+            )
         )
-    )
 
-    mongo_map = {
-        m["Bill_id"]: m
-        for m in mongo_bills
-    }
+    mongo_map = {m["Bill_id"]: m for m in mongo_bills}
 
+    # =========================================================
+    # ✅ Collect item_ids + batch_numbers for mapping
+    # =========================================================
     item_batch_set = set()
 
     for m in mongo_bills:
-
         for item in m.get("medicine_particulars", []):
-
             if item.get("item_id") and item.get("batch_number"):
-
-                item_batch_set.add(
-                    (
-                        int(item["item_id"]),
-                        str(item["batch_number"]).strip()
-                    )
-                )
+                item_batch_set.add((
+                    int(item["item_id"]),
+                    str(item["batch_number"]).strip()
+                ))
 
     item_ids      = list(set([i[0] for i in item_batch_set]))
     batch_numbers = list(set([i[1] for i in item_batch_set]))
@@ -4362,49 +4361,45 @@ def pharmacy_view_bills(request):
     item_map = {}
 
     if item_ids:
-
         item_cursor = pharmacy_item_collection.find(
             {
-                "item_id": {"$in": item_ids},
+                "item_id":       {"$in": item_ids},
                 "hospital_code": hospital_code,
-                "branch_code": branch_code
+                "branch_code":   branch_code
             },
             {
-                "item_id": 1,
+                "item_id":   1,
                 "item_name": 1
             }
         )
-
         item_map = {
             i["item_id"]: i.get("item_name", "")
             for i in item_cursor
         }
 
     # =========================================================
-    # ✅ Stock Mapping
+    # ✅ Stock Mapping (GST)
     # =========================================================
     stock_map = {}
 
     if item_ids and batch_numbers:
-
         stock_cursor = pharmacy_stock_collection.find(
             {
-                "item_id": {"$in": item_ids},
-                "batch_number": {"$in": batch_numbers},
+                "item_id":       {"$in": item_ids},
+                "batch_number":  {"$in": batch_numbers},
                 "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": matched_outlet
+                "branch_code":   branch_code,
+                "outlet_code":   matched_outlet
             },
             {
-                "item_id": 1,
-                "batch_number": 1,
+                "item_id":         1,
+                "batch_number":    1,
                 "CGST_Percentage": 1,
                 "SGST_Percentage": 1,
-                "CGST_Amt": 1,
-                "SGST_Amt": 1
+                "CGST_Amt":        1,
+                "SGST_Amt":        1
             }
         )
-
         stock_map = {
             (
                 s["item_id"],
@@ -4414,7 +4409,9 @@ def pharmacy_view_bills(request):
         }
 
     # =========================================================
-    # ✅ Final Response
+    # ✅ Build Bills Data
+    #    medicine_particulars includes edit_history so the frontend
+    #    can derive sales_return rows inline without a separate collection
     # =========================================================
     data = []
 
@@ -4422,67 +4419,43 @@ def pharmacy_view_bills(request):
 
         serialized = PharmacyBillingSerializer(bill).data
 
-        serialized["patient_name"] = patient_map.get(bill.uhid, "")
-        serialized["doctor_name"]  = doctor_map.get(str(bill.doctor_id), "")
-        serialized["bill_type_name"] = billtype_map.get(
-            int(bill.bill_type),
-            ""
-        )
+        serialized["patient_name"]   = patient_map.get(bill.uhid, "")
+        serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
+        serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type), "")
 
-        mongo_bill = mongo_map.get(bill.Bill_id, {})
-
-        medicine_list = mongo_bill.get(
-            "medicine_particulars",
-            []
-        )
+        mongo_bill    = mongo_map.get(bill.Bill_id, {})
+        medicine_list = mongo_bill.get("medicine_particulars", [])
 
         updated_items = []
 
         for item in medicine_list:
 
-            item_id = (
-                int(item.get("item_id"))
-                if item.get("item_id")
-                else None
-            )
-
-            batch_number = (
-                str(item.get("batch_number")).strip()
-                if item.get("batch_number")
-                else ""
-            )
+            item_id      = int(item.get("item_id")) if item.get("item_id") else None
+            batch_number = str(item.get("batch_number")).strip() if item.get("batch_number") else ""
 
             item["item_name"] = item_map.get(item_id, "")
 
-            stock = stock_map.get(
-                (item_id, batch_number),
-                {}
-            )
+            stock = stock_map.get((item_id, batch_number), {})
 
-            item["CGST_Percentage"] = convert_decimal(
-                stock.get("CGST_Percentage", 0)
-            )
+            item["CGST_Percentage"] = convert_decimal(stock.get("CGST_Percentage", 0))
+            item["SGST_Percentage"] = convert_decimal(stock.get("SGST_Percentage", 0))
+            item["CGST_Amt"]        = convert_decimal(stock.get("CGST_Amt", 0))
+            item["SGST_Amt"]        = convert_decimal(stock.get("SGST_Amt", 0))
 
-            item["SGST_Percentage"] = convert_decimal(
-                stock.get("SGST_Percentage", 0)
-            )
-
-            item["CGST_Amt"] = convert_decimal(
-                stock.get("CGST_Amt", 0)
-            )
-
-            item["SGST_Amt"] = convert_decimal(
-                stock.get("SGST_Amt", 0)
-            )
+            # ✅ edit_history is passed through as-is so the frontend can
+            #    extract sales_return entries and render them inline in the table
+            item["edit_history"] = item.get("edit_history", [])
 
             updated_items.append(item)
 
         serialized["medicine_particulars"] = updated_items
-
         data.append(serialized)
 
+    # =========================================================
+    # ✅ Final Response  (no sales_returns key — embedded in edit_history)
+    # =========================================================
     return Response({
-        "employee_id": employee_id,
+        "employee_id":   employee_id,
         "employee_name": emp_name,
         "allowed_bill_type_details": allowed_bill_type_details,
         "data": data

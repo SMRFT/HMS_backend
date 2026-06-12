@@ -336,7 +336,7 @@ class StockTransfer(AuditModel):
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
     
-# Correctly using djongo models below
+
 from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
@@ -345,8 +345,10 @@ class PharmacyBilling(AuditModel):
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
-    uhid = models.CharField(max_length=50)
+    uhid = models.CharField(max_length=5,blank=True, null=True)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    patientname = models.CharField(max_length=100, blank=True, null=True)
+    age = models.IntegerField(blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
@@ -946,28 +948,36 @@ class Summary(AuditModel):
     
 class EstimateBilling(AuditModel):
     EstBillNo = models.CharField(max_length=50, blank=True)
-    EstBillDate = models.DateTimeField() 
-    uhid = models.CharField(max_length=50)
-    age = models.CharField(max_length=50)
-    age_type = models.CharField(max_length=50)
-    roomNo = models.CharField(max_length=50)
-    ipNumber = models.CharField(max_length=50,blank=True)
-    bill_type       = models.CharField(max_length=100, blank=True, null=True)  # collection / category key
-    billTypeNo      = models.CharField(max_length=50, blank=True, null=True)
-    doctor = models.CharField(max_length=100)     
+    EstBillDate = models.DateTimeField()
+    
+    # ── Patient Identity ──────────────────────────────────────
+    uhid = models.CharField(max_length=50, blank=True)        # ← blank=True (manual entry)
+    ipNumber = models.CharField(max_length=50, blank=True)
+    salutation = models.CharField(max_length=20, blank=True)   # ← new
+    firstName = models.CharField(max_length=100, blank=True)   # ← new
+    lastName = models.CharField(max_length=100, blank=True)    # ← new
+    age = models.CharField(max_length=50, blank=True)          # ← blank=True
+    age_type = models.CharField(max_length=50, blank=True)     # ← blank=True
+    gender = models.CharField(max_length=20, blank=True)       # ← new
+    roomNo = models.CharField(max_length=50, blank=True)       # ← blank=True
+
+    # ── Billing Details ───────────────────────────────────────
+    bill_type = models.CharField(max_length=100, blank=True, null=True)
+    billTypeNo = models.CharField(max_length=50, blank=True, null=True)
+    doctor = models.CharField(max_length=100, blank=True)      # ← blank=True
     referredBy = models.CharField(max_length=100, blank=True, null=True)
-    item = models.JSONField()  # Stores the selected item as a JSON field
+    item = models.JSONField()
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    discountPercent = models.IntegerField()
-    discount = models.DecimalField(max_digits=10,blank=True, decimal_places=2, default=0.0)
+    discountPercent = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # ← DecimalField (was Int)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, default=0.0)
     discountRemarks = models.TextField(blank=True, null=True)
     finalPrice = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    paymentMethod = models.CharField(max_length=50)
+    paymentMethod = models.CharField(max_length=50, blank=True)  # ← blank=True
+
     is_active = models.BooleanField(default=True)
 
-
     def __str__(self):
-        return f"Billing for {self.firstName} {self.lastName} ({self.uhid})"
+        return f"Estimate for {f'{self.firstName} {self.lastName}'.strip()} ({self.uhid or 'No UHID'})"
     
 
 class ReferenceDoctor(AuditModel):
