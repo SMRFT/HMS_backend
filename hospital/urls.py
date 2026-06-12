@@ -137,10 +137,10 @@ urlpatterns = [
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
     # path('get_oppharmacy_stock/',  pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
-    path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    # path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     # path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
-    path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+    # path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
