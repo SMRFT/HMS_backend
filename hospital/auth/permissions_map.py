@@ -199,6 +199,7 @@ PAGE_MAPPING = {
 
     #Investigation Prices:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices_get/': 'HMS-P-IP',                  
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-prices_get/?(\?.*)?$': 'HMS-P-IP',                  
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/create/': 'HMS-P-IP',                        
     r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update(?:/[^/]+)+/$': 'HMS-P-IPE',                  
     r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/update_item(?:/[^/]+)+/$': 'HMS-P-IPE',                  

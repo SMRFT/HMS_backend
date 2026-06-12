@@ -396,7 +396,9 @@ class PharmacyBilling(AuditModel):
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
-    ward_request_date = models.DateTimeField(default=timezone.now)
+    ward_request_date = models.DateTimeField(blank=True, null=True)
+    is_dispatched = models.BooleanField(default=False)
+    pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
 
@@ -409,7 +411,7 @@ class PharmacyBilling(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"
+        return f"{self.billing_status} - {self.patient_name}"  
 
 
         
