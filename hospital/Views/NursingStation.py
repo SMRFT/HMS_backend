@@ -48,7 +48,7 @@ def get_admission_list(request):
         print("FROM DATE:", from_date)
         print("TO DATE:", to_date)
 
-        query = {"is_admissionActive": True}
+        query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
 
         if from_date and to_date:
             ist = pytz.timezone("Asia/Kolkata")
@@ -369,8 +369,8 @@ def uhidadmissionstatus(request):
     # ✅ Updated condition including is_admitted
     if (
         admission.get("is_admitted") is True and
-        admission.get("is_admissionActive") is True and
-        admission.get("is_discharged") is False
+        admission.get("is_cancelled") is not True and
+        admission.get("is_discharged") is not True
     ):
         admitted = True
 
@@ -500,7 +500,7 @@ def save_lab_ward_request(request):
         patient_name = data.get("patient_name", "").strip()
         if not patient_name:
             # Fallback to Admission via PyMongo
-            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admissionActive": True})
+            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
             if admission and "patient_details" in admission:
                 fname = admission["patient_details"].get("firstName", "")
                 lname = admission["patient_details"].get("lastName", "")
@@ -920,7 +920,7 @@ def save_medicine_ward_request(request):
         patient_name = data.get("patient_name", "").strip()
         if not patient_name:
             # Fallback to Admission via PyMongo
-            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admissionActive": True})
+            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
             if admission and "patient_details" in admission:
                 fname = admission["patient_details"].get("firstName", "")
                 lname = admission["patient_details"].get("lastName", "")
@@ -1175,7 +1175,7 @@ def save_radiology_ward_request(request):
         patient_name = data.get("patient_name", "").strip()
         if not patient_name:
             # Fallback to Admission via PyMongo
-            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admissionActive": True})
+            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
             if admission and "patient_details" in admission:
                 fname = admission["patient_details"].get("firstName", "")
                 lname = admission["patient_details"].get("lastName", "")
@@ -1345,6 +1345,12 @@ def update_admission_status(request):
         if not ip_number or not ward_status:
             return Response({"error": "ip_number and status are required"}, status=400)
 
+        # Update in Relational Model
+        try:
+            Admission.objects.filter(ipNumber=ip_number).update(ward_status=ward_status)
+        except Exception as e:
+            print(f"Error updating Admission model: {e}")
+
         # Map to specific logical statuses if needed, e.g., Sent for billing -> is_billed = True?
         update_fields = {"ward_status": ward_status}
         
@@ -1482,7 +1488,7 @@ def get_pending_ward_returns(request):
             patient_name = pr.get("patient_name") or doc.get("patient_name") or ""
             if not patient_name:
                 # Try fetching from admission
-                admission = mongo_db["hospital_admission"].find_one({"uhid": doc.get("uhid"), "is_admissionActive": True})
+                admission = mongo_db["hospital_admission"].find_one({"uhid": doc.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
                 if admission and "patient_details" in admission:
                     fname = admission["patient_details"].get("firstName", "")
                     lname = admission["patient_details"].get("lastName", "")

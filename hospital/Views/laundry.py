@@ -99,7 +99,7 @@ def get_laundry_requests(request):
     return JsonResponse({'success': False, 'error': 'Invalid request method'}, status=405)
 
 
-@api_view(['POST', 'GET'])
+@api_view(['POST', 'GET', 'PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def update_laundry_status(request):
     """
@@ -119,17 +119,15 @@ def update_laundry_status(request):
             if not req_id or not new_status:
                 return JsonResponse({'success': False, 'error': 'Missing id or status'}, status=400)
                 
-            laundry_req = LaundryWardRequest.objects.get(id=req_id)
-            laundry_req.status = new_status
-            laundry_req.save()
+            updated = LaundryWardRequest.objects.filter(id=req_id).update(status=new_status)
+            if updated == 0:
+                return JsonResponse({'success': False, 'error': 'Request not found'}, status=404)
             
             return JsonResponse({
                 'success': True,
                 'message': f'Status updated to {new_status}'
             })
             
-        except LaundryWardRequest.DoesNotExist:
-            return JsonResponse({'success': False, 'error': 'Request not found'}, status=404)
         except Exception as e:
             return JsonResponse({'success': False, 'error': str(e)}, status=500)
             
