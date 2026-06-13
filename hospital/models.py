@@ -359,6 +359,33 @@ class PurchaseReturn(AuditModel):
     def __str__(self):
         return f"{self.purchase_return_bill_no} — {self.grn_number}"
     
+
+class PurchaseRequisition(models.Model):
+    """Header-level record for a purchase requisition."""
+ 
+    pr_number       = models.CharField(max_length=30, primary_key=True)   # PR/2627/000001
+    medicine_name    = models.CharField(max_length=255)
+ 
+    # Header
+    status          = models.CharField(max_length=20, default="Draft")     # Draft | Verified | Approved | Rejected
+ 
+    # Approval
+    approved_by     = models.CharField(max_length=100, blank=True, default="")
+    approved_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # Rejection
+    rejected_by     = models.CharField(max_length=100, blank=True, default="")
+    rejected_reason = models.TextField(blank=True, default="")
+    rejected_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # Edit audit
+    edited_by       = models.CharField(max_length=100, blank=True, default="")
+    edited_reason   = models.TextField(blank=True, default="")
+    edited_date     = models.DateTimeField(null=True, blank=True)
+ 
+    def __str__(self):
+        return f"{self.pr_number} — {self.medicine_name} [{self.status}]"
+    
     
 from django.utils import timezone
 
