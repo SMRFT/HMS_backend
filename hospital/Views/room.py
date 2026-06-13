@@ -61,9 +61,13 @@ def _save_admission(adm, room_details, shifting_details, advance_payments):
     BSON arrays in MongoDB. Always pass the in-memory lists you built —
     never re-read from ORM after save.
     """
-    rd = room_details     if isinstance(room_details,     list) else _safe_list(room_details)
-    sd = shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details)
-    ap = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
+    import json
+    def make_serializable(data):
+        return json.loads(json.dumps(data, default=str))
+
+    rd = make_serializable(room_details     if isinstance(room_details,     list) else _safe_list(room_details))
+    sd = make_serializable(shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details))
+    ap = make_serializable(advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments))
 
     adm.room_details       = rd
     adm.roomShitingDetails = sd
