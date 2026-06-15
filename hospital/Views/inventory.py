@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 #VENDOR VIEWS
-from ..models import Vendor
+from ..models import Vendor, GRN, PharmacyStock, StockTransfer, PharmacyBilling, SalesReturn, PurchaseReturn, PharmacyItem
 from ..serializers import VendorSerializer
 
 @api_view(["GET", "POST", "PUT", "DELETE"])
@@ -986,6 +986,325 @@ def pharmacy_stock_history(request):
         })
 
     except Exception as e:
+        return Response({
+            "success": False,
+            "error": str(e)
+        }, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def medicine_tracking(request):
+    try:
+        item_id   = str(request.GET.get("item_id", "")).strip()
+        item_name = str(request.GET.get("item_name", "")).strip().lower()
+        outlet_code = str(request.GET.get("outlet_code", "")).strip()
+
+        hospital_code = (
+            request.GET.get("auth-hospital-code")
+            or request.headers.get("auth-hospital-code")
+            or None
+        )
+        branch_code = (
+            request.GET.get("auth-branch-code")
+            or request.headers.get("Branch-Code")
+            or None
+        )
+
+        if not item_id and not item_name:
+            return Response({
+                "success": False,
+                "error": "item_id or item_name is required"
+            }, status=400)
+
+        if item_id and not item_name:
+            try:
+                item_obj = PharmacyItem.objects.get(item_id=int(item_id), hospital_code=hospital_code, branch_code=branch_code)
+                item_name = getattr(item_obj, "item_name", "").lower()
+            except Exception:
+                item_obj = None
+
+        if item_name and not item_id:
+            candidates = [
+                i for i in PharmacyItem.objects.all()
+                if getattr(i, "hospital_code", None) == hospital_code
+                and getattr(i, "branch_code", None) == branch_code
+                and getattr(i, "item_name", "").lower() == item_name
+            ]
+            if candidates:
+                item_obj = candidates[0]
+                item_id = str(getattr(item_obj, "item_id", ""))
+            else:
+                item_obj = None
+                item_id = ""
+
+        if not item_id:
+            return Response({
+                "success": False,
+                "error": "Medicine not found"
+            }, status=404)
+
+        item_name_display = getattr(item_obj, "item_name", "") if item_obj else item_name
+
+        def _dt(v):
+            if isinstance(v, datetime):
+                return v.isoformat()
+            return v
+
+        def _dec(v):
+            try:
+                return str(Decimal(v))
+            except Exception:
+                return "0"
+
+        timeline = []
+
+        # GRN / Opening Stock movements
+        try:
+            all_grns = GRN.objects.all()
+        except Exception:
+            all_grns = []
+
+        for g in all_grns:
+            if getattr(g, "hospital_code", None) != hospital_code:
+                continue
+            if getattr(g, "branch_code", None) != branch_code:
+                continue
+
+            raw_items = getattr(g, "items", "")
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            if not isinstance(raw_items, list):
+                continue
+
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                    batch_no = it.get("batch_number", "") or ""
+                    qty = _dec(it.get("quantity", 0) or 0)
+                    timeline.append({
+                        "type": "PURCHASE",
+                        "date": _dt(getattr(g, "date", None) or getattr(g, "created_date", None)),
+                        "ref_no": getattr(g, "grn_number", "") or getattr(g, "draft_number", ""),
+                        "bill_ref": getattr(g, "invoice_no", ""),
+                        "bill_date": _dt(getattr(g, "invoice_date", None)),
+                        "vendor_id": getattr(g, "vendor_id", ""),
+                        "vendor_name": it.get("vendor_name", "") or "",
+                        "outlet_code": getattr(g, "outlet_code", ""),
+                        "batch_no": batch_no,
+                        "quantity": qty,
+                        "status": getattr(g, "status", ""),
+                        "details": f"Purchased via GRN — {getattr(g, 'purchase_category', '')}"
+                    })
+
+        # Stock Transfer movements
+        try:
+            all_transfers = StockTransfer.objects.all()
+        except Exception:
+            all_transfers = []
+
+        for t in all_transfers:
+            if getattr(t, "hospital_code", None) != hospital_code:
+                continue
+            if getattr(t, "branch_code", None) != branch_code:
+                continue
+            if outlet_code and str(getattr(t, "to_outlet", "")) != outlet_code:
+                continue
+
+            raw_items = getattr(t, "items", [])
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            if not isinstance(raw_items, list):
+                continue
+
+            to_outlet = getattr(t, "to_outlet", "") or ""
+            is_incoming = (to_outlet == outlet_code) if outlet_code else (to_outlet != "")
+
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                    batch_no = it.get("batch_number", "") or ""
+                    qty = _dec(it.get("quantity", 0) or 0)
+                    direction = "IN" if is_incoming else "OUT"
+                    movement = f"Stock Transfer {direction} — From: {getattr(t, 'outlet_code', '') or 'Drug Purchase'} → To: {to_outlet or 'N/A'}"
+                    timeline.append({
+                        "type": f"STOCK_TRANSFER_{direction}",
+                        "date": _dt(getattr(t, "created_date", None)),
+                        "ref_no": getattr(t, "transfer_ref_number", ""),
+                        "from_outlet": getattr(t, "outlet_code", "") or "",
+                        "to_outlet": to_outlet,
+                        "batch_no": batch_no,
+                        "quantity": qty,
+                        "status": getattr(t, "is_verified", ""),
+                        "details": movement,
+                        "approved_by": getattr(t, "approved_by", ""),
+                        "approved_date": _dt(getattr(t, "approved_date", None)),
+                    })
+
+        # Pharmacy Billing (sale) movements
+        try:
+            all_bills = []
+            for b in PharmacyBilling.objects.all():
+                if getattr(b, "hospital_code", None) != hospital_code:
+                    continue
+                if getattr(b, "branch_code", None) != branch_code:
+                    continue
+                if outlet_code and str(getattr(b, "outlet_code", "")) != outlet_code:
+                    continue
+                all_bills.append(b)
+        except Exception:
+            all_bills = []
+
+        for b in all_bills:
+            meds = getattr(b, "medicine_particulars", []) or []
+            if isinstance(meds, str):
+                try:
+                    meds = json.loads(meds)
+                except Exception:
+                    meds = []
+            if not isinstance(meds, list):
+                continue
+
+            for m in meds:
+                if not isinstance(m, dict):
+                    continue
+                if str(m.get("item_id", "")) == item_id or str(m.get("item_name", "")).lower() == item_name:
+                    batch_no = m.get("batch_number", "") or ""
+                    qty = _dec(m.get("quantity", 0) or 0)
+                    timeline.append({
+                        "type": "SALE",
+                        "date": _dt(getattr(b, "bill_date", None) or getattr(b, "created_date", None)),
+                        "ref_no": getattr(b, "bill_no", "") or str(getattr(b, "Bill_id", "")),
+                        "uhid": getattr(b, "uhid", ""),
+                        "patient_name": m.get("patient_name", "") or "",
+                        "outlet_code": getattr(b, "outlet_code", ""),
+                        "batch_no": batch_no,
+                        "quantity": qty,
+                        "status": getattr(b, "billing_status", ""),
+                        "details": f"Sold via Pharmacy Bill — {getattr(b, 'billing_status', '')}"
+                    })
+
+        # Sales Return movements
+        try:
+            all_sales_returns = SalesReturn.objects.all()
+        except Exception:
+            all_sales_returns = []
+
+        for sr in all_sales_returns:
+            if getattr(sr, "hospital_code", None) != hospital_code:
+                continue
+            if getattr(sr, "branch_code", None) != branch_code:
+                continue
+
+            meds = getattr(sr, "medicine_particulars", []) or []
+            if isinstance(meds, str):
+                try:
+                    meds = json.loads(meds)
+                except Exception:
+                    meds = []
+            if not isinstance(meds, list):
+                continue
+
+            for m in meds:
+                if not isinstance(m, dict):
+                    continue
+                if str(m.get("item_id", "")) == item_id or str(m.get("item_name", "")).lower() == item_name:
+                    batch_no = m.get("batch_number", "") or ""
+                    qty = _dec(m.get("quantity", 0) or 0)
+                    timeline.append({
+                        "type": "SALES_RETURN",
+                        "date": _dt(getattr(sr, "return_bill_date", None) or getattr(sr, "created_date", None)),
+                        "ref_no": getattr(sr, "return_bill_no", ""),
+                        "bill_no": getattr(sr, "bill_no", ""),
+                        "uhid": getattr(sr, "uhid", ""),
+                        "outlet_code": getattr(sr, "outlet_code", ""),
+                        "batch_no": batch_no,
+                        "quantity": qty,
+                        "details": "Sales Return — returned by patient/customer"
+                    })
+
+        # Purchase Return movements
+        try:
+            all_pr = PurchaseReturn.objects.all()
+        except Exception:
+            all_pr = []
+
+        for pr in all_pr:
+            if getattr(pr, "hospital_code", None) != hospital_code:
+                continue
+            if getattr(pr, "branch_code", None) != branch_code:
+                continue
+
+            raw_items = getattr(pr, "items", [])
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            if not isinstance(raw_items, list):
+                continue
+
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                    batch_no = it.get("batch_number", "") or ""
+                    qty = _dec(it.get("return_qty", 0) or 0)
+                    timeline.append({
+                        "type": "PURCHASE_RETURN",
+                        "date": _dt(getattr(pr, "purchase_return_bill_date", None) or getattr(pr, "created_date", None)),
+                        "ref_no": getattr(pr, "purchase_return_bill_no", ""),
+                        "grn_number": getattr(pr, "grn_number", ""),
+                        "vendor_code": getattr(pr, "vendor_code", ""),
+                        "vendor_name": getattr(pr, "vendor_name", ""),
+                        "outlet_code": getattr(pr, "outlet_code", ""),
+                        "batch_no": batch_no,
+                        "quantity": qty,
+                        "status": getattr(pr, "status", ""),
+                        "details": f"Purchase Return — {getattr(pr, 'return_remark', '') or 'Returned to vendor'}"
+                    })
+
+        # Sort by date descending
+        def _sort_key(x):
+            d = x.get("date") or ""
+            return d
+
+        timeline.sort(key=_sort_key, reverse=True)
+
+        # Summary stats
+        purchased = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "PURCHASE")
+        sold = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "SALE")
+        returned_from_sale = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "SALES_RETURN")
+        returned_to_vendor = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "PURCHASE_RETURN")
+        transferred = sum(Decimal(t["quantity"]) for t in timeline if "STOCK_TRANSFER" in t["type"])
+
+        return Response({
+            "success": True,
+            "item_id": item_id,
+            "item_name": item_name_display,
+            "summary": {
+                "purchased": str(purchased),
+                "sold": str(sold),
+                "sales_return": str(returned_from_sale),
+                "purchase_return": str(returned_to_vendor),
+                "stock_transfer": str(transferred),
+                "current_stock": str(purchased - sold - returned_to_vendor),
+            },
+            "count": len(timeline),
+            "data": timeline
+        })
+
+    except Exception as e:
+        logger.error("[medicine_tracking] %s", e, exc_info=True)
         return Response({
             "success": False,
             "error": str(e)

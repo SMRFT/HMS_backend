@@ -25,6 +25,7 @@ from .Views import (
     DietOrder,
     purchasereturn,
     purchase_order,
+    Purchase_Requisition,
     front_office_reports,
     registration_updates,
     physicalstockentry
@@ -97,6 +98,10 @@ urlpatterns = [
     path("purchase-order-action/",purchase_order.purchase_order_action_view,name="purchase_order_action"),
     path("purchase-order-email/",purchase_order.purchase_order_email_view,name="purchase_order_email"),
 
+    path("purchase-requisition/",            Purchase_Requisition.purchase_requisition_view),
+    path("purchase-requisition/<str:pk>/",   Purchase_Requisition.purchase_requisition_view),
+    path("purchase-requisition-action/",     Purchase_Requisition.purchase_requisition_action_view),
+
     path(
         "pharmacy-stock-batches/",
         physicalstockentry.pharmacy_stock_batches_view,
@@ -127,6 +132,7 @@ urlpatterns = [
         name="physical-stock-approval-detail",
     ),
 
+    path('medicine-tracking/', inventory.medicine_tracking, name='medicine_tracking'),
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
     path('get_oppharmacy_stock/',  pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
