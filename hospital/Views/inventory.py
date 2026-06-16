@@ -993,7 +993,7 @@ def pharmacy_stock_history(request):
 
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def medicine_tracking(request):
     try:
@@ -1026,12 +1026,13 @@ def medicine_tracking(request):
                 item_obj = None
 
         if item_name and not item_id:
-            candidates = [
-                i for i in PharmacyItem.objects.all()
-                if getattr(i, "hospital_code", None) == hospital_code
-                and getattr(i, "branch_code", None) == branch_code
-                and getattr(i, "item_name", "").lower() == item_name
-            ]
+            search_term = item_name
+            candidates = []
+            for i in PharmacyItem.objects.all():
+                name = getattr(i, "item_name", "") or ""
+                if search_term in name.lower():
+                    candidates.append(i)
+
             if candidates:
                 item_obj = candidates[0]
                 item_id = str(getattr(item_obj, "item_id", ""))
