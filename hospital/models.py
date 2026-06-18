@@ -1797,3 +1797,34 @@ class LaundryItemMaster(AuditModel):
     def __str__(self):
         return f"{self.item_name} - ₹{self.price}"
 
+
+class CrashCartItem(models.Model):
+    id = models.IntegerField(primary_key=True)
+    nursing_station = models.CharField(max_length=100, null=True, blank=True)
+    box_category = models.CharField(max_length=100) # e.g., "BOX-1(EMERGENCY MEDICINE)"
+    drug_name = models.CharField(max_length=255)    # e.g., "INJ.ADRENALINE 1 mg"
+    required_stock = models.IntegerField()          # e.g., 10
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartItem.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+    
+class CrashCartDailyCheck(models.Model):
+    id = models.IntegerField(primary_key=True)
+    date = models.DateField(default=timezone.now)
+    nursing_station = models.CharField(max_length=100) # e.g., "CHEMO WARD"
+    item = models.ForeignKey(CrashCartItem, on_delete=models.CASCADE)
+    expiry_date = models.CharField(max_length=50, null=True, blank=True) # Expiry date
+    is_checked = models.BooleanField(default=False)
+    checked_by = models.CharField(max_length=100) # Nurse Name/ID
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartDailyCheck.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    class Meta:
+        unique_together = ('date', 'nursing_station', 'item')
