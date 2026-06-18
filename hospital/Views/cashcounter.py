@@ -96,6 +96,28 @@ def generate_shift_no():
     new_number = last_number + 1
     return f"{fy}/{str(new_number).zfill(6)}"
 
+def generate_accounts_bill_no(db, date_val):
+    if date_val.month >= 4:
+        start, end = date_val.year, date_val.year + 1
+    else:
+        start, end = date_val.year - 1, date_val.year
+    fy = f"{str(start)[-2:]}{str(end)[-2:]}"
+    prefix = f"ACT/{fy}/"
+    
+    col = db["hospital_cashcountercollection"]
+    records = list(col.find({"bill_number": {"$regex": f"^{prefix}"}}))
+    last_num = 0
+    for r in records:
+        b_no = r.get("bill_number", "")
+        try:
+            num = int(b_no.split("/")[-1])
+            if num > last_num:
+                last_num = num
+        except:
+            pass
+    new_num = last_num + 1
+    return f"{prefix}{str(new_num).zfill(5)}"
+
 def convert_decimal(value):
 
     if value is None:
@@ -320,6 +342,7 @@ def cash_counter_shiftdetails(request):
         # Use provided fields or defaults
         shift.ClosingBalance = safe_dec(closing_balance_raw or totals['total_collection'])
         shift.RemittedToBank = safe_dec(data.get("RemittedToBank", shift.RemittedToBank))
+        shift.SubmittedToAccount = safe_dec(data.get("SubmittedToAccount", shift.SubmittedToAccount))
         shift.HandOverAmount = safe_dec(data.get("HandOverAmount", 0))
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
@@ -336,6 +359,88 @@ def cash_counter_shiftdetails(request):
         shift.lastmodified_by = employee_id
         shift.lastmodified_date = timezone.now()
         shift.save()
+
+        # ✅ Record remitted/submitted transactions in hospital_cashcountercollection
+        try:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            
+            # Record Remitted
+            remitted_val = float(shift.RemittedToBank)
+            if remitted_val > 0:
+                existing = db["hospital_cashcountercollection"].find_one({
+                    "shift_no": shift_no,
+                    "billing_category": "remitted",
+                    "transaction_type": "remitted"
+                })
+                if not existing:
+                    bill_no_remit = generate_accounts_bill_no(db, timezone.now())
+                    db["hospital_cashcountercollection"].insert_one({
+                        "created_by": employee_id,
+                        "created_date": timezone.now(),
+                        "lastmodified_by": employee_id,
+                        "lastmodified_date": timezone.now(),
+                        "branch_code": branch_code or shift.branch_code,
+                        "outlet_code": outlet_code or shift.outlet_code,
+                        "hospital_code": hospital_code or shift.hospital_code,
+                        "counter_code": shift.CashCounter,
+                        "shift_no": shift_no,
+                        "billing_category": "remitted",
+                        "bill_number": bill_no_remit,
+                        "transaction_type": "remitted",
+                        "collected_amount": Decimal128(str(remitted_val)),
+                        "Returned_amount": Decimal128("0.00"),
+                        "remarks": "Remitted to Bank on closing"
+                    })
+                else:
+                    db["hospital_cashcountercollection"].update_one(
+                        {"_id": existing["_id"]},
+                        {"$set": {
+                            "collected_amount": Decimal128(str(remitted_val)),
+                            "lastmodified_by": employee_id,
+                            "lastmodified_date": timezone.now()
+                        }}
+                    )
+
+            # Record Submitted
+            submitted_val = float(shift.SubmittedToAccount)
+            if submitted_val > 0:
+                existing = db["hospital_cashcountercollection"].find_one({
+                    "shift_no": shift_no,
+                    "billing_category": "submit",
+                    "transaction_type": "submit"
+                })
+                if not existing:
+                    bill_no_submit = generate_accounts_bill_no(db, timezone.now())
+                    db["hospital_cashcountercollection"].insert_one({
+                        "created_by": employee_id,
+                        "created_date": timezone.now(),
+                        "lastmodified_by": employee_id,
+                        "lastmodified_date": timezone.now(),
+                        "branch_code": branch_code or shift.branch_code,
+                        "outlet_code": outlet_code or shift.outlet_code,
+                        "hospital_code": hospital_code or shift.hospital_code,
+                        "counter_code": shift.CashCounter,
+                        "shift_no": shift_no,
+                        "billing_category": "submit",
+                        "bill_number": bill_no_submit,
+                        "transaction_type": "submit",
+                        "collected_amount": Decimal128(str(submitted_val)),
+                        "Returned_amount": Decimal128("0.00"),
+                        "remarks": "Submitted to Account on closing"
+                    })
+                else:
+                    db["hospital_cashcountercollection"].update_one(
+                        {"_id": existing["_id"]},
+                        {"$set": {
+                            "collected_amount": Decimal128(str(submitted_val)),
+                            "lastmodified_by": employee_id,
+                            "lastmodified_date": timezone.now()
+                        }}
+                    )
+            client.close()
+        except Exception as e:
+            print("Error recording remitted/submitted to cash counter collection:", e)
 
         return Response({
             "success": True,

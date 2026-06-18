@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal, InvalidOperation
 from bson import ObjectId
 
 class ObjectIdField(serializers.Field):
@@ -12,7 +13,6 @@ class ObjectIdField(serializers.Field):
             return data
 
 from .models import ChemicalComposition
- 
 class ChemicalCompositionSerializer(serializers.ModelSerializer):
     class Meta:
         model  = ChemicalComposition
@@ -46,11 +46,48 @@ class PharmacyItemSerializer(serializers.ModelSerializer):
 
 from .models import StockTransfer
 class StockTransferSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
     class Meta:
         model  = StockTransfer
         fields = "__all__"
-        read_only_fields = ["transfer_id"]
 
+from .models import PurchaseReturn
+class PurchaseReturnSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+ 
+    class Meta:
+        model  = PurchaseReturn
+        fields = "__all__"
+ 
+    def validate_status(self, value):
+        valid = [
+            "Returned",
+            "Supplier Collected",
+            "Partial Credit Note",
+            "Credit Note Settled",
+        ]
+        if value not in valid:
+            raise serializers.ValidationError(
+                f"status must be one of {valid}"
+            )
+        return value
+ 
+    def validate_items(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("items must be a list")
+        valid_causes = [
+            "Broken", "Damage", "Nearing Expiry", "Non Moving",
+            "Price Difference", "Returns", "Shortage",
+        ]
+        for idx, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError(f"Item {idx + 1} must be an object")
+            cause = item.get("cause_of_return", "")
+            if cause and cause not in valid_causes:
+                raise serializers.ValidationError(
+                    f"Item {idx + 1}: cause_of_return '{cause}' is not valid"
+                )
+        return value
 
 from .models import Vendor
 class VendorSerializer(serializers.ModelSerializer):
@@ -82,6 +119,30 @@ class GRNSerializer(serializers.ModelSerializer):
     class Meta:
         model = GRN
         fields = '__all__'
+
+
+from .models import MedicineRequisition
+class MedicineRequisitionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = MedicineRequisition
+        fields = "__all__"
+
+
+from .models import PhysicalStockEntry
+class PhysicalStockEntrySerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = PhysicalStockEntry
+        fields = "__all__"
+
+
+from .models import PurchaseOrder
+class PurchaseOrderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model  = PurchaseOrder
+        fields = "__all__"
 
 
 from .models import Block, RoomCategory, Room, NursingStation, RoomKitItems, RoomServiceDescription
@@ -123,7 +184,7 @@ class NursingStationSerializer(serializers.ModelSerializer):
             "lastmodified_date",
             "is_active"
         ]
-
+       
 class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoomServiceDescription
@@ -151,11 +212,9 @@ class RoomKitItemsSerializer(serializers.ModelSerializer):
         ]
 
 class RoomSerializer(serializers.ModelSerializer):
- 
     services  = serializers.JSONField(required=False, allow_null=True, default=list)
     beds      = serializers.JSONField(required=False, allow_null=True, default=list)
     room_kits = serializers.JSONField(required=False, allow_null=True, default=list)
- 
     class Meta:
         model  = Room
         fields = "__all__"
@@ -168,7 +227,6 @@ class RoomSerializer(serializers.ModelSerializer):
             "is_active"
         ]
 
- 
     # ── Field-level validators ────────────────────────────────────────────────
  
     def validate_room_status(self, value):
@@ -221,10 +279,26 @@ class RoomSerializer(serializers.ModelSerializer):
         return value
     
 
-from .models import Admission
+from .models import Patient, InsuranceProvider, Admission
+
+class PatientSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    uhid = serializers.CharField(read_only=True)
+    class Meta:
+        model = Patient
+        fields = '__all__'
+
+class InsuranceProviderSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = InsuranceProvider
+        fields = '__all__'
 
 class AdmissionSerializer(serializers.ModelSerializer):
     patient_details = serializers.SerializerMethodField()
+    insurance_details = serializers.SerializerMethodField()
+    registration_details = serializers.SerializerMethodField()
+    room_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Admission
@@ -232,10 +306,49 @@ class AdmissionSerializer(serializers.ModelSerializer):
 
     def get_patient_details(self, obj):
         patient = Patient.objects.filter(uhid=obj.uhid).first()
-
         if patient:
             return PatientSerializer(patient).data
         return None 
+
+    def get_insurance_details(self, obj):
+        # Fetch insurance details by comparing company_code from patient
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient and patient.company_code:
+            insurance = InsuranceProvider.objects.filter(company_code=patient.company_code).first()
+            if insurance:
+                return {
+                    "company_code": insurance.company_code,
+                    "company_name": insurance.company_name,
+                }
+        return None
+
+    def get_registration_details(self, obj):
+        # Fetch registration details from patient record
+        patient = Patient.objects.filter(uhid=obj.uhid).first()
+        if patient:
+            return {
+                "registration_date": patient.registration_date,
+                "customer_type": patient.customer_type,
+            }
+        return None
+
+    def get_room_info(self, obj):
+        # Logic to extract current room/bed from room_details
+        import json
+        details = obj.room_details
+        if isinstance(details, str):
+            try: details = json.loads(details)
+            except: details = []
+        
+        if details:
+            for r in reversed(details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    return {
+                        "room_no": r.get("roomNo"),
+                        "bed_no": r.get("bedNo")
+                    }
+        return {}
+
 
 
 from .models import DischargeBilling
@@ -245,13 +358,6 @@ class DischargeBillingSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Patient
-class PatientSerializer(serializers.ModelSerializer):
-    id = ObjectIdField(read_only=True)
-    uhid = serializers.CharField(read_only=True)
-    class Meta:
-        model = Patient
-        fields = '__all__'
 
 
 from .models import Summary
@@ -284,17 +390,13 @@ class BillingSerializer(serializers.ModelSerializer):
         model = Billing
         fields = '__all__'
 
+
 from .models import InsuranceProvider
 class InsuranceProviderSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = InsuranceProvider
         fields = '__all__'
-
-from decimal import Decimal, InvalidOperation
-
-from rest_framework import serializers
-from decimal import Decimal, InvalidOperation
 
 class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
 
@@ -360,7 +462,6 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
 from .models import CustomerType
 class CustomerTypeSerializer(serializers.ModelSerializer):
     patient_count = serializers.SerializerMethodField()
-
     class Meta:
         model = CustomerType
         fields = '__all__'
@@ -370,14 +471,13 @@ class CustomerTypeSerializer(serializers.ModelSerializer):
         from .models import Patient
         return Patient.objects.filter(customer_type=obj.type_name).count()
 
-from .models import SurgerySchedule
 
+from .models import SurgerySchedule
 class SurgeryScheduleSerializer(serializers.ModelSerializer):
     """
     Used for READ responses (list, retrieve, after create/update).
     All audit/system fields are read-only — never accepted from the client.
     """
-
     class Meta:
         model  = SurgerySchedule
         fields = "__all__"
@@ -397,9 +497,7 @@ class SurgeryScheduleSerializer(serializers.ModelSerializer):
             "hospital_code",
         ]
 
-
 class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
- 
     class Meta:
         model  = SurgerySchedule
         fields = [

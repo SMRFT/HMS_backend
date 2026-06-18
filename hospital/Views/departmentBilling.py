@@ -1,3 +1,5 @@
+from pydoc import doc
+
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
@@ -20,6 +22,7 @@ from bson import Decimal128, ObjectId
 from bson.json_util import dumps
 import json
 from pymongo import MongoClient, ReturnDocument
+import re
 
 
 
@@ -185,6 +188,7 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'lastName': patient.lastName,
             'age': patient.age,
             'gender': patient.gender,
+            'dob': patient.dob,
             'mobilePhone': patient.mobilePhone,
             'area': patient.area,
             'city': patient.city,
@@ -269,28 +273,29 @@ def serialize_doc(doc):
 @permission_classes([HasRoleAndDataPermission])
 def estimate_billing_list(request):
     try:
-        branch_code = request.data.get('auth-branch-code')
-        outlet_code = request.data.get('auth-outlet-code')
+        branch_code   = request.data.get('auth-branch-code')
+        outlet_code   = request.data.get('auth-outlet-code')
         hospital_code = request.data.get('auth-hospital-code')
 
-        # ── Read query params ────────────────────────────────────────────────
-        from_date_str  = request.GET.get('fromDate', '').strip()
-        to_date_str    = request.GET.get('toDate', '').strip()
-        bill_type_param = request.GET.get('billType', '').strip()
-        doctor_param   = request.GET.get('doctor', '').strip()
-        uhid_param     = request.GET.get('uhid', '').strip()
-        patient_type   = request.GET.get('patientType', '').strip()
+        from_date_str   = request.GET.get('fromDate',     '').strip()
+        to_date_str     = request.GET.get('toDate',       '').strip()
+        bill_type_param = request.GET.get('billType',     '').strip()
+        doctor_param    = request.GET.get('doctor',       '').strip()
+        uhid_param      = request.GET.get('uhid',         '').strip()
+        patient_type    = request.GET.get('patientType',  '').strip()
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
-        estimate_collection = db['hospital_estimatebilling']
-        patient_collection  = db['hospital_patient']
-        billtype_collection = db['hospital_billtype']
+        global_db = client['Global']
+
+        estimate_collection      = db['hospital_estimatebilling']
+        patient_collection       = db['hospital_patient']
+        billtype_collection      = db['hospital_billtype']
+        diagnostics_profile_coll = global_db['backend_diagnostics_profile']   # ← new
 
         # ── Base Query ───────────────────────────────────────────────────────
         query = {"is_active": {"$nin": [False, 0, "false", "False"]}}
 
-        # ✅ Apply auth filters
         if hospital_code:
             query["hospital_code"] = hospital_code
         if branch_code:
@@ -344,14 +349,12 @@ def estimate_billing_list(request):
         # ── Fetch data ───────────────────────────────────────────────────────
         data = list(estimate_collection.find(query).sort("_id", -1))
 
-        # ── Patient Cache (WITH AUTH FILTER) ─────────────────────────────────
+        # ── Patient Cache ────────────────────────────────────────────────────
         uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
         patient_cache = {}
 
         if uhids:
             patient_query = {"uhid": {"$in": list(uhids)}}
-
-            # ✅ Apply auth filters to patient query
             if hospital_code:
                 patient_query["hospital_code"] = hospital_code
             if branch_code:
@@ -360,22 +363,15 @@ def estimate_billing_list(request):
             patients = patient_collection.find(
                 patient_query,
                 {
-                    "_id": 0,
-                    "uhid": 1,
-                    "salutation": 1,
-                    "firstName": 1,
-                    "lastName": 1,
-                    "age": 1,
-                    "gender": 1
+                    "_id": 0, "uhid": 1, "salutation": 1,
+                    "firstName": 1, "lastName": 1, "age": 1, "gender": 1
                 }
             )
-
             for p in patients:
                 patient_cache[p["uhid"]] = p
 
-        # ── Bill Type Cache (WITH AUTH FILTER) ───────────────────────────────
+        # ── Bill Type Cache ──────────────────────────────────────────────────
         bill_type_ids = set()
-
         for doc in data:
             bt = doc.get("bill_type")
             if bt:
@@ -385,11 +381,8 @@ def estimate_billing_list(request):
                     pass
 
         bill_type_cache = {}
-
         if bill_type_ids:
             bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
-
-            # ✅ Apply auth filters
             if hospital_code:
                 bt_query["hospital_code"] = hospital_code
             if branch_code:
@@ -401,25 +394,61 @@ def estimate_billing_list(request):
                 bt_query,
                 {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
             )
-
             for bt in bt_docs:
                 bill_type_cache[int(bt["bill_type"])] = {
-                    "bill_name": bt.get("bill_name", ""),
+                    "bill_name":  bt.get("bill_name",  ""),
                     "billTypeNo": bt.get("billTypeNo", "")
                 }
+
+        # ── Doctor / ReferredBy Cache ────────────────────────────────────────
+        doctor_ids      = set()
+        referred_by_ids = set()
+
+        for doc in data:
+            doc_val = doc.get("doctor", "")
+            ref_val = doc.get("referredBy", "")
+
+            if doc_val and str(doc_val).upper() != "SELF":
+                doctor_ids.add(str(doc_val))
+            if ref_val and str(ref_val).upper() != "SELF":
+                referred_by_ids.add(str(ref_val))
+
+        diagnostics_profile_cache = {}   # employeeId → employeeName
+
+        all_profile_ids = doctor_ids | referred_by_ids
+        if all_profile_ids:
+            profile_docs = diagnostics_profile_coll.find(
+                {"employeeId": {"$in": list(all_profile_ids)}},
+                {"_id": 0, "employeeId": 1, "employeeName": 1}
+            )
+            for p in profile_docs:
+                emp_id = str(p.get("employeeId", ""))
+                if emp_id:
+                    diagnostics_profile_cache[emp_id] = p.get("employeeName", "")
 
         # ── Enrich Data ──────────────────────────────────────────────────────
         result = []
 
         for doc in data:
-            uhid = doc.get("uhid", "")
-            patient = patient_cache.get(uhid, {})
+            uhid = doc.get("uhid", "").strip()
+            
+            if uhid:
+                patient = patient_cache.get(uhid, {})
+                doc["salutation"] = patient.get("salutation", "")
+                doc["firstName"]  = patient.get("firstName",  "")
+                doc["lastName"]   = patient.get("lastName",   "")
+                doc["gender"]     = patient.get("gender",     "")
+            else:
+                # Manual entry — fields already stored directly on the estimate doc
+                doc["salutation"] = doc.get("salutation", "")
+                doc["firstName"]  = doc.get("firstName",  "")
+                doc["lastName"]   = doc.get("lastName",   "")
+                doc["gender"]     = doc.get("gender",     "")
 
-            doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"] = patient.get("firstName", "")
-            doc["lastName"] = patient.get("lastName", "")
-            doc["age"] = patient.get("age", "")
-            doc["gender"] = patient.get("gender", "")
+            # Age / room — always from the estimate doc
+            doc["age"]      = doc.get("age",      "")
+            doc["age_type"] = doc.get("age_type", "")
+            doc["roomNo"]   = doc.get("roomNo",   "")
 
             try:
                 bt_key = int(doc.get("bill_type", 0))
@@ -427,9 +456,22 @@ def estimate_billing_list(request):
                 bt_key = 0
 
             bt_info = bill_type_cache.get(bt_key, {})
-
-            doc["bill_name"] = bt_info.get("bill_name", "")
+            doc["bill_name"]  = bt_info.get("bill_name",  "")
             doc["billTypeNo"] = bt_info.get("billTypeNo", "")
+
+            # ── Doctor name ──────────────────────────────────────────────────
+            doc_val = doc.get("doctor", "")
+            if doc_val and str(doc_val).upper() == "SELF":
+                doc["doctorName"] = "SELF"
+            else:
+                doc["doctorName"] = diagnostics_profile_cache.get(str(doc_val), "")
+
+            # ── ReferredBy name ──────────────────────────────────────────────
+            ref_val = doc.get("referredBy", "")
+            if ref_val and str(ref_val).upper() == "SELF":
+                doc["referredByName"] = "SELF"
+            else:
+                doc["referredByName"] = diagnostics_profile_cache.get(str(ref_val), "")
 
             if isinstance(doc.get("item"), str):
                 try:
@@ -440,7 +482,6 @@ def estimate_billing_list(request):
             result.append(serialize_doc(doc))
 
         client.close()
-
         return Response(result)
 
     except Exception as e:
@@ -448,6 +489,8 @@ def estimate_billing_list(request):
             {"error": "Failed to fetch estimate billing list", "details": str(e)},
             status=500,
         )
+
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
@@ -887,7 +930,6 @@ def invest_billing_create(request):
         data["lastmodified_by"] = None
         data["lastmodified_date"] = timezone.now()
         data["is_active"] = True
-        data["shiftno"] = request.data.get("shiftno")
 
         # Insert
         invest_collection.insert_one(data)
@@ -929,21 +971,23 @@ def billing_report_view(request):
         return doc
 
     try:
-        branch_code = request.data.get('auth-branch-code', 'system')
-        outlet_code = request.data.get('auth-outlet-code', 'system')
+        branch_code   = request.data.get('auth-branch-code',   'system')
+        outlet_code   = request.data.get('auth-outlet-code',   'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
+        global_db = client['Global']
 
-        collection = db['hospital_investbilling']
-        bill_type_collection = db['hospital_billtype']
-        patient_collection = db['hospital_patient']
+        collection               = db['hospital_investbilling']
+        bill_type_collection     = db['hospital_billtype']
+        patient_collection       = db['hospital_patient']
+        refund_collection        = db['hospital_investrefund']
+        diagnostics_profile_coll = global_db['backend_diagnostics_profile']  # ← new
 
         # ── Base Query ─────────────────────────────────────────
         query = {"is_active": True}
 
-        # ✅ Apply auth filters
         if hospital_code:
             query["hospital_code"] = hospital_code
         if branch_code:
@@ -955,12 +999,12 @@ def billing_report_view(request):
 
         # ── Date filter ────────────────────────────────────────
         start_date = request.GET.get('start_date')
-        end_date = request.GET.get('end_date')
+        end_date   = request.GET.get('end_date')
 
         if start_date and end_date:
             try:
                 start = datetime.strptime(start_date, "%Y-%m-%d")
-                end = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                end   = datetime.strptime(end_date,   "%Y-%m-%d").replace(
                     hour=23, minute=59, second=59, microsecond=999999
                 )
                 query["investBillDate"] = {"$gte": start, "$lte": end}
@@ -996,17 +1040,52 @@ def billing_report_view(request):
                 {"ipNumber": None},
             ]
 
-        # ── Fetch data ─────────────────────────────────────────
+        # ── Fetch billing data ─────────────────────────────────
         data = list(collection.find(query))
 
-        # ── Batch Patient Cache (OPTIMIZED) ────────────────────
+        # ── Batch Refund Cache ─────────────────────────────────
+        invest_bill_nos = [
+            doc.get("investBillNo") for doc in data if doc.get("investBillNo")
+        ]
+
+        refunded_test_ids = {}
+
+        if invest_bill_nos:
+            refund_docs = refund_collection.find(
+                {
+                    "investBillNo": {"$in": invest_bill_nos},
+                    "is_active": True
+                },
+                {"_id": 0, "investBillNo": 1, "item": 1}
+            )
+
+            for rdoc in refund_docs:
+                bill_no = rdoc.get("investBillNo")
+                items   = rdoc.get("item", [])
+
+                if isinstance(items, str):
+                    try:
+                        items = json.loads(items)
+                    except:
+                        items = []
+
+                if bill_no not in refunded_test_ids:
+                    refunded_test_ids[bill_no] = set()
+
+                for it in items:
+                    tid = it.get("item_id") or it.get("test_id")
+                    if tid is not None:
+                        try:
+                            refunded_test_ids[bill_no].add(int(tid))
+                        except (ValueError, TypeError):
+                            refunded_test_ids[bill_no].add(tid)
+
+        # ── Batch Patient Cache ────────────────────────────────
         uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
         patient_cache = {}
 
         if uhids:
             patient_query = {"uhid": {"$in": list(uhids)}}
-
-            # ✅ Apply auth filters
             if hospital_code:
                 patient_query["hospital_code"] = hospital_code
             if branch_code:
@@ -1015,22 +1094,15 @@ def billing_report_view(request):
             patients = patient_collection.find(
                 patient_query,
                 {
-                    "_id": 0,
-                    "uhid": 1,
-                    "salutation": 1,
-                    "firstName": 1,
-                    "lastName": 1,
-                    "age": 1,
-                    "gender": 1
+                    "_id": 0, "uhid": 1, "salutation": 1,
+                    "firstName": 1, "lastName": 1, "age": 1, "gender": 1
                 }
             )
-
             for p in patients:
                 patient_cache[p["uhid"]] = p
 
-        # ── Batch Bill Type Cache (OPTIMIZED) ──────────────────
+        # ── Batch Bill Type Cache ──────────────────────────────
         bill_type_ids = set()
-
         for doc in data:
             bt = doc.get("bill_type")
             if bt:
@@ -1040,32 +1112,71 @@ def billing_report_view(request):
                     pass
 
         bill_type_cache = {}
-
         if bill_type_ids:
-            bt_query = {"bill_type": {"$in": list(bill_type_ids)}}
             bt_docs = bill_type_collection.find(
-                bt_query,
+                {"bill_type": {"$in": list(bill_type_ids)}},
                 {"_id": 0, "bill_type": 1, "bill_name": 1, "billTypeNo": 1}
             )
-
             for bt in bt_docs:
                 bill_type_cache[int(bt["bill_type"])] = {
-                    "bill_name": bt.get("bill_name", ""),
+                    "bill_name":  bt.get("bill_name",  ""),
                     "billTypeNo": bt.get("billTypeNo", "")
                 }
 
-        # ── Enrich Data ────────────────────────────────────────
+        # ── Batch Doctor / ReferredBy Cache ────────────────────
+        # Collect all employee IDs that are NOT "SELF"
+        doctor_ids     = set()
+        referred_by_ids = set()
+
+        for doc in data:
+            doc_val = doc.get("doctor", "")
+            ref_val = doc.get("referredBy", "")
+
+            if doc_val and doc_val.upper() != "SELF":
+                doctor_ids.add(str(doc_val))
+
+            if ref_val and ref_val.upper() != "SELF":
+                referred_by_ids.add(str(ref_val))
+
+        # One query covers both sets — union of all IDs needed
+        all_profile_ids = doctor_ids | referred_by_ids
+        diagnostics_profile_cache = {}   # employeeId → full name string
+
+        if all_profile_ids:
+            profile_docs = diagnostics_profile_coll.find(
+                {"employeeId": {"$in": list(all_profile_ids)}},
+                {"_id": 0, "employeeId": 1, "employeeName": 1}
+            )
+            for p in profile_docs:
+                emp_id   = str(p.get("employeeId", ""))
+                emp_name = p.get("employeeName", "")
+                if emp_id:
+                    diagnostics_profile_cache[emp_id] = emp_name
+
+        # ── Enrich & Filter Data ───────────────────────────────
         result = []
 
         for doc in data:
 
-            # Patient
-            patient = patient_cache.get(doc.get("uhid"), {})
-            doc["salutation"] = patient.get("salutation", "")
-            doc["firstName"] = patient.get("firstName", "")
-            doc["lastName"] = patient.get("lastName", "")
-            doc["age"] = patient.get("age", "")
-            doc["gender"] = patient.get("gender", "")
+            # Patient — use patient_cache if uhid exists, else fall back to doc fields
+            uhid = doc.get("uhid", "").strip()
+            if uhid:
+                patient = patient_cache.get(uhid, {})
+                doc["salutation"] = patient.get("salutation", "")
+                doc["firstName"]  = patient.get("firstName",  "")
+                doc["lastName"]   = patient.get("lastName",   "")
+                doc["gender"]     = patient.get("gender",     "")
+            else:
+                # Manual entry — fields already stored directly on the billing doc
+                doc["salutation"] = doc.get("salutation", "")
+                doc["firstName"]  = doc.get("firstName",  "")
+                doc["lastName"]   = doc.get("lastName",   "")
+                doc["gender"]     = doc.get("gender",     "")
+
+            # Age / room — always from the billing doc (not patient_cache)
+            doc["age"]      = doc.get("age",    "")
+            doc["age_type"] = doc.get("age_type", "")
+            doc["roomNo"]   = doc.get("roomNo",   "")
 
             # Bill type
             try:
@@ -1074,15 +1185,53 @@ def billing_report_view(request):
                 bt_key = 0
 
             bt_info = bill_type_cache.get(bt_key, {})
-            doc["bill_name"] = bt_info.get("bill_name", "")
+            doc["bill_name"]  = bt_info.get("bill_name",  "")
             doc["billTypeNo"] = bt_info.get("billTypeNo", "")
 
+            # ── Doctor name ────────────────────────────────────
+            doc_val = doc.get("doctor", "")
+            if doc_val and doc_val.upper() == "SELF":
+                doc["doctorName"] = "SELF"
+            else:
+                doc["doctorName"] = diagnostics_profile_cache.get(str(doc_val), "")
+
+            # ── ReferredBy name ────────────────────────────────
+            ref_val = doc.get("referredBy", "")
+            if ref_val and ref_val.upper() == "SELF":
+                doc["referredByName"] = "SELF"
+            else:
+                doc["referredByName"] = diagnostics_profile_cache.get(str(ref_val), "")
+
             # Parse items
-            if isinstance(doc.get("item"), str):
+            items = doc.get("item", [])
+            if isinstance(items, str):
                 try:
-                    doc["item"] = json.loads(doc["item"])
+                    items = json.loads(items)
                 except:
-                    doc["item"] = []
+                    items = []
+
+            # ── Exclude already-refunded items ─────────────────
+            bill_no          = doc.get("investBillNo", "")
+            already_refunded = refunded_test_ids.get(bill_no, set())
+
+            if already_refunded:
+                filtered_items = []
+                for it in items:
+                    tid = it.get("item_id") or it.get("test_id")
+                    try:
+                        tid_norm = int(tid) if tid is not None else None
+                    except (ValueError, TypeError):
+                        tid_norm = tid
+
+                    if tid_norm not in already_refunded:
+                        filtered_items.append(it)
+                doc["item"] = filtered_items
+            else:
+                doc["item"] = items
+
+            # Skip the bill entirely if all items have been refunded
+            if not doc["item"]:
+                continue
 
             result.append(serialize_doc(doc))
 
@@ -1097,7 +1246,8 @@ def billing_report_view(request):
             {"error": "Failed to generate billing report", "details": str(e)},
             status=500
         )
-    
+
+
 
 @api_view(['PATCH'])
 @csrf_exempt
@@ -1301,4 +1451,149 @@ def dept_budr_view(request):
             {"error": "Failed to fetch report", "details": str(e)},
             status=500,
         )
-    
+@api_view(['POST'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
+def invest_refund_create(request):
+    """
+    Creates a refund bill for selected items from an existing invest bill.
+    refundBillNo is generated by incrementing the last existing refundBillNo
+    that matches the same financial-year/bill_type prefix  (no atomic counter).
+    """
+    mongo_client = None
+    try:
+        current_user  = request.data.get('auth-user-id',       'system')
+        branch_code   = request.data.get('auth-branch-code',   'system')
+        outlet_code   = request.data.get('auth-outlet-code',   'system')
+        hospital_code = request.data.get('auth-hospital-code', 'system')
+
+        data = {k: v for k, v in request.data.items()
+                if not k.startswith('auth-')}
+
+        # ── Validate required fields ────────────────────────────────────────
+        required = ['investBillNo', 'uhid', 'bill_type', 'item', 'refund_finalPrice']
+        for field in required:
+            if not data.get(field):
+                return Response(
+                    {'error': f'{field} is required'},
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
+
+        # ── Normalize item list ─────────────────────────────────────────────
+        item_data = data.get('item', [])
+        if isinstance(item_data, str):
+            try:
+                item_data = json.loads(item_data)
+                if isinstance(item_data, str):
+                    item_data = json.loads(item_data)
+            except (json.JSONDecodeError, TypeError):
+                item_data = []
+        if not isinstance(item_data, list) or len(item_data) == 0:
+            return Response(
+                {'error': 'At least one item must be selected for refund'},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
+
+        # ── Connect MongoDB ─────────────────────────────────────────────────
+        mongo_client   = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        mongo_db       = mongo_client['HMS']
+        refund_col     = mongo_db['hospital_investrefund']
+        invest_col     = mongo_db['hospital_investbilling']
+
+        # ── Verify the source invest bill exists and is active ───────────────
+        invest_bill_no = data['investBillNo']
+        source_bill = invest_col.find_one(
+            {'investBillNo': invest_bill_no, 'is_active': True}
+        )
+        if not source_bill:
+            return Response(
+                {'error': f'Active invest bill not found: {invest_bill_no}'},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+
+        # ── Financial year prefix ────────────────────────────────────────────
+        today = datetime.today()
+        if today.month < 4:
+            financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
+        else:
+            financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
+
+        # fixed — financial year only
+        bill_type  = data['bill_type']   
+        prefix_key = f"{financial_year}"   # e.g. "2627"
+        prefix     = f"{prefix_key}/"      # e.g. "2627/"
+
+        # ── Last-incremental refundBillNo (no atomic counter) ────────────────
+        # Find the highest existing refundBillNo for this prefix and add 1.
+        last_doc = refund_col.find_one(
+            {'refundBillNo': {'$regex': f'^{re.escape(prefix)}'}},
+            sort=[('refundBillNo', -1)]
+        )
+
+        if last_doc and last_doc.get('refundBillNo'):
+            try:
+                last_seq = int(last_doc['refundBillNo'].rsplit('/', 1)[-1])
+            except (ValueError, IndexError):
+                last_seq = 0
+        else:
+            last_seq = 0
+
+        next_seq       = last_seq + 1
+        refund_bill_no = f"{prefix}{next_seq:06d}"   # e.g. "2627/16/000009"
+
+        # ── Build document ───────────────────────────────────────────────────
+        now = timezone.now()
+        # Parse investBillDate string → proper datetime object
+        raw_invest_date = data.get('investBillDate')
+        if raw_invest_date:
+            try:
+                # Handle both "2026-05-13T11:57:04.604Z" and "2026-05-13T11:57:04.604+00:00"
+                invest_bill_date = datetime.fromisoformat(
+                    raw_invest_date.replace('Z', '+00:00')
+                )
+            except (ValueError, AttributeError):
+                invest_bill_date = now
+        else:
+            invest_bill_date = now
+
+        refund_doc = {
+            'refundBillNo':     refund_bill_no,
+            'refundBillDate':   now,
+            'investBillNo':     invest_bill_no,
+            'uhid':             data.get('uhid', ''),
+            'ipNumber':         data.get('ipNumber', ''),
+            'bill_type':        bill_type,
+            'billTypeNo':       data.get('billTypeNo', ''),
+            'refund_finalPrice':str(data.get('refund_finalPrice', '0.00')),
+            'paymentStatus':    'Pending',
+            'item':             item_data,
+            'investBillDate':   invest_bill_date,   # use the parsed datetime object
+            'created_by':       current_user,
+            'branch_code':      branch_code,
+            'outlet_code':      outlet_code,
+            'hospital_code':    hospital_code,
+            'created_date':     now,
+            'lastmodified_by':  None,
+            'lastmodified_date':now,
+            'is_active':        True,
+        }
+
+        refund_col.insert_one(refund_doc)
+
+        return Response(
+            {
+                'message':       'Refund bill created successfully!',
+                'refundBillNo':  refund_bill_no,
+            },
+            status=drf_status.HTTP_201_CREATED
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {'error': 'Refund creation failed', 'details': repr(e)},
+            status=500
+        )
+    finally:
+        if mongo_client:
+            mongo_client.close()  

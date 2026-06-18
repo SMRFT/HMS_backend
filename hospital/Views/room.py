@@ -22,6 +22,74 @@ from ..serializers import (
     NursingStationSerializer
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _safe_list + _save_admission
+#
+# _save_admission is the ONE function that should be called instead of
+# adm.save() anywhere the Admission model is touched in this file.
+# It always:
+#   1. Assigns all 3 array fields as Python lists before save.
+#   2. Calls adm.save().
+#   3. Forces native BSON arrays in MongoDB via a direct update_one.
+#
+# This prevents Djongo from stringifying JSONFields on PATCH/PUT requests
+# where only some fields were modified.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_list(value):
+    """Always return a Python list from a JSONField value (list, string, or None)."""
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value in ("null", "None", "[]", "{}"):
+            return []
+        try:
+            import json as _j
+            parsed = _j.loads(value)
+            return parsed if isinstance(parsed, list) else [parsed] if isinstance(parsed, dict) else []
+        except Exception:
+            return []
+    return []
+
+
+def _save_admission(adm, room_details, shifting_details, advance_payments):
+    """
+    Assign all 3 JSON array fields, call adm.save(), then force native
+    BSON arrays in MongoDB. Always pass the in-memory lists you built —
+    never re-read from ORM after save.
+    """
+    import json
+    def make_serializable(data):
+        return json.loads(json.dumps(data, default=str))
+
+    rd = make_serializable(room_details     if isinstance(room_details,     list) else _safe_list(room_details))
+    sd = make_serializable(shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details))
+    ap = make_serializable(advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments))
+
+    adm.room_details       = rd
+    adm.roomShitingDetails = sd
+    adm.advance_payments   = ap
+    adm.save()
+
+    try:
+        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+        if MONGO_URI:
+            client = MongoClient(MONGO_URI)
+            client["HMS"]["hospital_admission"].update_one(
+                {"ipNumber": str(adm.ipNumber)},
+                {"$set": {
+                    "room_details":       rd,
+                    "roomShitingDetails": sd,
+                    "advance_payments":   ap,
+                }}
+            )
+    except Exception as ex:
+        print(f"[_save_admission] Mongo sync failed for {adm.ipNumber}: {ex}")
+
+
 # --------------------------------------------------
 # BLOCK
 # --------------------------------------------------
@@ -1408,12 +1476,13 @@ def book_room_view(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPDATE is_roomCleaned  (PATCH)
+# UPDATE is_roomCleaned  (PUT)
 # Body: { "room_no": "101", "bed_no": "2", "is_roomCleaned": true,
 #         "ip_number": "S026/500001", "shifting_id": "" }
+# Changed from PATCH → PUT to prevent Djongo from stringifying other JSONFields.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@api_view(["PATCH"])
+@api_view(["PUT"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def update_room_cleaned_view(request):
@@ -1461,12 +1530,16 @@ def update_room_cleaned_view(request):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Read ALL 3 arrays into memory before modifying anything
+        rd = _safe_list(admission.room_details)
+        sd = _safe_list(admission.roomShitingDetails)
+        ap = _safe_list(admission.advance_payments)
+
         updated = False
 
         # ── Try shifting entry first ──────────────────────────────────────
-        shiftings     = parse_json_field(admission.roomShitingDetails)
-        new_shiftings = []
-        for shift in shiftings:
+        new_sd = []
+        for shift in sd:
             if not isinstance(shift, dict):
                 continue
             obj = dict(shift)
@@ -1475,19 +1548,18 @@ def update_room_cleaned_view(request):
             sid = str(obj.get("shifting_id", ""))
             if rn == room_no and bn == bed_no:
                 if shifting_id and sid != shifting_id:
-                    new_shiftings.append(obj)
+                    new_sd.append(obj)
                     continue
                 obj["is_roomCleaned"] = is_cleaned
                 updated = True
-            new_shiftings.append(obj)
+            new_sd.append(obj)
 
         if updated:
-            admission.roomShitingDetails = new_shiftings
+            sd = new_sd
         else:
             # ── Fall back to room_details ─────────────────────────────────
-            details     = parse_json_field(admission.room_details)
-            new_details = []
-            for entry in details:
+            new_rd = []
+            for entry in rd:
                 if not isinstance(entry, dict):
                     continue
                 obj = dict(entry)
@@ -1496,8 +1568,8 @@ def update_room_cleaned_view(request):
                 if rn == room_no and bn == bed_no:
                     obj["is_roomCleaned"] = is_cleaned
                     updated = True
-                new_details.append(obj)
-            admission.room_details = new_details
+                new_rd.append(obj)
+            rd = new_rd
 
         if not updated:
             return Response(
@@ -1506,7 +1578,28 @@ def update_room_cleaned_view(request):
             )
 
         admission.lastmodified_date = timezone.now()
-        admission.save()
+        # _save_admission assigns all 3 arrays, calls save(), then syncs Mongo
+        _save_admission(admission, rd, sd, ap)
+
+        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+        try:
+            import os
+            from pymongo import MongoClient
+            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+            if MONGO_URI:
+                client = MongoClient(MONGO_URI)
+                mongo_db = client["HMS"]
+                
+                mongo_db["hospital_admission"].update_one(
+                    {"ipNumber": str(admission.ipNumber)},
+                    {"$set": {
+                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                    }}
+                )
+        except Exception as ex:
+            print("Failed to save admission fields natively:", str(ex))
+
 
         return Response({"success": True, "message": "Room cleaned status updated"})
 
@@ -1597,7 +1690,6 @@ def get_active_admission(request):
         active_records = [
             adm for adm in all_admissions
             if getattr(adm, "is_admitted",        False) is True
-            and getattr(adm, "is_admissionActive", False) is True
             and getattr(adm, "is_discharged",      True)  is False
         ]
 
@@ -1753,7 +1845,6 @@ def get_active_admission(request):
                 "reservedBedNo":    reserved_bed  or "",
                 # ── Status flags ───────────────────────────────────────────
                 "is_admitted":        getattr(admission, "is_admitted",        None),
-                "is_admissionActive": getattr(admission, "is_admissionActive", None),
                 "is_discharged":      getattr(admission, "is_discharged",      None),
                 "patient": patient_data,
             },
@@ -1776,7 +1867,7 @@ def get_active_admission(request):
 @csrf_exempt
 def room_shifting_view(request):
 
-    user_id = request.headers.get("auth-user-id", "system")
+    user_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
 
     # ════════════════════════════════════════════════════════════════════════
     # GET — list shifting history
@@ -1879,7 +1970,6 @@ def room_shifting_view(request):
             if (
                 str(adm.ipNumber) == ip_number
                 and bool(adm.is_admitted)
-                and bool(adm.is_admissionActive)
             ):
                 admission = adm
                 break
@@ -1958,10 +2048,32 @@ def room_shifting_view(request):
         admission.lastmodified_by    = str(user_id)
         admission.lastmodified_date  = timezone.now()
 
-        if not isinstance(admission.advance_payments, list):
-            admission.advance_payments = []
+        # Read advance_payments before save so it isn't lost
+        ap = _safe_list(admission.advance_payments)
 
-        admission.save()
+        # _save_admission assigns all 3 arrays, saves, and syncs Mongo atomically
+        _save_admission(admission, updated_room_details, cleaned_shiftings, ap)
+
+
+        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+        try:
+            import os
+            from pymongo import MongoClient
+            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+            if MONGO_URI:
+                client = MongoClient(MONGO_URI)
+                mongo_db = client["HMS"]
+                
+                mongo_db["hospital_admission"].update_one(
+                    {"ipNumber": str(admission.ipNumber)},
+                    {"$set": {
+                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                    }}
+                )
+        except Exception as ex:
+            print("Failed to save admission fields natively:", str(ex))
+
 
         # ── Mark RoomBooking as shifted (if one existed) ──────────────────
         try:
@@ -1995,12 +2107,13 @@ def room_shifting_view(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PATCH /room-shifting/<ip_number>/update/
+# PUT /room-shifting/<ip_number>/update/
+# Changed from PATCH → PUT to prevent Djongo from stringifying other JSONFields.
 # Editing creates a NEW shifting object; previous one is set is_roomActive=False
 # and endDateTime is stamped on it.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@api_view(["PATCH"])
+@api_view(["PUT"])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def room_shifting_detail_view(request, ip_number):
@@ -2035,6 +2148,7 @@ def room_shifting_detail_view(request, ip_number):
 
     shifting_details = parse_json_field(admission.roomShitingDetails)
     room_details     = parse_json_field(admission.room_details)
+    advance_payments = _safe_list(admission.advance_payments)   # read ap too — must preserve it
 
     # Check the target shift exists
     shift_found = any(
@@ -2098,7 +2212,28 @@ def room_shifting_detail_view(request, ip_number):
     admission.room_details       = updated_rooms
     admission.lastmodified_by    = str(user_id)
     admission.lastmodified_date  = timezone.now()
-    admission.save()
+    # _save_admission assigns all 3 arrays, saves, then syncs Mongo
+    _save_admission(admission, updated_rooms, updated_shiftings, advance_payments)
+
+    # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+    try:
+        import os
+        from pymongo import MongoClient
+        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+        if MONGO_URI:
+            client = MongoClient(MONGO_URI)
+            mongo_db = client["HMS"]
+            
+            mongo_db["hospital_admission"].update_one(
+                {"ipNumber": str(admission.ipNumber)},
+                {"$set": {
+                    "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
+                    "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
+                }}
+            )
+    except Exception as ex:
+        print("Failed to save admission fields natively:", str(ex))
+
 
     return Response(
         {
