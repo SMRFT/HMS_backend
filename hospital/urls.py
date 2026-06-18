@@ -141,7 +141,7 @@ urlpatterns = [
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
-    path('get_oppharmacy_stock/',  pharmacy.get_pharmacy_stock, name='get_oppharmacy_stock'),
+    # path('get_oppharmacy_stock/',  pharmacy.get_pharmacy_stock, name='get_oppharmacy_stock'),
     # path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
     # path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
