@@ -951,8 +951,7 @@ def create_dialysis_discharge_summary(request):
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import datetime, timedelta
-from django.utils.timezone import make_aware
+from datetime import datetime
 from ..models import DialysisDischargeSummary
 from ..serializers import DialysisDischargeSummarySerializer
 
@@ -981,8 +980,8 @@ def Print_dialysis_dischargesummary(request):
         )
 
     try:
-        from_date = datetime.strptime(from_date_str, "%Y-%m-%d")
-        to_date   = datetime.strptime(to_date_str,   "%Y-%m-%d")
+        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+        to_date   = datetime.strptime(to_date_str,   "%Y-%m-%d").date()
     except ValueError:
         return Response(
             {"status": "error", "message": "Invalid date format. Use YYYY-MM-DD."},
@@ -994,26 +993,22 @@ def Print_dialysis_dischargesummary(request):
             {"status": "error", "message": "'from_date' cannot be later than 'to_date'."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    # include the entire to_date day (up to 23:59:59)
-    to_date_end = to_date + timedelta(days=1) - timedelta(seconds=1)
-
-    # make timezone-aware if Django USE_TZ = True
-    try:
-        from_date   = make_aware(from_date)
-        to_date_end = make_aware(to_date_end)
-    except Exception:
-        pass   # already aware or USE_TZ = False
+    
+    print("AUTH:", hospital_code, branch_code, outlet_code)
+    print("DATES:", from_date, to_date)
+    print("ALL RECORDS:", DialysisDischargeSummary.objects.filter(
+        hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code
+    ).values("uhid", "date"))
 
     # ─── QUERYSET ─────────────────────────────────────────────
     try:
         queryset = DialysisDischargeSummary.objects.filter(
-            hospital_code     = hospital_code,
-            branch_code       = branch_code,
-            outlet_code       = outlet_code,
-            created_date__gte = from_date,
-            created_date__lte = to_date_end,
-        ).order_by("-created_date")
+            hospital_code = hospital_code,
+            branch_code   = branch_code,
+            outlet_code   = outlet_code,
+            date__gte     = from_date,
+            date__lte     = to_date,
+        ).order_by("-date")
 
     except Exception as e:
         return Response(

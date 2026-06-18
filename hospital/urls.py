@@ -17,6 +17,7 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
+    salesreturn,
     summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder
 )
@@ -70,11 +71,11 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
-    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
-    path("salesreturn_get_uhid_bills/",  pharmacy.salesreturn_get_uhid_bills),
-    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
-    path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
+    # path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("salesreturn_get_uhid_bills/",  pharmacy.salesreturn_get_uhid_bills),
+    # path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    # path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -89,10 +90,11 @@ urlpatterns = [
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
-     path("ipadvance_bills/",  pharmacy.ipadvance_bills),
-     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
-     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
-     path("get_registration_bills/", cashcounter.get_registration_bills),
+    path("ipadvance_bills/",  cashcounter.ipadvance_bills),
+    path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
+    path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
+    path("get_registration_bills/", cashcounter.get_registration_bills),
+    path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
      
     
     
@@ -140,7 +142,7 @@ urlpatterns = [
     path("discharge-billing/",discharge.discharge_billing_list_create,name="discharge-billing-list-create",),
     path("discharge-billing/<str:pk>/",discharge.discharge_billing_detail,name="discharge-billing-detail",),
     path("discharge-billing/<str:pk>/convert-to-bill/",discharge.convert_estimate_to_bill,name="discharge-billing-convert",),
-    path("create_dialysis_discharge_summary/",discharge.create_dialysis_discharge_summary,name="dialysis-discharge-summary"),
+    path("create_dialysis_discharge_summary/",discharge.create_dialysis_discharge_summary,name="create_dialysis_discharge_summary"),
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
     path("Print_dialysis_dischargesummary/",discharge.Print_dialysis_dischargesummary,name="Print_dialysis_dischargesummary",),
 
@@ -163,7 +165,7 @@ urlpatterns = [
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
-    path('cashcounter_pending_bills/', pharmacy.cashcounter_pending_bills, name='cashcounter_pending_bills'),
+   
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
 
     # Customer Type URLs
@@ -379,11 +381,13 @@ urlpatterns = [
     path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
     path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
 
-    # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
-    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
-    path("salesreturn_get_patientdetails/",pharmacy.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
-    path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
-    path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+    # Sales Return URLs
+   
+    path("salesreturn_get_patientdetails/",salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
+    path("get_salesreturn_billdetails/", salesreturn.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
+    path("OP_salesreturn_billdetails/", salesreturn.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+    path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
+
 
     
 ]

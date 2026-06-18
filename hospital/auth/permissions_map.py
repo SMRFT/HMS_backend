@@ -265,42 +265,43 @@ PAGE_MAPPING = {
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
-        '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSOPB',
+        '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
         '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
-        '/_b_a_c_k_e_n_d/HMS/cashcounter_pending_bills/': 'HMS-P-CCOPPB',
+        
 
-         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
-         '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-POPPDB',
+        
+         '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-PDB',
          '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
          '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
          r'^/_b_a_c_k_e_n_d/HMS/searchby_ip/?(\?.*)?$': 'HMS-P-PSIP',
-         '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCC',
+         '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCIPAB',
           '/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/': 'HMS-P-PHVSB',
 
-         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-POPUAS',
+         r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-PAS',
+
+        #  salesreturn urls
          '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-SRGPD',
          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-SRBD',
          '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-OPSRBD',
-          '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-OPGSRD',
+          r'/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/?(\?.*)?$': 'HMS-P-PGSRD',
 
         # Central cah counter
 
+        '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCOPPB',
+        '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
-  
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
-  
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
-        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCMBPB',
-        '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCMBPB',
-        '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCMBPB',
-        '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
-         
+        '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
+        '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
+        '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCGMPB',
+        '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',        
         '/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/' : 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/get_return_bills/' : 'HMS-P-CCGRB',

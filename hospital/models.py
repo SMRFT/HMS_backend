@@ -1407,8 +1407,8 @@ class DialysisDischargeSummary(AuditModel):
     gender = models.CharField(max_length=100)
 
     uhid = models.CharField(max_length=100, unique=True)
-    consultant = models.CharField(max_length=255)
-    id_no = models.CharField(max_length=100)
+    consultant = models.CharField(max_length=255,null=True, blank=True)
+    id_no = models.CharField(max_length=100,null=True, blank=True)
     insurance = models.CharField(max_length=255, blank=True, default="")
 
     address = models.TextField()
@@ -1418,13 +1418,13 @@ class DialysisDischargeSummary(AuditModel):
     date_of_first_dialysis = models.DateField(null=True, blank=True)
     date_of_last_dialysis = models.DateField(null=True, blank=True)
 
-    blood_investigations = models.JSONField(default=list, blank=True)
+    blood_investigations = models.JSONField(default=list,null=True, blank=True)
     hd_sessions = models.JSONField(default=list, blank=True)
-    complications_during_hd = models.JSONField(default=list, blank=True)
+    complications_during_hd = models.JSONField(default=list, null=True, blank=True)
 
     condition_on_discharge = models.TextField()
 
-    advice_on_discharge = models.JSONField(default=list, blank=True)
+    advice_on_discharge = models.JSONField(default=list, null=True, blank=True)
 
     next_hd_session_on = models.DateField()
 
