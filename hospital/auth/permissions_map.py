@@ -11,7 +11,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
-
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
 
     # ==================== WARD REQUEST ====================
@@ -101,6 +100,7 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-PSG',
     r'^/_b_a_c_k_e_n_d/HMS/get_active_outlets/?(\?.*)?$': 'HMS-P-OS',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_expiry_report/?(\?.*)?$': 'HMS-P-PSG',
 
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
@@ -265,7 +265,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-OTMBD',    
                 
 
-
+    r'^/_b_a_c_k_e_n_d/HMS/crash-cart/items/?(\?.*)?$': 'HMS-P-CL',
+    r'^/_b_a_c_k_e_n_d/HMS/crash-cart/daily-check/?(\?.*)?$': 'HMS-P-CL',
+    r'^/_b_a_c_k_e_n_d/HMS/crash-cart/monthly-report/?(\?.*)?$': 'HMS-P-CL',
     
     
      
