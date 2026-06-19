@@ -19,58 +19,112 @@ from django.utils import timezone
 from django.db.models import Max
 
 # Auth/permissions
+import os
+from pymongo import MongoClient
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from ..models import Patient, SalesReturn
 
+
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_salesreturn_details(request):
-    from_date = request.GET.get("from_date")
-    to_date   = request.GET.get("to_date")
+    try:
+        from_date = request.GET.get("from_date")
+        to_date   = request.GET.get("to_date")
 
-    qs = SalesReturn.objects.all()
-    if from_date and to_date:
-        qs = qs.filter(return_bill_date__date__gte=from_date,
-                        return_bill_date__date__lte=to_date)
-    qs = qs.order_by("-return_bill_date")
+        qs = SalesReturn.objects.all()
 
-    # Collect uhids and created_by ids for batch lookup
-    uhids = {r.uhid for r in qs}
-    created_by_ids = {r.created_by for r in qs if r.created_by}
+        # ✅ FIX 1: Proper datetime filtering (NO __date)
+        if from_date and to_date:
+            try:
+                from_date = datetime.strptime(from_date, "%Y-%m-%d")
+                to_date   = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
 
-    # 2. Patient lookup
-    patients = Patient.objects.filter(uhid__in=uhids)
-    patient_map = {}
-    for p in patients:
-        name_parts = [p.salutation, p.firstName, p.lastName]
-        patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+                qs = qs.filter(
+                    return_bill_date__gte=from_date,
+                    return_bill_date__lt=to_date,
+                )
+            except Exception as e:
+                return Response({
+                    "status": "error",
+                    "message": f"Invalid date format: {str(e)}"
+                }, status=400)
 
-    # 3. User lookup from Global DB - backend_diagnostics_profile
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    global_db = client["GLOBAL"]  # adjust db name as needed
-    profiles = global_db["backend_diagnostics_profile"].find(
-        {"employeeId": {"$in": list(created_by_ids)}},
-        {"employeeId": 1, "employeeName": 1}
-    )
-    user_map = {p["employeeId"]: p.get("employeeName", "") for p in profiles}
-    client.close()
+        records = list(qs.order_by("-return_bill_date"))
 
-    data = []
-    for r in qs:
-        data.append({
-            "return_bill_no": r.return_bill_no,
-            "return_bill_date": r.return_bill_date,
-            "bill_no": r.bill_no,
-            "uhid": r.uhid,
-            "return_amount": r.return_amount,
-            "status": r.status,
-            "bill_type": r.bill_type,
-            "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
-            "patient_name": patient_map.get(r.uhid, ""),
-            "pharmacist_name": user_map.get(r.created_by, r.created_by or ""),
+        # ✅ DEBUG (remove in production if needed)
+        print("SalesReturn records found:", len(records))
+
+        if not records:
+            return Response({
+                "status": "success",
+                "data": [],
+                "message": "No records found"
+            })
+
+        # ✅ Collect IDs
+        uhids = {r.uhid for r in records if r.uhid}
+        created_by_ids = {r.created_by for r in records if r.created_by}
+
+        # ✅ Patient Lookup
+        patient_map = {}
+        patients = Patient.objects.filter(uhid__in=uhids)
+
+        for p in patients:
+            name_parts = [p.salutation, p.firstName, p.lastName]
+            patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+
+        # ✅ User Lookup (MongoDB)
+        user_map = {}
+        try:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["GLOBAL"]
+
+            profiles = global_db["backend_diagnostics_profile"].find(
+                {"employeeId": {"$in": list(created_by_ids)}},
+                {"employeeId": 1, "employeeName": 1},
+            )
+
+            user_map = {
+                str(p["employeeId"]): p.get("employeeName", "")
+                for p in profiles
+            }
+
+            client.close()
+
+        except Exception as e:
+            print("MongoDB user lookup failed:", str(e))
+
+        # ✅ Final Response Build
+        data = []
+        for r in records:
+            data.append({
+                "return_bill_no":   r.return_bill_no,
+                "return_bill_date": r.return_bill_date,
+                "bill_no":          r.bill_no,
+                "uhid":             r.uhid,
+                "return_amount":    r.return_amount,
+                "status":           r.status,
+                "bill_type":        r.bill_type,
+                "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
+                "patient_name":     patient_map.get(r.uhid, ""),
+                "pharmacist_name":  user_map.get(str(r.created_by), r.created_by or ""),
+            })
+
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "data": data
         })
 
-    return Response({"status": "success", "data": data})
+    except Exception as e:
+        print("SalesReturn API Error:", str(e))
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
 
 
 from rest_framework.decorators import api_view
@@ -171,13 +225,6 @@ def _convert_decimal(val):
     return float(val.to_decimal()) if isinstance(val, Decimal128) else val
 
 
-def _get_db():
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    return client, client["HMS"]
- 
-
-def _convert_decimal(val):
-    return float(val.to_decimal()) if isinstance(val, Decimal128) else val
 
 
 
