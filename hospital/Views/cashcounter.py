@@ -1546,11 +1546,7 @@ def update_mainblock_pendingbills(request):
         hospital_code = data.get("auth-hospital-code")
         branch_code = data.get("auth-branch-code")
 
-        outlet_code = (
-            data.get("auth-outlet-code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or request.META.get("HTTP_OUTLET_CODE")
-        )
+        outlet_code = (data.get("auth-outlet-code"))
 
         employee_id = data.get("auth-user-id")
 
@@ -1560,10 +1556,7 @@ def update_mainblock_pendingbills(request):
 
         payment_details = data.get("payment_details")
 
-        shiftno = (
-            data.get("shiftno")
-            or data.get("shift_no")
-        )
+        shiftno = (data.get("shiftno"))
 
         counter_id = data.get("counter_id")
 
