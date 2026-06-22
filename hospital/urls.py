@@ -529,6 +529,7 @@ urlpatterns = [
     path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
     path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
+    path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),
 
     
     # Insurance Claim URLs
