@@ -1151,14 +1151,14 @@ def get_radiology_ward_requests(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def save_radiology_ward_request(request):
     try:
         import json
         data = request.data
         current_user = data.get('auth-user-id', "system")
         branch_code = data.get('auth-branch-code', 'system')
-        department_code = data.get('auth-department-code', 'system')
+        outlet_code = data.get('auth-outlet-code', 'system')
         hospital_code = data.get('auth-hospital-code', 'system')
         
         request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
@@ -1218,7 +1218,7 @@ def save_radiology_ward_request(request):
             "total_amount": round(float(request_doc.get("total_amount", 0)), 2),
             "created_by": current_user,
             "branch_code": branch_code,
-            "department_code": department_code,
+            "outlet_code": outlet_code,
             "hospital_code": hospital_code,
             "created_date": now_ist,
             "investBillDate": now_ist,
