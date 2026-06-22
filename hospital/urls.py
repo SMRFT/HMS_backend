@@ -47,6 +47,10 @@ from .Views.Complaints import complaints
 
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
+      # Crash Cart URLs
+    path('crash-cart/items/', NursingStation.get_crash_cart_items, name='get_crash_cart_items'),
+    path('crash-cart/daily-check/', NursingStation.save_crash_cart_daily_check, name='save_crash_cart_daily_check'),
+    path('crash-cart/monthly-report/', NursingStation.get_crash_cart_monthly_report, name='get_crash_cart_monthly_report'),
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
