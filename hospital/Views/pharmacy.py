@@ -21,7 +21,7 @@ from django.db.models import Max
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 
 # Models & Serializers
-from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem
+from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider
 from ..serializers import PharmacyBillingSerializer
 
 # MongoDB Configuration
@@ -2402,96 +2402,6 @@ def cashcounter_outlet(request):
 
 
 
-    
-
-
-
-@api_view(["GET"])
-def salesreturn_get_uhid_bills(request):
-    try:
-        uhid_input = request.GET.get("uhid", "").strip()
- 
-        if not uhid_input:
-            return Response({
-                "status": "error",
-                "message": "UHID is required"
-            }, status=status.HTTP_400_BAD_REQUEST)
- 
-        client, db = _get_db()
-        bill_col = db["hospital_pharmacybilling"]
- 
-        cutoff_date = datetime.utcnow() - timedelta(days=30)
- 
-        # Build query — support partial UHID (numeric suffix after slash)
-        # e.g. "7878" should match "S025/007878"
-        # We use a regex so partial input works both for exact and substring
-        import re
-        escaped = re.escape(uhid_input)
- 
-        query = {
-            "uhid":            {"$regex": escaped, "$options": "i"},
-            "billing_status":  "Paid",
-            "bill_date":       {"$gte": cutoff_date},
-        }
- 
-        bills_cursor = bill_col.find(
-            query,
-            {
-                "_id": 0,
-                "bill_no": 1,
-                "bill_date": 1,
-                "uhid": 1,
-                "net_amount": 1,
-                "total_amount": 1,
-                "billing_mode": 1,
-                "inpatient_number": 1,
-            }
-        ).sort("bill_date", -1)  # newest first
- 
-        bills = []
-        for b in bills_cursor:
-            # Normalise bill_date to ISO string for JSON serialisation
-            bd = b.get("bill_date")
-            if isinstance(bd, datetime):
-                bd = bd.isoformat()
- 
-            bills.append({
-                "bill_no":           b.get("bill_no"),
-                "bill_date":         bd,
-                "uhid":              b.get("uhid"),
-                "net_amount":        _convert_decimal(b.get("net_amount", 0)),
-                "total_amount":      _convert_decimal(b.get("total_amount", 0)),
-                "billing_mode":      b.get("billing_mode", ""),
-                "inpatient_number":  b.get("inpatient_number", ""),
-            })
- 
-        client.close()
- 
-        return Response({
-            "status":  "success",
-            "message": f"{len(bills)} bill(s) found within the last 30 days.",
-            "data":    bills,
-        }, status=status.HTTP_200_OK)
- 
-    except Exception as e:
-        return Response({
-            "status":     "error",
-            "message":    f"Internal server error: {str(e)}",
-            "error_type": type(e).__name__,
-            "trace":      traceback.format_exc(),
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
- 
-
-
-
-
-
-
-
-
-
-
-
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -2793,6 +2703,7 @@ from pymongo import MongoClient
 import os
 
 
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def pharmacy_view_bills(request):
@@ -3081,8 +2992,7 @@ def pharmacy_view_bills(request):
     return Response({
         "employee_id":   employee_id,
         "employee_name": emp_name,
-        "allowed_bill_type_details": allowed_bill_type_details,
-        "data": data
+        "data":          data,
     }, status=status.HTTP_200_OK)
 
 

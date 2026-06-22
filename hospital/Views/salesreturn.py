@@ -19,62 +19,112 @@ from django.utils import timezone
 from django.db.models import Max
 
 # Auth/permissions
+import os
+from pymongo import MongoClient
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from ..models import Patient, SalesReturn
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_salesreturn_details(request):
-    from_date = request.GET.get("from_date")
-    to_date   = request.GET.get("to_date")
+    try:
+        from_date = request.GET.get("from_date")
+        to_date   = request.GET.get("to_date")
 
-    qs = SalesReturn.objects.all()
-    if from_date and to_date:
-        qs = qs.filter(return_bill_date__date__gte=from_date,
-                        return_bill_date__date__lte=to_date)
-    qs = qs.order_by("-return_bill_date")
+        qs = SalesReturn.objects.all()
 
-    # Collect uhids and created_by ids for batch lookup
-    uhids = {r.uhid for r in qs}
-    created_by_ids = {r.created_by for r in qs if r.created_by}
+        # ✅ FIX 1: Proper datetime filtering (NO __date)
+        if from_date and to_date:
+            try:
+                from_date = datetime.strptime(from_date, "%Y-%m-%d")
+                to_date   = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
 
-    # 2. Patient lookup
-    patients = Patient.objects.filter(uhid__in=uhids)
-    patient_map = {}
-    for p in patients:
-        name_parts = [p.salutation, p.firstName, p.lastName]
-        patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+                qs = qs.filter(
+                    return_bill_date__gte=from_date,
+                    return_bill_date__lt=to_date,
+                )
+            except Exception as e:
+                return Response({
+                    "status": "error",
+                    "message": f"Invalid date format: {str(e)}"
+                }, status=400)
 
-    # 3. User lookup from Global DB - backend_diagnostics_profile
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    global_db = client["GLOBAL"]  # adjust db name as needed
-    profiles = global_db["backend_diagnostics_profile"].find(
-        {"employeeId": {"$in": list(created_by_ids)}},
-        {"employeeId": 1, "employeeName": 1}
-    )
-    user_map = {p["employeeId"]: p.get("employeeName", "") for p in profiles}
-    client.close()
+        records = list(qs.order_by("-return_bill_date"))
 
-    data = []
-    for r in qs:
-        data.append({
-            "return_bill_no": r.return_bill_no,
-            "return_bill_date": r.return_bill_date,
-            "bill_no": r.bill_no,
-            "uhid": r.uhid,
-            "return_amount": r.return_amount,
-            "status": r.status,
-            "bill_type": r.bill_type,
-            "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
-            "patient_name": patient_map.get(r.uhid, ""),
-            "pharmacist_name": user_map.get(r.created_by, r.created_by or ""),
+        # ✅ DEBUG (remove in production if needed)
+        print("SalesReturn records found:", len(records))
+
+        if not records:
+            return Response({
+                "status": "success",
+                "data": [],
+                "message": "No records found"
+            })
+
+        # ✅ Collect IDs
+        uhids = {r.uhid for r in records if r.uhid}
+        created_by_ids = {r.created_by for r in records if r.created_by}
+
+        # ✅ Patient Lookup
+        patient_map = {}
+        patients = Patient.objects.filter(uhid__in=uhids)
+
+        for p in patients:
+            name_parts = [p.salutation, p.firstName, p.lastName]
+            patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+
+        # ✅ User Lookup (MongoDB)
+        user_map = {}
+        try:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["GLOBAL"]
+
+            profiles = global_db["backend_diagnostics_profile"].find(
+                {"employeeId": {"$in": list(created_by_ids)}},
+                {"employeeId": 1, "employeeName": 1},
+            )
+
+            user_map = {
+                str(p["employeeId"]): p.get("employeeName", "")
+                for p in profiles
+            }
+
+            client.close()
+
+        except Exception as e:
+            print("MongoDB user lookup failed:", str(e))
+
+        # ✅ Final Response Build
+        data = []
+        for r in records:
+            data.append({
+                "return_bill_no":   r.return_bill_no,
+                "return_bill_date": r.return_bill_date,
+                "bill_no":          r.bill_no,
+                "uhid":             r.uhid,
+                "return_amount":    r.return_amount,
+                "status":           r.status,
+                "bill_type":        r.bill_type,
+                "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
+                "patient_name":     patient_map.get(r.uhid, ""),
+                "pharmacist_name":  user_map.get(str(r.created_by), r.created_by or ""),
+            })
+
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "data": data
         })
 
-    return Response({"status": "success", "data": data})
-
-
-
-
+    except Exception as e:
+        print("SalesReturn API Error:", str(e))
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
 
 
 from rest_framework.decorators import api_view
@@ -175,6 +225,85 @@ def _convert_decimal(val):
     return float(val.to_decimal()) if isinstance(val, Decimal128) else val
 
 
+
+
+
+
+@api_view(["GET"])
+def salesreturn_get_uhid_bills(request):
+    try:
+        uhid_input = request.GET.get("uhid", "").strip()
+ 
+        if not uhid_input:
+            return Response({
+                "status": "error",
+                "message": "UHID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+ 
+        client, db = _get_db()
+        bill_col = db["hospital_pharmacybilling"]
+ 
+        cutoff_date = datetime.utcnow() - timedelta(days=30)
+ 
+        # Build query — support partial UHID (numeric suffix after slash)
+        # e.g. "7878" should match "S025/007878"
+        # We use a regex so partial input works both for exact and substring
+        import re
+        escaped = re.escape(uhid_input)
+ 
+        query = {
+            "uhid":            {"$regex": escaped, "$options": "i"},
+            "billing_status":  "Paid",
+            "bill_date":       {"$gte": cutoff_date},
+        }
+ 
+        bills_cursor = bill_col.find(
+            query,
+            {
+                "_id": 0,
+                "bill_no": 1,
+                "bill_date": 1,
+                "uhid": 1,
+                "net_amount": 1,
+                "total_amount": 1,
+                "billing_mode": 1,
+                "inpatient_number": 1,
+            }
+        ).sort("bill_date", -1)  # newest first
+ 
+        bills = []
+        for b in bills_cursor:
+            # Normalise bill_date to ISO string for JSON serialisation
+            bd = b.get("bill_date")
+            if isinstance(bd, datetime):
+                bd = bd.isoformat()
+ 
+            bills.append({
+                "bill_no":           b.get("bill_no"),
+                "bill_date":         bd,
+                "uhid":              b.get("uhid"),
+                "net_amount":        _convert_decimal(b.get("net_amount", 0)),
+                "total_amount":      _convert_decimal(b.get("total_amount", 0)),
+                "billing_mode":      b.get("billing_mode", ""),
+                "inpatient_number":  b.get("inpatient_number", ""),
+            })
+ 
+        client.close()
+ 
+        return Response({
+            "status":  "success",
+            "message": f"{len(bills)} bill(s) found within the last 30 days.",
+            "data":    bills,
+        }, status=status.HTTP_200_OK)
+ 
+    except Exception as e:
+        return Response({
+            "status":     "error",
+            "message":    f"Internal server error: {str(e)}",
+            "error_type": type(e).__name__,
+            "trace":      traceback.format_exc(),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+ 
 
 
 
