@@ -264,6 +264,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
     r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
     r'^/_b_a_c_k_e_n_d/HMS/get_ippharmacy_stock/?(\?.*)?$': 'HMS-P-OTMB',  
+    r'^/_b_a_c_k_e_n_d/HMS/get_oppharmacy_stock/?(\?.*)?$': 'HMS-P-OTMB',  
+
     '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',  
     '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
     '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
@@ -319,8 +321,10 @@ PAGE_MAPPING = {
 
 
     # PHARMACY 
-         r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
-        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
+         r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD', 
+        #  r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
+
+        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/?(\?.*)?$': 'HMS-P-BTE',
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',

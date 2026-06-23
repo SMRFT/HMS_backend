@@ -552,7 +552,7 @@ def save_lab_ward_request(request):
             "is_active": True,
             "is_ward_request": True,
             "status": "Result Pending",
-            "paymentStatus":"Pending",
+            "payment_method":"Credit",
             "ward_request_type": "LAB"
         })
         
@@ -772,6 +772,7 @@ def get_medicine_ward_requests(request):
                 "status": doc.get("billing_status", "Pending"),
                 "doctor": doc.get("doctor_id", ""),
                 "outlet_code": doc.get("outlet_code", ""),
+                "isDischarge": doc.get("billing_mode") == "DISCHARGE MEDICINE",
                 "medicines": medicines,
                 "total_amount": doc.get("total_amount", 0),
                 "pending_returns": doc.get("pending_returns", []),
@@ -952,7 +953,7 @@ def save_medicine_ward_request(request):
             total_amount=total_amount,
             net_amount=total_amount,
             billing_status="Pending",
-            billing_mode="WARD REQUEST",
+            billing_mode="DISCHARGE MEDICINE" if data.get("is_discharge") else "WARD REQUEST",
             payment_details={},
             outlet_code=outlet_code,
             hospital_code=hospital_code,
@@ -1225,6 +1226,7 @@ def save_radiology_ward_request(request):
             "bill_date": now_ist,
             "is_active": True,
             "is_ward_request": True,
+            "payment_method":"Credit",
             "status": "Result Pending",
             "ward_request_type": "RADIOLOGY"
         })
