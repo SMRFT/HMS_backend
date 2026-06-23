@@ -18,11 +18,12 @@ from django.utils import timezone
 from django.db.models import Max
 
 # Auth/permissions
-from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
+from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPermission
 
 # Models & Serializers
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider
 from ..serializers import PharmacyBillingSerializer
+from .cashcounter import validate_active_shift
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -47,15 +48,18 @@ def convert_decimals(obj):
 
 
 
+
 @api_view(["POST","GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_stock(request):
     try:
         # ✅ Get values
-        print("test", request.data.get("outlet_code"))
         hospital_code = request.data.get("auth-hospital-code") 
         branch_code = request.data.get("auth-branch-code")
-        outlet_code = request.data.get("auth-outlet-code")
+        
+        # Respect passed outlet_code (query param or body) before falling back to auth-outlet-code
+        passed_outlet = request.GET.get("outlet_code") or request.data.get("outlet_code")
+        outlet_code = passed_outlet if passed_outlet else request.data.get("auth-outlet-code")
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -1148,6 +1152,20 @@ def collect_oppharmacy_payment(request):
                 "error": "payment_details must be object"
             })
 
+        # Active shift validation
+        is_valid, msg, active_shift = validate_active_shift(
+            shiftno=shiftno,
+            counter_id=counter_id,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+        if not is_valid:
+            return Response({
+                "success": False,
+                "error": msg
+            })
+
         # =====================================================
         # TYPE CONVERSIONS
         # =====================================================
@@ -1329,6 +1347,13 @@ def collect_oppharmacy_payment(request):
                 f"✅ CashCounterCollection saved successfully "
                 f"ID = {instance.collection_id}"
             )
+
+            # Recalculate shift totals
+            try:
+                from .cashcounter import recalculate_and_update_shift_details
+                recalculate_and_update_shift_details(shiftno)
+            except Exception as e:
+                print("Error updating shift details in OP Pharmacy payment:", e)
 
         else:
 

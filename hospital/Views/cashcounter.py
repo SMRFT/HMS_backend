@@ -150,6 +150,46 @@ def convert_decimal128(value):
     try: return Decimal(str(value))
     except: return Decimal('0.00')
 
+def validate_active_shift(shiftno, counter_id, outlet_code, hospital_code, branch_code):
+    """
+    Validates that:
+    1. There is an active shift for the specified counter.
+    2. The provided shiftno matches the active shiftno.
+    3. The shift's status is 'active'.
+    """
+    if not shiftno:
+        return False, "Shift number is required for transaction.", None
+
+    from pymongo import MongoClient
+    import os
+    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+    db = client["HMS"]
+    col = db["hospital_cashcountershiftdetails"]
+
+    query = {
+        "ShiftStatus": "active",
+        "is_active": True,
+        "hospital_code": hospital_code,
+        "branch_code": branch_code
+    }
+    if counter_id:
+        query["CashCounter"] = counter_id
+    if outlet_code:
+        query["SelectedOutlet"] = outlet_code
+
+    doc = col.find_one(query, sort=[("StartingTime", -1)])
+    client.close()
+
+    if not doc:
+        counter_msg = f" for counter '{counter_id}'" if counter_id else ""
+        return False, f"No active shift found{counter_msg}. Please open/start a shift first.", None
+
+    active_shiftno = doc.get("shiftno")
+    if active_shiftno != shiftno:
+        return False, f"Shift mismatch or shift is not active. The active shift is '{active_shiftno}', but transaction requested '{shiftno}'.", active_shiftno
+
+    return True, "Shift is active and valid.", active_shiftno
+
 # =====================================================
 
 # ✅ RESPONSE FORMATTER
@@ -340,10 +380,10 @@ def cash_counter_shiftdetails(request):
         shift.SalesReturnAmount = safe_dec(totals['sales_return'])
         
         # Use provided fields or defaults
-        shift.ClosingBalance = safe_dec(closing_balance_raw or totals['total_collection'])
         shift.RemittedToBank = safe_dec(data.get("RemittedToBank", shift.RemittedToBank))
         shift.SubmittedToAccount = safe_dec(data.get("SubmittedToAccount", shift.SubmittedToAccount))
         shift.HandOverAmount = safe_dec(data.get("HandOverAmount", 0))
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
@@ -453,6 +493,19 @@ def calculate_shift_collection(shift_no):
     Calculates the total collected amount and other financial metrics for a shift.
     Returns a dictionary with all metrics.
     """
+    def to_float(val):
+        if val is None:
+            return 0.0
+        if hasattr(val, 'to_decimal'):
+            try:
+                return float(val.to_decimal())
+            except:
+                pass
+        try:
+            return float(val)
+        except:
+            return 0.0
+
     results = {
         "total_collection": 0.0,
         "pending_amount": 0.0,
@@ -470,62 +523,61 @@ def calculate_shift_collection(shift_no):
         # Paid
         paid_bills = list(db["hospital_billing"].find({"shiftno": shift_no, "payment_status": "Paid"}))
         for b in paid_bills:
-            results["total_collection"] += convert_decimal(b.get("total_fees", 0))
+            results["total_collection"] += to_float(b.get("total_fees", 0))
         
         # Pending
         pending_bills = list(db["hospital_billing"].find({"shiftno": shift_no, "payment_status": "Pending"}))
         for b in pending_bills:
-            results["pending_amount"] += convert_decimal(b.get("total_fees", 0))
+            results["pending_amount"] += to_float(b.get("total_fees", 0))
 
         # 2. Investigation
         paid_invest = list(db["hospital_investbilling"].find({"shiftno": shift_no, "paymentStatus": "Paid"}))
         for d in paid_invest:
-            results["total_collection"] += convert_decimal(d.get("finalPrice") or d.get("total") or 0)
+            results["total_collection"] += to_float(d.get("finalPrice") or d.get("total") or 0)
             
         pending_invest = list(db["hospital_investbilling"].find({"shiftno": shift_no, "paymentStatus": "Pending"}))
         for d in pending_invest:
-            results["pending_amount"] += convert_decimal(d.get("finalPrice") or d.get("total") or 0)
+            results["pending_amount"] += to_float(d.get("finalPrice") or d.get("total") or 0)
 
         # 3. Discharge
         paid_discharge = list(db["hospital_dischargebilling"].find({"shiftno": shift_no, "status": "Paid"}))
         for d in paid_discharge:
-            results["total_collection"] += convert_decimal(d.get("net_amount", 0))
+            results["total_collection"] += to_float(d.get("net_amount", 0))
             
         pending_discharge = list(db["hospital_dischargebilling"].find({"shiftno": shift_no, "status": "Pending"}))
         for d in pending_discharge:
-            results["pending_amount"] += convert_decimal(d.get("net_amount", 0))
+            results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 4. Pharmacy
         paid_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": shift_no, "billing_status": "Paid"}))
         for d in paid_pharmacy:
-            results["total_collection"] += convert_decimal(d.get("net_amount", 0))
+            results["total_collection"] += to_float(d.get("net_amount", 0))
             
         pending_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": shift_no, "billing_status": "Pending"}))
         for d in pending_pharmacy:
-            results["pending_amount"] += convert_decimal(d.get("net_amount", 0))
+            results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 5. IP Advance (from Admission model's advance_payments)
-        # Since shiftno might not be in the JSON yet, we might need a fallback or check if it was added
         admissions = list(db["hospital_admission"].find({"advance_payments.shiftno": shift_no}))
         for adm in admissions:
             payments = adm.get("advance_payments", [])
             for p in payments:
                 if p.get("shiftno") == shift_no and p.get("is_advanceActive"):
-                    amt = convert_decimal(p.get("advance_amount", 0))
+                    amt = to_float(p.get("advance_amount", 0))
                     results["ip_advance"] += amt
                     results["total_collection"] += amt
 
         # 6. Sales Return
         returns = list(db["hospital_salesreturn"].find({"shiftno": shift_no}))
         for r in returns:
-            amt = convert_decimal(r.get("return_amount", 0))
+            amt = to_float(r.get("return_amount", 0))
             results["sales_return"] += amt
             results["total_collection"] -= amt
 
         # 7. Receipt and Payment
         rp_docs = list(db["hospital_receiptandpayment"].find({"shiftno": shift_no}))
         for d in rp_docs:
-            amt = convert_decimal(d.get("amount", 0))
+            amt = to_float(d.get("amount", 0))
             if d.get("receipt_type") == "Receipt":
                 results["receipts"] += amt
                 results["total_collection"] += amt
@@ -540,6 +592,83 @@ def calculate_shift_collection(shift_no):
         traceback.print_exc()
 
     return results
+
+
+def recalculate_and_update_shift_details(shift_no):
+    """
+    Recalculates and updates all collection, return, remitted, and hand over amounts
+    in hospital_cashcountershiftdetails for a given shift_no.
+    """
+    if not shift_no:
+        return
+
+    try:
+        from ..models import Cashcountershiftdetails, CashCounterCollection
+        from django.db.models import Sum
+
+        try:
+            shift = Cashcountershiftdetails.objects.get(shiftno=shift_no)
+        except Cashcountershiftdetails.DoesNotExist:
+            print(f"[recalculate_and_update_shift_details] Shift {shift_no} not found.")
+            return
+
+        # 1. Recalculate collection and returns using existing function
+        totals = calculate_shift_collection(shift_no)
+        
+        # 2. Update collected_Amount and SalesReturnAmount
+        shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
+        shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
+
+        # 3. Sum up RemittedToBank and HandOverAmount, and check for close-shift records or manual entries in MongoDB directly
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        col = db["hospital_cashcountercollection"]
+
+        remitted_sum = Decimal('0.00')
+        handover_sum = Decimal('0.00')
+        extra_remitted = Decimal('0.00')
+        extra_submit = Decimal('0.00')
+
+        docs = list(col.find({"shift_no": shift_no}))
+        for doc in docs:
+            # Sum up RemittedToBank and HandOverAmount
+            remitted_sum += safe_dec(doc.get("RemittedToBank"))
+            handover_sum += safe_dec(doc.get("HandOverAmount"))
+
+            # Check for extra remitted/submit categories
+            cat = doc.get("billing_category")
+            val = doc.get("collected_amount", 0)
+            if cat == "remitted":
+                extra_remitted += safe_dec(val)
+            elif cat == "submit":
+                extra_submit += safe_dec(val)
+
+        client.close()
+
+        # 4. Set fields
+        shift.RemittedToBank = safe_dec(remitted_sum) + extra_remitted
+        shift.HandOverAmount = safe_dec(handover_sum)
+        if extra_submit > 0:
+            shift.SubmittedToAccount = extra_submit
+
+        # ClosingBalance = OpeningBalance + collected_Amount - RemittedToBank - SubmittedToAccount - HandOverAmount
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
+
+        # Clean all decimal fields to avoid conversion/saving errors
+        for field in [
+            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 
+            'PettyCashBalance', 'RemittedToBank', 'SubmittedToAccount', 
+            'HandOverAmount', 'PendingAmount', 'IPAdvanceAmount', 'SalesReturnAmount'
+        ]:
+            if hasattr(shift, field):
+                setattr(shift, field, safe_dec(getattr(shift, field, 0)))
+
+        shift.save()
+        print(f"[recalculate_and_update_shift_details] Shift {shift_no} updated successfully.")
+
+    except Exception as e:
+        print(f"[recalculate_and_update_shift_details] Error: {e}")
+        traceback.print_exc()
 
 
 
@@ -809,6 +938,20 @@ def post_receipt_payments(request):
 
             }, status=400)
 
+        # Active shift validation
+        is_valid, msg, active_shift = validate_active_shift(
+            shiftno=shiftno,
+            counter_id=cash_counter,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+        if not is_valid:
+            return Response({
+                "status": "error",
+                "message": msg
+            }, status=400)
+
 
 
         # ✅ Generate voucher number
@@ -855,7 +998,7 @@ def post_receipt_payments(request):
 
         serializer = ReceiptAndPaymentSerializer(obj)
 
-
+        recalculate_and_update_shift_details(shiftno)
 
         return Response({
 
@@ -1590,6 +1733,23 @@ def update_mainblock_pendingbills(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Active shift validation
+        is_valid, msg, active_shift = validate_active_shift(
+            shiftno=shiftno,
+            counter_id=counter_id,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+        if not is_valid:
+            return Response(
+                {
+                    "status": "error",
+                    "message": msg
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         paid_amount = float(
             payment_details.get("Paid_amount", 0)
         )
@@ -1694,6 +1854,7 @@ def update_mainblock_pendingbills(request):
 
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                recalculate_and_update_shift_details(shiftno)
             else:
                 return Response(
                     {
@@ -1805,6 +1966,7 @@ def update_mainblock_pendingbills(request):
 
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                recalculate_and_update_shift_details(shiftno)
             else:
                 return Response(
                     {
@@ -1922,6 +2084,7 @@ def update_mainblock_pendingbills(request):
 
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                recalculate_and_update_shift_details(shiftno)
             else:
                 return Response(
                     {
@@ -2311,6 +2474,20 @@ def collectpayment_return_bills(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Active shift validation
+        is_valid, msg, active_shift = validate_active_shift(
+            shiftno=shiftno,
+            counter_id=counter_id,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+        if not is_valid:
+            return Response(
+                {"status": "error", "message": msg},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # ── Determine new status ─────────────────────────────────────────────
         # We compare paid_amount against the document's return_amount later;
         # for now derive pending from what the frontend sends (if any).
@@ -2359,6 +2536,8 @@ def collectpayment_return_bills(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            recalculate_and_update_shift_details(shiftno)
+
             return Response(
                 {
                     "status":              "success",
@@ -2404,6 +2583,8 @@ def collectpayment_return_bills(request):
                     {"status": "error", "message": "CashCounter save failed.", "serializer_errors": errors},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            recalculate_and_update_shift_details(shiftno)
 
             return Response(
                 {
@@ -2451,6 +2632,8 @@ def collectpayment_return_bills(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            recalculate_and_update_shift_details(shiftno)
+
             return Response(
                 {
                     "status":              "success",
@@ -2496,6 +2679,8 @@ def collectpayment_return_bills(request):
                     {"status": "error", "message": "CashCounter save failed.", "serializer_errors": errors},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            recalculate_and_update_shift_details(shiftno)
 
             return Response(
                 {
@@ -2754,6 +2939,20 @@ def ipadvance_bills(request):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # Active shift validation
+            is_valid, msg, active_shift = validate_active_shift(
+                shiftno=shiftno,
+                counter_id=cashcounter_id,
+                outlet_code=outlet_code,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+            if not is_valid:
+                return Response(
+                    {"error": msg},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             admission = Admission.objects.filter(
                 ipNumber=ipNumber,
                 hospital_code=hospital_code,
@@ -2894,6 +3093,8 @@ def ipadvance_bills(request):
                 patient_name = f"{salutation} {firstName} {lastName}".strip()
             else:
                 patient_name = None
+
+            recalculate_and_update_shift_details(shiftno)
 
             return Response({
                 "cashcounter": cashcounter_data,

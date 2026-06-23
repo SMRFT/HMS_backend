@@ -500,6 +500,8 @@ def get_bill_types(request):
         outlet_code = request.data.get('auth-outlet-code')
         hospital_code = request.data.get('auth-hospital-code')
 
+        ignore_outlet = request.GET.get('ignore_outlet') == 'true'
+
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
         collection = db['hospital_billtype']
@@ -513,7 +515,7 @@ def get_bill_types(request):
             query["branch_code"] = branch_code
 
         # ✅ FIX: include empty outlet also
-        if outlet_code:
+        if outlet_code and not ignore_outlet:
             query["$or"] = [
                 {"outlet_code": outlet_code},
                 {"outlet_code": ""},

@@ -47,6 +47,10 @@ from .Views.Complaints import complaints
 
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
+      # Crash Cart URLs
+    path('crash-cart/items/', NursingStation.get_crash_cart_items, name='get_crash_cart_items'),
+    path('crash-cart/daily-check/', NursingStation.save_crash_cart_daily_check, name='save_crash_cart_daily_check'),
+    path('crash-cart/monthly-report/', NursingStation.get_crash_cart_monthly_report, name='get_crash_cart_monthly_report'),
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
@@ -270,9 +274,6 @@ urlpatterns = [
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
     path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
-    path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
-    
-
   
 
     # Customer Type URLs
@@ -533,7 +534,19 @@ urlpatterns = [
     path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),
+    
+    path('front-office-reports/', front_office_reports.front_office_report_view),
+    path('update-registration-visit/', registration_updates.update_registration_visit),
+    path('process-registration-refund/', registration_updates.process_registration_refund),
 
+    # Laundry
+    path("save_laundry_request/", laundry.save_laundry_request),
+    path("get_laundry_requests/", laundry.get_laundry_requests),
+    path("update_laundry_status/", laundry.update_laundry_status),
+    path("get_all_laundry_requests/", laundry.get_all_laundry_requests),
+    path("save_laundry_item_master/", laundry.save_laundry_item_master),
+    path("get_laundry_items_master/", laundry.get_laundry_items_master),
+    path("delete_laundry_item_master/", laundry.delete_laundry_item_master),
     
     # Insurance Claim URLs
     path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
