@@ -23,6 +23,7 @@ from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPerm
 # Models & Serializers
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider
 from ..serializers import PharmacyBillingSerializer
+from .cashcounter import validate_active_shift
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -1151,6 +1152,20 @@ def collect_oppharmacy_payment(request):
                 "error": "payment_details must be object"
             })
 
+        # Active shift validation
+        is_valid, msg, active_shift = validate_active_shift(
+            shiftno=shiftno,
+            counter_id=counter_id,
+            outlet_code=outlet_code,
+            hospital_code=hospital_code,
+            branch_code=branch_code
+        )
+        if not is_valid:
+            return Response({
+                "success": False,
+                "error": msg
+            })
+
         # =====================================================
         # TYPE CONVERSIONS
         # =====================================================
@@ -1332,6 +1347,13 @@ def collect_oppharmacy_payment(request):
                 f"✅ CashCounterCollection saved successfully "
                 f"ID = {instance.collection_id}"
             )
+
+            # Recalculate shift totals
+            try:
+                from .cashcounter import recalculate_and_update_shift_details
+                recalculate_and_update_shift_details(shiftno)
+            except Exception as e:
+                print("Error updating shift details in OP Pharmacy payment:", e)
 
         else:
 

@@ -13,6 +13,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
 
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
+
+
     # ==================== WARD REQUEST ====================
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
@@ -365,6 +368,13 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/get_return_bills/' : 'HMS-P-CCGRB',
         '/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/' :'HMS-P-CCCRB',
+
+        #complaints and Tickets
+        '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/admin/?(\\?.*)?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/admin-list/?(\\?.*)?$': 'HMS-P-CTIA',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTI',
+        r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTI',
              
 }
 
