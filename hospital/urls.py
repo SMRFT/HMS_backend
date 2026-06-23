@@ -29,7 +29,8 @@ from .Views import (
     front_office_reports,
     registration_updates,
     laundry,
-    physicalstockentry
+    physicalstockentry,
+    salesreturn,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -46,6 +47,10 @@ from .Views.Complaints import complaints
 
 handler404 = 'hospital.views.custom_page_not_found'
 urlpatterns = [
+      # Crash Cart URLs
+    path('crash-cart/items/', NursingStation.get_crash_cart_items, name='get_crash_cart_items'),
+    path('crash-cart/daily-check/', NursingStation.save_crash_cart_daily_check, name='save_crash_cart_daily_check'),
+    path('crash-cart/monthly-report/', NursingStation.get_crash_cart_monthly_report, name='get_crash_cart_monthly_report'),
     # Admission URLs
     path('autoipNumber/', admission.get_next_ip_number, name='get_next_ip_number'), 
     path('admission/', admission.admission_view, name='admission'),
@@ -136,28 +141,21 @@ urlpatterns = [
 
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
-    # path('get_oppharmacy_stock/',  pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
-    # path('save_oppharmacy_bill/',  pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
-    # path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
+    
     path('pharmacy_expiry_report/', pharmacy.pharmacy_expiry_report, name='pharmacy_expiry_report'),
-    # path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
     path('pharmacy_view_bills/', pharmacy.pharmacy_view_bills, name='pharmacy_view_bills'),
     path('get_estimate_bills/',    pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/',  pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
-    # path('OPPharmacy_pending_bills/', pharmacy.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+    
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
-    # path('oppharmacy_deletebill/', pharmacy.oppharmacy_deletebill, name='oppharmacy_deletebill'),
+    
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
-    path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
-    path("salesreturn_get_uhid_bills/",  pharmacy.salesreturn_get_uhid_bills),
-    path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
-    path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
     path("convert_to_bill/",       pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
@@ -182,8 +180,7 @@ urlpatterns = [
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
 
     # Stock Transfer URLs
-    # path('stock-transfer/', inventory.stock_transfer_view, name='stock_transfer_list'),
-    path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+    
     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
@@ -237,13 +234,45 @@ urlpatterns = [
     path('add-reference-doctor/', views.save_reference_doctor, name='save_reference_doctor'),
     path('get-reference-doctors/', views.get_reference_doctors, name='get_reference_doctors'),
 
-    # path('get_oppharmacy_stock/', pharmacy.get_oppharmacy_stock, name='get_oppharmacy_stock'),
-    # path('save_oppharmacy_bill/', pharmacy.save_oppharmacy_bill, name='save_oppharmacy_bill'),
+# Pharmacy Category URLs
+    path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),
+    path("pharmacy-category/<int:pk>/", inventory.pharmacycategory_view, name="pharmacy-category-detail"),
+
+    # Chemical Composition URLs
+    path("chemical-composition/", inventory.chemical_composition_view, name="chemical-composition-list"),
+    path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
+
+    path('get_pharmacy_stock/', pharmacy.get_pharmacy_stock, name='get_pharmacy_stock'),
+    path('save_pharmacy_bill/', pharmacy.save_pharmacy_bill, name='save_pharmacy_bill'),
     path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
     path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
     path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
-    path('cashcounter_pending_bills/', pharmacy.cashcounter_pending_bills, name='cashcounter_pending_bills'),
+    path('pharmacy_view_bills/', pharmacy.pharmacy_view_bills, name='pharmacy_view_bills'),
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
+    path('pharmacy_deletebill/', pharmacy.pharmacy_deletebill, name='pharmacy_deletebill'),
+    path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
+    path('patient_details/', pharmacy.patient_details, name='patient_details'),
+    path("substitute_medicine/",  pharmacy.substitute_medicine),
+    path("convert_to_bill/",       pharmacy.convert_to_bill),
+    path("finalize_bill/",   pharmacy.finalize_bill),
+    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
+    path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),
+
+   
+    # Central cash counter
+    path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
+    path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
+    path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
+    path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
+    path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
+    path("get_receipt_payments/", cashcounter.get_receipt_payments),
+    path("ipadvance_bills/",  cashcounter.ipadvance_bills),
+    path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
+    path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
+    path("get_registration_bills/", cashcounter.get_registration_bills),
+    path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+  
 
     # Customer Type URLs
     path('customer-types/', customer_type.customer_type_list, name='customer_type_list'),
@@ -504,12 +533,29 @@ urlpatterns = [
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
 
-    # path("salesreturn_get_patientdetails/",  pharmacy.get_salesreturn_billdetails),
-    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
-    path("salesreturn_get_patientdetails/",pharmacy.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
-    path("get_salesreturn_billdetails/", pharmacy.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
-    path("OP_salesreturn_billdetails/", pharmacy.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+  # Sales Return URLs
+   
+    path("salesreturn_get_patientdetails/",salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
+    path("get_salesreturn_billdetails/", salesreturn.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
+    path("OP_salesreturn_billdetails/", salesreturn.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
+    path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
+    path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
+    path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
+    path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),
+    
+    path('front-office-reports/', front_office_reports.front_office_report_view),
+    path('update-registration-visit/', registration_updates.update_registration_visit),
+    path('process-registration-refund/', registration_updates.process_registration_refund),
 
+    # Laundry
+    path("save_laundry_request/", laundry.save_laundry_request),
+    path("get_laundry_requests/", laundry.get_laundry_requests),
+    path("update_laundry_status/", laundry.update_laundry_status),
+    path("get_all_laundry_requests/", laundry.get_all_laundry_requests),
+    path("save_laundry_item_master/", laundry.save_laundry_item_master),
+    path("get_laundry_items_master/", laundry.get_laundry_items_master),
+    path("delete_laundry_item_master/", laundry.delete_laundry_item_master),
+    
     # Insurance Claim URLs
     path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
     path('insurance-claims/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),

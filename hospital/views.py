@@ -61,11 +61,8 @@ def patientCreateView(request):
         request.headers.get('auth-branch-code') or
         "system"
     )
-    outlet_code = (
-        request.data.get('auth-outlet-code') or
-        request.headers.get('auth-outlet-code') or
-        "system"
-    )
+    outlet_code = request.data.get('auth-outlet-code')
+    
     
     if request.method == 'GET':
         uhid = request.GET.get('uhid')

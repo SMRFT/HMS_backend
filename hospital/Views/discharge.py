@@ -808,7 +808,9 @@ def create_dialysis_discharge_summary(request):
             "age",
             "gender",
             "uhid",
-            "consultant"
+            "consultant",
+            "date_of_first_dialysis",
+            "date_of_last_dialysis",
         ]
 
         missing_fields = [
@@ -834,16 +836,20 @@ def create_dialysis_discharge_summary(request):
         # ============================================
 
         payload = {
-            "name": data.get("name"),
-            "age": data.get("age"),
-            "gender": data.get("gender"),
+            "name":       data.get("name"),
+            "age":        data.get("age"),
+            "gender":     data.get("gender"),
 
-            "uhid": data.get("uhid"),
+            "uhid":       data.get("uhid"),
             "consultant": data.get("consultant"),
-            "id_no": data.get("id_no"),
+            "id_no":      data.get("id_no"),
+            "insurance":  data.get("insurance", ""),
 
-            "address": data.get("address"),
+            "address":   data.get("address"),
             "diagnosis": data.get("diagnosis"),
+
+            "date_of_first_dialysis": data.get("date_of_first_dialysis"),
+            "date_of_last_dialysis":  data.get("date_of_last_dialysis"),
 
             "blood_investigations":
                 json.loads(data.get("blood_investigations"))
@@ -860,25 +866,21 @@ def create_dialysis_discharge_summary(request):
                 if isinstance(data.get("complications_during_hd"), str)
                 else data.get("complications_during_hd", []),
 
-            "condition_on_discharge":
-                data.get("condition_on_discharge"),
+            "condition_on_discharge": data.get("condition_on_discharge"),
 
             "advice_on_discharge":
                 json.loads(data.get("advice_on_discharge"))
                 if isinstance(data.get("advice_on_discharge"), str)
                 else data.get("advice_on_discharge", []),
 
-            "next_hd_session_on":
-                data.get("next_hd_session_on"),
+            "next_hd_session_on": data.get("next_hd_session_on"),
         }
 
         # ============================================
         # SERIALIZER
         # ============================================
 
-        serializer = DialysisDischargeSummarySerializer(
-            data=payload
-        )
+        serializer = DialysisDischargeSummarySerializer(data=payload)
 
         # ============================================
         # SUCCESS RESPONSE
@@ -898,7 +900,7 @@ def create_dialysis_discharge_summary(request):
                 {
                     "success": True,
                     "status_code": 201,
-                    "message": "Dialysis discharge summary created successfully",
+                    "message": f"Dialysis discharge summary for {payload['name']} created successfully.",
                     "data": serializer.data
                 },
                 status=status.HTTP_201_CREATED
@@ -908,11 +910,15 @@ def create_dialysis_discharge_summary(request):
         # VALIDATION ERROR RESPONSE
         # ============================================
 
+        # Flatten the first error into a readable sentence
+        first_field, first_msgs = next(iter(serializer.errors.items()))
+        first_msg = first_msgs[0] if isinstance(first_msgs, list) else str(first_msgs)
+
         return Response(
             {
                 "success": False,
                 "status_code": 400,
-                "message": "Validation failed",
+                "message": f"Validation failed — {first_field}: {first_msg}",
                 "errors": serializer.errors,
                 "data": None
             },
@@ -929,7 +935,7 @@ def create_dialysis_discharge_summary(request):
             {
                 "success": False,
                 "status_code": 400,
-                "message": "Invalid JSON format",
+                "message": "Invalid JSON format in request data.",
                 "error": str(e),
                 "data": None
             },
@@ -946,9 +952,106 @@ def create_dialysis_discharge_summary(request):
             {
                 "success": False,
                 "status_code": 500,
-                "message": "Internal server error",
+                "message": "An unexpected error occurred. Please try again or contact support.",
                 "error": str(e),
                 "data": None
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from datetime import datetime
+from ..models import DialysisDischargeSummary
+from ..serializers import DialysisDischargeSummarySerializer
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def Print_dialysis_dischargesummary(request):
+
+    data        = request.data
+    employee_id = data.get("auth-user-id")
+
+    # ─── AUTH CODES ───────────────────────────────────────────
+    hospital_code = data.get("auth-hospital-code")
+    branch_code   = data.get("auth-branch-code")
+    outlet_code   = data.get("auth-outlet-code")
+
+    # ─── QUERY PARAMS ─────────────────────────────────────────
+    from_date_str = request.query_params.get("from_date", "").strip()
+    to_date_str   = request.query_params.get("to_date",   "").strip()
+
+    # ─── VALIDATION ───────────────────────────────────────────
+    if not from_date_str or not to_date_str:
+        return Response(
+            {"status": "error", "message": "Both 'from_date' and 'to_date' are required (YYYY-MM-DD)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+        to_date   = datetime.strptime(to_date_str,   "%Y-%m-%d").date()
+    except ValueError:
+        return Response(
+            {"status": "error", "message": "Invalid date format. Use YYYY-MM-DD."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if from_date > to_date:
+        return Response(
+            {"status": "error", "message": "'from_date' cannot be later than 'to_date'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    print("AUTH:", hospital_code, branch_code, outlet_code)
+    print("DATES:", from_date, to_date)
+    print("ALL RECORDS:", DialysisDischargeSummary.objects.filter(
+        hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code
+    ).values("uhid", "date"))
+
+    # ─── QUERYSET ─────────────────────────────────────────────
+    try:
+        queryset = DialysisDischargeSummary.objects.filter(
+            hospital_code = hospital_code,
+            branch_code   = branch_code,
+            outlet_code   = outlet_code,
+            date__gte     = from_date,
+            date__lte     = to_date,
+        ).order_by("-date")
+
+    except Exception as e:
+        return Response(
+            {"status": "error", "message": f"Database error: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # ─── EMPTY RESULT ─────────────────────────────────────────
+    if not queryset.exists():
+        return Response(
+            {
+                "status":  "success",
+                "message": "No records found for the selected date range.",
+                "count":   0,
+                "data":    [],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    # ─── SERIALIZE & RETURN ───────────────────────────────────
+    serializer = DialysisDischargeSummarySerializer(queryset, many=True)
+
+    return Response(
+        {
+            "status":  "success",
+            "message": "Records fetched successfully.",
+            "count":   queryset.count(),
+            "data":    serializer.data,
+        },
+        status=status.HTTP_200_OK,
+    )

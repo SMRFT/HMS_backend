@@ -377,10 +377,7 @@ class PharmacyBilling(AuditModel):
     room_no = models.CharField(max_length=20, blank=True, null=True)
     medicine_particulars = models.JSONField(default=list)
     total_amount = models.FloatField(default=0)
-    overall_discount_type = models.CharField(
-        max_length=10,
-        default="percent"
-    )
+    overall_discount_type = models.CharField(max_length=10,default="percent")
     overall_discount_value = models.FloatField(default=0)
     overall_discount_amount = models.FloatField(default=0)
     net_amount = models.FloatField(default=0)
@@ -1627,29 +1624,37 @@ class DialysisDischargeSummary(AuditModel):
     gender = models.CharField(max_length=100)
 
     uhid = models.CharField(max_length=100, unique=True)
-    consultant = models.CharField(max_length=255)
-    id_no = models.CharField(max_length=100)
+    consultant = models.CharField(max_length=255,null=True, blank=True)
+    id_no = models.CharField(max_length=100,null=True, blank=True)
+    insurance = models.CharField(max_length=255, blank=True, default="")
 
     address = models.TextField()
+    date = models.DateField(auto_now_add=True)
     diagnosis = models.TextField()
 
-    blood_investigations = models.JSONField(default=list, blank=True)
+    date_of_first_dialysis = models.DateField(null=True, blank=True)
+    date_of_last_dialysis = models.DateField(null=True, blank=True)
 
+    blood_investigations = models.JSONField(default=list,null=True, blank=True)
     hd_sessions = models.JSONField(default=list, blank=True)
-
-    complications_during_hd = models.JSONField(
-        default=list,
-        blank=True
-    )
+    complications_during_hd = models.JSONField(default=list, null=True, blank=True)
 
     condition_on_discharge = models.TextField()
 
-    advice_on_discharge = models.JSONField(
-        default=list,
-        blank=True
-    )
+    advice_on_discharge = models.JSONField(default=list, null=True, blank=True)
 
     next_hd_session_on = models.DateField()
+
+    def _parse_json_field(self, value):
+        """Safely parse a field that may already be a list or a JSON string."""
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                return []
+        return []
 
     def save(self, *args, **kwargs):
 
@@ -1664,90 +1669,33 @@ class DialysisDischargeSummary(AuditModel):
         # ==========================================
 
         try:
-
-            client = MongoClient(
-                os.getenv("GLOBAL_DB_HOST")
-            )
-
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             db = client["HMS"]
 
-            # --------------------------------------
-            # BLOOD INVESTIGATIONS
-            # --------------------------------------
-
-            blood = self.blood_investigations
-
-            if isinstance(blood, str):
-
-                try:
-                    blood = json.loads(blood)
-                except:
-                    blood = []
-
-            # --------------------------------------
-            # HD SESSIONS
-            # --------------------------------------
-
-            hd = self.hd_sessions
-
-            if isinstance(hd, str):
-
-                try:
-                    hd = json.loads(hd)
-                except:
-                    hd = []
-
-            # --------------------------------------
-            # COMPLICATIONS
-            # --------------------------------------
-
-            complications = self.complications_during_hd
-
-            if isinstance(complications, str):
-
-                try:
-                    complications = json.loads(complications)
-                except:
-                    complications = []
-
-            # --------------------------------------
-            # ADVICE
-            # --------------------------------------
-
-            advice = self.advice_on_discharge
-
-            if isinstance(advice, str):
-
-                try:
-                    advice = json.loads(advice)
-                except:
-                    advice = []
-
-            # ==========================================
-            # UPDATE BSON ARRAYS
-            # ==========================================
-
             db["hospital_dialysisdischargesummary"].update_one(
-                {
-                    "uhid": self.uhid
-                },
+                {"uhid": self.uhid},
                 {
                     "$set": {
-                        "blood_investigations": blood,
-                        "hd_sessions": hd,
-                        "complications_during_hd": complications,
-                        "advice_on_discharge": advice,
+                        "blood_investigations": self._parse_json_field(self.blood_investigations),
+                        "hd_sessions": self._parse_json_field(self.hd_sessions),
+                        "complications_during_hd": self._parse_json_field(self.complications_during_hd),
+                        "advice_on_discharge": self._parse_json_field(self.advice_on_discharge),
+                        "date_of_first_dialysis": (
+                            self.date_of_first_dialysis.isoformat()
+                            if self.date_of_first_dialysis else None
+                        ),
+                        "date_of_last_dialysis": (
+                            self.date_of_last_dialysis.isoformat()
+                            if self.date_of_last_dialysis else None
+                        ),
                     }
-                }
+                },
             )
 
             client.close()
 
         except Exception as e:
-
-            print(
-                f"DialysisDischargeSummary pymongo update failed: {e}"
-            )
+            print(f"DialysisDischargeSummary pymongo update failed: {e}")
 
     def __str__(self):
         return f"{self.name} - {self.uhid}"
@@ -1853,3 +1801,34 @@ class LaundryItemMaster(AuditModel):
     def __str__(self):
         return f"{self.item_name} - ₹{self.price}"
 
+
+class CrashCartItem(models.Model):
+    id = models.IntegerField(primary_key=True)
+    nursing_station = models.CharField(max_length=100, null=True, blank=True)
+    box_category = models.CharField(max_length=100) # e.g., "BOX-1(EMERGENCY MEDICINE)"
+    drug_name = models.CharField(max_length=255)    # e.g., "INJ.ADRENALINE 1 mg"
+    required_stock = models.IntegerField()          # e.g., 10
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartItem.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+    
+class CrashCartDailyCheck(models.Model):
+    id = models.IntegerField(primary_key=True)
+    date = models.DateField(default=timezone.now)
+    nursing_station = models.CharField(max_length=100) # e.g., "CHEMO WARD"
+    item = models.ForeignKey(CrashCartItem, on_delete=models.CASCADE)
+    expiry_date = models.CharField(max_length=50, null=True, blank=True) # Expiry date
+    is_checked = models.BooleanField(default=False)
+    checked_by = models.CharField(max_length=100) # Nurse Name/ID
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartDailyCheck.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    class Meta:
+        unique_together = ('date', 'nursing_station', 'item')
