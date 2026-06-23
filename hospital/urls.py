@@ -533,7 +533,20 @@ urlpatterns = [
     path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
     path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
+    path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),
+    
+    path('front-office-reports/', front_office_reports.front_office_report_view),
+    path('update-registration-visit/', registration_updates.update_registration_visit),
+    path('process-registration-refund/', registration_updates.process_registration_refund),
 
+    # Laundry
+    path("save_laundry_request/", laundry.save_laundry_request),
+    path("get_laundry_requests/", laundry.get_laundry_requests),
+    path("update_laundry_status/", laundry.update_laundry_status),
+    path("get_all_laundry_requests/", laundry.get_all_laundry_requests),
+    path("save_laundry_item_master/", laundry.save_laundry_item_master),
+    path("get_laundry_items_master/", laundry.get_laundry_items_master),
+    path("delete_laundry_item_master/", laundry.delete_laundry_item_master),
     
     # Insurance Claim URLs
     path('insurance-claims/', insurance.insurance_claim_view, name='insurance_claim_list'),
