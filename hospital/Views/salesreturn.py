@@ -19,62 +19,113 @@ from django.utils import timezone
 from django.db.models import Max
 
 # Auth/permissions
+import os
+from pymongo import MongoClient
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from ..models import Patient, SalesReturn
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_salesreturn_details(request):
-    from_date = request.GET.get("from_date")
-    to_date   = request.GET.get("to_date")
+    try:
+        from_date = request.GET.get("from_date")
+        to_date   = request.GET.get("to_date")
 
-    qs = SalesReturn.objects.all()
-    if from_date and to_date:
-        qs = qs.filter(return_bill_date__date__gte=from_date,
-                        return_bill_date__date__lte=to_date)
-    qs = qs.order_by("-return_bill_date")
+        qs = SalesReturn.objects.all()
 
-    # Collect uhids and created_by ids for batch lookup
-    uhids = {r.uhid for r in qs}
-    created_by_ids = {r.created_by for r in qs if r.created_by}
+        # ✅ FIX 1: Proper datetime filtering (NO __date)
+        if from_date and to_date:
+            try:
+                from_date = datetime.strptime(from_date, "%Y-%m-%d")
+                to_date   = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
 
-    # 2. Patient lookup
-    patients = Patient.objects.filter(uhid__in=uhids)
-    patient_map = {}
-    for p in patients:
-        name_parts = [p.salutation, p.firstName, p.lastName]
-        patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+                qs = qs.filter(
+                    return_bill_date__gte=from_date,
+                    return_bill_date__lt=to_date,
+                )
+            except Exception as e:
+                return Response({
+                    "status": "error",
+                    "message": f"Invalid date format: {str(e)}"
+                }, status=400)
 
-    # 3. User lookup from Global DB - backend_diagnostics_profile
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    global_db = client["GLOBAL"]  # adjust db name as needed
-    profiles = global_db["backend_diagnostics_profile"].find(
-        {"employeeId": {"$in": list(created_by_ids)}},
-        {"employeeId": 1, "employeeName": 1}
-    )
-    user_map = {p["employeeId"]: p.get("employeeName", "") for p in profiles}
-    client.close()
+        records = list(qs.order_by("-return_bill_date"))
 
-    data = []
-    for r in qs:
-        data.append({
-            "return_bill_no": r.return_bill_no,
-            "return_bill_date": r.return_bill_date,
-            "bill_no": r.bill_no,
-            "uhid": r.uhid,
-            "return_amount": r.return_amount,
-            "status": r.status,
-            "bill_type": r.bill_type,
-            "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
-            "patient_name": patient_map.get(r.uhid, ""),
-            "pharmacist_name": user_map.get(r.created_by, r.created_by or ""),
+        # ✅ DEBUG (remove in production if needed)
+        print("SalesReturn records found:", len(records))
+
+        if not records:
+            return Response({
+                "status": "success",
+                "data": [],
+                "message": "No records found"
+            })
+
+        # ✅ Collect IDs
+        uhids = {r.uhid for r in records if r.uhid}
+        created_by_ids = {r.created_by for r in records if r.created_by}
+
+        # ✅ Patient Lookup
+        patient_map = {}
+        patients = Patient.objects.filter(uhid__in=uhids)
+
+        for p in patients:
+            name_parts = [p.salutation, p.firstName, p.lastName]
+            patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip()
+
+        # ✅ User Lookup (MongoDB)
+        user_map = {}
+        try:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["GLOBAL"]
+
+            profiles = global_db["backend_diagnostics_profile"].find(
+                {"employeeId": {"$in": list(created_by_ids)}},
+                {"employeeId": 1, "employeeName": 1},
+            )
+
+            user_map = {
+                str(p["employeeId"]): p.get("employeeName", "")
+                for p in profiles
+            }
+
+            client.close()
+
+        except Exception as e:
+            print("MongoDB user lookup failed:", str(e))
+
+        # ✅ Final Response Build
+        data = []
+        for r in records:
+            data.append({
+                "return_bill_no":   r.return_bill_no,
+                "return_bill_date": r.return_bill_date,
+                "bill_no":          r.bill_no,
+                "uhid":             r.uhid,
+                "return_amount":    r.return_amount,
+                "status":           r.status,
+                "bill_type":        r.bill_type,
+                "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
+                "patient_name":     patient_map.get(r.uhid, ""),
+                "pharmacist_name":  user_map.get(str(r.created_by), r.created_by or ""),
+            })
+
+
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "data": data
         })
 
-    return Response({"status": "success", "data": data})
-
-
-
-
+    except Exception as e:
+        print("SalesReturn API Error:", str(e))
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
 
 
 from rest_framework.decorators import api_view
@@ -175,6 +226,85 @@ def _convert_decimal(val):
     return float(val.to_decimal()) if isinstance(val, Decimal128) else val
 
 
+
+
+
+
+@api_view(["GET"])
+def salesreturn_get_uhid_bills(request):
+    try:
+        uhid_input = request.GET.get("uhid", "").strip()
+ 
+        if not uhid_input:
+            return Response({
+                "status": "error",
+                "message": "UHID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+ 
+        client, db = _get_db()
+        bill_col = db["hospital_pharmacybilling"]
+ 
+        cutoff_date = datetime.utcnow() - timedelta(days=30)
+ 
+        # Build query — support partial UHID (numeric suffix after slash)
+        # e.g. "7878" should match "S025/007878"
+        # We use a regex so partial input works both for exact and substring
+        import re
+        escaped = re.escape(uhid_input)
+ 
+        query = {
+            "uhid":            {"$regex": escaped, "$options": "i"},
+            "billing_status":  "Paid",
+            "bill_date":       {"$gte": cutoff_date},
+        }
+ 
+        bills_cursor = bill_col.find(
+            query,
+            {
+                "_id": 0,
+                "bill_no": 1,
+                "bill_date": 1,
+                "uhid": 1,
+                "net_amount": 1,
+                "total_amount": 1,
+                "billing_mode": 1,
+                "inpatient_number": 1,
+            }
+        ).sort("bill_date", -1)  # newest first
+ 
+        bills = []
+        for b in bills_cursor:
+            # Normalise bill_date to ISO string for JSON serialisation
+            bd = b.get("bill_date")
+            if isinstance(bd, datetime):
+                bd = bd.isoformat()
+ 
+            bills.append({
+                "bill_no":           b.get("bill_no"),
+                "bill_date":         bd,
+                "uhid":              b.get("uhid"),
+                "net_amount":        _convert_decimal(b.get("net_amount", 0)),
+                "total_amount":      _convert_decimal(b.get("total_amount", 0)),
+                "billing_mode":      b.get("billing_mode", ""),
+                "inpatient_number":  b.get("inpatient_number", ""),
+            })
+ 
+        client.close()
+ 
+        return Response({
+            "status":  "success",
+            "message": f"{len(bills)} bill(s) found within the last 30 days.",
+            "data":    bills,
+        }, status=status.HTTP_200_OK)
+ 
+    except Exception as e:
+        return Response({
+            "status":     "error",
+            "message":    f"Internal server error: {str(e)}",
+            "error_type": type(e).__name__,
+            "trace":      traceback.format_exc(),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+ 
 
 
 
@@ -755,5 +885,535 @@ def OP_salesreturn_billdetails(request):
             "message":    f"Internal server error: {str(e)}",
             "error_type": type(e).__name__
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+
+
+
+
+
+
+MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+
+client = MongoClient(MONGO_URI)
+
+# HMS DATABASE
+mongo_db = client["HMS"]
+
+# GLOBAL DATABASE
+global_db = client["Global"]
+
+
+
+# ---------------------------------------------------
+# COMMON SERIALIZER
+# ---------------------------------------------------
+
+def convert_decimal(value):
+
+    if isinstance(value, Decimal128):
+        return float(value.to_decimal())
+
+    if isinstance(value, ObjectId):
+        return str(value)
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, list):
+        return [convert_decimal(v) for v in value]
+
+    if isinstance(value, dict):
+        return {k: convert_decimal(v) for k, v in value.items()}
+
+    return value
+
+
+# ---------------------------------------------------
+# GET RETURN BILLS
+# ---------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_return_bills(request):
+
+    print("Before_get_return_bills")
+
+    try:
+
+        # ---------------------------------------------------
+        # REQUEST DATA
+        # ---------------------------------------------------
+
+        data = request.data
+
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        employee_id   = data.get("auth-user-id")
+
+        # ---------------------------------------------------
+        # CURRENT DATE
+        # ---------------------------------------------------
+
+        current_date = datetime.utcnow().date()
+
+        # ---------------------------------------------------
+        # VALIDATION
+        # ---------------------------------------------------
+
+        if not employee_id:
+
+            return Response(
+                {
+                    "status": "error",
+                    "message": "auth-user-id is required"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ---------------------------------------------------
+        # COLLECTIONS
+        # ---------------------------------------------------
+
+        salesreturn_collection = mongo_db["hospital_salesreturn"]
+
+        refund_collection = mongo_db["hospital_refund"]
+
+        investrefund_collection = mongo_db["hospital_investrefund"]
+
+        ipadvance_refund_collection = mongo_db["hospital_ipadvance_refund"]
+
+        patient_collection = mongo_db["hospital_patient"]
+
+        cashcounter_collection = mongo_db["hospital_cashcounter"]
+
+        profile_collection = global_db["backend_diagnostics_profile"]
+
+        # ---------------------------------------------------
+        # GET EMPLOYEE PROFILE
+        # ---------------------------------------------------
+
+        profile_data = profile_collection.find_one(
+            {
+                "employeeId": str(employee_id)
+            }
+        )
+
+        if not profile_data:
+
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Employee profile not found"
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # ---------------------------------------------------
+        # CHECK HMS OUTLETS
+        # ---------------------------------------------------
+
+        hms_outlets = profile_data.get("hms_outlets", [])
+
+        if outlet_code not in hms_outlets:
+
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Outlet not mapped for employee",
+                    "employee_outlets": hms_outlets
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ---------------------------------------------------
+        # GET CASHCOUNTER
+        # ---------------------------------------------------
+
+        emp_cashcounter = profile_data.get("cashcounter")
+
+        if not emp_cashcounter:
+
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Cashcounter not mapped for employee"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # ---------------------------------------------------
+        # GET CASHCOUNTER DATA
+        # ---------------------------------------------------
+
+        cashcounter_data = cashcounter_collection.find_one(
+            {
+                "counter_id": emp_cashcounter,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet": outlet_code,
+                "is_active": True
+            }
+        )
+
+        if not cashcounter_data:
+
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Matching cashcounter not found"
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        counter_id = cashcounter_data.get("counter_id")
+
+        counter_name = cashcounter_data.get("counter_name")
+
+        allowed_bill_types = cashcounter_data.get(
+            "bill_type",
+            []
+        )
+
+        # ---------------------------------------------------
+        # BILL TYPE MAP
+        # ---------------------------------------------------
+
+        bill_type_map = {}
+
+        allowed_bill_type_ids = []
+
+        if isinstance(allowed_bill_types, list):
+
+            for item in allowed_bill_types:
+
+                if isinstance(item, dict):
+
+                    bill_type = item.get("bill_type")
+
+                    bill_name = item.get("bill_name")
+
+                    bill_type_map[bill_type] = bill_name
+
+                    allowed_bill_type_ids.append(bill_type)
+
+        # ---------------------------------------------------
+        # COMMON DOCUMENT PROCESSOR
+        # ---------------------------------------------------
+
+        def process_documents(documents, collection_name):
+
+            processed = []
+
+            for doc in documents:
+
+                doc = convert_decimal(doc)
+
+                # ---------------------------------------------------
+                # BILL TYPE FILTER
+                # ---------------------------------------------------
+
+                bill_type = doc.get("bill_type")
+
+                try:
+                    bill_type = int(bill_type)
+                except:
+                    pass
+
+                if (
+                    allowed_bill_type_ids
+                    and bill_type not in allowed_bill_type_ids
+                ):
+                    continue
+
+                # ---------------------------------------------------
+                # GET UHID
+                # ---------------------------------------------------
+
+                uhid = (
+                    doc.get("uhid")
+                    or doc.get("UHID")
+                )
+
+                # ---------------------------------------------------
+                # GET PATIENT NAME
+                # ---------------------------------------------------
+
+                patient_name = ""
+
+                if uhid:
+
+                    patient_data = patient_collection.find_one(
+                        {
+                            "uhid": uhid,
+                            "hospital_code": hospital_code,
+                            "branch_code": branch_code
+                        }
+                    )
+
+                    if patient_data:
+
+                        salutation = patient_data.get(
+                            "salutation",
+                            ""
+                        )
+
+                        first_name = patient_data.get(
+                            "firstName",
+                            ""
+                        )
+
+                        last_name = patient_data.get(
+                            "lastName",
+                            ""
+                        )
+
+                        patient_name = (
+                            f"{salutation} "
+                            f"{first_name} "
+                            f"{last_name}"
+                        ).strip()
+
+                # ---------------------------------------------------
+                # BILL TYPE NAME
+                # ---------------------------------------------------
+
+                bill_type_name = bill_type_map.get(
+                    bill_type,
+                    str(bill_type) if bill_type else None
+                )
+
+                # ---------------------------------------------------
+                # ADD EXTRA FIELDS
+                # ---------------------------------------------------
+
+                doc["collection_name"] = collection_name
+                doc["patient_name"] = patient_name
+                doc["counter_id"] = counter_id
+                doc["counter_name"] = counter_name
+                doc["bill_type_name"] = bill_type_name
+
+                doc["hospital_code"] = (
+                    doc.get("hospital_code")
+                    or hospital_code
+                )
+
+                doc["branch_code"] = (
+                    doc.get("branch_code")
+                    or branch_code
+                )
+
+                doc["outlet_code"] = (
+                    doc.get("outlet_code")
+                    or outlet_code
+                )
+
+                processed.append(doc)
+
+            return processed
+
+        # ---------------------------------------------------
+        # FETCH SALES RETURN
+        # ONLY CURRENT DATE
+        # ---------------------------------------------------
+
+        salesreturn_docs = list(
+            salesreturn_collection.find(
+                {
+                    "status": {
+                        "$in": ["Pending", "Paid"]
+                    },
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "$expr": {
+                        "$eq": [
+                            {
+                                "$dateToString": {
+                                    "format": "%Y-%m-%d",
+                                    "date": "$return_bill_date"
+                                }
+                            },
+                            current_date.strftime("%Y-%m-%d")
+                        ]
+                    }
+                }
+            )
+        )
+
+        # ---------------------------------------------------
+        # FETCH REFUND
+        # ONLY CURRENT DATE
+        # ---------------------------------------------------
+
+        refund_docs = list(
+            refund_collection.find(
+                {
+                    "status": {
+                        "$in": ["Pending", "Paid"]
+                    },
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "$expr": {
+                        "$eq": [
+                            {
+                                "$dateToString": {
+                                    "format": "%Y-%m-%d",
+                                    "date": "$refund_date"
+                                }
+                            },
+                            current_date.strftime("%Y-%m-%d")
+                        ]
+                    }
+                }
+            )
+        )
+
+        # ---------------------------------------------------
+        # FETCH IP ADVANCE REFUND
+        # ONLY CURRENT DATE
+        # ---------------------------------------------------
+
+        ipadvance_docs = list(
+            ipadvance_refund_collection.find(
+                {
+                    "status": {
+                        "$in": ["Pending", "Paid"]
+                    },
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "$expr": {
+                        "$eq": [
+                            {
+                                "$dateToString": {
+                                    "format": "%Y-%m-%d",
+                                    "date": "$refund_date"
+                                }
+                            },
+                            current_date.strftime("%Y-%m-%d")
+                        ]
+                    }
+                }
+            )
+        )
+
+        # ---------------------------------------------------
+        # FETCH INVEST REFUND
+        # ONLY CURRENT DATE
+        # ---------------------------------------------------
+
+        investrefund_docs = list(
+            investrefund_collection.find(
+                {
+                    "paymentStatus": {
+                        "$in": ["Pending", "Paid"]
+                    },
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "$expr": {
+                        "$eq": [
+                            {
+                                "$dateToString": {
+                                    "format": "%Y-%m-%d",
+                                    "date": "$refundBillDate"
+                                }
+                            },
+                            current_date.strftime("%Y-%m-%d")
+                        ]
+                    }
+                }
+            )
+        )
+
+        # ---------------------------------------------------
+        # PROCESS DOCUMENTS
+        # ---------------------------------------------------
+
+        response_data = []
+
+        response_data.extend(
+            process_documents(
+                salesreturn_docs,
+                "hospital_salesreturn"
+            )
+        )
+
+        response_data.extend(
+            process_documents(
+                refund_docs,
+                "hospital_refund"
+            )
+        )
+
+        response_data.extend(
+            process_documents(
+                ipadvance_docs,
+                "hospital_ipadvance_refund"
+            )
+        )
+
+        response_data.extend(
+            process_documents(
+                investrefund_docs,
+                "hospital_investrefund"
+            )
+        )
+
+        # ---------------------------------------------------
+        # SORT BY DATE DESC
+        # ---------------------------------------------------
+
+        def get_sort_date(item):
+
+            return (
+                item.get("return_bill_date")
+                or item.get("refund_date")
+                or item.get("created_date")
+                or item.get("refundBillDate")
+                or ""
+            )
+
+        response_data = sorted(
+            response_data,
+            key=get_sort_date,
+            reverse=True
+        )
+
+        # ---------------------------------------------------
+        # FINAL RESPONSE
+        # ---------------------------------------------------
+
+        return Response(
+            {
+                "status": "success",
+
+                "count": len(response_data),
+
+                "cashcounter_details": {
+                    "counter_id": counter_id,
+                    "counter_name": counter_name,
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "bill_types": allowed_bill_types
+                },
+
+                "data": response_data
+            },
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+
+        return Response(
+            {
+                "status": "error",
+                "message": str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
  
 

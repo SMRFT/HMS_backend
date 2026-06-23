@@ -88,8 +88,42 @@ def _import_chandra():
 def _import_pytesseract():
     try:
         import pytesseract
+
+        tesseract_in_path = shutil.which("tesseract")
+
+        if tesseract_in_path:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
+
+        elif os.path.exists("/usr/bin/tesseract"):
+            pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+        elif os.path.exists("/opt/homebrew/bin/tesseract"):
+            pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+
+        elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+            pytesseract.pytesseract.tesseract_cmd = (
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            )
+
+        else:
+            logger.warning("Tesseract binary not found")
+            return None
+
+        try:
+            logger.info(
+                "Tesseract Version: %s",
+                pytesseract.get_tesseract_version()
+            )
+        except Exception as e:
+            logger.warning(
+                "Tesseract version could not be retrieved: %s",
+                e
+            )
+
         return pytesseract
+
     except ImportError:
+        logger.warning("pytesseract is not installed")
         return None
 
 
