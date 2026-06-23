@@ -24,23 +24,42 @@ def serialize_doc(doc):
     if doc and '_id' in doc:
         doc['_id'] = str(doc['_id'])
     return doc
+def _build_item_name_map(db, bill_type_nos):
+    """
+    Returns { (billTypeNo, item_id): itemName } for all relevant bill types.
+    """
+    if not bill_type_nos:
+        return {}
 
+    collection = db['hospital_investigationprice']
+    name_map = {}
+
+    for doc in collection.find(
+        {"billTypeNo": {"$in": list(bill_type_nos)}},
+        {"billTypeNo": 1, "Items": 1, "_id": 0}
+    ):
+        bill_type_no = doc.get("billTypeNo", "")
+        for item in doc.get("Items", []):
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("extraKeys", {}).get("item_id") or item.get("item_id")
+            try:
+                iid = int(raw_id) if raw_id not in (None, '') else None
+            except (ValueError, TypeError):
+                iid = None
+
+            if iid is not None:
+                name_map[(bill_type_no, iid)] = item.get("itemName", "")
+
+    return name_map
 
 # ════════════════════════════════════════════════════════════════════════════
 #  GET  /packages/               → list all active packages
 #  POST /packages/create/        → create a new package
 # ════════════════════════════════════════════════════════════════════════════
-
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_packages(request):
-    """
-    Return all active packages.
-    Optional query params:
-        ?outlet=<name>
-        ?search=<term>        (searches packageName, outlet)
-        ?is_active=true|false  (default: true only)
-    """
     client = None
     try:
         client, db = get_hms_db()
@@ -48,42 +67,56 @@ def get_packages(request):
 
         query = {"is_active": True}
 
-        # Filter: Outlet
         outlet = request.query_params.get('outlet', '').strip()
         if outlet:
-            query['outlet'] = {'$regex': outlet, '$options': 'i'}
+            query['outlet_code'] = {'$regex': outlet, '$options': 'i'}
 
-        # Filter: free-text search
         search = request.query_params.get('search', '').strip()
         if search:
             query['$or'] = [
                 {'packageName': {'$regex': search, '$options': 'i'}},
-                {'outlet':  {'$regex': search, '$options': 'i'}},
+                {'outlet_code': {'$regex': search, '$options': 'i'}},
             ]
 
-        packages = [serialize_doc(p) for p in collection.find(query, {"_id": 1, "packageNo": 1,
-            "packageName": 1, "outlet_code": 1,
-            "totalPrice": 1, "is_active": 1, "items": 1,
-            "created_date": 1, "lastmodified_date": 1})]
+        packages = [serialize_doc(p) for p in collection.find(query, {
+            "_id": 1, "packageNo": 1, "packageName": 1,
+            "outlet_code": 1, "totalPrice": 1, "is_active": 1,
+            "items": 1, "created_date": 1, "lastmodified_date": 1
+        })]
 
-        # ── Fetch all outlet_names in one query ─────────────────────────────
+        # ── Resolve outlet_name ──────────────────────────────────────────
         outlet_codes = {p.get("outlet_code") for p in packages if p.get("outlet_code")}
         outlet_map = {}
         if outlet_codes:
-            outlets_collection = db["hospital_outlets"]
             outlet_map = {
                 o["outlet_code"]: o.get("outlet_name", "")
-                for o in outlets_collection.find(
+                for o in db["hospital_outlets"].find(
                     {"outlet_code": {"$in": list(outlet_codes)}},
                     {"outlet_code": 1, "outlet_name": 1, "_id": 0}
                 )
             }
-        # ────────────────────────────────────────────────────────────────────
 
-        # ── Inject outlet_name into each package ────────────────────────────
+        # ── Collect billTypeNos that have item_id ────────────────────────
+        bill_type_nos = set()
+        for pkg in packages:
+            for item in pkg.get("items", []):
+                if "item_id" in item and item.get("billTypeNo"):
+                    bill_type_nos.add(item["billTypeNo"])
+
+        item_name_map = _build_item_name_map(db, bill_type_nos)
+
+        # ── Inject outlet_name + resolved itemName ───────────────────────
+        # ── Inject outlet_name + resolved itemName ───────────────────────
         for pkg in packages:
             pkg["outlet_name"] = outlet_map.get(pkg.get("outlet_code"), "")
-        # ────────────────────────────────────────────────────────────────────
+            for item in pkg.get("items", []):
+                item_id = item.get("item_id")
+                if item_id is not None:                                        # ← guard against null value
+                    try:
+                        key = (item.get("billTypeNo", ""), int(item_id))
+                        item["itemName"] = item_name_map.get(key, item.get("itemName", ""))
+                    except (ValueError, TypeError):
+                        pass                                                   # skip if item_id is invalid
 
         return Response(packages, status=status.HTTP_200_OK)
 
@@ -93,6 +126,7 @@ def get_packages(request):
     finally:
         if client:
             client.close()
+
 
 
 @api_view(['POST'])
@@ -170,17 +204,48 @@ def create_package(request):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_package(request, package_no):
-    """Retrieve a single package by packageNo."""
     client = None
     try:
         client, db = get_hms_db()
-        collection = db['hospital_package']
-
-        doc = collection.find_one({"packageNo": int(package_no), "is_active": True})
+        doc = db['hospital_package'].find_one(
+            {"packageNo": int(package_no), "is_active": True}
+        )
         if not doc:
             return Response({"error": "Package not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(serialize_doc(doc), status=status.HTTP_200_OK)
+        doc = serialize_doc(doc)
+
+        # ── Resolve outlet_name ──────────────────────────────────────────
+        outlet_code = doc.get("outlet_code")
+        if outlet_code:
+            outlet_doc = db["hospital_outlets"].find_one(
+                {"outlet_code": outlet_code},
+                {"outlet_name": 1, "_id": 0}
+            )
+            doc["outlet_name"] = outlet_doc.get("outlet_name", "") if outlet_doc else ""
+        else:
+            doc["outlet_name"] = ""
+
+        # ── Collect billTypeNos that have item_id ────────────────────────
+        bill_type_nos = {
+            item["billTypeNo"]
+            for item in doc.get("items", [])
+            if "item_id" in item and item.get("billTypeNo")
+        }
+
+        item_name_map = _build_item_name_map(db, bill_type_nos)
+
+        # ── Resolve itemName for investigation items ──────────────────────
+        for item in doc.get("items", []):
+            item_id = item.get("item_id")
+            if item_id is not None:                                            # ← guard against null value
+                try:
+                    key = (item.get("billTypeNo", ""), int(item_id))
+                    item["itemName"] = item_name_map.get(key, item.get("itemName", ""))
+                except (ValueError, TypeError):
+                    pass
+
+        return Response(doc, status=status.HTTP_200_OK)
 
     except Exception as e:
         logger.exception("get_package failed")
@@ -188,7 +253,6 @@ def get_package(request, package_no):
     finally:
         if client:
             client.close()
-
 
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
@@ -206,7 +270,7 @@ def update_package(request, package_no):
         modified_by = data.pop('auth-user-id', 'system')
 
         # Strip immutable / auth keys
-        exclude = {'_id', 'packageNo', 'created_by', 'created_date',
+        exclude = {'_id', 'packageNo', 'created_by', 'created_date','outlet',
                    *[k for k in data.keys() if k.startswith('auth-')]}
         data = {k: v for k, v in data.items() if k not in exclude}
 
@@ -281,26 +345,37 @@ def delete_package(request, package_no):
 # ════════════════════════════════════════════════════════════════════════════
 
 def _sanitize_items(raw_items):
-    """Ensure each item has the expected fields and correct types."""
     clean = []
     for item in raw_items:
         if not isinstance(item, dict):
             continue
 
-        # Cast test_id to int32, fallback to None if empty or invalid
         raw_test_id = item.get('test_id')
         try:
             test_id = int(raw_test_id) if raw_test_id not in (None, '', 'null') else None
         except (ValueError, TypeError):
             test_id = None
 
-        clean.append({
+        raw_item_id = item.get('item_id')
+        try:
+            item_id = int(raw_item_id) if raw_item_id not in (None, '', 'null') else None
+        except (ValueError, TypeError):
+            item_id = None
+
+        row = {
             "itemName":   str(item.get('itemName', '')).strip(),
             "price":      str(item.get('price', '0')),
             "quantity":   int(item.get('quantity', 1)),
             "billTypeNo": str(item.get('billTypeNo', '')).strip(),
-            "test_id":    test_id,   # stored as int32 (or None)
-        })
+        }
+
+        # Only store test_id / item_id if they have a real value
+        if test_id is not None:
+            row["test_id"] = test_id
+        if item_id is not None:
+            row["item_id"] = item_id
+
+        clean.append(row)
     return clean
 
 @api_view(['GET'])

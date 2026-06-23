@@ -54,22 +54,22 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     try:
         from ..models import Admission, Patient, InsuranceProvider
 
-        # Step 1: ip_number → uhid
+        # Step 1: ip_number → (uhid, age, age_type)
         admissions = list(
             Admission.objects.filter(ipNumber__in=ip_numbers)
-            .values("ipNumber", "uhid")
+            .values("ipNumber", "uhid", "age", "age_type")
         )
         if not admissions:
             return {}
 
-        ip_to_uhid = {a["ipNumber"]: a["uhid"] for a in admissions}
-        uhids = set(ip_to_uhid.values())
+        ip_to_admission = {a["ipNumber"]: a for a in admissions}
+        uhids = {a["uhid"] for a in admissions}
 
         # Step 2: uhid → Patient
         patients = list(
             Patient.objects.filter(uhid__in=uhids)
             .values("uhid", "salutation", "firstName", "lastName",
-                    "age", "gender", "customer_type", "company_code")
+                    "gender", "customer_type", "company_code")
         )
         uhid_to_patient = {p["uhid"]: p for p in patients}
 
@@ -84,7 +84,8 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
 
         # Step 4: assemble result keyed by ip_number
         result = {}
-        for ip_num, uhid in ip_to_uhid.items():
+        for ip_num, adm in ip_to_admission.items():
+            uhid       = adm["uhid"]
             pt         = uhid_to_patient.get(uhid, {})
             salutation = (pt.get("salutation") or "").strip()
             first      = (pt.get("firstName")  or "").strip()
@@ -95,7 +96,8 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
             result[ip_num] = {
                 "uhid":          uhid,
                 "patient_name":  full_name,
-                "age":           pt.get("age"),
+                "age":           adm.get("age"),
+                "age_type":      adm.get("age_type"),
                 "gender":        pt.get("gender"),
                 "customer_type": pt.get("customer_type"),
                 "company_name":  code_to_name.get(cc) if cc else None,
@@ -106,7 +108,7 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     except Exception as e:
         print(f"[ERROR] _bulk_get_patient_info: {e}\n{traceback.format_exc()}")
         return {}
-
+    
 
 def _bulk_get_employee_names(emp_ids: set) -> dict:
     """
@@ -218,6 +220,7 @@ def _enrich_bulk(records: list) -> list:
             "uhid":          pt.get("uhid"),
             "patient_name":  pt.get("patient_name"),
             "age":           pt.get("age"),
+            "age_type":      pt.get("age_type"),
             "gender":        pt.get("gender"),
             "customer_type": pt.get("customer_type"),
             "company_name":  pt.get("company_name"),
@@ -695,6 +698,73 @@ def get_ippharmacy_stock(request):
         }, status=500)
 
 
+# ─── NEW: Medicine Packages ────────────────────────────────────────────────────
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_medicine_packages(request):
+    """
+    Fetch active medicine packages from hospital_medicine_package collection (HMS DB),
+    scoped to outlet/branch/hospital, for use in the OT Medicine Request "Select
+    from Package" flow.
+
+    Query params:
+        outlet_code   (optional, defaults to OLET001)
+        search        (optional, filters by medPackage_name, case-insensitive)
+
+    Returns:
+        { success: true, data: [ { medPackage_id, medPackage_name, items: [...], is_active }, ... ] }
+    """
+    try:
+        outlet_code = request.GET.get("outlet_code", "OLET001")
+        search = request.GET.get("search", "").strip()
+        branch_code = request.data.get("auth-branch-code", "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        mongo_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        mongo_db = mongo_client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        query = {
+            "outlet_code": outlet_code,
+            "branch_code": branch_code,
+            "hospital_code": hospital_code,
+            "is_active": True,
+        }
+
+        if search:
+            query["medPackage_name"] = {"$regex": search, "$options": "i"}
+
+        cursor = (
+            mongo_db["hospital_medicine_package"]
+            .find(
+                query,
+                {
+                    "_id": 0,
+                    "medPackage_id": 1,
+                    "medPackage_name": 1,
+                    "items": 1,
+                    "is_active": 1,
+                    "outlet_code": 1,
+                },
+            )
+            .sort("medPackage_name", 1)
+        )
+
+        data = list(cursor)
+        data = convert_decimals(data)
+
+        mongo_client.close()
+
+        return Response({"success": True, "data": data}, status=200)
+
+    except Exception as e:
+        return Response(
+            {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            },
+            status=500,
+        )
 
 
 @api_view(["POST"])
@@ -703,6 +773,10 @@ def save_ot_medicine_ward_request(request):
     """
     Save OT medicine ward request using PharmacyBilling model.
     Bill_id is auto-generated in PharmacyBilling.save()
+
+    Supports Package_id: when the request was created by selecting a medicine
+    package on the frontend, medPackage_id is sent as "Package_id" and stored
+    on the bill. Defaults to "" when no package was used.
     """
 
     try:
@@ -716,7 +790,15 @@ def save_ot_medicine_ward_request(request):
         medicine_particulars = data.get("medicine_particulars", [])
         total_amount = round(float(data.get("total_amount", 0)), 2)
 
-        # Remove fields that should not be stored in medicine_particulars
+        # Package_id — sent by frontend when a package was selected,
+        # empty string otherwise.
+        package_id = data.get("Package_id", "") or ""
+
+        # Remove fields that should not be stored in medicine_particulars.
+        # itemName is intentionally stripped: item_id is the source of truth,
+        # and the display name is resolved on read via hospital_pharmacyitem
+        # (see get_ot_medicine_ward_requests). Storing it here would just be
+        # a stale, duplicated copy.
         STRIP_FIELDS = {
             "edit_history",
             "billType",
@@ -725,6 +807,9 @@ def save_ot_medicine_ward_request(request):
             "total_stock",
             "price",
             "expiry_date",
+            "itemName",
+            "item_name",
+            "name",
         }
 
         cleaned_medicines = []
@@ -792,6 +877,8 @@ def save_ot_medicine_ward_request(request):
             round_off=0,
 
             cashier_id="",
+
+            Package_id=package_id,
         )
 
         return Response(
@@ -800,6 +887,7 @@ def save_ot_medicine_ward_request(request):
                 "message": "OT medicine ward request saved successfully",
                 "bill_id": bill.Bill_id,
                 "billing_status": bill.billing_status,
+                "package_id": bill.Package_id,
             },
             status=200,
         )
@@ -941,6 +1029,40 @@ def get_ot_medicine_ward_requests(request):
             }
 
         # ✅ -------------------------------
+        # STEP 4b: Fetch package names for any Package_id referenced
+        # ✅ -------------------------------
+        all_package_ids = {
+            doc.get("Package_id")
+            for doc in requests_data
+            if doc.get("Package_id")
+        }
+
+        package_map = {}
+
+        if all_package_ids:
+            package_collection = hms_db["hospital_medicine_package"]
+
+            # Package_id stored on PharmacyBilling is a CharField, while
+            # medPackage_id in the package collection is numeric — try both
+            # so the lookup matches whichever form was stored.
+            normalized_ids = list(all_package_ids)
+            numeric_ids = []
+            for pid in normalized_ids:
+                try:
+                    numeric_ids.append(int(pid))
+                except (TypeError, ValueError):
+                    pass
+
+            package_docs = package_collection.find(
+                {"medPackage_id": {"$in": numeric_ids or normalized_ids}},
+                {"medPackage_id": 1, "medPackage_name": 1, "_id": 0}
+            )
+
+            for pkg in package_docs:
+                package_map[str(pkg.get("medPackage_id"))] = pkg.get("medPackage_name", "")
+                package_map[pkg.get("medPackage_id")] = pkg.get("medPackage_name", "")
+
+        # ✅ -------------------------------
         # STEP 5: Format response
         # ✅ -------------------------------
         formatted_data = []
@@ -1023,10 +1145,14 @@ def get_ot_medicine_ward_requests(request):
                 "doctor_id": doctor_id,
                 "wardName": doc.get("room_no", ""),
                 "billingStatus": doc.get("billing_status", ""),
+                "is_dispatched": doc.get("is_dispatched", False),   # ← ADD
+                "is_received":   doc.get("is_received",   False),   # ← ADD
                 "billingMode": doc.get("billing_mode", ""),
                 "medicines": medicines,
                 "total_amount": doc.get("total_amount", 0),
-                "net_amount": doc.get("net_amount", 0)
+                "net_amount": doc.get("net_amount", 0),
+                "Package_id": doc.get("Package_id", ""),
+                "packageName": package_map.get(doc.get("Package_id", "")) or "",
             }
 
             formatted_data.append(formatted_doc)
@@ -1060,6 +1186,11 @@ def update_ot_medicine_ward_request(request):
     """
     Update OT medicine ward request using Bill_id (NOT ObjectId)
     Only allowed when billing_status == "Pending"
+
+    Supports updating Package_id whenever the key is present in the payload —
+    this covers both setting a package (newly selected) and clearing one
+    (frontend sends "" when the user removes an item from a package-derived
+    list or clicks "Clear Package").
     """
     try:
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1109,10 +1240,13 @@ def update_ot_medicine_ward_request(request):
         medicine_particulars = data.get("medicine_particulars", [])
         total_amount = round(float(data.get("total_amount", 0)), 2)
 
-        # ✅ Clean medicines
+        # ✅ Clean medicines — itemName/item_name/name stripped, same reasoning
+        # as in save_ot_medicine_ward_request: item_id is the source of truth,
+        # display name is resolved on read.
         STRIP_FIELDS = {
             "edit_history", "billType", "billTypeNo", "billTypeName",
             "total_stock", "price", "expiry_date",
+            "itemName", "item_name", "name",
         }
 
         cleaned_medicines = []
@@ -1133,6 +1267,12 @@ def update_ot_medicine_ward_request(request):
         # ✅ Update doctor if present
         if data.get("doctor_id"):
             update_fields["doctor_id"] = data["doctor_id"]
+
+        # ✅ Update Package_id whenever the key is present in the payload
+        # (covers both setting and clearing it — frontend always sends the key,
+        # using "" to mean "no package").
+        if "Package_id" in data:
+            update_fields["Package_id"] = data.get("Package_id") or ""
 
         # ✅ Update using Bill_id
         collection.update_one(
@@ -1206,3 +1346,54 @@ def delete_ot_medicine_ward_request(request):
 
     except Exception as e:
         return Response({"success": False, "error": str(e), "traceback": traceback.format_exc()}, status=500)
+    
+@api_view(["PUT"])
+@permission_classes([HasRoleAndDataPermission])
+def mark_ot_medicine_received(request):
+    """
+    Sets is_received = True on a dispatched ward request.
+    Only allowed when is_dispatched == True.
+    """
+    try:
+        client  = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db  = client[os.getenv("HMS_DB_NAME", "HMS")]
+        data    = request.data
+        current_user = data.get("auth-user-id", "system")
+
+        bill_id = data.get("bill_id")
+        if bill_id is None:
+            return Response({"success": False, "message": "bill_id is required"}, status=400)
+        try:
+            bill_id = int(bill_id)
+        except Exception:
+            return Response({"success": False, "message": "bill_id must be a number"}, status=400)
+
+        collection = hms_db["hospital_pharmacybilling"]
+        existing   = collection.find_one({"Bill_id": bill_id})
+
+        if not existing:
+            return Response({"success": False, "message": "Record not found"}, status=404)
+
+        if not existing.get("is_dispatched", False):
+            return Response(
+                {"success": False, "message": "Cannot mark as received: not yet dispatched"},
+                status=400,
+            )
+
+        collection.update_one(
+            {"Bill_id": bill_id},
+            {"$set": {
+                "is_received":       True,
+                "lastmodified_by":   current_user,
+                "lastmodified_date": timezone.now(),
+            }}
+        )
+
+        client.close()
+        return Response({"success": True, "message": "Marked as received successfully"})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )

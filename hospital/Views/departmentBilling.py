@@ -180,13 +180,13 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'reasonForAdmission': admission.reasonForAdmission,
 
             'is_discharged': admission.is_discharged,
-            'is_admissionActive': admission.is_admissionActive,
             'is_admitted': getattr(admission, 'is_admitted', False),
 
             'salutation': getattr(patient, 'salutation', ''),
             'firstName': patient.firstName,
             'lastName': patient.lastName,
-            'age': patient.age,
+            'age': admission.age,
+            'age_type': admission.age_type,
             'gender': patient.gender,
             'dob': patient.dob,
             'mobilePhone': patient.mobilePhone,

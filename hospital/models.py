@@ -401,6 +401,8 @@ class PharmacyBilling(AuditModel):
     pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
+    Package_id = models.CharField(max_length=100, blank=True, null=True)
+    is_received = models.BooleanField(default=False)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
@@ -752,6 +754,8 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
+    age_type            = models.CharField(max_length=10)
+    age     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)
