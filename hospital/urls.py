@@ -170,7 +170,7 @@ urlpatterns = [
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
-    path("ipadvance_bills/",  pharmacy.ipadvance_bills),
+    path("ipadvance_bills/",  cashcounter.ipadvance_bills),
     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
