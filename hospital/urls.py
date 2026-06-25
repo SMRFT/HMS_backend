@@ -22,15 +22,17 @@ from .Views import (
     advanced_dashboard,
     doctor_dashboard,
     insurance_provider,
-    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports, medicine_package,
+    summary,package_crud, investigation_price, billType, velavan, otMaster, anesthesia, surgeryschedule, customer_type,doctor_reports,
     DietOrder,
     purchasereturn,
     purchase_order,
+    Purchase_Requisition,
     front_office_reports,
     registration_updates,
     laundry,
     physicalstockentry,
     salesreturn,
+    medicine_package
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -109,6 +111,10 @@ urlpatterns = [
     path("purchase-order-action/",purchase_order.purchase_order_action_view,name="purchase_order_action"),
     path("purchase-order-email/",purchase_order.purchase_order_email_view,name="purchase_order_email"),
 
+    path("purchase-requisition/",            Purchase_Requisition.purchase_requisition_view),
+    path("purchase-requisition/<str:pk>/",   Purchase_Requisition.purchase_requisition_view),
+    path("purchase-requisition-action/",     Purchase_Requisition.purchase_requisition_action_view),
+
     path(
         "pharmacy-stock-batches/",
         physicalstockentry.pharmacy_stock_batches_view,
@@ -139,6 +145,7 @@ urlpatterns = [
         name="physical-stock-approval-detail",
     ),
 
+    path('medicine-tracking/', inventory.medicine_tracking, name='medicine_tracking'),
     path('pharmacy/notifications/', pharmacynotification.pharmacy_notifications, name='pharmacy-notifications'),
 
     
@@ -170,11 +177,20 @@ urlpatterns = [
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
     path('post_receipt_payments/', cashcounter.post_receipt_payments, name='post_receipt_payments'),
     path("get_receipt_payments/", cashcounter.get_receipt_payments),
-    path("ipadvance_bills/",  cashcounter.ipadvance_bills),
-    path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
-    path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
-    path("get_registration_bills/", cashcounter.get_registration_bills),
+     path("get_mainblock_pendingbills/", cashcounter.get_mainblock_pendingbills),
+     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
+     path("get_registration_bills/", cashcounter.get_registration_bills),
      
+    # Medicine Package Master:
+
+    path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
+    path('medicine-packages/create/', medicine_package.create_medicine_package, name='create_medicine_package'),
+    path('medicine-packages/<str:pkg_id>/', medicine_package.get_medicine_package, name='get_medicine_package'),
+    path('medicine-packages/update/<str:pkg_id>/', medicine_package.update_medicine_package, name='update_medicine_package'),
+    path('medicine-packages/delete/<str:pkg_id>/', medicine_package.delete_medicine_package, name='delete_medicine_package'),
+    path('pharmacy-items/', medicine_package.get_pharmacy_items, name='get_pharmacy_items'),
+    
+    
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
@@ -369,14 +385,6 @@ urlpatterns = [
     path('packages/update/<int:package_no>/', package_crud.update_package, name='update_package'),
     path('packages/delete/<int:package_no>/', package_crud.delete_package, name='delete_package'),
 
-    #Medicin Package Master:
-    path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
-    path('medicine-packages/create/',medicine_package.create_medicine_package, name='create_medicine_package'),
-    path('medicine-packages/<str:pkg_id>/',medicine_package.get_medicine_package, name='get_medicine_package'),
-    path('medicine-packages/update/<str:pkg_id>/',medicine_package.update_medicine_package, name='update_medicine_package'),
-    path('medicine-packages/delete/<str:pkg_id>/',medicine_package.delete_medicine_package, name='delete_medicine_package'),
-    path('pharmacy-items/',medicine_package.get_pharmacy_items, name='get_pharmacy_items'),
-
     #Investigation Price Master:
     path('investigation-prices_get/', investigation_price.get_investigation_prices, name='get_investigation_prices'),
     path('investigation-prices/create/', investigation_price.create_investigation_price, name='create_investigation_price'),
@@ -500,8 +508,6 @@ urlpatterns = [
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
-    path("get_medicine_packages/", surgeryschedule.get_medicine_packages, name="get_medicine_packages"),
-    path("mark_ot_medicine_received/", surgeryschedule.mark_ot_medicine_received, name="mark_ot_medicine_received"),
 
     # Diet / Food Ordering:
     path("save_diet_order/",    DietOrder.save_diet_order,    name="save_diet_order"),

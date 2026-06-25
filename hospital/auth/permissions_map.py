@@ -122,6 +122,12 @@ PAGE_MAPPING = {
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/.+/?$":    "HMS-P-MRL",
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition-action/?$":"HMS-P-MRA",
 
+    r"^/_b_a_c_k_e_n_d/HMS/purchase-requisition/?$":       "HMS-P-PR",
+    r"^/_b_a_c_k_e_n_d/HMS/purchase-requisition/.+/?$":    "HMS-P-PRL",
+    r"^/_b_a_c_k_e_n_d/HMS/purchase-requisition-action/?$":"HMS-P-PRA",
+
+    r"^/_b_a_c_k_e_n_d/HMS/medicine-tracking/?$":          "HMS-P-MT",
+
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
