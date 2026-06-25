@@ -72,8 +72,8 @@ urlpatterns = [
     path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
 
     # Stock URLs
-    path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
-    path("pharmacy-items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
+    path("pharmacy_items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
+    path("pharmacy_items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail"),
     path("get_pharmacy_item_tracking/", inventory.get_pharmacy_item_tracking, name="get_pharmacy_item_tracking"),
 
     # Pharmacy Category URLs

@@ -93,8 +93,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/vendors/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendors/[0-9]+/?(\?.*)?$': 'HMS-P-VNDD',
 
-    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/?(\?.*)?$': 'HMS-P-PI',
-    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/?(\?.*)?$': 'HMS-P-VND',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
     r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_item_tracking/?(\?.*)?$': 'HMS-P-PID',
 
     r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
