@@ -32,6 +32,7 @@ from .Views import (
     laundry,
     physicalstockentry,
     salesreturn,
+    medicine_package
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -180,7 +181,14 @@ urlpatterns = [
      path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
      path("get_registration_bills/", cashcounter.get_registration_bills),
      
-    
+    # Medicine Package Master:
+
+    path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
+    path('medicine-packages/create/', medicine_package.create_medicine_package, name='create_medicine_package'),
+    path('medicine-packages/<str:pkg_id>/', medicine_package.get_medicine_package, name='get_medicine_package'),
+    path('medicine-packages/update/<str:pkg_id>/', medicine_package.update_medicine_package, name='update_medicine_package'),
+    path('medicine-packages/delete/<str:pkg_id>/', medicine_package.delete_medicine_package, name='delete_medicine_package'),
+    path('pharmacy-items/', medicine_package.get_pharmacy_items, name='get_pharmacy_items'),
     
     
     # GRN URLs

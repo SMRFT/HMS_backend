@@ -134,6 +134,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
     '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
     r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
+    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/?(\?.*)?$': 'HMS-P-DIS',
 
     # ==================== NURSING ======================
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
@@ -200,10 +201,17 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/departments/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/packages_crud/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/packages/create/': 'HMS-P-IPKG',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-IPKGE',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-IPKGD',     
+    r'^/_b_a_c_k_e_n_d/HMS/packages(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/packages/update(?:/[^/]+)+/$': 'HMS-P-IPKGE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/packages/delete(?:/[^/]+)+/$': 'HMS-P-IPKGD',     
 
+    #MedicinePackage Master:            
+    '/_b_a_c_k_e_n_d/HMS/medicine-packages/': 'HMS-P-MPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/?(\?.*)?$': 'HMS-P-MPKG',                
+    '/_b_a_c_k_e_n_d/HMS/medicine-packages/create/': 'HMS-P-MPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages(?:/[^/]+)+/$': 'HMS-P-MPKG',                  
+    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/update/(?:/[^/]+)+/$': 'HMS-P-MPKGE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/delete(?:/[^/]+)+/$': 'HMS-P-MPKGD',   
     #Bill Type Master:
     '/_b_a_c_k_e_n_d/HMS/bill-types_get/': 'HMS-P-BT',                  
     '/_b_a_c_k_e_n_d/HMS/bill-types/create/': 'HMS-P-BT',                  
@@ -265,10 +273,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSSA',                
     '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
-
-    
-
-                  
+    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-OTMB',  
+    r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
     r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
