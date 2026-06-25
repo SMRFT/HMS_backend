@@ -534,6 +534,25 @@ def create_velavan_in(request):
         total_amount = to_decimal(summary.get('totalAmount'))
         clean_items = sanitize_items(data.get('items', []))
 
+        # ── Duplicate check ──────────────────────────────────────────────
+        vendor_id   = data.get('vendor_id') or ''
+        invoice_no  = data.get('invoiceNo') or ''
+        invoice_date = to_date(data.get('invoiceDate'))
+
+        if vendor_id and invoice_no and invoice_date:
+            exists = VelavanInvoice.objects.filter(
+                vendor_id    = vendor_id,
+                invoice_no   = invoice_no,
+                invoice_date = invoice_date,
+            ).exists()
+            if exists:
+                return JsonResponse({
+                    'success': False,
+                    'status':  'duplicate',
+                    'message': f'Invoice "{invoice_no}" from vendor "{vendor_id}" on {invoice_date} already exists.',
+                }, status=409)
+        # ─────────────────────────────────────────────────────────────────
+
         invoice = VelavanInvoice(
             vendor_id               = data.get('vendor_id') or '',
             date                    = to_date(data.get('date')),

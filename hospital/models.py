@@ -424,17 +424,16 @@ class PharmacyBilling(AuditModel):
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
     bill_date = models.DateTimeField(blank=True, null=True)
-    uhid = models.CharField(max_length=50)
+    uhid = models.CharField(max_length=5,blank=True, null=True)
     inpatient_number = models.CharField(max_length=50, blank=True, null=True)
+    patientname = models.CharField(max_length=100, blank=True, null=True)
+    age = models.IntegerField(blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     room_no = models.CharField(max_length=20, blank=True, null=True)
     medicine_particulars = models.JSONField(default=list)
     total_amount = models.FloatField(default=0)
-    overall_discount_type = models.CharField(
-        max_length=10,
-        default="percent"
-    )
+    overall_discount_type = models.CharField(max_length=10,default="percent")
     overall_discount_value = models.FloatField(default=0)
     overall_discount_amount = models.FloatField(default=0)
     net_amount = models.FloatField(default=0)
@@ -442,16 +441,20 @@ class PharmacyBilling(AuditModel):
     billing_mode = models.CharField(max_length=20)
     payment_details = models.JSONField(null=True, blank=True)
     Esimated_id=models.CharField(max_length=150)
-    Edit_reason = models.TextField(null=True, blank=True)
-    Edited_by =models.CharField(max_length=150)
+    edit_reason = models.TextField(null=True, blank=True)
+    edited_by = models.CharField(max_length=150)
     is_deleted= models.BooleanField(default=False)
     delete_reason = models.TextField(null=True, blank=True)
     deleted_by =models.CharField(max_length=150)
     round_off= models.IntegerField(default=0)
     cashier_id = models.CharField(max_length=500, blank=True, null=True)
     is_ward_request = models.BooleanField(default=False)
-    ward_request_date = models.DateTimeField(default=timezone.now)
+    ward_request_date = models.DateTimeField(blank=True, null=True)
+    is_dispatched = models.BooleanField(default=False)
+    pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
+    pending_returns = models.JSONField(default=list, blank=True, null=True)
+    Package_id = models.CharField(max_length=100, blank=True, null=True)
 
     # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
@@ -462,7 +465,7 @@ class PharmacyBilling(AuditModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"
+        return f"{self.billing_status} - {self.patient_name}"  
 
 
         
@@ -950,7 +953,10 @@ class InsuranceProvider(AuditModel):
 class RadiologyReport(AuditModel):
     date = models.DateTimeField()
     slot_DateTime = models.DateTimeField()
+    patientIn_DateTime = models.DateTimeField(null=True, blank=True)
+    scan_started_DateTime = models.DateTimeField(null=True, blank=True)
     investBillNo = models.CharField(max_length=50, blank=True)
+    uhid = models.TextField()    
     billTypeNo = models.TextField()    
     itemName = models.TextField()
     item_id = models.IntegerField()
@@ -961,10 +967,41 @@ class RadiologyReport(AuditModel):
     is_active = models.BooleanField(default=True)   # ✅ add this
     has_report = models.BooleanField(default=False)   # ✅ add this
     type = models.TextField()    
+    is_Dispatched = models.BooleanField(default=False)
+    dispatch_DateTime = models.DateTimeField(null=True, blank=True)
+    dispatched_by = models.CharField(max_length=100, blank=True)
 
 
     def __str__(self):
         return f"Radiology Report - {self.investBillNo} ({self.uhid})"
+    
+class JRDReport(AuditModel):
+    """
+    Stores the JRD (Form-F) register data captured from the ANC Register UI.
+    One record per ANC report line — linked via investBillNo + item_id.
+ 
+    jrd_id  → sequential business key (1, 2, 3 …) scoped per hospital+branch.
+              Generated once on creation and never changed.
+    """
+    jrd_id       = models.IntegerField(db_index=True)           # sequential business key
+    hospital_code = models.CharField(max_length=50, blank=True)
+    branch_code   = models.CharField(max_length=50, blank=True)
+ 
+    investBillNo = models.CharField(max_length=50, db_index=True)
+    item_id      = models.IntegerField(db_index=True)
+    form_no      = models.CharField(max_length=100, blank=True)  # S. No of Form -F
+    mtp_advice   = models.CharField(max_length=500, blank=True)  # MTP Advice if Any
+    is_active    = models.BooleanField(default=True)
+ 
+    class Meta:
+        unique_together = [
+            ('investBillNo', 'item_id'),                          # one record per ANC scan
+            ('hospital_code', 'branch_code', 'jrd_id'),          # jrd_id unique per branch
+        ]
+        ordering = ['jrd_id']
+ 
+    def __str__(self):
+        return f"JRD-{self.jrd_id} [{self.investBillNo} / item {self.item_id}]"
 
 
 class Summary(AuditModel):
@@ -995,25 +1032,36 @@ class Summary(AuditModel):
     
 class EstimateBilling(AuditModel):
     EstBillNo = models.CharField(max_length=50, blank=True)
-    EstBillDate = models.DateTimeField() 
-    uhid = models.CharField(max_length=50)
-    ipNumber = models.CharField(max_length=50,blank=True)
-    bill_type       = models.CharField(max_length=100, blank=True, null=True)  # collection / category key
-    billTypeNo      = models.CharField(max_length=50, blank=True, null=True)
-    doctor = models.CharField(max_length=100)     
+    EstBillDate = models.DateTimeField()
+    
+    # ── Patient Identity ──────────────────────────────────────
+    uhid = models.CharField(max_length=50, blank=True)        # ← blank=True (manual entry)
+    ipNumber = models.CharField(max_length=50, blank=True)
+    salutation = models.CharField(max_length=20, blank=True)   # ← new
+    firstName = models.CharField(max_length=100, blank=True)   # ← new
+    lastName = models.CharField(max_length=100, blank=True)    # ← new
+    age = models.CharField(max_length=50, blank=True)          # ← blank=True
+    age_type = models.CharField(max_length=50, blank=True)     # ← blank=True
+    gender = models.CharField(max_length=20, blank=True)       # ← new
+    roomNo = models.CharField(max_length=50, blank=True)       # ← blank=True
+
+    # ── Billing Details ───────────────────────────────────────
+    bill_type = models.CharField(max_length=100, blank=True, null=True)
+    billTypeNo = models.CharField(max_length=50, blank=True, null=True)
+    doctor = models.CharField(max_length=100, blank=True)      # ← blank=True
     referredBy = models.CharField(max_length=100, blank=True, null=True)
-    item = models.JSONField()  # Stores the selected item as a JSON field
+    item = models.JSONField()
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    discountPercent = models.IntegerField()
-    discount = models.DecimalField(max_digits=10,blank=True, decimal_places=2, default=0.0)
+    discountPercent = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # ← DecimalField (was Int)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, default=0.0)
     discountRemarks = models.TextField(blank=True, null=True)
     finalPrice = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    paymentMethod = models.CharField(max_length=50)
+    paymentMethod = models.CharField(max_length=50, blank=True)  # ← blank=True
+
     is_active = models.BooleanField(default=True)
 
-
     def __str__(self):
-        return f"Billing for {self.firstName} {self.lastName} ({self.uhid})"
+        return f"Estimate for {f'{self.firstName} {self.lastName}'.strip()} ({self.uhid or 'No UHID'})"
     
 
 class ReferenceDoctor(AuditModel):
@@ -1223,6 +1271,7 @@ class Cashcountershiftdetails(AuditModel):
     StartingTime   = models.DateTimeField()
     closingTime    = models.DateTimeField(null=True, blank=True)
     date         = models.DateField(auto_now_add=True)
+    collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -1443,11 +1492,24 @@ class SalesReturn(AuditModel):
     return_bill_date = models.DateTimeField(auto_now_add=True)
     bill_no = models.CharField(max_length=200)
     uhid = models.CharField(max_length=20)
-    return_amount= models.CharField(max_length=200)
+    return_amount = models.CharField(max_length=200)
     medicine_particulars = models.JSONField()
     pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
-    cashier_id = models.CharField(max_length=500, blank=True, null=True)
-    shiftno = models.CharField(max_length=100, blank=True, null=True)
+    PaymentType= models.CharField(max_length=500, blank=True, null=True)
+   
+
+    # ✅ ADD THIS
+    status = models.CharField(
+        max_length=100,
+        default="Pending",
+        blank=True,
+        null=True
+    )
+
+    bill_type = models.IntegerField(
+        null=True,
+        blank=True
+    )
 
     def save(self, *args, **kwargs):
         # 1. Standard Django Save
@@ -1472,7 +1534,13 @@ class SalesReturn(AuditModel):
 
             db["hospital_salesreturn"].update_one(
                 {"return_bill_no": self.return_bill_no},
-                {"$set": {"medicine_particulars": meds if isinstance(meds, list) else []}}
+                {
+                    "$set": {
+                        "medicine_particulars": meds if isinstance(meds, list) else [],
+                        "status": self.status  ,
+                        "bill_type": self.bill_type,  
+                    }
+                }
             )
 
             client.close()
@@ -1502,6 +1570,189 @@ class DietExtraMaster(AuditModel):
 
     def __str__(self):
         return f"{self.item_name} - {self.price}"
+    
+
+
+
+
+class CashCounterCollection(AuditModel):
+
+    collection_id = models.AutoField(primary_key=True)
+
+    Bill_id = models.IntegerField(
+        null=True,
+        blank=True
+    )
+
+    bill_no = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    return_bill_no= models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    bill_type = models.IntegerField(
+        null=True,
+        blank=True
+    )
+
+    counter_code = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True
+    )
+
+    # ✅ CHANGED TO CHARFIELD
+    shift_no = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    billing_category = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    bill_number = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    transaction_type = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
+
+    collected_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00
+    )
+
+    Returned_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        null=True,
+        blank=True
+    )
+
+    RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0,null=True,blank=True)
+    
+    HandOverAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0,null=True,blank=True)
+
+    remarks = models.TextField(
+        null=True,
+        blank=True
+    )
+
+    def __str__(self):
+        return f"{self.bill_number} - {self.collected_amount}"
+    
+
+
+
+
+
+import json
+import os
+from pymongo import MongoClient
+from django.db import models
+
+
+class DialysisDischargeSummary(AuditModel):
+
+    # Patient Details
+    name = models.CharField(max_length=255)
+    age = models.PositiveIntegerField()
+    gender = models.CharField(max_length=100)
+
+    uhid = models.CharField(max_length=100, unique=True)
+    consultant = models.CharField(max_length=255,null=True, blank=True)
+    id_no = models.CharField(max_length=100,null=True, blank=True)
+    insurance = models.CharField(max_length=255, blank=True, default="")
+
+    address = models.TextField()
+    date = models.DateField(auto_now_add=True)
+    diagnosis = models.TextField()
+
+    date_of_first_dialysis = models.DateField(null=True, blank=True)
+    date_of_last_dialysis = models.DateField(null=True, blank=True)
+
+    blood_investigations = models.JSONField(default=list,null=True, blank=True)
+    hd_sessions = models.JSONField(default=list, blank=True)
+    complications_during_hd = models.JSONField(default=list, null=True, blank=True)
+
+    condition_on_discharge = models.TextField()
+
+    advice_on_discharge = models.JSONField(default=list, null=True, blank=True)
+
+    next_hd_session_on = models.DateField()
+
+    def _parse_json_field(self, value):
+        """Safely parse a field that may already be a list or a JSON string."""
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                return []
+        return []
+
+    def save(self, *args, **kwargs):
+
+        # ==========================================
+        # NORMAL DJANGO SAVE
+        # ==========================================
+
+        super().save(*args, **kwargs)
+
+        # ==========================================
+        # FORCE BSON ARRAY SAVE
+        # ==========================================
+
+        try:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+
+            db["hospital_dialysisdischargesummary"].update_one(
+                {"uhid": self.uhid},
+                {
+                    "$set": {
+                        "blood_investigations": self._parse_json_field(self.blood_investigations),
+                        "hd_sessions": self._parse_json_field(self.hd_sessions),
+                        "complications_during_hd": self._parse_json_field(self.complications_during_hd),
+                        "advice_on_discharge": self._parse_json_field(self.advice_on_discharge),
+                        "date_of_first_dialysis": (
+                            self.date_of_first_dialysis.isoformat()
+                            if self.date_of_first_dialysis else None
+                        ),
+                        "date_of_last_dialysis": (
+                            self.date_of_last_dialysis.isoformat()
+                            if self.date_of_last_dialysis else None
+                        ),
+                    }
+                },
+            )
+
+            client.close()
+
+        except Exception as e:
+            print(f"DialysisDischargeSummary pymongo update failed: {e}")
+
+    def __str__(self):
+        return f"{self.name} - {self.uhid}"
+
 
 class Refund(AuditModel):
     id = models.AutoField(primary_key=True)
@@ -1546,3 +1797,91 @@ class Refund(AuditModel):
 
     def __str__(self):
         return f"{self.refund_bill_no} - {self.uhid} (₹{self.refund_amount})"
+
+
+class LaundryWardRequest(AuditModel):
+    id = models.IntegerField(primary_key=True)
+    STATUS_CHOICES = [
+        ("Pending", "Pending"),
+        ("Processing", "Processing"),
+        ("Completed", "Completed"),
+        ("Cancelled", "Cancelled"),
+    ]
+    REQUEST_TYPE_CHOICES = [
+        ("Normal", "Normal"),
+        ("Urgent", "Urgent"),
+    ]
+
+    patient_name = models.CharField(max_length=200, null=True, blank=True)
+    uhid = models.CharField(max_length=50)
+    ipNumber = models.CharField(max_length=50, null=True, blank=True)
+    wardName = models.CharField(max_length=100, null=True, blank=True)
+    roomNo = models.CharField(max_length=50, null=True, blank=True)
+    bedNo = models.CharField(max_length=50, null=True, blank=True)
+    
+    # Store laundry items (e.g., {"Bedsheets": 2, "Towels": 1})
+    items = models.JSONField(default=list)
+    
+    request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default="Normal")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
+    remarks = models.TextField(null=True, blank=True)
+    
+    requested_by = models.CharField(max_length=100, null=True, blank=True)
+    requested_date = models.DateTimeField(default=timezone.now)
+
+    def save(self, *args, **kwargs):
+        if self.id is None:
+            last = LaundryWardRequest.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last and last.id else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Laundry Request - {self.uhid} - {self.status}"
+
+
+class LaundryItemMaster(AuditModel):
+    id = models.IntegerField(primary_key=True)
+    item_name = models.CharField(max_length=200, unique=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.id is None:
+            last = LaundryItemMaster.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last and last.id else 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.item_name} - ₹{self.price}"
+
+
+class CrashCartItem(models.Model):
+    id = models.IntegerField(primary_key=True)
+    nursing_station = models.CharField(max_length=100, null=True, blank=True)
+    box_category = models.CharField(max_length=100) # e.g., "BOX-1(EMERGENCY MEDICINE)"
+    drug_name = models.CharField(max_length=255)    # e.g., "INJ.ADRENALINE 1 mg"
+    required_stock = models.IntegerField()          # e.g., 10
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartItem.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+    
+class CrashCartDailyCheck(models.Model):
+    id = models.IntegerField(primary_key=True)
+    date = models.DateField(default=timezone.now)
+    nursing_station = models.CharField(max_length=100) # e.g., "CHEMO WARD"
+    item = models.ForeignKey(CrashCartItem, on_delete=models.CASCADE)
+    expiry_date = models.CharField(max_length=50, null=True, blank=True) # Expiry date
+    is_checked = models.BooleanField(default=False)
+    checked_by = models.CharField(max_length=100) # Nurse Name/ID
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last = CrashCartDailyCheck.objects.order_by('-id').first()
+            self.id = (last.id + 1) if last else 1
+        super().save(*args, **kwargs)
+
+    class Meta:
+        unique_together = ('date', 'nursing_station', 'item')
