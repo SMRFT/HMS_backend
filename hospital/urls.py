@@ -256,7 +256,7 @@ urlpatterns = [
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
     path("substitute_medicine/",  pharmacy.substitute_medicine),
-    path("convert_to_bill/",       pharmacy.convert_to_bill),
+    path("convert_to_bill/",      pharmacy.convert_to_bill),
     path("finalize_bill/",   pharmacy.finalize_bill),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),

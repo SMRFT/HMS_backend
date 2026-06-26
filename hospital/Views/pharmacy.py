@@ -21,7 +21,7 @@ from django.db.models import Max
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPermission
 
 # Models & Serializers
-from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider
+from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider,Admission
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
 
@@ -1583,250 +1583,693 @@ def parse_medicine_particulars(data):
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 def pharmacy_medicinechart(request):
+
     try:
+
         print("\n===== API START: pharmacy_medicinechart =====")
 
+
         data = request.data
+
 
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
 
+
         print("hospital_code:", hospital_code)
-        print("branch_code:",   branch_code)
-        print("outlet_code:",   outlet_code)
+        print("branch_code:", branch_code)
+        print("outlet_code:", outlet_code)
+
+
 
         if not hospital_code or not branch_code or not outlet_code:
+
             return Response(
-                {"error": "hospital_code, branch_code, outlet_code required"},
+                {
+                    "error":
+                    "hospital_code, branch_code, outlet_code required"
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+
+
         # =========================================
-        # 🌐 GLOBAL DB (DOCTOR LOOKUP)
+        # GLOBAL DB
         # =========================================
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST")
+        )
+
         global_db = client["Global"]
-        employee_collection = global_db["backend_diagnostics_profile"]
+
+        employee_collection = global_db[
+            "backend_diagnostics_profile"
+        ]
+
+
 
         # =========================================
-        # 🌐 PHARMACY MONGO COLLECTION
-        #    FIX: connect to bill_collection so we can read the latest
-        #    medicine_particulars (which includes substituted items saved
-        #    by substitute_medicine — those are written to MongoDB, not
-        #    back to the Django ORM, so the ORM serializer would return
-        #    stale pre-substitute data on refresh).
+        # PHARMACY MONGO
         # =========================================
-        pharmacy_client = MongoClient(os.getenv("PHARMACY_DB_HOST", os.getenv("GLOBAL_DB_HOST")))
-        pharmacy_db     = pharmacy_client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
-        bill_collection = pharmacy_db["pharmacy_billing"]   # adjust collection name as needed
+
+        pharmacy_client = MongoClient(
+            os.getenv(
+                "PHARMACY_DB_HOST",
+                os.getenv("GLOBAL_DB_HOST")
+            )
+        )
+
+
+        pharmacy_db = pharmacy_client[
+            os.getenv(
+                "PHARMACY_DB_NAME",
+                "pharmacy"
+            )
+        ]
+
+
+        bill_collection = pharmacy_db[
+            "pharmacy_billing"
+        ]
+
+
 
         # =========================================
-        # 🔎 FETCH BILLS via Django ORM
+        # GET BILL DATA
         # =========================================
+
         queryset = PharmacyBilling.objects.filter(
+
             hospital_code=hospital_code,
+
             branch_code=branch_code,
+
             outlet_code=outlet_code,
-            billing_status="Pending",
+
+            billing_status__in=[
+                "Pending",
+                "Processing"
+            ],
+
             is_ward_request=True
+
         ).order_by('-created_date')
 
-        serializer = PharmacyBillingSerializer(queryset, many=True)
+
+
+        serializer = PharmacyBillingSerializer(
+            queryset,
+            many=True
+        )
+
+
         serialized_data = serializer.data
+
+
+
+        print(
+            "Total Bills:",
+            len(serialized_data)
+        )
+
+
 
         final_data = []
 
+
+
         # =========================================
-        # 🔄 LOOP BILLS
+        # LOOP BILL
         # =========================================
+
         for bill in serialized_data:
 
-            if not bill.get("is_ward_request"):
-                continue
+
 
             bill_id = bill.get("Bill_id")
 
-            # -------------------------------------
-            # 👤 PATIENT DETAILS
-            # -------------------------------------
-            uhid = bill.get("uhid")
+
+            print(
+                "\nProcessing Bill:",
+                bill_id
+            )
+
+
+
+            # =====================================
+            # GET MEDICINE FROM MONGO
+            # =====================================
+
+            mongo_doc = bill_collection.find_one(
+
+                {
+                    "Bill_id": bill_id,
+
+                    "hospital_code": hospital_code,
+
+                    "branch_code": branch_code,
+
+                    "outlet_code": outlet_code,
+
+                },
+
+                {
+
+                    "medicine_particulars":1,
+
+                    "billing_status":1,
+
+                    "_id":0
+
+                }
+
+            )
+
+
+
+            if mongo_doc:
+
+
+                bill["billing_status"] = mongo_doc.get(
+                    "billing_status",
+                    bill.get("billing_status")
+                )
+
+
+                raw_particulars = mongo_doc.get(
+                    "medicine_particulars",
+                    []
+                )
+
+
+            else:
+
+
+                raw_particulars = bill.get(
+                    "medicine_particulars",
+                    []
+                )
+
+
+
+
+            # =====================================
+            # PATIENT DETAILS
+            # =====================================
+
+
             patient_data = {}
 
+
+            uhid = bill.get("uhid")
+
+
             if uhid:
-                patient = Patient.objects.filter(uhid=uhid).first()
+
+
+                patient = Patient.objects.filter(
+                    uhid=uhid
+                ).first()
+
+
+
                 if patient:
+
+
                     patient_data = {
-                        "patient_name": f"{patient.firstName} {patient.lastName}",
-                        "address":       patient.permanent_address,
-                        "mobile":        patient.mobilePhone
+
+
+                        "patient_name":
+                        f"{patient.firstName} {patient.lastName}",
+
+
+                        "address":
+                        patient.permanent_address,
+
+
+                        "mobile":
+                        patient.mobilePhone
+
                     }
+
+
+
 
             bill["patient_details"] = patient_data
 
-            # -------------------------------------
-            # 👨‍⚕️ DOCTOR DETAILS (GLOBAL DB)
-            # -------------------------------------
-            doctor_id   = bill.get("doctor_id")
+
+
+
+            # =====================================
+            # DOCTOR DETAILS
+            # =====================================
+
+
             doctor_name = None
 
+
+            doctor_id = bill.get(
+                "doctor_id"
+            )
+
+
             if doctor_id:
+
+
                 doctor = employee_collection.find_one(
-                    {"employeeId": str(doctor_id)},
-                    {"employeeName": 1, "_id": 0}
+
+                    {
+                        "employeeId":
+                        str(doctor_id)
+                    },
+
+                    {
+                        "employeeName":1,
+                        "_id":0
+                    }
+
                 )
+
+
                 if doctor:
-                    doctor_name = doctor.get("employeeName")
+
+                    doctor_name = doctor.get(
+                        "employeeName"
+                    )
+
+
 
             bill["doctor_name"] = doctor_name
 
-            # -------------------------------------
-            # 💊 FIX: READ medicine_particulars FROM MONGODB
-            #
-            # substitute_medicine writes directly to bill_collection
-            # (MongoDB). The ORM serializer only reflects the original
-            # Django model — it never sees MongoDB updates. Reading from
-            # bill_collection here ensures substituted items are always
-            # returned fresh on every call.
-            # -------------------------------------
-            mongo_doc = bill_collection.find_one(
-                {
-                    "Bill_id":      bill_id,
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
-                },
-                {"medicine_particulars": 1, "_id": 0}
+
+
+
+
+            # =====================================
+            # MEDICINE ITEMS
+            # =====================================
+
+
+            items = parse_medicine_particulars(
+                raw_particulars
             )
 
-            if mongo_doc:
-                # Use the up-to-date MongoDB version (includes substitutes)
-                raw_particulars = mongo_doc.get("medicine_particulars", [])
-                print(f"✅ Bill {bill_id}: read {len(raw_particulars)} items from MongoDB")
-            else:
-                # Fallback: parse from ORM serializer (first-time / sync lag)
-                raw_particulars = bill.get("medicine_particulars", [])
-                print(f"⚠️ Bill {bill_id}: MongoDB doc not found, falling back to ORM data")
-
-            items = parse_medicine_particulars(raw_particulars)
 
             mapped_items = []
 
-            # -------------------------------------
-            # 🔄 LOOP ITEMS
-            # -------------------------------------
+
+
             for item in items:
 
-                if not isinstance(item, dict):
+
+
+                if not isinstance(item,dict):
+
                     continue
 
-                # Skip soft-deleted items (replaced by substitute)
+
+
                 if item.get("is_deleted"):
+
                     continue
 
-                item_id   = item.get("item_id")
-                req_batch = item.get("batch_number")
 
-                print(f"\nItem → {item_id}, Batch → {req_batch}")
 
-                # ---------------------------------
-                # 🔹 ITEM NAME
-                # ---------------------------------
-                item_obj = PharmacyItem.objects.filter(
-                    item_id=item_id,
-                    hospital_code=hospital_code,
-                    branch_code=branch_code
-                ).first()
 
-                item_name = item_obj.item_name if item_obj else item.get("item_name")
-
-                # ---------------------------------
-                # 🔹 STRICT STOCK FILTER
-                # ---------------------------------
-                stock_qs = PharmacyStock.objects.filter(
-                    hospital_code=hospital_code,
-                    branch_code=branch_code,
-                    outlet_code=outlet_code,
-                    item_id=item_id,
-                    batch_number=req_batch
-                ).order_by('-stock_id')
-
-                # ---------------------------------
-                # 🔥 FALLBACK (IF BATCH NOT FOUND)
-                # ---------------------------------
-                if not stock_qs.exists():
-                    print("⚠️ Batch not found → using available batch")
-
-                    stock_qs = PharmacyStock.objects.filter(
-                        hospital_code=hospital_code,
-                        branch_code=branch_code,
-                        outlet_code=outlet_code,
-                        item_id=item_id
-                    ).order_by('-stock_id')
-
-                    fallback_stock = stock_qs.first()
-                    if fallback_stock:
-                        req_batch = fallback_stock.batch_number
-
-                # ---------------------------------
-                # 📊 STOCK CALCULATION
-                # ---------------------------------
-                stock_agg = stock_qs.aggregate(
-                    total_stock=Sum('total_stock'),
-                    sold=Sum('sold_quantity'),
-                    transferred=Sum('transferred_out_quantity'),
-                    grn_return=Sum('grn_return_quantity')
+                item_id = item.get(
+                    "item_id"
                 )
 
-                total_stock = stock_agg.get("total_stock") or 0
-                sold        = stock_agg.get("sold")        or 0
-                transferred = stock_agg.get("transferred") or 0
-                grn_return  = stock_agg.get("grn_return")  or 0
 
-                available_stock = total_stock - sold - transferred - grn_return
 
-                # ---------------------------------
-                # 💰 TAX
-                # ---------------------------------
+                req_batch = item.get(
+                    "batch_number"
+                )
+
+
+
+                print(
+                    "Item:",
+                    item_id,
+                    "Batch:",
+                    req_batch
+                )
+
+
+
+
+                # =================================
+                # ITEM NAME
+                # =================================
+
+
+                item_obj = PharmacyItem.objects.filter(
+
+                    item_id=item_id,
+
+                    hospital_code=hospital_code,
+
+                    branch_code=branch_code
+
+                ).first()
+
+
+
+                item_name = (
+
+                    item_obj.item_name
+
+                    if item_obj
+
+                    else
+
+                    item.get("item_name")
+
+                )
+
+
+
+
+                # =================================
+                # STOCK FIND
+                # =================================
+
+
+                if req_batch:
+
+
+                    stock_qs = PharmacyStock.objects.filter(
+
+                        hospital_code=hospital_code,
+
+                        branch_code=branch_code,
+
+                        outlet_code=outlet_code,
+
+                        item_id=item_id,
+
+                        batch_number=req_batch
+
+                    ).order_by('-stock_id')
+
+
+
+                else:
+
+
+                    stock_qs = PharmacyStock.objects.filter(
+
+                        hospital_code=hospital_code,
+
+                        branch_code=branch_code,
+
+                        outlet_code=outlet_code,
+
+                        item_id=item_id
+
+                    ).order_by('-stock_id')
+
+
+
+
+
                 latest_stock = stock_qs.first()
 
-                cgst_per = convert_decimal(getattr(latest_stock, "CGST_Percentage", 0)) if latest_stock else 0
-                sgst_per = convert_decimal(getattr(latest_stock, "SGST_Percentage", 0)) if latest_stock else 0
-                cgst_amt = convert_decimal(getattr(latest_stock, "CGST_Amt",        0)) if latest_stock else 0
-                sgst_amt = convert_decimal(getattr(latest_stock, "SGST_Amt",        0)) if latest_stock else 0
 
-                # ---------------------------------
-                # ✅ FINAL MAP — preserve substitute flags from MongoDB
-                # ---------------------------------
-                mapped_items.append({
-                    **item,                        # keeps is_substitute, substituted, edit_history, etc.
-                    "item_name":       item_name,
-                    "batch_number":    req_batch,
-                    "available_stock": available_stock,
-                    "CGST_Percentage": cgst_per,
-                    "SGST_Percentage": sgst_per,
-                    "CGST_Amt":        cgst_amt,
-                    "SGST_Amt":        sgst_amt,
-                })
+
+
+                # if no batch from request
+                # take stock batch
+
+
+                if latest_stock:
+
+
+                    req_batch = latest_stock.batch_number
+
+
+
+                    print(
+
+                        "Stock Found:",
+
+                        req_batch
+
+                    )
+
+
+
+                else:
+
+
+                    print(
+
+                        "No Stock Found"
+
+                    )
+
+
+
+
+
+                # =================================
+                # AVAILABLE STOCK
+                # =================================
+
+
+                stock_agg = stock_qs.aggregate(
+
+                    total_stock=Sum(
+                        'total_stock'
+                    ),
+
+                    sold=Sum(
+                        'sold_quantity'
+                    ),
+
+                    transferred=Sum(
+                        'transferred_out_quantity'
+                    ),
+
+                    grn_return=Sum(
+                        'grn_return_quantity'
+                    )
+
+                )
+
+
+
+
+                available_stock = (
+
+                    (stock_agg.get("total_stock") or 0)
+
+                    -
+
+                    (stock_agg.get("sold") or 0)
+
+                    -
+
+                    (stock_agg.get("transferred") or 0)
+
+                    -
+
+                    (stock_agg.get("grn_return") or 0)
+
+                )
+
+
+
+
+
+                # =================================
+                # TAX + MRP
+                # =================================
+
+
+                if latest_stock:
+
+
+                    mrp = convert_decimal(
+
+                        latest_stock.mrp
+
+                    )
+
+
+                    cgst_per = convert_decimal(
+
+                        latest_stock.CGST_Percentage
+
+                    )
+
+
+                    sgst_per = convert_decimal(
+
+                        latest_stock.SGST_Percentage
+
+                    )
+
+
+                    cgst_amt = convert_decimal(
+
+                        latest_stock.CGST_Amt
+
+                    )
+
+
+                    sgst_amt = convert_decimal(
+
+                        latest_stock.SGST_Amt
+
+                    )
+
+
+                else:
+
+
+                    mrp = 0
+
+                    cgst_per = 0
+
+                    sgst_per = 0
+
+                    cgst_amt = 0
+
+                    sgst_amt = 0
+
+
+
+
+
+                # =================================
+                # FINAL ITEM
+                # =================================
+
+
+                mapped_items.append(
+
+                    {
+
+
+                        **item,
+
+
+                        "item_name":
+                        item_name,
+
+
+                        "batch_number":
+                        req_batch,
+
+
+                        "mrp":
+                        mrp,
+
+
+                        "available_stock":
+                        available_stock,
+
+
+                        "CGST_Percentage":
+                        cgst_per,
+
+
+                        "SGST_Percentage":
+                        sgst_per,
+
+
+                        "CGST_Amt":
+                        cgst_amt,
+
+
+                        "SGST_Amt":
+                        sgst_amt
+
+
+                    }
+
+                )
+
+
+
 
             bill["medicine_items"] = mapped_items
-            final_data.append(bill)
 
-        print("\n===== API SUCCESS =====")
 
-        return Response({
-            "status":  "success",
-            "count":   len(final_data),
-            "data":    final_data
-        }, status=status.HTTP_200_OK)
 
-    except Exception as e:
-        print("❌ ERROR:", str(e))
-        return Response(
-            {"error": "Something went wrong", "details": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            final_data.append(
+                bill
+            )
+
+
+
+
+
+        print(
+            "\n===== API SUCCESS ====="
         )
 
+
+
+        return Response(
+
+            {
+
+                "status":
+                "success",
+
+                "count":
+                len(final_data),
+
+                "data":
+                final_data
+
+            },
+
+            status=status.HTTP_200_OK
+
+        )
+
+
+
+    except Exception as e:
+
+
+        print(
+            "ERROR:",
+            str(e)
+        )
+
+
+        import traceback
+
+        traceback.print_exc()
+
+
+
+        return Response(
+
+            {
+
+                "error":
+                "Something went wrong",
+
+                "details":
+                str(e)
+
+            },
+
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+
+        )
+
+
+
+    
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from bson import ObjectId
@@ -2073,94 +2516,117 @@ def finalize_bill(request):
         # =====================================================
         # ✅ AUTH CONTEXT
         # =====================================================
-        hospital_code = (
-            data.get("auth-hospital-code")
-            
-        )
-
-        branch_code = (
-            data.get("auth-branch-code")
-            
-        )
-
-        outlet_code = (
-            data.get("auth-outlet-code")
-           
-        )
-
-        employee_id = (
-            data.get("auth-user-id")
-            
-        )
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+        employee_id   = data.get("auth-user-id")
 
         print("hospital_code_finalize_bill:", hospital_code)
         print("branch_code_finalize_bill:", branch_code)
         print("outlet_code_finalize_bill:", outlet_code)
 
-        # =====================================================
-        # ✅ VALIDATION
-        # =====================================================
         if not hospital_code or not branch_code or not outlet_code:
-            return Response(
-                {"error": "Missing hospital/branch/outlet code"},
-                status=400
-            )
+            return Response({"error": "Missing hospital/branch/outlet code"}, status=400)
 
         # =====================================================
         # ✅ INPUT
         # =====================================================
         Bill_id = data.get("Bill_id")
-
         if not Bill_id:
-            return Response(
-                {"error": "Bill_id is required"},
-                status=400
-            )
+            return Response({"error": "Bill_id is required"}, status=400)
 
         # =====================================================
         # ✅ FETCH BILL
         # =====================================================
         bill = bill_collection.find_one({
-            "Bill_id": Bill_id,
+            "Bill_id":      Bill_id,
             "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code
+            "branch_code":  branch_code,
+            "outlet_code":  outlet_code
         })
 
         if not bill:
-            return Response(
-                {"error": "Bill not found"},
-                status=404
-            )
+            return Response({"error": "Bill not found"}, status=404)
+
+        # =====================================================
+        # ✅ IP ADVANCE CHECK (only for ward / inpatient bills)
+        # =====================================================
+        inpatient_number = bill.get("inpatient_number")
+
+        # ✅ Use live total sent from frontend (user may have edited qty);
+        #    fall back to DB value if not provided.
+        current_bill_total = float(
+            data.get("current_total_amount")
+            or bill.get("total_amount")
+            or bill.get("net_amount")
+            or 0
+        )
+
+        if inpatient_number:
+            from ..models import Admission  # adjust import path as needed
+
+            try:
+                admission = Admission.objects.get(ipNumber=inpatient_number)
+                advance_payments = admission.advance_payments or []
+
+                # Sum all active ip_advance entries
+                ip_advance_total = sum(
+                    float(ap.get("ip_advance", 0))
+                    for ap in advance_payments
+                    if ap.get("is_advanceActive", True)
+                )
+
+                # Sum all previously billed amounts for the same inpatient_number
+                # (exclude current bill — it is not yet Billed)
+                previous_billed_cursor = bill_collection.find({
+                    "inpatient_number": inpatient_number,
+                    "hospital_code":    hospital_code,
+                    "billing_status":   "Billed",
+                    "Bill_id":          {"$ne": Bill_id}
+                })
+
+                previous_billed_total = sum(
+                    float(b.get("total_amount") or b.get("net_amount") or 0)
+                    for b in previous_billed_cursor
+                )
+
+                cumulative_total = previous_billed_total + current_bill_total
+
+                print(f"ip_advance_total: {ip_advance_total}")
+                print(f"previous_billed_total: {previous_billed_total}")
+                print(f"current_bill_total: {current_bill_total}")
+                print(f"cumulative_total: {cumulative_total}")
+
+                if cumulative_total > ip_advance_total:
+                    return Response(
+                        {"error": "Billing Exceeds From IP Advance"},
+                        status=400
+                    )
+
+            except Admission.DoesNotExist:
+                # No admission record found — allow billing to proceed
+                print(f"No admission record found for ipNumber: {inpatient_number}")
 
         # =====================================================
         # ✅ GENERATE BILL NO
         # =====================================================
         if not bill.get("bill_no"):
-
-            fy = get_financial_year()
+            fy          = get_financial_year()
             new_bill_no = get_last_oppharmacy_billno(fy)
-
-            bill_date = datetime.utcnow()
+            bill_date   = datetime.utcnow()
 
             bill_collection.update_one(
                 {
-                    "Bill_id": Bill_id,
+                    "Bill_id":       Bill_id,
                     "hospital_code": hospital_code,
-                    "branch_code": branch_code,
-                    "outlet_code": outlet_code
+                    "branch_code":   branch_code,
+                    "outlet_code":   outlet_code
                 },
-                {
-                    "$set": {
-                        "bill_no": new_bill_no,
-                        "bill_date": bill_date
-                    }
-                }
+                {"$set": {"bill_no": new_bill_no, "bill_date": bill_date}}
             )
-
         else:
             new_bill_no = bill.get("bill_no")
-            bill_date = bill.get("bill_date")
+            bill_date   = bill.get("bill_date")
 
         medicines = bill.get("medicine_particulars", [])
 
@@ -2170,7 +2636,6 @@ def finalize_bill(request):
         medicine_history = []
 
         for med in medicines:
-
             if med.get("is_deleted"):
                 continue
 
@@ -2197,116 +2662,80 @@ def finalize_bill(request):
             calculated_price = round(qty * price, 2)
 
             medicine_history.append({
-
-                "item_id": item_id,
-                "item_name": med.get("item_name"),
-                "batch_number": med.get("batch_number"),
-
-                "quantity": qty,
-
-                # ✅ PRICE
-                "price": price,
-
-                # ✅ CALCULATED PRICE
+                "item_id":          item_id,
+                "item_name":        med.get("item_name"),
+                "batch_number":     med.get("batch_number"),
+                "quantity":         qty,
+                "price":            price,
                 "calculated_price": calculated_price,
-
-                # ✅ EXTRA FIELDS
-                "discount": med.get("discount", 0),
-                "tax": med.get("tax", 0),
-                "mrp": med.get("mrp"),
-                "expiry_date": med.get("expiry_date"),
-
-                # ✅ ACTION
-                "action": "finalized",
-
-                # ✅ AUDIT
-                "edited_by": employee_id,
-                "edited_at": datetime.utcnow()
+                "discount":         med.get("discount", 0),
+                "tax":              med.get("tax", 0),
+                "mrp":              med.get("mrp"),
+                "expiry_date":      med.get("expiry_date"),
+                "action":           "finalized",
+                "edited_by":        employee_id,
+                "edited_at":        datetime.utcnow()
             })
 
         # =====================================================
         # ✅ STOCK UPDATE
         # =====================================================
         for med in medicines:
-
             if med.get("is_deleted"):
                 continue
 
             try:
                 item_id = int(med.get("item_id"))
-                batch = str(med.get("batch_number")).strip()
-                qty = float(med.get("quantity", 0))
-
+                batch   = str(med.get("batch_number")).strip()
+                qty     = float(med.get("quantity", 0))
             except Exception as e:
                 print("Skipping invalid med:", med, "Error:", e)
                 continue
 
             result = stock_collection.update_one(
                 {
-                    "item_id": item_id,
-                    "batch_number": batch,
+                    "item_id":       item_id,
+                    "batch_number":  batch,
                     "hospital_code": hospital_code,
-                    "branch_code": branch_code,
-                    "outlet_code": outlet_code
+                    "branch_code":   branch_code,
+                    "outlet_code":   outlet_code
                 },
-                {
-                    "$inc": {
-                        "blocked_quantity": qty
-                    }
-                },
+                {"$inc": {"blocked_quantity": qty}},
                 upsert=False
             )
 
             print("STOCK FILTER:", {
-                "item_id": item_id,
-                "batch_number": batch,
+                "item_id": item_id, "batch_number": batch,
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
                 "outlet_code": outlet_code
             })
-
-            print(
-                "MATCHED:",
-                result.matched_count,
-                "MODIFIED:",
-                result.modified_count
-            )
+            print("MATCHED:", result.matched_count, "MODIFIED:", result.modified_count)
 
         # =====================================================
-        # ✅ UPDATE BILL
+        # ✅ UPDATE BILL  (billing_status → Billed + is_dispatched → True)
         # =====================================================
         bill_collection.update_one(
             {
-                "Bill_id": Bill_id,
+                "Bill_id":       Bill_id,
                 "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code
+                "branch_code":   branch_code,
+                "outlet_code":   outlet_code
             },
             {
                 "$set": {
-
-                    "billing_status": "Billed",
-
-                    "lastmodified_date": datetime.utcnow(),
-
-                    # ✅ STORE PRICE VALUES INSIDE MAIN MEDICINES
+                    "billing_status":       "Billed",
+                    "is_dispatched":        True,
+                    "lastmodified_date":    datetime.utcnow(),
                     "medicine_particulars": medicine_history
                 },
-
-                # ✅ STORE EDIT HISTORY
                 "$push": {
                     "edit_history": {
-
-                        "action": "finalized",
-
+                        "action":    "finalized",
                         "edited_by": employee_id,
-
                         "edited_at": datetime.utcnow(),
-
-                        "bill_no": new_bill_no,
-
+                        "bill_no":   new_bill_no,
                         "bill_date": bill_date,
-
                         "medicines": medicine_history
                     }
                 }
@@ -2317,30 +2746,16 @@ def finalize_bill(request):
         # ✅ RESPONSE
         # =====================================================
         return Response({
-
-            "status": "success",
-
-            "message": "Bill finalized & stock updated",
-
-            "bill_no": new_bill_no,
-
+            "status":   "success",
+            "message":  "Bill finalized & stock updated",
+            "bill_no":  new_bill_no,
             "bill_date": bill_date
-
         })
 
     except Exception as e:
-
         import traceback
-
         traceback.print_exc()
-
-        return Response(
-            {"error": str(e)},
-            status=500
-        )
-
-
-
+        return Response({"error": str(e)}, status=500)
 
 
 
