@@ -95,6 +95,24 @@ urlpatterns = [
     path("chemical-composition/", inventory.chemical_composition_view, name="chemical-composition-list"),
     path("chemical-composition/<int:pk>/", inventory.chemical_composition_view, name="chemical-composition-detail"),
 
+    path('get_pharmacy_stock/', pharmacy.get_pharmacy_stock, name='get_pharmacy_stock'),
+    path('save_pharmacy_bill/', pharmacy.save_pharmacy_bill, name='save_pharmacy_bill'),
+    path('get_pharmacy_BillType/', pharmacy.get_pharmacy_BillType, name='get_pharmacy_BillType'),
+    path('get_estimate_bills/', pharmacy.get_estimate_bills, name='get_estimate_bills'),
+    path('get_last_billed_uhid/', pharmacy.get_last_billed_uhid, name='get_last_billed_uhid'),
+    path('pharmacy_view_bills/', pharmacy.pharmacy_view_bills, name='pharmacy_view_bills'),
+    path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
+    path('pharmacy_deletebill/', pharmacy.pharmacy_deletebill, name='pharmacy_deletebill'),
+    path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
+    path('patient_details/', pharmacy.patient_details, name='patient_details'),
+    path("substitute_medicine/",  pharmacy.substitute_medicine),
+    path("convert_to_bill/",      pharmacy.convert_to_bill),
+    path("finalize_bill/",   pharmacy.finalize_bill),
+    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
+    path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),
+
+    
     # GRN URLs
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
