@@ -337,9 +337,7 @@ PAGE_MAPPING = {
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD', 
-        #  r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PPD',  
-
-        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/?(\?.*)?$': 'HMS-P-BTE',
+       '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',

@@ -451,6 +451,7 @@ class PharmacyBilling(AuditModel):
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     is_dispatched = models.BooleanField(default=False)
+    is_received = models.BooleanField(default=False)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
