@@ -51,6 +51,15 @@ class StockTransferSerializer(serializers.ModelSerializer):
         model  = StockTransfer
         fields = "__all__"
 
+
+from .models import PurchaseRequisition
+class PurchaseRequisitionSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model  = PurchaseRequisition
+        fields = "__all__"
+
+
 from .models import PurchaseReturn
 class PurchaseReturnSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
