@@ -1498,6 +1498,7 @@ class SalesReturn(AuditModel):
 
 class DietMaster(AuditModel):
     id               = models.AutoField(primary_key=True)
+    item_id          = models.CharField(max_length=50, null=True, blank=True)
     diet_name        = models.CharField(max_length=100, unique=True)
     morning_items    = models.TextField(null=True, blank=True)
     afternoon_items  = models.TextField(null=True, blank=True)
@@ -1511,6 +1512,7 @@ class DietMaster(AuditModel):
 
 class DietExtraMaster(AuditModel):
     id               = models.AutoField(primary_key=True)
+    item_id          = models.CharField(max_length=50, null=True, blank=True)
     item_name        = models.CharField(max_length=100, unique=True)
     price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     is_active        = models.BooleanField(default=True)
@@ -1788,6 +1790,7 @@ class LaundryWardRequest(AuditModel):
 
 class LaundryItemMaster(AuditModel):
     id = models.IntegerField(primary_key=True)
+    item_id = models.CharField(max_length=50, null=True, blank=True)
     item_name = models.CharField(max_length=200, unique=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     is_active = models.BooleanField(default=True)
@@ -1796,6 +1799,8 @@ class LaundryItemMaster(AuditModel):
         if self.id is None:
             last = LaundryItemMaster.objects.order_by('-id').first()
             self.id = (last.id + 1) if last and last.id else 1
+        if not self.item_id:
+            self.item_id = f"L-{self.id:02d}"
         super().save(*args, **kwargs)
 
     def __str__(self):

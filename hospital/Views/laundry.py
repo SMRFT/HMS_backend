@@ -194,6 +194,7 @@ def get_laundry_items_master(request):
                     data.append({
                         'id': str(i.id),
                         'item_name': i.item_name,
+                        'item_id': i.item_id,
                         'price': str(i.price)
                     })
 
@@ -224,6 +225,7 @@ def save_laundry_item_master(request):
             item_id = data.get('id')
             item_name = data.get('item_name', '')
             price = data.get('price', 0)
+            custom_item_id = data.get('item_id', '')
             
             if not item_name:
                 return JsonResponse({'success': False, 'error': 'Item name is required'}, status=400)
@@ -232,10 +234,11 @@ def save_laundry_item_master(request):
                 item = LaundryItemMaster.objects.get(id=item_id)
                 item.item_name = item_name
                 item.price = price
+                item.item_id = custom_item_id
                 item.save()
                 msg = "Item updated successfully"
             else:
-                LaundryItemMaster.objects.create(item_name=item_name, price=price)
+                LaundryItemMaster.objects.create(item_name=item_name, price=price, item_id=custom_item_id)
                 msg = "Item created successfully"
                 
             return JsonResponse({'success': True, 'message': msg})

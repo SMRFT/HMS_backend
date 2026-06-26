@@ -959,7 +959,9 @@ def save_medicine_ward_request(request):
             hospital_code=hospital_code,
             branch_code=branch_code,
             created_by=current_user,
-            is_ward_request=True
+            is_ward_request=True,
+            room_no=data.get("room_no", data.get("roomNo", data.get("wardName", "-"))),
+            ward_request_date=timezone.now() if 'timezone' in globals() else datetime.now()
         )
         bill.save()
         
