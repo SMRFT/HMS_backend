@@ -359,6 +359,62 @@ class PurchaseReturn(AuditModel):
     def __str__(self):
         return f"{self.purchase_return_bill_no} — {self.grn_number}"
     
+
+PR_STATUS_CHOICES = [
+    ("Draft",                     "Draft"),
+    ("Approved",                  "Approved"),
+    ("Rejected",                  "Rejected"),
+    ("Purchase Order Initiated",  "Purchase Order Initiated"),
+    ("Purchased",                 "Purchased"),
+    ("Stock Restocked",           "Stock Restocked"),
+]
+ 
+ 
+class PurchaseRequisition(AuditModel):
+    pr_number = models.CharField(max_length=30, primary_key=True)   # PR/2627/000001
+ 
+    # ── Medicine items ──────────────────────────────────────────────────────
+    # Stored as a native list of dicts:
+    #   [{ "item_id": <id|None>, "medicine_name": "<name>" }, ...]
+    # Persisted as a BSON array (MongoDB via djongo) — same pattern as
+    # PurchaseOrder.items. Never json.dumps / json.loads this field.
+    items = models.JSONField(default=list, blank=True)
+ 
+    # ── Header ───────────────────────────────────────────────────────────────
+    status = models.CharField(max_length=30, default="Draft", choices=PR_STATUS_CHOICES)
+ 
+    # ── Approval ─────────────────────────────────────────────────────────────
+    approved_by   = models.CharField(max_length=100, blank=True, default="")
+    approved_date = models.DateTimeField(null=True, blank=True)
+ 
+    # ── Rejection ────────────────────────────────────────────────────────────
+    rejected_by     = models.CharField(max_length=100, blank=True, default="")
+    rejected_reason = models.TextField(blank=True, default="")
+    rejected_date   = models.DateTimeField(null=True, blank=True)
+ 
+    # ── Purchase Order Initiated ────────────────────────────────────────────
+    po_initiated_by   = models.CharField(max_length=100, blank=True, default="")
+    po_initiated_date = models.DateTimeField(null=True, blank=True)
+ 
+    # ── Purchased ────────────────────────────────────────────────────────────
+    purchased_by   = models.CharField(max_length=100, blank=True, default="")
+    purchased_date = models.DateTimeField(null=True, blank=True)
+ 
+    # ── Stock Restocked ──────────────────────────────────────────────────────
+    stock_restocked_by   = models.CharField(max_length=100, blank=True, default="")
+    stock_restocked_date = models.DateTimeField(null=True, blank=True)
+ 
+    # ── Edit audit ───────────────────────────────────────────────────────────
+    edited_by     = models.CharField(max_length=100, blank=True, default="")
+    edited_reason = models.TextField(blank=True, default="")
+    edited_date   = models.DateTimeField(null=True, blank=True)
+ 
+    def __str__(self):
+        names = ", ".join(
+            i.get("medicine_name", "") for i in (self.items or []) if isinstance(i, dict)
+        )
+        return f"{self.pr_number} — {names or '—'} [{self.status}]"
+    
     
 from django.utils import timezone
 
@@ -395,6 +451,7 @@ class PharmacyBilling(AuditModel):
     is_ward_request = models.BooleanField(default=False)
     ward_request_date = models.DateTimeField(blank=True, null=True)
     is_dispatched = models.BooleanField(default=False)
+    is_received = models.BooleanField(default=False)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
     payment_mode = models.CharField(max_length=100, blank=True, null=True)
     pending_returns = models.JSONField(default=list, blank=True, null=True)
@@ -1498,6 +1555,7 @@ class SalesReturn(AuditModel):
 
 class DietMaster(AuditModel):
     id               = models.AutoField(primary_key=True)
+    item_id          = models.CharField(max_length=50, null=True, blank=True)
     diet_name        = models.CharField(max_length=100, unique=True)
     morning_items    = models.TextField(null=True, blank=True)
     afternoon_items  = models.TextField(null=True, blank=True)
@@ -1511,6 +1569,7 @@ class DietMaster(AuditModel):
 
 class DietExtraMaster(AuditModel):
     id               = models.AutoField(primary_key=True)
+    item_id          = models.CharField(max_length=50, null=True, blank=True)
     item_name        = models.CharField(max_length=100, unique=True)
     price            = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     is_active        = models.BooleanField(default=True)
@@ -1788,6 +1847,7 @@ class LaundryWardRequest(AuditModel):
 
 class LaundryItemMaster(AuditModel):
     id = models.IntegerField(primary_key=True)
+    item_id = models.CharField(max_length=50, null=True, blank=True)
     item_name = models.CharField(max_length=200, unique=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     is_active = models.BooleanField(default=True)
@@ -1796,6 +1856,8 @@ class LaundryItemMaster(AuditModel):
         if self.id is None:
             last = LaundryItemMaster.objects.order_by('-id').first()
             self.id = (last.id + 1) if last and last.id else 1
+        if not self.item_id:
+            self.item_id = f"L-{self.id:02d}"
         super().save(*args, **kwargs)
 
     def __str__(self):

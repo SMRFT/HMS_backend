@@ -272,6 +272,7 @@ def get_diet_master(request):
             for doc in cursor:
                 data.append({
                     "diet_id":         str(doc.get('_id')),
+                    "item_id":         doc.get('item_id', ""),
                     "diet_name":       doc.get('diet_name', ""),
                     "morning_items":   doc.get('morning_items', ""),
                     "afternoon_items": doc.get('afternoon_items', ""),
@@ -394,56 +395,57 @@ def save_diet_master(request):
         price           = to_float(data.get("price", 0))
         is_active       = data.get("is_active", True)
         user_id         = data.get("auth-user-id")
+        custom_item_id  = data.get("item_id", "")
 
         if not diet_name:
             return Response({"success": False, "error": "diet_name is required."}, status=400)
 
-        try:
-            if diet_id:
-                master = DietMaster.objects.get(id=diet_id)
-            else:
-                master = DietMaster()
+        from django.conf import settings
+        import pymongo
+        from bson import ObjectId
+        import uuid
+        
+        client = pymongo.MongoClient(settings.DATABASES['default']['CLIENT']['host'])
+        db = client[settings.DATABASES['default']['NAME']]
+        col = db['hospital_dietmaster']
 
-            master.diet_name        = diet_name
-            master.morning_items    = morning_items
-            master.afternoon_items  = afternoon_items
-            master.evening_items    = evening_items
-            master.dinner_items     = dinner_items
-            master.price            = price
-            master.is_active        = is_active
-            if diet_id:
-                master.lastmodified_by = user_id
+        update_data = {
+            "diet_name": diet_name,
+            "morning_items": morning_items,
+            "afternoon_items": afternoon_items,
+            "evening_items": evening_items,
+            "dinner_items": dinner_items,
+            "price": price,
+            "is_active": is_active,
+            "hospital_code": "SH001"
+        }
+        
+        if custom_item_id:
+            update_data["item_id"] = custom_item_id
+        
+        if diet_id:
+            update_data["lastmodified_by"] = user_id
+            col.update_one({"_id": ObjectId(diet_id)}, {"$set": update_data})
+            save_id = diet_id
+        else:
+            update_data["created_by"] = user_id
+            if custom_item_id:
+                update_data["item_id"] = custom_item_id
             else:
-                master.created_by = user_id
+                last_item = col.find_one({"item_id": {"$regex": "^D-"}}, sort=[("_id", pymongo.DESCENDING)])
+                new_id = "D-01"
+                if last_item and last_item.get("item_id"):
+                    try:
+                        last_num = int(last_item["item_id"].replace("D-", ""))
+                        new_id = f"D-{last_num + 1:02d}"
+                    except:
+                        pass
+                update_data["item_id"] = new_id
                 
-            master.save()
-            save_id = str(master.pk)
-        except Exception as orm_save_error:
-            # FALLBACK: Use direct Pymongo for saving if ORM fails
-            print(f"ORM Save Error, falling back to Pymongo: {str(orm_save_error)}")
-            from django.conf import settings
-            import pymongo
-            client = pymongo.MongoClient(settings.DATABASES['default']['CLIENT']['host'])
-            db = client[settings.DATABASES['default']['NAME']]
-            col = db['hospital_dietmaster']
-            
-            from bson import ObjectId
-            update_data = {
-                "diet_name":        diet_name,
-                "morning_items":    morning_items,
-                "afternoon_items":  afternoon_items,
-                "evening_items":    evening_items,
-                "dinner_items":     dinner_items,
-                "price":            price,
-                "is_active":        is_active,
-                "hospital_code":    "SH001" 
-            }
-            if diet_id:
-                col.update_one({"_id": ObjectId(diet_id)}, {"$set": update_data})
-                save_id = diet_id
-            else:
-                res = col.insert_one(update_data)
-                save_id = str(res.inserted_id)
+            res = col.insert_one(update_data)
+            save_id = str(res.inserted_id)
+        
+        client.close()
 
         return Response({"success": True, "diet_id": save_id})
     except Exception as e:
@@ -550,6 +552,7 @@ def get_diet_extra_master(request):
             for doc in cursor:
                 data.append({
                     "extra_id":    str(doc.get('_id')),
+                    "item_id":     doc.get('item_id', ""),
                     "item_name":   doc.get('item_name', ""),
                     "price":       to_float(doc.get('price', 0)),
                     "is_active":   doc.get('is_active', True),
@@ -570,22 +573,50 @@ def save_diet_extra_master(request):
         price      = to_float(data.get("price", 0))
         is_active  = data.get("is_active", True)
         user_id    = data.get("auth-user-id")
+        custom_item_id  = data.get("item_id", "")
 
         if not item_name:
             return Response({"success": False, "error": "item_name is required."}, status=400)
 
+        from django.conf import settings
+        import pymongo
+        from bson import ObjectId
+        import uuid
+
+        client = pymongo.MongoClient(settings.DATABASES['default']['CLIENT']['host'])
+        db = client[settings.DATABASES['default']['NAME']]
+        col = db['hospital_dietextramaster']
+        
+        update_data = {
+            "item_name": item_name,
+            "price": price,
+            "is_active": is_active,
+        }
+        if custom_item_id:
+            update_data["item_id"] = custom_item_id
+
         if extra_id:
-            master = DietExtraMaster.objects.get(id=extra_id)
-            master.lastmodified_by = user_id
+            col.update_one({"_id": ObjectId(extra_id)}, {"$set": update_data})
+            save_id = extra_id
         else:
-            master = DietExtraMaster()
-            master.created_by = user_id
+            update_data["created_by"] = user_id
+            if custom_item_id:
+                update_data["item_id"] = custom_item_id
+            else:
+                last_item = col.find_one({"item_id": {"$regex": "^E-"}}, sort=[("_id", pymongo.DESCENDING)])
+                new_id = "E-01"
+                if last_item and last_item.get("item_id"):
+                    try:
+                        last_num = int(last_item["item_id"].replace("E-", ""))
+                        new_id = f"E-{last_num + 1:02d}"
+                    except:
+                        pass
+                update_data["item_id"] = new_id
+                
+            res = col.insert_one(update_data)
+            save_id = str(res.inserted_id)
 
-        master.item_name = item_name
-        master.price     = price
-        master.is_active = is_active
-        master.save()
-
-        return Response({"success": True, "extra_id": str(master.pk)})
+        client.close()
+        return Response({"success": True, "extra_id": save_id})
     except Exception as e:
         return Response({"success": False, "error": str(e)}, status=500)
