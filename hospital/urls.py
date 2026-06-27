@@ -143,7 +143,6 @@ urlpatterns = [
     path("purchase-requisition/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_list"),
     path("purchase-requisition/<str:pk>/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_detail"),
     path("purchase-requisition-action/", Purchase_Requisition.purchase_requisition_action_view, name="purchase_requisition_action"),
-
     path("pharmacy-stock-batches/", physicalstockentry.pharmacy_stock_batches_view, name="pharmacy-stock-batches"),
  
     # Physical stock entry CRUD

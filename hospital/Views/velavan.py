@@ -292,7 +292,7 @@ def list_items(request):
 
         active_items = list(items_collection.find(
             {"is_active": True},
-            {"_id": 1, "itemName": 1, "hsn": 1}
+            {"_id": 1, "itemName": 1, "hsn": 1,"category": 1}
         ))
 
         for item in active_items:
@@ -313,7 +313,7 @@ def velavan_get_items(request):
  
     items = db['hospital_velavan_items'].find(
         {"is_active": True},
-        {"_id": 1, "itemName": 1, "hsn": 1}
+        {"_id": 1, "itemName": 1, "hsn": 1, "category":1}
     )
  
     data = [
@@ -321,6 +321,7 @@ def velavan_get_items(request):
             "id": str(item["_id"]),
             "itemName": item.get("itemName", ""),
             "hsn": item.get("hsn", ""),
+            "category": item.get("category", ""),
         }
         for item in items
     ]
@@ -365,6 +366,7 @@ def velavan_create_item(request):
         item = VelavanItems.objects.create(
             itemName=item_name,
             hsn=hsn,
+            category=request.data.get("category", ""), 
             created_by=user_id,
             branch_code=branch_code,
             outlet_code=outlet_code,
@@ -378,7 +380,8 @@ def velavan_create_item(request):
                 "data": {
                     "id": str(item.id),
                     "itemName": item.itemName,
-                    "hsn": item.hsn
+                    "hsn": item.hsn,
+                    "category": item.category,
                 }
             },
             status=status.HTTP_201_CREATED

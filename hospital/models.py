@@ -1253,7 +1253,9 @@ class VelavanVendors(AuditModel):
 class VelavanItems(AuditModel):
     itemName = models.CharField(max_length=255)
     hsn = models.CharField(max_length=20, blank=True, null=True)
+    category = models.CharField(max_length=50, blank=True, default="")
     is_active = models.BooleanField(default=True)
+    
 
     class Meta:
         db_table = 'hospital_velavan_items'
