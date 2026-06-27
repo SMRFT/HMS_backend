@@ -329,6 +329,7 @@ def velavan_get_items(request):
     client.close()
     return Response({"status": "success", "data": data}, status=status.HTTP_200_OK)
 
+
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 def velavan_create_item(request):
@@ -339,8 +340,7 @@ def velavan_create_item(request):
         user_id = data.get('auth-user-id', 'system')
         outlet_code = data.get('outlet_code','OLET005')
         branch_code = data.get('auth-branch-code', 'SHB001')        
-        hospital_code = data.get('auth-hospital-code', 'SH001')
-        
+        hospital_code = data.get('auth-hospital-code', 'SH001')        
 
         if not item_name:
             return Response(
