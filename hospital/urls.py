@@ -143,7 +143,6 @@ urlpatterns = [
     path("purchase-requisition/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_list"),
     path("purchase-requisition/<str:pk>/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_detail"),
     path("purchase-requisition-action/", Purchase_Requisition.purchase_requisition_action_view, name="purchase_requisition_action"),
-
     path("pharmacy-stock-batches/", physicalstockentry.pharmacy_stock_batches_view, name="pharmacy-stock-batches"),
  
     # Physical stock entry CRUD
@@ -273,6 +272,7 @@ urlpatterns = [
     re_path(r'^patient-investigations/(?P<ip_no>[\w%/-]+)/$', summary.get_patient_investigations, name='get_patient_investigations'),
     re_path(r'^get-printsummary/(?P<ip_no>.+)/$', summary.get_printsummary, name='get_printsummary'),
     re_path(r'^patient-medicines/(?P<ip_no>.+)/$', summary.get_patient_medicines, name='get_patient_medicines'),
+    re_path(r'^patient-discharge-medicines/(?P<ip_no>.+)/$', summary.get_patient_discharge_medicines, name='get_patient_discharge_medicines'),
 
     # ICD11
     path("icd11/search/", ICD11.icd11_search, name='icd11_search'),
@@ -446,7 +446,7 @@ urlpatterns = [
     path("update_schedule_status/", surgeryschedule.update_schedule_status, name='update_schedule_status'),
     path("list_diagnosis/", surgeryschedule.list_diagnosis, name='list_diagnosis'),    
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
-    path('get_ippharmacy_stock/', surgeryschedule.get_ippharmacy_stock, name='get_ippharmacy_stock'),
+    path('get_pharmacy_items/', surgeryschedule.get_pharmacy_items, name='get_pharmacy_items'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
