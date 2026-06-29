@@ -451,6 +451,12 @@ urlpatterns = [
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
+    path("mark_ot_medicine_received/", surgeryschedule.mark_ot_medicine_received, name="mark_ot_medicine_received"),
+    path("get_implant_items/",       surgeryschedule.get_implant_items, name="get_implant_items"),
+    path("save_implant_request/",     surgeryschedule.save_implant_request, name="save_implant_request"),
+    path("get_implant_requests/",     surgeryschedule.get_implant_requests, name="get_implant_requests"),
+    path("update_implant_request/",   surgeryschedule.update_implant_request, name="update_implant_request"),
+    path("delete_implant_request/",   surgeryschedule.delete_implant_request, name="delete_implant_request"),
 
     # Diet / Food Ordering
     path("save_diet_order/", DietOrder.save_diet_order, name="save_diet_order"),

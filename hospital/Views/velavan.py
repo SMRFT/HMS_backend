@@ -32,6 +32,44 @@ from django.shortcuts import get_object_or_404
 client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
 db = client['HMS']
 
+
+def normalize_items_payload(raw_items):
+    """
+    Coerce whatever shape `items` arrives in (JSON body, multipart form,
+    or an already-stringified value) into a guaranteed Python list of
+    dicts. Handles single- and double-encoded JSON strings, which is
+    the root cause of items occasionally being stored as a JSON string
+    instead of a native array.
+    """
+    value = raw_items
+
+    # Unwrap up to 2 levels of JSON-string encoding.
+    for _ in range(2):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return []
+        else:
+            break
+
+    if not isinstance(value, list):
+        return []
+
+    # Each item itself might also have arrived as a JSON string.
+    normalized = []
+    for item in value:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        if isinstance(item, dict):
+            normalized.append(item)
+
+    return normalized
+
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def list_vendors(request):
@@ -535,7 +573,14 @@ def create_velavan_in(request):
 
         employee_id = data.get('auth-user-id') or 'Anonymous'
         total_amount = to_decimal(summary.get('totalAmount'))
-        clean_items = sanitize_items(data.get('items', []))
+
+        # ── Normalize items to a guaranteed native list BEFORE sanitizing ──
+        # This is the fix: regardless of whether `items` arrives as a
+        # list, a JSON-encoded string, or a double-encoded string, this
+        # always returns a real list of dicts. Prevents items being
+        # stored as a JSON string in Mongo.
+        normalized_items = normalize_items_payload(data.get('items', []))
+        clean_items = sanitize_items(normalized_items)
 
         # ── Duplicate check ──────────────────────────────────────────────
         vendor_id   = data.get('vendor_id') or ''
@@ -588,6 +633,24 @@ def create_velavan_in(request):
         )
 
         invoice.save()
+
+        # ── Bypass djongo's broken JSONField serialization for `items` ──
+        # djongo 1.3.6 has a known issue where JSONField values get
+        # stored as a Python repr() string (single-quoted) instead of a
+        # native BSON array, even though `clean_items` here is a proper
+        # Python list. Patch the field directly via PyMongo immediately
+        # after the ORM save, the same way other writes in this module
+        # already do successfully (e.g. update_velavan_invoice).
+        try:
+            raw_collection = db["hospital_velavaninvoice"]
+            raw_collection.update_one(
+                {"grn_number": invoice.grn_number},
+                {"$set": {"items": clean_items}}
+            )
+        except Exception as items_fix_err:
+            logger.error(
+                f"Failed to patch items via PyMongo for GRN {invoice.grn_number}: {items_fix_err}"
+            )
 
         return JsonResponse({
             'success':    True,
@@ -728,21 +791,12 @@ def list_velavan_invoices(request):
                 surgeon_name = surgeon_name_map.get(str(surgeon_id), '') if surgeon_id else ''
 
                 # ── Parse items — always return a list, never a raw string ──
-                raw_items = getattr(obj, 'items', [])
-                if isinstance(raw_items, str):
-                    try:
-                        items = json.loads(raw_items)
-                        if not isinstance(items, list):
-                            logger.warning(f"Items field for GRN {obj.grn_number} is not a valid JSON list after parsing")
-                            items = []
-                    except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON in items for GRN {obj.grn_number}")
-                        items = []
-                elif isinstance(raw_items, list):
-                    items = raw_items
-                else:
-                    logger.warning(f"Items field for GRN {obj.grn_number} is neither a string nor a list")
-                    items = []
+                # Uses the shared normalize_items_payload() helper so the
+                # same single- and double-encoding handling is applied
+                # consistently across read and write paths.
+                items = normalize_items_payload(getattr(obj, 'items', []))
+                if not items and getattr(obj, 'items', None):
+                    logger.warning(f"Items field for GRN {obj.grn_number} could not be normalized to a list")
 
                 # Convert numeric fields in items
                 for item in items:
@@ -877,14 +931,9 @@ def get_previous_purchases(request):
         matched_purchases = []
 
         for doc in documents:
-            items = doc.get('items', [])
-            if isinstance(items, str):
-                try:
-                    items = json.loads(items)
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing items for GRN {doc.get('grn_number')}: {e}")
-                    continue
-            elif not isinstance(items, list):
+            items = normalize_items_payload(doc.get('items', []))
+            if not items and doc.get('items'):
+                print(f"Error parsing items for GRN {doc.get('grn_number')}")
                 continue
 
             payment_details = doc.get('payment_details', {})
@@ -988,19 +1037,10 @@ def update_velavan_invoice(request, grn_number):
         parsed_invoice_date = parse_date_field(data.get('invoiceDate'))
         parsed_due_date     = parse_date_field(data.get('dueDate'))
 
-        # ✅ Always store items as a parsed list (not a JSON string)
-        raw_items = data.get('items', [])
-        if isinstance(raw_items, str):
-            try:
-                items_to_store = json.loads(raw_items)
-                if not isinstance(items_to_store, list):
-                    items_to_store = []
-            except json.JSONDecodeError:
-                items_to_store = []
-        elif isinstance(raw_items, list):
-            items_to_store = raw_items
-        else:
-            items_to_store = []
+        # ✅ Always store items as a parsed list (not a JSON string).
+        # normalize_items_payload() handles single- and double-encoded
+        # JSON strings, so items can never be written back as a string.
+        items_to_store = normalize_items_payload(data.get('items', []))
 
         update_data = {
             'purchase_category': data.get('purchaseCategory'),
@@ -1056,12 +1096,9 @@ def update_velavan_invoice(request, grn_number):
             updated_doc = collection.find_one({"grn_number": grn_number})
             cleaned_doc = clean_mongo_document(updated_doc)
 
-            # ✅ Also parse items in the response so the caller gets a list
-            if isinstance(cleaned_doc.get('items'), str):
-                try:
-                    cleaned_doc['items'] = json.loads(cleaned_doc['items'])
-                except (json.JSONDecodeError, TypeError):
-                    cleaned_doc['items'] = []
+            # ✅ Also normalize items in the response so the caller always
+            # gets a list, even for legacy records saved before this fix.
+            cleaned_doc['items'] = normalize_items_payload(cleaned_doc.get('items', []))
 
             return Response({
                 'status': 'success',
@@ -1119,11 +1156,9 @@ def approve_velavan_invoice(request, grn_number):
             updated_doc = collection.find_one({"grn_number": grn_number})
             cleaned_doc = clean_mongo_document(updated_doc)
 
-            if isinstance(cleaned_doc.get('items'), str):
-                try:
-                    cleaned_doc['items'] = json.loads(cleaned_doc['items'])
-                except (json.JSONDecodeError, TypeError):
-                    cleaned_doc['items'] = []
+            # ✅ Normalize items here too, so legacy string-encoded records
+            # are returned correctly to the caller as well.
+            cleaned_doc['items'] = normalize_items_payload(cleaned_doc.get('items', []))
 
             return Response({
                 'status': 'success',
