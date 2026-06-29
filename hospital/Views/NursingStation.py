@@ -1377,7 +1377,7 @@ def update_admission_status(request):
 
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def return_medicine_ward_request(request):
     import traceback
     try:
@@ -1465,7 +1465,7 @@ def return_medicine_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def get_pending_ward_returns(request):
     try:
         # Fetch bills with pending returns
