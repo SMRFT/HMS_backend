@@ -1253,7 +1253,9 @@ class VelavanVendors(AuditModel):
 class VelavanItems(AuditModel):
     itemName = models.CharField(max_length=255)
     hsn = models.CharField(max_length=20, blank=True, null=True)
+    category = models.CharField(max_length=50, blank=True, default="")
     is_active = models.BooleanField(default=True)
+    
 
     class Meta:
         db_table = 'hospital_velavan_items'
@@ -1274,8 +1276,7 @@ class Cashcountershiftdetails(AuditModel):
     ShiftStatus    = models.CharField(max_length=50, default="active")
     StartingTime   = models.DateTimeField()
     closingTime    = models.DateTimeField(null=True, blank=True)
-    date         = models.DateField(auto_now_add=True)
-    collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    date         = models.DateField(default=timezone.now)
     collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)

@@ -559,143 +559,53 @@ def convert_decimals(obj):
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
-def get_ippharmacy_stock(request):
+def get_pharmacy_items(request):
+    """
+    Search hospital_pharmacyitem by item_name prefix.
+    Returns only is_active=True, is_blocked=False items.
+    No stock/batch/MRP lookup needed here.
+    """
     try:
-        # ✅ Dynamic department (code1)
-        outlet_code = request.GET.get("outlet_code", "OLET001")
-        search = request.GET.get("search", "").strip()
+        search        = request.GET.get("search", "").strip()
         branch_code   = request.data.get("auth-branch-code",   "system")
         hospital_code = request.data.get("auth-hospital-code", "system")
 
-        # ✅ Mongo connection (code2)
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        if len(search) < 2:
+            return JsonResponse({"success": True, "data": []})
+
+        client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         mongo_db = client["HMS"]
 
         pipeline = [
-
-            # ✅ Filter at DB level (VERY IMPORTANT)
             {
                 "$match": {
-                    "outlet_code": outlet_code,
-                    "branch_code": branch_code,
-                    "hospital_code": hospital_code
-                }
-            },
-
-            # ✅ Join item master
-            {
-                "$lookup": {
-                    "from": "hospital_pharmacyitem",
-                    "localField": "item_id",
-                    "foreignField": "item_id",
-                    "as": "item_details"
-                }
-            },
-
-            {
-                "$unwind": "$item_details"
-            },
-
-            # ✅ Filter active items
-            {
-                "$match": {
-                    "item_details.is_blocked": False,
-                    "item_details.is_active": True
-                }
-            },
-
-            # ✅ 🔥 SEARCH FILTER (DB LEVEL)
-            *( [
-                {
-                    "$match": {
-                        "item_details.item_name": {
-                            "$regex": f"^{search}",   # anchored = faster
-                            "$options": "i"
-                        }
-                    }
-                }
-            ] if search else [] ),
-
-            # ✅ Calculate stock
-            {
-                "$addFields": {
-                    "available_stock": {
-                        "$add": [
-                            {
-                                "$subtract": [
-                                    {
-                                        "$subtract": [
-                                            {
-                                                "$subtract": [
-                                                    {
-                                                        "$subtract": [
-                                                            "$total_stock",
-                                                            {"$ifNull": ["$sold_quantity", 0]}
-                                                        ]
-                                                    },
-                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
-                                                ]
-                                            },
-                                            {"$ifNull": ["$grn_return_quantity", 0]}
-                                        ]
-                                    },
-                                    {"$ifNull": ["$blocked_quantity", 0]}
-                                ]
-                            },
-                            {"$ifNull": ["$sales_return_quantity", 0]}
-                        ]
-                    },
-                    "reorder_level": {
-                        "$ifNull": ["$item_details.reorder_level", 0]
+                    "branch_code":   branch_code,
+                    "hospital_code": hospital_code,
+                    "is_active":     True,
+                    "is_blocked":    False,
+                    "item_name": {
+                        "$regex":   f"^{search}",   # prefix-anchored = uses index
+                        "$options": "i"
                     }
                 }
             },
-
-            # ✅ Low stock flag
-            {
-                "$addFields": {
-                    "is_low_stock": {
-                        "$lte": ["$available_stock", "$reorder_level"]
-                    }
-                }
-            },
-
-            # ✅ Return only needed fields (performance boost)
             {
                 "$project": {
-                    "_id": 0,
-                    "item_id": 1,
-                    "batch_number": 1,
-                    "expiry_date": 1,
-                    "total_stock": 1,
-                    "mrp": 1,
-                    "available_stock": 1,
-                    "item_name": "$item_details.item_name"
+                    "_id":       0,
+                    "item_id":   1,
+                    "item_name": 1,
                 }
             },
-
-            # ✅ LIMIT (VERY IMPORTANT for search)
-            {
-                "$limit": 20
-            }
+            { "$limit": 30 }
         ]
 
-        data = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
+        data = list(mongo_db["hospital_pharmacyitem"].aggregate(pipeline))
 
-        # ✅ Convert Decimal128 → float
-        data = convert_decimals(data)
-
-        return JsonResponse({
-            "success": True,
-            "data": data
-        }, safe=False)
+        return JsonResponse({"success": True, "data": data})
 
     except Exception as e:
-        print("Error in get_oppharmacy_stock:", str(e))
-        return JsonResponse({
-            "success": False,
-            "message": str(e)
-        }, status=500)
+        print("Error in get_pharmacy_items:", str(e))
+        return JsonResponse({"success": False, "message": str(e)}, status=500)
 
 
 # ─── NEW: Medicine Packages ────────────────────────────────────────────────────

@@ -1089,7 +1089,23 @@ def collect_oppharmacy_payment(request):
         payment_details = data.get("payment_details")
 
         shiftno = data.get("shiftno")
+        cashier_id = data.get("auth-user-id")
         counter_id = data.get("counter_id")
+        if not counter_id and cashier_id:
+            from pymongo import MongoClient
+            import os
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["Global"]
+            profile_col = global_db["backend_diagnostics_profile"]
+            try:
+                query_id = str(cashier_id)
+                search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+            except:
+                search_query = {"employeeId": str(cashier_id)}
+            profile_data = profile_col.find_one(search_query)
+            emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+            if emp_cashcounter:
+                counter_id = emp_cashcounter
 
         remarks = data.get("remarks", "")
 
@@ -1109,8 +1125,6 @@ def collect_oppharmacy_payment(request):
             
            
         )
-
-        cashier_id = data.get("auth-user-id")
 
         # =====================================================
         # VALIDATIONS
