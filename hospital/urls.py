@@ -447,6 +447,7 @@ urlpatterns = [
     path("list_diagnosis/", surgeryschedule.list_diagnosis, name='list_diagnosis'),    
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
     path('get_pharmacy_items/', surgeryschedule.get_pharmacy_items, name='get_pharmacy_items'),
+    path('get_medicine_packages/', surgeryschedule.get_medicine_packages, name='get_medicine_packages'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
