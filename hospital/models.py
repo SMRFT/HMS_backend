@@ -1895,3 +1895,39 @@ class CrashCartDailyCheck(models.Model):
 
     class Meta:
         unique_together = ('date', 'nursing_station', 'item')
+
+class ImplantRequest(AuditModel): 
+    ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
+    uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    inpatient_number = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    surgeon_id = models.CharField(max_length=100, null=True, blank=True)
+    surgery_ref = models.CharField(max_length=100, null=True, blank=True)
+    items = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=20,
+        default="Pending"
+    )
+    is_active = models.BooleanField(default=True)
+ 
+    class Meta:
+        db_table = "hospital_implant_request"
+        ordering = ["-created_date"]
+ 
+    def __str__(self):
+        return f"ImplantRequest #{self.ImplantRequest_id} — {self.uhid}"
+ 
+    @classmethod
+    def _generate_next_id(cls):
+        try:
+            existing_ids = list(
+                cls.objects.all().values_list("ImplantRequest_id", flat=True)
+            )
+            numeric_ids = [i for i in existing_ids if isinstance(i, int)]
+            return (max(numeric_ids) + 1) if numeric_ids else 1
+        except Exception:
+            return 1
+ 
+    def save(self, *args, **kwargs):
+        if self.ImplantRequest_id is None:
+            self.ImplantRequest_id = self._generate_next_id()
+        super().save(*args, **kwargs)
