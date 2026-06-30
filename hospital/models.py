@@ -808,7 +808,7 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
-    age_type            = models.CharField(max_length=10)
+    age_type            = models.CharField(max_length=10, default='')
     age     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
@@ -1451,7 +1451,7 @@ class PatientDietOrder(AuditModel):
 
     meal_time            = models.CharField(max_length=20, choices=MEAL_TIME_CHOICES, default="Lunch")
 
-    extra_items          = models.TextField(default="[]")            # JSON array [{item, qty}]
+    extra_items          = models.JSONField(default=list, blank=True)            # JSON array [{item, qty}]
     attender_count       = models.IntegerField(default=0)
 
     diet_price           = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -1688,7 +1688,7 @@ class DialysisDischargeSummary(AuditModel):
     insurance = models.CharField(max_length=255, blank=True, default="")
 
     address = models.TextField()
-    date = models.DateField(auto_now_add=True)
+    date = models.DateField(default=timezone.now)
     diagnosis = models.TextField()
 
     date_of_first_dialysis = models.DateField(null=True, blank=True)
@@ -1827,6 +1827,7 @@ class LaundryWardRequest(AuditModel):
     
     # Store laundry items (e.g., {"Bedsheets": 2, "Towels": 1})
     items = models.JSONField(default=list)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     
     request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default="Normal")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
