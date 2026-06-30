@@ -91,7 +91,7 @@ def save_diet_order(request):
                             "diet_type": diet_type,
                             "special_diet_note": special_diet_note,
                             "meal_time": meal_time,
-                            "extra_items": json.dumps(extra_items),
+                            "extra_items": extra_items,
                             "attender_count": attender_count,
                             "special_instructions": special_instructions,
                             "diet_price": Decimal128(str(diet_price)),
@@ -119,7 +119,7 @@ def save_diet_order(request):
                 order.diet_type            = diet_type
                 order.special_diet_note    = special_diet_note
                 order.meal_time            = meal_time
-                order.extra_items          = json.dumps(extra_items)
+                order.extra_items          = extra_items
                 order.attender_count       = attender_count
                 order.special_instructions = special_instructions
                 order.diet_price           = diet_price
@@ -325,7 +325,7 @@ def add_extra_to_order(request):
             col.update_one(
                 {"_id": oid},
                 {"$set": {
-                    "extra_items": json.dumps(current_extras),
+                    "extra_items": current_extras,
                     "extra_items_price": new_extra_total,
                     "total_price": new_grand_total
                 }}
@@ -369,7 +369,7 @@ def update_diet_order_extras(request):
             col.update_one(
                 {"_id": oid},
                 {"$set": {
-                    "extra_items": json.dumps(extra_items),
+                    "extra_items": extra_items,
                     "extra_items_price": extra_items_price,
                     "total_price": total_price
                 }}
