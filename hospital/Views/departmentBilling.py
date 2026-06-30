@@ -1051,6 +1051,7 @@ def billing_report_view(request):
         ]
 
         refunded_test_ids = {}
+        refund_details = {}
 
         if invest_bill_nos:
             refund_docs = refund_collection.find(
@@ -1058,7 +1059,8 @@ def billing_report_view(request):
                     "investBillNo": {"$in": invest_bill_nos},
                     "is_active": True
                 },
-                {"_id": 0, "investBillNo": 1, "item": 1}
+                {"_id": 0, "investBillNo": 1, "item": 1,
+         "refundBillNo": 1, "refundBillDate": 1, "refundRemarks": 1}
             )
 
             for rdoc in refund_docs:
@@ -1081,6 +1083,16 @@ def billing_report_view(request):
                             refunded_test_ids[bill_no].add(int(tid))
                         except (ValueError, TypeError):
                             refunded_test_ids[bill_no].add(tid)
+
+                            # ← NEW: collect full refund doc per bill
+                    if bill_no not in refund_details:
+                        refund_details[bill_no] = []
+                    refund_details[bill_no].append({
+                        "refundBillNo":   rdoc.get("refundBillNo", ""),
+                        "refundBillDate": rdoc.get("refundBillDate", ""),
+                        "refundRemarks":  rdoc.get("refundRemarks", ""),
+                        "item":           items,
+                    })
 
         # ── Batch Patient Cache ────────────────────────────────
         uhids = {doc.get("uhid") for doc in data if doc.get("uhid")}
@@ -1234,6 +1246,10 @@ def billing_report_view(request):
             # Skip the bill entirely if all items have been refunded
             if not doc["item"]:
                 continue
+            # ← NEW: attach refund details to the bill
+            bill_no = doc.get("investBillNo", "")
+            doc["refunds"] = refund_details.get(bill_no, [])
+
 
             result.append(serialize_doc(doc))
 
@@ -1569,6 +1585,7 @@ def invest_refund_create(request):
             'refund_finalPrice':str(data.get('refund_finalPrice', '0.00')),
             'paymentStatus':    'Pending',
             'item':             item_data,
+            'refundRemarks': data.get('refundRemarks', ''), 
             'investBillDate':   invest_bill_date,   # use the parsed datetime object
             'created_by':       current_user,
             'branch_code':      branch_code,

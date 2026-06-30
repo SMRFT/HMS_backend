@@ -54,10 +54,10 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     try:
         from ..models import Admission, Patient, InsuranceProvider
 
-        # Step 1: ip_number → (uhid, age, age_type)
+        # Step 1: ip_number → (uhid, age, age_type, is_admitted,is_discharged)
         admissions = list(
             Admission.objects.filter(ipNumber__in=ip_numbers)
-            .values("ipNumber", "uhid", "age", "age_type")
+            .values("ipNumber", "uhid", "age", "age_type", "is_admitted", "is_discharged")
         )
         if not admissions:
             return {}
@@ -98,6 +98,8 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
                 "patient_name":  full_name,
                 "age":           adm.get("age"),
                 "age_type":      adm.get("age_type"),
+                "is_admitted":   adm.get("is_admitted"),
+                "is_discharged": adm.get("is_discharged"),
                 "gender":        pt.get("gender"),
                 "customer_type": pt.get("customer_type"),
                 "company_name":  code_to_name.get(cc) if cc else None,
@@ -221,6 +223,8 @@ def _enrich_bulk(records: list) -> list:
             "patient_name":  pt.get("patient_name"),
             "age":           pt.get("age"),
             "age_type":      pt.get("age_type"),
+            "is_admitted":   pt.get("is_admitted"),
+            "is_discharged": pt.get("is_discharged"),
             "gender":        pt.get("gender"),
             "customer_type": pt.get("customer_type"),
             "company_name":  pt.get("company_name"),
@@ -559,143 +563,53 @@ def convert_decimals(obj):
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
-def get_ippharmacy_stock(request):
+def get_pharmacy_items(request):
+    """
+    Search hospital_pharmacyitem by item_name prefix.
+    Returns only is_active=True, is_blocked=False items.
+    No stock/batch/MRP lookup needed here.
+    """
     try:
-        # ✅ Dynamic department (code1)
-        outlet_code = request.GET.get("outlet_code", "OLET001")
-        search = request.GET.get("search", "").strip()
+        search        = request.GET.get("search", "").strip()
         branch_code   = request.data.get("auth-branch-code",   "system")
         hospital_code = request.data.get("auth-hospital-code", "system")
 
-        # ✅ Mongo connection (code2)
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        if len(search) < 2:
+            return JsonResponse({"success": True, "data": []})
+
+        client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         mongo_db = client["HMS"]
 
         pipeline = [
-
-            # ✅ Filter at DB level (VERY IMPORTANT)
             {
                 "$match": {
-                    "outlet_code": outlet_code,
-                    "branch_code": branch_code,
-                    "hospital_code": hospital_code
-                }
-            },
-
-            # ✅ Join item master
-            {
-                "$lookup": {
-                    "from": "hospital_pharmacyitem",
-                    "localField": "item_id",
-                    "foreignField": "item_id",
-                    "as": "item_details"
-                }
-            },
-
-            {
-                "$unwind": "$item_details"
-            },
-
-            # ✅ Filter active items
-            {
-                "$match": {
-                    "item_details.is_blocked": False,
-                    "item_details.is_active": True
-                }
-            },
-
-            # ✅ 🔥 SEARCH FILTER (DB LEVEL)
-            *( [
-                {
-                    "$match": {
-                        "item_details.item_name": {
-                            "$regex": f"^{search}",   # anchored = faster
-                            "$options": "i"
-                        }
-                    }
-                }
-            ] if search else [] ),
-
-            # ✅ Calculate stock
-            {
-                "$addFields": {
-                    "available_stock": {
-                        "$add": [
-                            {
-                                "$subtract": [
-                                    {
-                                        "$subtract": [
-                                            {
-                                                "$subtract": [
-                                                    {
-                                                        "$subtract": [
-                                                            "$total_stock",
-                                                            {"$ifNull": ["$sold_quantity", 0]}
-                                                        ]
-                                                    },
-                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
-                                                ]
-                                            },
-                                            {"$ifNull": ["$grn_return_quantity", 0]}
-                                        ]
-                                    },
-                                    {"$ifNull": ["$blocked_quantity", 0]}
-                                ]
-                            },
-                            {"$ifNull": ["$sales_return_quantity", 0]}
-                        ]
-                    },
-                    "reorder_level": {
-                        "$ifNull": ["$item_details.reorder_level", 0]
+                    "branch_code":   branch_code,
+                    "hospital_code": hospital_code,
+                    "is_active":     True,
+                    "is_blocked":    False,
+                    "item_name": {
+                        "$regex":   f"^{search}",   # prefix-anchored = uses index
+                        "$options": "i"
                     }
                 }
             },
-
-            # ✅ Low stock flag
-            {
-                "$addFields": {
-                    "is_low_stock": {
-                        "$lte": ["$available_stock", "$reorder_level"]
-                    }
-                }
-            },
-
-            # ✅ Return only needed fields (performance boost)
             {
                 "$project": {
-                    "_id": 0,
-                    "item_id": 1,
-                    "batch_number": 1,
-                    "expiry_date": 1,
-                    "total_stock": 1,
-                    "mrp": 1,
-                    "available_stock": 1,
-                    "item_name": "$item_details.item_name"
+                    "_id":       0,
+                    "item_id":   1,
+                    "item_name": 1,
                 }
             },
-
-            # ✅ LIMIT (VERY IMPORTANT for search)
-            {
-                "$limit": 20
-            }
+            { "$limit": 30 }
         ]
 
-        data = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
+        data = list(mongo_db["hospital_pharmacyitem"].aggregate(pipeline))
 
-        # ✅ Convert Decimal128 → float
-        data = convert_decimals(data)
-
-        return JsonResponse({
-            "success": True,
-            "data": data
-        }, safe=False)
+        return JsonResponse({"success": True, "data": data})
 
     except Exception as e:
-        print("Error in get_oppharmacy_stock:", str(e))
-        return JsonResponse({
-            "success": False,
-            "message": str(e)
-        }, status=500)
+        print("Error in get_pharmacy_items:", str(e))
+        return JsonResponse({"success": False, "message": str(e)}, status=500)
 
 
 # ─── NEW: Medicine Packages ────────────────────────────────────────────────────
@@ -1392,6 +1306,430 @@ def mark_ot_medicine_received(request):
         client.close()
         return Response({"success": True, "message": "Marked as received successfully"})
 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+    
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_implant_items(request):
+    """
+    Search VelavanItems where category='IMPLANT', is_active=True,
+    itemName contains the search term (case-insensitive prefix match).
+ 
+    Query params:
+        search  — required, min 2 chars
+ 
+    Returns:
+        { success: true, data: [{ item_id, itemName, hsn, category }] }
+    """
+    try:
+        from ..models import VelavanItems  # adjust import path to your app
+ 
+        search        = request.GET.get("search", "").strip()
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+ 
+        if len(search) < 2:
+            return Response({"success": True, "data": []})
+ 
+        qs = VelavanItems.objects.filter(
+            category__iexact="IMPLANT",
+            is_active=True,
+            branch_code=branch_code,
+            hospital_code=hospital_code,
+            itemName__icontains=search,
+        ).values("id", "itemName", "hsn", "category")[:40]
+ 
+        data = [
+            {
+                "item_id":  str(item["id"]),
+                "itemName": item["itemName"],
+                "hsn":      item["hsn"] or "",
+                "category": item["category"],
+            }
+            for item in qs
+        ]
+ 
+        return Response({"success": True, "data": data})
+ 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+ 
+# ─── 2. Save new implant request ──────────────────────────────────────────────
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def save_implant_request(request):
+    """
+    Create a new ImplantRequest.
+
+    Body:
+        uhid          : patient UHID
+        ipNumber      : IP number
+        patient_name  : patient full name (stored for audit convenience)
+        surgeryRef    : surgery schedule reference_no
+        items         : [{ item_id, itemName, hsn, quantity }]
+
+    Returns:
+        { success: true, request_id: <ImplantRequest_id> }
+
+    NOTE: ImplantRequest_id is generated inside ImplantRequest.save() itself
+    (see models.py), so .create() below always returns an instance with
+    ImplantRequest_id already set — no dependency on djongo's broken
+    AutoField round-trip.
+
+    NOTE: djongo's JSONField has been confirmed to store Python
+    lists/dicts as a JSON-encoded STRING in Mongo (visible as
+    "items": "[{...}]" with escaped quotes) instead of a native BSON
+    array — i.e. it's effectively behaving like a TextField for this
+    field type on this djongo version. To guarantee `items` is stored
+    as a true array, we create the record via the ORM first (everything
+    else is fine through djongo), then immediately overwrite just the
+    `items` field with a raw pymongo update_one(), which writes native
+    BSON and bypasses djongo's JSONField serialization entirely.
+    """
+    try:
+        from ..models import ImplantRequest  # adjust import path to your app
+
+        data          = request.data
+        current_user  = data.get("auth-user-id",       "system")
+        branch_code   = data.get("auth-branch-code",   "system")
+        hospital_code = data.get("auth-hospital-code", "system")
+
+        items = data.get("items", [])
+        if not items:
+            return Response(
+                {"success": False, "message": "At least one item is required"},
+                status=400,
+            )
+
+        # Strip any stray fields; keep only what we need
+        ALLOWED_ITEM_FIELDS = {"item_id", "itemName", "hsn", "quantity"}
+        cleaned_items = [
+            {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
+            for item in items
+        ]
+        for ci in cleaned_items:
+            # Defensively normalize item_id — a missing/None value must
+            # become "" here, never the literal string "None".
+            item_id = ci.get("item_id")
+            ci["item_id"] = str(item_id) if item_id else ""
+            ci.setdefault("hsn", "")
+            try:
+                ci["quantity"] = int(ci.get("quantity", 1))
+            except (ValueError, TypeError):
+                ci["quantity"] = 1
+
+        implant_req = ImplantRequest.objects.create(
+            branch_code      = branch_code,
+            hospital_code    = hospital_code,
+            outlet_code      = data.get("outlet_code", ""),
+            created_by       = current_user,
+            created_date     = timezone.now(),
+            uhid             = data.get("uhid", ""),
+            inpatient_number = data.get("ipNumber", ""),
+            surgeon_id       = data.get("surgeon_id", ""),
+            surgery_ref      = data.get("surgeryRef", ""),
+            items            = [],  # set below via raw pymongo write
+            status           = "Pending",
+            is_active        = True,
+        )
+
+        # Overwrite `items` with a raw pymongo write so it's stored as a
+        # native array, bypassing djongo's JSONField stringification.
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": implant_req.ImplantRequest_id},
+            {"$set": {"items": cleaned_items}},
+        )
+
+        return Response(
+            {
+                "success":    True,
+                "message":    "Implant request saved successfully",
+                "request_id": implant_req.ImplantRequest_id,
+            },
+            status=201,
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
+# ─── 3. List implant requests for a patient ───────────────────────────────────
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_implant_requests(request):
+    """
+    Fetch all active implant requests for a given UHID / IP number.
+
+    Query params:
+        uhid      — required
+        ipNumber  — optional additional filter
+
+    Returns:
+        { success: true, count: N, data: [...] }
+
+    NOTE: djongo (1.3.6) cannot translate a bare-column BooleanField filter
+    (e.g. .filter(is_active=True), which Django compiles to the SQL form
+    `WHERE "table"."is_active"` rather than `WHERE "table"."is_active" = true`)
+    into a Mongo query — its sql2mongo WHERE-clause parser crashes with
+    `AttributeError: 'NoneType' object has no attribute 'lhs'` because it
+    expects every WHERE token to be part of a binary lhs/op/rhs comparison,
+    and a bare boolean column reference has no operator.
+    This happens even with a SINGLE boolean filter and no other conditions,
+    so any .filter(...) call that includes a BooleanField kwarg is unsafe on
+    this djongo version. We avoid the issue entirely by not filtering in the
+    ORM at all — fetch everything with .all() and do all filtering (uhid,
+    ipNumber, is_active) and sorting in Python.
+    """
+    try:
+        from ..models import ImplantRequest  # adjust import path to your app
+
+        uhid      = request.query_params.get("uhid", "").strip()
+        ip_number = request.query_params.get("ipNumber", "").strip()
+
+        if not uhid:
+            return Response(
+                {"success": False, "error": "UHID is required"},
+                status=400,
+            )
+
+        def _normalize_items(raw):
+            """
+            `items` should be a native list (post-fix records use a raw
+            pymongo write to guarantee this). Older records saved before
+            this fix may still have `items` stored as a JSON-encoded
+            string by djongo's JSONField — handle both so old and new
+            documents read back correctly.
+            """
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        # No .filter(...) at all — djongo 1.3.6 cannot safely translate even
+        # a single BooleanField filter. Fetch everything and filter in Python.
+        qs = ImplantRequest.objects.all()
+
+        records = [
+            rec for rec in qs
+            if rec.is_active
+            and rec.uhid == uhid
+            and (not ip_number or rec.inpatient_number == ip_number)
+        ]
+        records.sort(
+            key=lambda r: r.created_date or timezone.now(),
+            reverse=True,
+        )
+
+        ist = pytz.timezone("Asia/Kolkata")
+
+        formatted = []
+        for rec in records:
+            created = rec.created_date
+            if created and created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            if created:
+                created = created.astimezone(ist)
+
+            formatted.append(
+                {
+                    "request_id":  rec.ImplantRequest_id,
+                    "uhid":        rec.uhid,
+                    "ipNumber":    rec.inpatient_number,
+                    "surgeryRef":  rec.surgery_ref or "",
+                    "items":       _normalize_items(rec.items),
+                    "status":      rec.status,
+                    "reqDate":     created.strftime("%d-%m-%Y") if created else "",
+                    "reqTime":     created.strftime("%I:%M %p") if created else "",
+                    "created_by":  rec.created_by or "",
+                    "branch_code": rec.branch_code or "",
+                }
+            )
+
+        return Response({"success": True, "count": len(formatted), "data": formatted})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
+# ─── 4. Update implant request (Pending only) ─────────────────────────────────
+@api_view(["PUT"])
+@permission_classes([HasRoleAndDataPermission])
+def update_implant_request(request):
+    """
+    Update items on an existing ImplantRequest.
+    Only allowed when status == 'Pending'.
+
+    Body:
+        request_id  : ImplantRequest_id
+        items       : [{ item_id, itemName, hsn, quantity }]
+
+    Returns:
+        { success: true }
+    """
+    try:
+        from ..models import ImplantRequest  # adjust import path to your app
+
+        data         = request.data
+        current_user = data.get("auth-user-id", "system")
+        request_id   = data.get("request_id")
+
+        if not request_id:
+            return Response(
+                {"success": False, "message": "request_id is required"},
+                status=400,
+            )
+
+        try:
+            request_id = int(request_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"success": False, "message": "request_id must be a number"},
+                status=400,
+            )
+
+        # Single-field filter to stay djongo-safe; check is_active in Python.
+        implant_req = ImplantRequest.objects.filter(
+            ImplantRequest_id=request_id
+        ).first()
+
+        if not implant_req or not implant_req.is_active:
+            return Response(
+                {"success": False, "message": "Record not found"},
+                status=404,
+            )
+
+        if implant_req.status != "Pending":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Cannot edit a request with status '{implant_req.status}'",
+                },
+                status=400,
+            )
+
+        items = data.get("items", [])
+        if not items:
+            return Response(
+                {"success": False, "message": "At least one item is required"},
+                status=400,
+            )
+
+        ALLOWED_ITEM_FIELDS = {"item_id", "itemName", "hsn", "quantity"}
+        cleaned_items = [
+            {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
+            for item in items
+        ]
+        for ci in cleaned_items:
+            # Defensively normalize item_id — a missing/None value must
+            # become "" here, never the literal string "None".
+            item_id = ci.get("item_id")
+            ci["item_id"] = str(item_id) if item_id else ""
+            ci.setdefault("hsn", "")
+            try:
+                ci["quantity"] = int(ci.get("quantity", 1))
+            except (ValueError, TypeError):
+                ci["quantity"] = 1
+
+        implant_req.lastmodified_by   = current_user
+        implant_req.lastmodified_date = timezone.now()
+        implant_req.save()
+
+        # Write `items` via raw pymongo so it's stored as a native array,
+        # bypassing djongo's JSONField stringification (same reasoning as
+        # save_implant_request above).
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": request_id},
+            {"$set": {"items": cleaned_items}},
+        )
+
+        return Response(
+            {"success": True, "message": "Implant request updated successfully"}
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
+@api_view(["PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+def delete_implant_request(request):
+    try:
+        from ..models import ImplantRequest  # adjust import path to your app
+ 
+        data         = request.data
+        current_user = data.get("auth-user-id", "system")
+        request_id   = data.get("request_id")
+ 
+        if not request_id:
+            return Response(
+                {"success": False, "message": "request_id is required"},
+                status=400,
+            )
+ 
+        try:
+            request_id = int(request_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"success": False, "message": "request_id must be a number"},
+                status=400,
+            )
+ 
+        # Single-field filter to stay djongo-safe; check is_active in Python.
+        implant_req = ImplantRequest.objects.filter(
+            ImplantRequest_id=request_id
+        ).first()
+ 
+        if not implant_req or not implant_req.is_active:
+            return Response(
+                {"success": False, "message": "Record not found"},
+                status=404,
+            )
+ 
+        if implant_req.status != "Pending":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Cannot delete a request with status '{implant_req.status}'",
+                },
+                status=400,
+            )
+ 
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": request_id},
+            {
+                "$set": {
+                    "is_active":         False,
+                    "lastmodified_by":   current_user,
+                    "lastmodified_date": timezone.now(),
+                }
+            },
+        )
+ 
+        return Response(
+            {"success": True, "message": "Implant request deleted successfully"}
+        )
+ 
     except Exception as e:
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},

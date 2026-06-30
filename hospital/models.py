@@ -808,7 +808,7 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
-    age_type            = models.CharField(max_length=10)
+    age_type            = models.CharField(max_length=10, default='')
     age     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
@@ -1253,7 +1253,9 @@ class VelavanVendors(AuditModel):
 class VelavanItems(AuditModel):
     itemName = models.CharField(max_length=255)
     hsn = models.CharField(max_length=20, blank=True, null=True)
+    category = models.CharField(max_length=50, blank=True, default="")
     is_active = models.BooleanField(default=True)
+    
 
     class Meta:
         db_table = 'hospital_velavan_items'
@@ -1274,8 +1276,7 @@ class Cashcountershiftdetails(AuditModel):
     ShiftStatus    = models.CharField(max_length=50, default="active")
     StartingTime   = models.DateTimeField()
     closingTime    = models.DateTimeField(null=True, blank=True)
-    date         = models.DateField(auto_now_add=True)
-    collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    date         = models.DateField(default=timezone.now)
     collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -1451,7 +1452,7 @@ class PatientDietOrder(AuditModel):
 
     meal_time            = models.CharField(max_length=20, choices=MEAL_TIME_CHOICES, default="Lunch")
 
-    extra_items          = models.TextField(default="[]")            # JSON array [{item, qty}]
+    extra_items          = models.JSONField(default=list, blank=True)            # JSON array [{item, qty}]
     attender_count       = models.IntegerField(default=0)
 
     diet_price           = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -1688,7 +1689,7 @@ class DialysisDischargeSummary(AuditModel):
     insurance = models.CharField(max_length=255, blank=True, default="")
 
     address = models.TextField()
-    date = models.DateField(auto_now_add=True)
+    date = models.DateField(default=timezone.now)
     diagnosis = models.TextField()
 
     date_of_first_dialysis = models.DateField(null=True, blank=True)
@@ -1827,6 +1828,7 @@ class LaundryWardRequest(AuditModel):
     
     # Store laundry items (e.g., {"Bedsheets": 2, "Towels": 1})
     items = models.JSONField(default=list)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     
     request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default="Normal")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
@@ -1894,3 +1896,39 @@ class CrashCartDailyCheck(models.Model):
 
     class Meta:
         unique_together = ('date', 'nursing_station', 'item')
+
+class ImplantRequest(AuditModel): 
+    ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
+    uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    inpatient_number = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    surgeon_id = models.CharField(max_length=100, null=True, blank=True)
+    surgery_ref = models.CharField(max_length=100, null=True, blank=True)
+    items = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=20,
+        default="Pending"
+    )
+    is_active = models.BooleanField(default=True)
+ 
+    class Meta:
+        db_table = "hospital_implant_request"
+        ordering = ["-created_date"]
+ 
+    def __str__(self):
+        return f"ImplantRequest #{self.ImplantRequest_id} — {self.uhid}"
+ 
+    @classmethod
+    def _generate_next_id(cls):
+        try:
+            existing_ids = list(
+                cls.objects.all().values_list("ImplantRequest_id", flat=True)
+            )
+            numeric_ids = [i for i in existing_ids if isinstance(i, int)]
+            return (max(numeric_ids) + 1) if numeric_ids else 1
+        except Exception:
+            return 1
+ 
+    def save(self, *args, **kwargs):
+        if self.ImplantRequest_id is None:
+            self.ImplantRequest_id = self._generate_next_id()
+        super().save(*args, **kwargs)

@@ -197,6 +197,14 @@ def validate_active_shift(shiftno, counter_id, outlet_code, hospital_code, branc
 # =====================================================
 
 def format_shift_response(shift):
+    from ..models import CashCounter
+    counter_name = shift.CashCounter
+    try:
+        cc = CashCounter.objects.filter(counter_id=shift.CashCounter).first()
+        if cc:
+            counter_name = cc.counter_name
+    except:
+        pass
 
     return {
 
@@ -205,6 +213,8 @@ def format_shift_response(shift):
         "CashierID": shift.CashierID,
 
         "CashCounter": shift.CashCounter,
+
+        "CashCounterName": counter_name,
 
         "OpeningBalance": convert_decimal(shift.OpeningBalance),
 
@@ -281,7 +291,25 @@ def cash_counter_shiftdetails(request):
     # :white_check_mark: CREATE SHIFT (POST)
     # =====================================================
     if request.method == "POST":
-        cash_counter = data.get("CashCounter")
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db = client["Global"]
+        profile_col = global_db["backend_diagnostics_profile"]
+        try:
+            query_id = str(employee_id)
+            search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+        except:
+            search_query = {"employeeId": str(employee_id)}
+            
+        profile_data = profile_col.find_one(search_query)
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+        
+        if not emp_cashcounter:
+            return Response({
+                "success": False,
+                "message": "Cashcounter is not mapped in the employee's profile. Please assign a cash counter to the profile first."
+            }, status=400)
+            
+        cash_counter = emp_cashcounter
         
         # ✅ ACCESS CONTROL: Check if there is already an active shift for this outlet & counter
         query = {
@@ -298,7 +326,7 @@ def cash_counter_shiftdetails(request):
             if existing_active.CashierID != employee_id:
                 return Response({
                     "success": False,
-                    "message": f"Outlet {cash_counter} is already being used by another cashier ({existing_active.CashierID}). Please close that shift first."
+                    "message": f"Cash Counter {cash_counter} is already being used by another cashier ({existing_active.CashierID}). Please close that shift first."
                 }, status=400)
             else:
                 return Response({
@@ -558,14 +586,34 @@ def calculate_shift_collection(shift_no):
             results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 5. IP Advance (from Admission model's advance_payments)
-        admissions = list(db["hospital_admission"].find({"advance_payments.shiftno": shift_no}))
-        for adm in admissions:
+        native_adms = list(db["hospital_admission"].find({"advance_payments.shiftno": shift_no}))
+        active_adms = list(db["hospital_admission"].find({"is_admitted": True}))
+        adms_dict = {str(a["_id"]): a for a in (native_adms + active_adms)}
+        
+        counted_advance_ids = set()
+        for adm in adms_dict.values():
             payments = adm.get("advance_payments", [])
-            for p in payments:
-                if p.get("shiftno") == shift_no and p.get("is_advanceActive"):
-                    amt = to_float(p.get("advance_amount", 0))
-                    results["ip_advance"] += amt
-                    results["total_collection"] += amt
+            if isinstance(payments, str):
+                import json
+                import ast
+                try:
+                    payments = json.loads(payments)
+                except:
+                    try:
+                        payments = ast.literal_eval(payments)
+                    except:
+                        payments = []
+            if isinstance(payments, list):
+                for p in payments:
+                    if isinstance(p, dict) and p.get("shiftno") == shift_no:
+                        bill_no = p.get("bill_no")
+                        if bill_no and bill_no not in counted_advance_ids:
+                            # Only count collected (Paid) advances
+                            if str(p.get("status", "")).lower() == "paid":
+                                amt = to_float(p.get("advance_amount", 0))
+                                results["ip_advance"] += amt
+                                results["total_collection"] += amt
+                                counted_advance_ids.add(bill_no)
 
         # 6. Sales Return
         returns = list(db["hospital_salesreturn"].find({"shiftno": shift_no}))
@@ -685,10 +733,48 @@ def recalculate_and_update_shift_details(shift_no):
 def get_active_shift(request):
     try:
         data = request.data
-        cash_counter = data.get("CashCounter") or request.META.get("HTTP_OUTLET_CODE")
         hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
         branch_code = data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE")
         outlet_code = data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE")
+        employee_id = data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID")
+        
+        # Get cashcounter from employee profile
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db = client["Global"]
+        profile_col = global_db["backend_diagnostics_profile"]
+        
+        try:
+            query_id = str(employee_id)
+            search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+        except:
+            search_query = {"employeeId": str(employee_id)}
+            
+        profile_data = profile_col.find_one(search_query)
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+        
+        if emp_cashcounter:
+            cash_counter = emp_cashcounter
+        else:
+            cash_counter = data.get("CashCounter") or request.META.get("HTTP_OUTLET_CODE")
+
+        # Fetch cash counter details
+        cashcounter_details = None
+        if cash_counter:
+            hms_db = client["HMS"]
+            cashcounter_col = hms_db["hospital_cashcounter"]
+            cashcounter_doc = cashcounter_col.find_one({
+                "counter_id": cash_counter,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet": outlet_code,
+                "is_active": True
+            })
+            if cashcounter_doc:
+                cashcounter_details = {
+                    "counter_id": cashcounter_doc.get("counter_id"),
+                    "counter_name": cashcounter_doc.get("counter_name"),
+                    "outlet": cashcounter_doc.get("outlet")
+                }
         
         today = timezone.now().date()
         # Bypassing Djongo ORM for the active shift query to avoid SQLDecodeError
@@ -705,10 +791,31 @@ def get_active_shift(request):
         shift = get_shift_pymongo(query, "StartingTime")
 
         if not shift:
+            # Check if there is an active shift for this CashierID where CashCounter might be the old outlet_code
+            fallback_query = {
+                "CashierID": employee_id,
+                "SelectedOutlet": outlet_code,
+                "ShiftStatus": "active",
+                "is_active": True,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code
+            }
+            hms_db = client["HMS"]
+            shift_col = hms_db["hospital_cashcountershiftdetails"]
+            fallback_doc = shift_col.find_one(fallback_query)
+            if fallback_doc:
+                shift_col.update_one(
+                    {"_id": fallback_doc["_id"]},
+                    {"$set": {"CashCounter": cash_counter, "lastmodified_date": timezone.now()}}
+                )
+                shift = get_shift_pymongo(query, "StartingTime")
+
+        if not shift:
             expected = get_previous_shift_balance(cash_counter, outlet_code, hospital_code, branch_code)
             return Response({
                 "success": False, "message": "No active shift found",
-                "expected_opening": expected, "default_petty_cash": 1000.0, "is_active": False
+                "expected_opening": expected, "default_petty_cash": 1000.0, "is_active": False,
+                "cashcounter": cashcounter_details
             })
 
         # Using global safe_dec
@@ -717,6 +824,7 @@ def get_active_shift(request):
         totals = calculate_shift_collection(shift.shiftno)
         shift.collected_Amount = safe_dec(totals['total_collection'])
         shift.SalesReturnAmount = safe_dec(totals['sales_return'])
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
@@ -728,7 +836,11 @@ def get_active_shift(request):
 
         shift.save()
         
-        return Response({"success": True, "data": format_shift_response(shift)})
+        return Response({
+            "success": True, 
+            "data": format_shift_response(shift),
+            "cashcounter": cashcounter_details
+        })
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -920,7 +1032,23 @@ def post_receipt_payments(request):
 
         amount       = data.get("amount")
 
-        cash_counter = data.get("CashCounter") or request.META.get("HTTP_OUTLET_CODE")
+        # Resolve cash counter from employee profile
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db = client["Global"]
+        profile_col = global_db["backend_diagnostics_profile"]
+        try:
+            query_id = str(employee_id)
+            search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+        except:
+            search_query = {"employeeId": str(employee_id)}
+            
+        profile_data = profile_col.find_one(search_query)
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+        
+        if emp_cashcounter:
+            cash_counter = emp_cashcounter
+        else:
+            cash_counter = data.get("CashCounter") or request.META.get("HTTP_OUTLET_CODE")
 
         shiftno      = data.get("shiftno")
 
@@ -1702,6 +1830,19 @@ def update_mainblock_pendingbills(request):
         shiftno = (data.get("shiftno"))
 
         counter_id = data.get("counter_id")
+        if not counter_id and employee_id:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["Global"]
+            profile_col = global_db["backend_diagnostics_profile"]
+            try:
+                query_id = str(employee_id)
+                search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+            except:
+                search_query = {"employeeId": str(employee_id)}
+            profile_data = profile_col.find_one(search_query)
+            emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+            if emp_cashcounter:
+                counter_id = emp_cashcounter
 
         remarks = data.get("remarks", "")
 
@@ -2443,6 +2584,20 @@ def collectpayment_return_bills(request):
         return_bill_no  = data.get("return_bill_no")     # return/refund bill (e.g. "2627/000003")
         bill_type       = data.get("bill_type")          # int, from the bill row
         counter_id      = data.get("counter_id")
+        if not counter_id and cashier_id:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["Global"]
+            profile_col = global_db["backend_diagnostics_profile"]
+            try:
+                query_id = str(cashier_id)
+                search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+            except:
+                search_query = {"employeeId": str(cashier_id)}
+            profile_data = profile_col.find_one(search_query)
+            emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+            if emp_cashcounter:
+                counter_id = emp_cashcounter
+
         shiftno         = data.get("shiftno", "")
         payment_details = data.get("payment_details")
         remarks         = data.get("remarks", "")
@@ -2863,6 +3018,21 @@ def ipadvance_bills(request):
                 else:
                     patient_name = None
 
+                # Safe parse of advance_payments
+                raw_ap = admission.advance_payments or []
+                if isinstance(raw_ap, str):
+                    import json
+                    import ast
+                    try:
+                        raw_ap = json.loads(raw_ap)
+                    except:
+                        try:
+                            raw_ap = ast.literal_eval(raw_ap)
+                        except:
+                            raw_ap = []
+                if not isinstance(raw_ap, list):
+                    raw_ap = []
+
                 admission_data = {
                     "ipNumber": admission.ipNumber,
                     "ipserial_number": admission.ipserial_number,
@@ -2899,7 +3069,7 @@ def ipadvance_bills(request):
                             else payment.get(" bill_type")
                         }
 
-                        for payment in (admission.advance_payments or [])
+                        for payment in raw_ap
                         if isinstance(payment, dict)
                     ]
                 }
@@ -2967,7 +3137,16 @@ def ipadvance_bills(request):
                 )
 
             payments = admission.advance_payments or []
-
+            if isinstance(payments, str):
+                import json
+                import ast
+                try:
+                    payments = json.loads(payments)
+                except:
+                    try:
+                        payments = ast.literal_eval(payments)
+                    except:
+                        payments = []
             if not isinstance(payments, list):
                 payments = []
 
@@ -2992,7 +3171,7 @@ def ipadvance_bills(request):
                             p["status"] = "Paid"
                             p["payment_details"] = payment_details
                             p["cashier_id"] = cashier_id
-                            p["paid_datetime"] = paid_datetime
+                            p["paid_datetime"] = paid_datetime.isoformat()
                             p["shiftno"] = shiftno
 
                             just_paid_payments.append(p)
@@ -3006,7 +3185,7 @@ def ipadvance_bills(request):
                         p["status"] = "Paid"
                         p["payment_details"] = payment_details
                         p["cashier_id"] = cashier_id
-                        p["paid_datetime"] = paid_datetime
+                        p["paid_datetime"] = paid_datetime.isoformat()
                         p["shiftno"] = shiftno
 
                         just_paid_payments.append(p)
@@ -3018,11 +3197,57 @@ def ipadvance_bills(request):
                     status=status.HTTP_200_OK
                 )
 
-            # ✅ SAVE ADMISSION
+            # ✅ SAVE ADMISSION using PyMongo directly to bypass Djongo JSONField string serialization
+            # Safe parse room_details and roomShitingDetails if they are strings to ensure they are stored as native object arrays
+            room_details = admission.room_details or []
+            if isinstance(room_details, str):
+                import json
+                import ast
+                try:
+                    room_details = json.loads(room_details)
+                except:
+                    try:
+                        room_details = ast.literal_eval(room_details)
+                    except:
+                        room_details = []
+            
+            roomShitingDetails = admission.roomShitingDetails or []
+            if isinstance(roomShitingDetails, str):
+                import json
+                import ast
+                try:
+                    roomShitingDetails = json.loads(roomShitingDetails)
+                except:
+                    try:
+                        roomShitingDetails = ast.literal_eval(roomShitingDetails)
+                    except:
+                        roomShitingDetails = []
+
+            from pymongo import MongoClient
+            import os
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            admission_col = db["hospital_admission"]
+
+            # Save via Django for model lifecycle, signals, and validation
+            admission.room_details = room_details
+            admission.roomShitingDetails = roomShitingDetails
             admission.advance_payments = payments
             admission.lastmodified_by = cashier_id
             admission.lastmodified_date = paid_datetime
             admission.save()
+
+            # Force writing the native object arrays to Mongo via PyMongo to prevent Djongo stringification
+            admission_col.update_one(
+                {"ipNumber": ipNumber, "hospital_code": hospital_code, "branch_code": branch_code},
+                {"$set": {
+                    "room_details": room_details,
+                    "roomShitingDetails": roomShitingDetails,
+                    "advance_payments": payments,
+                    "lastmodified_by": cashier_id,
+                    "lastmodified_date": paid_datetime
+                }}
+            )
 
             # =========================================
             # ✅ SAVE CashCounterCollection RECORDS

@@ -160,9 +160,8 @@ def get_summaries(request):
 def create_summary(request):
     data = request.data.copy()
 
-    # Strip time from date — model is DateField, frontend sends full ISO datetime
     if data.get('date'):
-        data['date'] = str(data['date'])[:10]  # "2026-02-23T07:42:44.007Z" → "2026-02-23"
+        data['date'] = str(data['date'])[:10]
 
     serializer = SummarySerializer(data=data)
     if serializer.is_valid():
@@ -174,16 +173,50 @@ def create_summary(request):
                 status=status.HTTP_409_CONFLICT
             )
 
-        created_by = request.data.get('auth-user-id', "system")
-        branch_code = request.data.get('auth-branch-code', "system")
+        created_by    = request.data.get('auth-user-id', "system")
+        branch_code   = request.data.get('auth-branch-code', "system")
         hospital_code = request.data.get('auth-hospital-code', "system")
 
-        instance = serializer.save(            
+        instance = serializer.save(
             branch_code=branch_code,
             hospital_code=hospital_code,
             created_by=created_by,
             created_date=datetime.utcnow()
         )
+
+        # ── After ORM save, fix fieldsData in MongoDB ──────────────────────
+        # The ORM serializes fieldsData as a JSON string; patch the document
+        # directly so it's stored as a native array (like medicine_particulars).
+        raw_fields = request.data.get('fieldsData', [])
+        if isinstance(raw_fields, str):
+            try:
+                raw_fields = json.loads(raw_fields)
+            except (json.JSONDecodeError, ValueError):
+                raw_fields = []
+
+        # Validate shape and filter blanks
+        if isinstance(raw_fields, list):
+            fields_array = [
+                f for f in raw_fields
+                if isinstance(f, dict)
+                and f.get('key') not in (None, '', 'undefined')
+                and f.get('value', '') != ''
+            ]
+        else:
+            fields_array = []
+
+        if fields_array:
+            try:
+                client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                db = client['HMS']
+                db['hospital_summary'].update_one(
+                    {"ipNo": ip_no},
+                    {"$set": {"fieldsData": fields_array}}
+                )
+                client.close()
+            except Exception as e:
+                # Non-fatal — summary was created, fieldsData just needs fixing
+                logger.warning(f"fieldsData patch failed for {ip_no}: {e}")
 
         return Response(
             {"message": "Summary created successfully", "ipNo": instance.ipNo},
@@ -191,6 +224,7 @@ def create_summary(request):
         )
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 @require_http_methods(["GET"])
 @permission_classes([HasRoleAndDataPermission])
@@ -453,6 +487,13 @@ def get_editsummary(request, ip_no):
                 summary['gender']  = patient.get('gender', '')
                 summary['address'] = full_address
 
+        # ── fieldsData: hand back exactly as stored ──────────────────────────
+        # Stored natively in Mongo as an array: [{"key": "...", "value": "..."}, ...]
+        # (see update_summary_fields). The frontend's normalizeFieldsData()
+        # tolerates a JSON-string-encoded array or an older object shape too,
+        # for summaries saved before this change, so we don't need to convert
+        # anything here — just pass the raw value through.
+
         return Response(summary, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -492,9 +533,37 @@ def update_summary_fields(request, ip_no):
         if 'fieldsData' not in data or not data['fieldsData']:
             return Response({"error": "No fieldsData provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Ensure fieldsData is stored as JSON string
-        if isinstance(data['fieldsData'], dict):
-            data['fieldsData'] = json.dumps(data['fieldsData'])
+        # ── fieldsData is now a native array of {"key": ..., "value": ...} ──
+        # objects (previously this was a plain {key: value} dict, stored as
+        # a JSON string). We validate the shape here, but no longer call
+        # json.dumps() on it — Mongo/pymongo stores a list of dicts directly,
+        # so the document itself contains a real array, not a string holding
+        # escaped JSON. get_editsummary/get_printsummary hand it back as-is.
+        fields_data = data['fieldsData']
+
+        # Accept a JSON string too, in case the caller already serialized it
+        # (e.g. an older frontend build) — we still normalize it to a native
+        # list before saving so the DB never stores a stringified array.
+        if isinstance(fields_data, str):
+            try:
+                fields_data = json.loads(fields_data)
+            except json.JSONDecodeError as e:
+                return Response({"error": f"Invalid JSON in fieldsData: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not isinstance(fields_data, list):
+            return Response(
+                {"error": "fieldsData must be a list of {key, value} objects"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        for entry in fields_data:
+            if not isinstance(entry, dict) or 'key' not in entry or 'value' not in entry:
+                return Response(
+                    {"error": "Each fieldsData entry must be an object with 'key' and 'value'"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        data['fieldsData'] = fields_data
 
         def to_date(value):
             """'YYYY-MM-DD' string → datetime at midnight UTC (for DateField)."""
@@ -571,6 +640,27 @@ def get_printsummary(request, ip_no):
                 status=404
             )
         summary['_id'] = str(summary['_id'])
+
+        # ── STEP 1b: fieldsData — hand back exactly as stored ─────────────────
+        # Stored natively in Mongo as an array: [{"key": "...", "value": "..."}].
+        # SummaryPrint.js looks up sections via fieldsData.find(f => f.key === key).
+        # The isinstance(str) branch below is only a fallback for documents
+        # saved by an older version of update_summary_fields that stringified
+        # the array with json.dumps() before saving.
+        raw_fields_data = summary.get('fieldsData')
+        if isinstance(raw_fields_data, str):
+            try:
+                parsed = json.loads(raw_fields_data)
+            except (json.JSONDecodeError, TypeError):
+                parsed = []
+        else:
+            parsed = raw_fields_data or []
+
+        # Tolerate legacy object-shaped fieldsData saved before this change.
+        if isinstance(parsed, dict):
+            parsed = [{"key": k, "value": v} for k, v in parsed.items()]
+
+        summary['fieldsData'] = parsed
 
         # ── STEP 2: Patient info from hospital_patient ────────────────────────
         uhid           = summary.get('uhid')
@@ -981,6 +1071,7 @@ def get_printsummary(request, ip_no):
         import traceback
         print(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
+    
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -989,21 +1080,20 @@ def get_patient_medicines(request, ip_no):
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db = client['HMS']
-        pharmacy_collection = hms_db['hospital_oppharmacybill']
+        pharmacy_collection = hms_db['hospital_pharmacybilling']
+        items_collection = hms_db['hospital_pharmacyitem']
 
         decoded_ip_no = unquote(ip_no)
 
         bills = list(pharmacy_collection.find(
             {
                 'inpatient_number': decoded_ip_no,
-                'is_active': True,
-                'is_discharge_medicine': True
+                'billing_mode': 'WARD REQUEST',
+                'is_ward_request': True,
             },
             {
                 '_id': 0,
                 'bill_no': 1,
-                'is_discharge_medicine': 1,
-                'is_regugar_medicine': 1,
                 'medicine_particulars': 1
             }
         ))
@@ -1011,20 +1101,104 @@ def get_patient_medicines(request, ip_no):
         if not bills:
             return Response([], status=status.HTTP_200_OK)
 
+        # Collect all unique item_ids across all bills
+        item_ids = set()
+        for bill in bills:
+            for item in bill.get('medicine_particulars', []):
+                if item.get('item_id') is not None:
+                    item_ids.add(item['item_id'])
+
+        # Single query to fetch all item names
+        item_name_map = {}
+        if item_ids:
+            items = items_collection.find(
+                {'item_id': {'$in': list(item_ids)}},
+                {'_id': 0, 'item_id': 1, 'item_name': 1}
+            )
+            item_name_map = {i['item_id']: i['item_name'] for i in items}
+
         # Flatten all medicine_particulars across all bills
         medicines = []
         for bill in bills:
             for item in bill.get('medicine_particulars', []):
+                item_id = item.get('item_id')
                 medicines.append({
-                    'itemName': item.get('itemName', ''),
+                    'itemName': item_name_map.get(item_id, f'Item {item_id}'),
                     'dosage': item.get('dosage', ''),
                     'noOfDays': item.get('noOfDays', ''),
                     'qty': item.get('qty', ''),
-                    'doseUnit': item.get('doseUnit', ''),
+                    'doseUnit': item.get('doseunit', ''),
                     'route': item.get('route', ''),
-                    'remark': item.get('remark', ''),
-                    'is_discharge_medicine': bill.get('is_discharge_medicine', False),
-                    'is_regular_medicine': bill.get('is_regugar_medicine', False),
+                    'remark': item.get('instruction', ''),
+                    'bill_no': bill.get('bill_no', ''),
+                })
+
+        return Response(medicines, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_patient_discharge_medicines(request, ip_no):
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        pharmacy_collection = hms_db['hospital_pharmacybilling']
+        items_collection = hms_db['hospital_pharmacyitem']
+
+        decoded_ip_no = unquote(ip_no)
+
+        bills = list(pharmacy_collection.find(
+            {
+                'inpatient_number': decoded_ip_no,
+                'billing_mode': 'DISCHARGE MEDICINE',
+                'is_ward_request': True,
+            },
+            {
+                '_id': 0,
+                'bill_no': 1,
+                'medicine_particulars': 1
+            }
+        ))
+
+        if not bills:
+            return Response([], status=status.HTTP_200_OK)
+
+        # Collect all unique item_ids across all bills
+        item_ids = set()
+        for bill in bills:
+            for item in bill.get('medicine_particulars', []):
+                if item.get('item_id') is not None:
+                    item_ids.add(item['item_id'])
+
+        # Single query to fetch all item names
+        item_name_map = {}
+        if item_ids:
+            items = items_collection.find(
+                {'item_id': {'$in': list(item_ids)}},
+                {'_id': 0, 'item_id': 1, 'item_name': 1}
+            )
+            item_name_map = {i['item_id']: i['item_name'] for i in items}
+
+        # Flatten all medicine_particulars across all bills
+        medicines = []
+        for bill in bills:
+            for item in bill.get('medicine_particulars', []):
+                item_id = item.get('item_id')
+                medicines.append({
+                    'itemName': item_name_map.get(item_id, f'Item {item_id}'),
+                    'dosage': item.get('dosage', ''),
+                    'noOfDays': item.get('noOfDays', ''),
+                    'qty': item.get('qty', ''),
+                    'doseUnit': item.get('doseunit', ''),
+                    'route': item.get('route', ''),
+                    'remark': item.get('instruction', ''),
                     'bill_no': bill.get('bill_no', ''),
                 })
 

@@ -143,7 +143,6 @@ urlpatterns = [
     path("purchase-requisition/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_list"),
     path("purchase-requisition/<str:pk>/", Purchase_Requisition.purchase_requisition_view, name="purchase_requisition_detail"),
     path("purchase-requisition-action/", Purchase_Requisition.purchase_requisition_action_view, name="purchase_requisition_action"),
-
     path("pharmacy-stock-batches/", physicalstockentry.pharmacy_stock_batches_view, name="pharmacy-stock-batches"),
  
     # Physical stock entry CRUD
@@ -186,6 +185,7 @@ urlpatterns = [
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
     path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+     path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
 
     # Medicine Package Master
     path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
@@ -273,6 +273,7 @@ urlpatterns = [
     re_path(r'^patient-investigations/(?P<ip_no>[\w%/-]+)/$', summary.get_patient_investigations, name='get_patient_investigations'),
     re_path(r'^get-printsummary/(?P<ip_no>.+)/$', summary.get_printsummary, name='get_printsummary'),
     re_path(r'^patient-medicines/(?P<ip_no>.+)/$', summary.get_patient_medicines, name='get_patient_medicines'),
+    re_path(r'^patient-discharge-medicines/(?P<ip_no>.+)/$', summary.get_patient_discharge_medicines, name='get_patient_discharge_medicines'),
 
     # ICD11
     path("icd11/search/", ICD11.icd11_search, name='icd11_search'),
@@ -375,7 +376,8 @@ urlpatterns = [
     path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
     path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
-    path('velavan/invoices/approve/<path:grn_number>/', velavan.approve_velavan_invoice, name='approve_velavan_invoice'),  
+    path('velavan/invoices/approve/<path:grn_number>/', velavan.approve_velavan_invoice, name='approve_velavan_invoice'), 
+    re_path(r'^vel-ip-patient/(?P<ipNumber>[\w%/-]+)/$', velavan.get_ip_patient, name='get_ip_patient'),  
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
@@ -446,10 +448,17 @@ urlpatterns = [
     path("update_schedule_status/", surgeryschedule.update_schedule_status, name='update_schedule_status'),
     path("list_diagnosis/", surgeryschedule.list_diagnosis, name='list_diagnosis'),    
     path("get_ot_medicine_ward_requests/", surgeryschedule.get_ot_medicine_ward_requests, name="get_ot_medicine_ward_requests"),
-    path('get_ippharmacy_stock/', surgeryschedule.get_ippharmacy_stock, name='get_ippharmacy_stock'),
+    path('get_pharmacy_items/', surgeryschedule.get_pharmacy_items, name='get_pharmacy_items'),
+    path('get_medicine_packages/', surgeryschedule.get_medicine_packages, name='get_medicine_packages'),
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
+    path("mark_ot_medicine_received/", surgeryschedule.mark_ot_medicine_received, name="mark_ot_medicine_received"),
+    path("get_implant_items/",       surgeryschedule.get_implant_items, name="get_implant_items"),
+    path("save_implant_request/",     surgeryschedule.save_implant_request, name="save_implant_request"),
+    path("get_implant_requests/",     surgeryschedule.get_implant_requests, name="get_implant_requests"),
+    path("update_implant_request/",   surgeryschedule.update_implant_request, name="update_implant_request"),
+    path("delete_implant_request/",   surgeryschedule.delete_implant_request, name="delete_implant_request"),
 
     # Diet / Food Ordering
     path("save_diet_order/", DietOrder.save_diet_order, name="save_diet_order"),

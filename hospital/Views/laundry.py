@@ -1,4 +1,5 @@
 import json
+import os
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from hospital.models import LaundryWardRequest, LaundryItemMaster
@@ -6,6 +7,10 @@ from hospital.models import LaundryWardRequest, LaundryItemMaster
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
+from pymongo import MongoClient
+from bson.decimal128 import Decimal128
+
+MONGO_URI = os.getenv("GLOBAL_DB_HOST")
 
 @api_view(['POST', 'GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -30,24 +35,51 @@ def save_laundry_request(request):
         try:
             data = request.data
             
-            laundry_req = LaundryWardRequest.objects.create(
-                uhid=data.get('uhid', ''),
-                ipNumber=data.get('ipNumber', ''),
-                patient_name=data.get('patient_name', ''),
-                wardName=data.get('wardName', ''),
-                roomNo=data.get('roomNo', ''),
-                bedNo=data.get('bedNo', ''),
-                items=data.get('items', []),
-                request_type=data.get('request_type', 'Normal'),
-                status='Pending',
-                remarks=data.get('remarks', ''),
-                requested_by=data.get('requested_by', '')
-            )
+            uhid = data.get('uhid', '')
+            ipNumber = data.get('ipNumber', '')
+            patient_name = data.get('patient_name', '')
+            wardName = data.get('wardName', '')
+            roomNo = data.get('roomNo', '')
+            bedNo = data.get('bedNo', '')
+            items = data.get('items', [])
+            total_amount = float(data.get('total_amount', 0.00))
+            request_type = data.get('request_type', 'Normal')
+            remarks = data.get('remarks', '')
+            requested_by = data.get('requested_by', '')
+            
+            with MongoClient(MONGO_URI) as client:
+                db = client["HMS"]
+                col = db["hospital_laundrywardrequest"]
+                
+                # Get next increment ID
+                last = col.find_one(sort=[("id", -1)])
+                next_id = (last["id"] + 1) if last and "id" in last else 1
+                
+                now = timezone.now()
+                doc = {
+                    "id": next_id,
+                    "uhid": uhid,
+                    "ipNumber": ipNumber,
+                    "patient_name": patient_name,
+                    "wardName": wardName,
+                    "roomNo": roomNo,
+                    "bedNo": bedNo,
+                    "items": items,
+                    "total_amount": Decimal128(str(total_amount)),
+                    "request_type": request_type,
+                    "status": "Pending",
+                    "remarks": remarks,
+                    "requested_by": requested_by,
+                    "requested_date": now,
+                    "created_date": now,
+                    "lastmodified_date": now
+                }
+                col.insert_one(doc)
             
             return JsonResponse({
                 'success': True,
                 'message': 'Laundry request saved successfully',
-                'data': {'id': str(laundry_req.id)}
+                'data': {'id': str(next_id)}
             })
             
         except Exception as e:
@@ -80,7 +112,8 @@ def get_laundry_requests(request):
                     'wardName': req.wardName,
                     'roomNo': req.roomNo,
                     'bedNo': req.bedNo,
-                    'items': req.items,
+                    'items': json.loads(req.items) if isinstance(req.items, str) else req.items,
+                    'total_amount': str(getattr(req, 'total_amount', 0.00)),
                     'request_type': req.request_type,
                     'status': req.status,
                     'remarks': req.remarks,
@@ -154,7 +187,8 @@ def get_all_laundry_requests(request):
                     'wardName': req.wardName,
                     'roomNo': req.roomNo,
                     'bedNo': req.bedNo,
-                    'items': req.items,
+                    'items': json.loads(req.items) if isinstance(req.items, str) else req.items,
+                    'total_amount': str(getattr(req, 'total_amount', 0.00)),
                     'request_type': req.request_type,
                     'status': req.status,
                     'remarks': req.remarks,
