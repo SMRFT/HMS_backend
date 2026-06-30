@@ -199,8 +199,7 @@ PAGE_MAPPING = {
 
     #Package Master:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  
-    '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                  
-    '/_b_a_c_k_e_n_d/HMS/departments/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                 
     '/_b_a_c_k_e_n_d/HMS/packages_crud/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/packages/create/': 'HMS-P-IPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/packages(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
