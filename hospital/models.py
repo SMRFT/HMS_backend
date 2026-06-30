@@ -1901,6 +1901,7 @@ class ImplantRequest(AuditModel):
     ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
     uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     inpatient_number = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    surgeon_id = models.CharField(max_length=100, null=True, blank=True)
     surgery_ref = models.CharField(max_length=100, null=True, blank=True)
     items = models.JSONField(default=list, blank=True)
     status = models.CharField(

@@ -54,10 +54,10 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     try:
         from ..models import Admission, Patient, InsuranceProvider
 
-        # Step 1: ip_number → (uhid, age, age_type)
+        # Step 1: ip_number → (uhid, age, age_type, is_admitted,is_discharged)
         admissions = list(
             Admission.objects.filter(ipNumber__in=ip_numbers)
-            .values("ipNumber", "uhid", "age", "age_type")
+            .values("ipNumber", "uhid", "age", "age_type", "is_admitted", "is_discharged")
         )
         if not admissions:
             return {}
@@ -98,6 +98,8 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
                 "patient_name":  full_name,
                 "age":           adm.get("age"),
                 "age_type":      adm.get("age_type"),
+                "is_admitted":   adm.get("is_admitted"),
+                "is_discharged": adm.get("is_discharged"),
                 "gender":        pt.get("gender"),
                 "customer_type": pt.get("customer_type"),
                 "company_name":  code_to_name.get(cc) if cc else None,
@@ -221,6 +223,8 @@ def _enrich_bulk(records: list) -> list:
             "patient_name":  pt.get("patient_name"),
             "age":           pt.get("age"),
             "age_type":      pt.get("age_type"),
+            "is_admitted":   pt.get("is_admitted"),
+            "is_discharged": pt.get("is_discharged"),
             "gender":        pt.get("gender"),
             "customer_type": pt.get("customer_type"),
             "company_name":  pt.get("company_name"),
@@ -1429,6 +1433,7 @@ def save_implant_request(request):
             created_date     = timezone.now(),
             uhid             = data.get("uhid", ""),
             inpatient_number = data.get("ipNumber", ""),
+            surgeon_id       = data.get("surgeon_id", ""),
             surgery_ref      = data.get("surgeryRef", ""),
             items            = [],  # set below via raw pymongo write
             status           = "Pending",
@@ -1666,33 +1671,22 @@ def update_implant_request(request):
         )
 
 
-# ─── 5. Soft-delete implant request (Pending only) ────────────────────────────
-@api_view(["PUT"])
+@api_view(["PATCH"])
 @permission_classes([HasRoleAndDataPermission])
 def delete_implant_request(request):
-    """
-    Soft-delete: sets is_active = False.
-    Only allowed when status == 'Pending'.
-
-    Body:
-        request_id : ImplantRequest_id
-
-    Returns:
-        { success: true }
-    """
     try:
         from ..models import ImplantRequest  # adjust import path to your app
-
+ 
         data         = request.data
         current_user = data.get("auth-user-id", "system")
         request_id   = data.get("request_id")
-
+ 
         if not request_id:
             return Response(
                 {"success": False, "message": "request_id is required"},
                 status=400,
             )
-
+ 
         try:
             request_id = int(request_id)
         except (ValueError, TypeError):
@@ -1700,18 +1694,18 @@ def delete_implant_request(request):
                 {"success": False, "message": "request_id must be a number"},
                 status=400,
             )
-
+ 
         # Single-field filter to stay djongo-safe; check is_active in Python.
         implant_req = ImplantRequest.objects.filter(
             ImplantRequest_id=request_id
         ).first()
-
+ 
         if not implant_req or not implant_req.is_active:
             return Response(
                 {"success": False, "message": "Record not found"},
                 status=404,
             )
-
+ 
         if implant_req.status != "Pending":
             return Response(
                 {
@@ -1720,16 +1714,22 @@ def delete_implant_request(request):
                 },
                 status=400,
             )
-
-        implant_req.is_active         = False
-        implant_req.lastmodified_by   = current_user
-        implant_req.lastmodified_date = timezone.now()
-        implant_req.save()
-
+ 
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": request_id},
+            {
+                "$set": {
+                    "is_active":         False,
+                    "lastmodified_by":   current_user,
+                    "lastmodified_date": timezone.now(),
+                }
+            },
+        )
+ 
         return Response(
             {"success": True, "message": "Implant request deleted successfully"}
         )
-
+ 
     except Exception as e:
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},

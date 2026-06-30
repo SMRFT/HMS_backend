@@ -69,6 +69,89 @@ def normalize_items_payload(raw_items):
 
     return normalized
 
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_ip_patient(request, ipNumber):
+    try:
+        from ..models import ImplantRequest, Patient, InsuranceProvider
+
+        ip_number = (ipNumber or "").strip()
+        if not ip_number:
+            return Response(
+                {"success": False, "error": "ip_number is required"},
+                status=400,
+            )
+
+        # ── Step 1: ip_number -> ImplantRequest (uhid, surgeon_id) ────────────
+        # Model's default ordering is ["-created_date"], so the first active
+        # match is the most recent request for this IP number.
+        candidates = ImplantRequest.objects.filter(
+            inpatient_number=ip_number
+        )
+
+        implant_req = next(
+            (rec for rec in candidates if rec.is_active),
+            None,
+        )
+
+        if not implant_req or not implant_req.uhid:
+            return Response(
+                {"success": False, "error": "No implant request found for this IP number"},
+                status=404,
+            )
+
+        uhid       = implant_req.uhid
+        surgeon_id = implant_req.surgeon_id or ""
+
+        # ── Step 2: uhid -> Patient ────────────────────────────────────────────
+        patient = Patient.objects.filter(uhid=uhid).first()
+        if not patient:
+            return Response(
+                {"success": False, "error": "Patient not found for this UHID"},
+                status=404,
+            )
+
+        company_name = None
+        if patient.company_code:
+            insurer = InsuranceProvider.objects.filter(
+                company_code=patient.company_code
+            ).first()
+            company_name = insurer.company_name if insurer else None
+
+        # ── Step 3: surgeon_id -> backend_diagnostics_profile (employeeName) ──
+        surgeon_name = ""
+        if surgeon_id:
+            mongo_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db    = mongo_client[os.getenv("GLOBAL_DB_NAME", "Global")]
+            collection   = global_db["backend_diagnostics_profile"]
+
+            doc = collection.find_one(
+                {"employeeId": str(surgeon_id)},
+                {"employeeName": 1, "_id": 0},
+            )
+            surgeon_name = doc.get("employeeName", "") if doc else ""
+            mongo_client.close()
+
+        data = {
+            "uhid": uhid,
+            "salutation": patient.salutation or "",
+            "firstName": patient.firstName or "",
+            "lastName": patient.lastName or "",
+            "gender": patient.gender or "",
+            "customer_type": patient.customer_type or "",
+            "company_name": company_name,
+            "surgeon_id": surgeon_id,
+            "surgeon_name": surgeon_name,
+        }
+
+        return Response({"success": True, "data": data})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -607,7 +690,7 @@ def create_velavan_in(request):
             payment_mode            = data.get('paymentMode') or '',
             ip_number               = data.get('ipNumber') or '',
             patient_name            = data.get('patientName') or '',
-            surgeon_id            = data.get('surgeonName') or '',
+            surgeon_id            = data.get('surgeon_id') or data.get('surgeonName') or '',
             customer_type           = data.get('customerType') or '',
             company_name            = data.get('companyName') or '',
             items                   = clean_items,
@@ -1052,7 +1135,7 @@ def update_velavan_invoice(request, grn_number):
             'payment_mode':      data.get('paymentMode'),
             'ip_number':         data.get('ipNumber'),
             'patient_name':      data.get('patientName'),
-            'surgeon_name':      data.get('surgeonName'),
+            'surgeon_id':        data.get('surgeon_id') or data.get('surgeonName', ''),
             # ✅ Store as list, not json.dumps() string
             'items':             items_to_store,
             'lastmodified_date': timezone.now(),
