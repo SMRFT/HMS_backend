@@ -1551,6 +1551,7 @@ def get_implant_requests(request):
                     "uhid":        rec.uhid,
                     "ipNumber":    rec.inpatient_number,
                     "surgeryRef":  rec.surgery_ref or "",
+                    "surgeon_id":  rec.surgeon_id or "",
                     "items":       _normalize_items(rec.items),
                     "status":      rec.status,
                     "reqDate":     created.strftime("%d-%m-%Y") if created else "",
