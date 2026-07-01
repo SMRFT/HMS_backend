@@ -343,7 +343,7 @@ PAGE_MAPPING = {
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',
-         r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-LND',               
+         r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PGS',               
 
     #    '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
 
