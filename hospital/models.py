@@ -1179,6 +1179,159 @@ class VelavanInvoice(AuditModel):
             self.lastmodified_date = timezone.now()
         super().save(*args, **kwargs)
 
+class VelavanPurchaseReturn(AuditModel):
+    return_number  = models.CharField(max_length=50, unique=True, blank=True)
+    grn_number     = models.CharField(max_length=50)
+    vendor_id      = models.CharField(max_length=255, blank=True, null=True)
+    return_date    = models.DateField()
+    items          = models.JSONField(default=list, blank=True)
+    taxable_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    cgst           = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    sgst           = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    igst           = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    round_amount   = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    total_amount   = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    remarks        = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'hospital_velavan_purchasereturn'
+        ordering = ['-created_date']
+
+    def __str__(self):
+        return f"{self.return_number} - {self.grn_number}"
+
+    @staticmethod
+    def get_financial_year_prefix():
+        today = timezone.now().date()
+        if today.month >= 4:
+            return f"{today.year % 100}{(today.year + 1) % 100}"
+        return f"{(today.year - 1) % 100}{today.year % 100}"
+
+    @staticmethod
+    def generate_return_number():
+        with transaction.atomic():
+            prefix = f"PR{VelavanPurchaseReturn.get_financial_year_prefix()}"
+            last_record = VelavanPurchaseReturn.objects.filter(
+                return_number__startswith=f"{prefix}/"
+            ).order_by('-return_number').first()
+            next_sequence = (
+                int(last_record.return_number.split('/')[1]) + 1 if last_record else 1
+            )
+            return f"{prefix}/{next_sequence:05d}"
+
+    def save(self, *args, **kwargs):
+        if not self.pk and not self.return_number:
+            self.return_number = self.generate_return_number()
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
+
+class VelavanSalesBill(AuditModel):    
+    bill_number = models.CharField(max_length=50, unique=True, blank=True)
+    source_grn_number = models.CharField(max_length=50, blank=True, null=True)
+    customer_id = models.CharField(max_length=50, blank=True, null=True)
+
+    bill_date = models.DateField()
+    ip_number = models.CharField(max_length=100, blank=True, null=True)
+    patient_name = models.CharField(max_length=255, blank=True, null=True)
+    surgeon_id = models.CharField(max_length=255, blank=True, null=True)
+    customer_type = models.CharField(max_length=255, blank=True, null=True)
+    company_name = models.CharField(max_length=255, blank=True, null=True)
+
+    items = models.JSONField(default=list, blank=True)
+
+    taxable_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    cgst = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    sgst = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    round_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    total_amount = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+
+    payment_mode = models.CharField(max_length=50, default='CASH')
+    payment_status = models.CharField(max_length=50, default='PAID')
+
+    remarks = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_date']
+
+    def __str__(self):
+        return f"{self.bill_number} - {self.patient_name}"
+
+    @staticmethod
+    def get_financial_year_prefix():
+        today = timezone.now().date()
+        if today.month >= 4:
+            return f"{today.year % 100}{(today.year + 1) % 100}"
+        return f"{(today.year - 1) % 100}{today.year % 100}"
+
+    @staticmethod
+    def generate_bill_number():
+        with transaction.atomic():
+            prefix = f"V{VelavanSalesBill.get_financial_year_prefix()}"
+            last_record = VelavanSalesBill.objects.filter(
+                bill_number__startswith=f"{prefix}/"
+            ).order_by('-bill_number').first()
+            next_sequence = (
+                int(last_record.bill_number.split('/')[1]) + 1 if last_record else 1
+            )
+            return f"{prefix}/{next_sequence:05d}"
+
+    def save(self, *args, **kwargs):
+        if not self.pk and not self.bill_number:
+            self.bill_number = self.generate_bill_number()
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
+
+class VelavanSalesReturn(AuditModel):
+    return_number      = models.CharField(max_length=50, unique=True, blank=True)
+    bill_number         = models.CharField(max_length=50)
+    source_grn_number   = models.CharField(max_length=50, blank=True, null=True)
+    customer_id         = models.CharField(max_length=50, blank=True, null=True)
+    return_date         = models.DateField()
+    ip_number           = models.CharField(max_length=100, blank=True, null=True)
+    patient_name        = models.CharField(max_length=255, blank=True, null=True)
+    surgeon_id           = models.CharField(max_length=255, blank=True, null=True)
+    items                = models.JSONField(default=list, blank=True)
+    taxable_amount       = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    cgst                 = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    sgst                 = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    round_amount         = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)   # ← added
+    total_amount         = models.DecimalField(max_digits=50, decimal_places=2, default=0.00)
+    remarks              = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'hospital_velavan_salesreturn'
+        ordering = ['-created_date']
+    def __str__(self):
+        return f"{self.return_number} - {self.bill_number}"
+
+    @staticmethod
+    def get_financial_year_prefix():
+        today = timezone.now().date()
+        if today.month >= 4:
+            return f"{today.year % 100}{(today.year + 1) % 100}"
+        return f"{(today.year - 1) % 100}{today.year % 100}"
+
+    @staticmethod
+    def generate_return_number():
+        with transaction.atomic():
+            prefix = f"SR{VelavanSalesReturn.get_financial_year_prefix()}"
+            last_record = VelavanSalesReturn.objects.filter(
+                return_number__startswith=f"{prefix}/"
+            ).order_by('-return_number').first()
+            next_sequence = (
+                int(last_record.return_number.split('/')[1]) + 1 if last_record else 1
+            )
+            return f"{prefix}/{next_sequence:05d}"
+
+    def save(self, *args, **kwargs):
+        if not self.pk and not self.return_number:
+            self.return_number = self.generate_return_number()
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
+
 
 class VelavanVendors(AuditModel):
     vendor_id = models.CharField(max_length=50, unique=True, blank=True, null=True)
@@ -1248,17 +1401,69 @@ class VelavanVendors(AuditModel):
             logger.error(f"Error saving vendor: {str(e)}")
             raise e  # Re-raise the exception
 
+class VelavanCustomers(AuditModel):
+    customer_id = models.CharField(max_length=50, unique=True, blank=True, null=True)
+    name = models.CharField(max_length=255)
+    addressLine1 = models.CharField(max_length=255, blank=True, null=True)
+    addressLine2 = models.CharField(max_length=255, blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    state = models.CharField(max_length=100, blank=True, null=True)
+    pincode = models.CharField(max_length=20, blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    gstin = models.CharField(max_length=50, blank=True, null=True)
+    customer_type = models.CharField(max_length=100, blank=True, null=True)
+    company_name = models.CharField(max_length=255, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'hospital_velavan_customers'
+
+    def __str__(self):
+        return self.name
+
+    def generate_customer_id(self):
+        """Generate auto-incrementing customer_id starting from 1"""
+        with transaction.atomic():
+            try:
+                all_customers = VelavanCustomers.objects.filter(
+                    customer_id__isnull=False
+                ).values_list('customer_id', flat=True)
+
+                max_id = 0
+                for cid in all_customers:
+                    try:
+                        numeric_id = int(cid)
+                        if numeric_id > max_id:
+                            max_id = numeric_id
+                    except (ValueError, TypeError):
+                        continue
+
+                new_id = max_id + 1
+                while VelavanCustomers.objects.filter(customer_id=str(new_id)).exists():
+                    new_id += 1
+                return str(new_id)
+            except Exception:
+                return "1"
+
+    def save(self, *args, **kwargs):
+        if not self.pk and not self.customer_id:
+            self.customer_id = self.generate_customer_id()
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
 
 
 class VelavanItems(AuditModel):
+    item_id = models.IntegerField(unique=True, blank=True, null=True)
     itemName = models.CharField(max_length=255)
     hsn = models.CharField(max_length=20, blank=True, null=True)
     category = models.CharField(max_length=50, blank=True, default="")
     is_active = models.BooleanField(default=True)
-    
 
     class Meta:
         db_table = 'hospital_velavan_items'
+
     def __str__(self):
         return self.itemName
 

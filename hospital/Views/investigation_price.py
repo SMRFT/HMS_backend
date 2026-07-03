@@ -127,6 +127,7 @@ def create_investigation_price(request):
             'billTypeNo':    bill_type_no,
             'is_active':     bool(data.get('is_active', True)),
             'Items':         items,
+            'department_code':      data['department_code'].strip(),
             'created_date':  datetime.utcnow(),
             'created_by':    created_by,
             'branch_code':   branch_code,
@@ -192,6 +193,9 @@ def update_investigation_price(request, bill_type_no):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             update['billTypeNo'] = new_no
+
+        if 'department_code' in data:
+            update['department_code'] = str(data['department_code']).strip()
 
         if 'is_active' in data:
             update['is_active'] = bool(data['is_active'])
