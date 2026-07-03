@@ -1089,7 +1089,22 @@ def collect_oppharmacy_payment(request):
         payment_details = data.get("payment_details")
 
         shiftno = data.get("shiftno")
+        cashier_id = data.get("auth-user-id")
         counter_id = data.get("counter_id")
+        if not counter_id and cashier_id:
+
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            global_db = client["Global"]
+            profile_col = global_db["backend_diagnostics_profile"]
+            try:
+                query_id = str(cashier_id)
+                search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
+            except:
+                search_query = {"employeeId": str(cashier_id)}
+            profile_data = profile_col.find_one(search_query)
+            emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+            if emp_cashcounter:
+                counter_id = emp_cashcounter
 
         remarks = data.get("remarks", "")
 
@@ -1109,8 +1124,6 @@ def collect_oppharmacy_payment(request):
             
            
         )
-
-        cashier_id = data.get("auth-user-id")
 
         # =====================================================
         # VALIDATIONS
@@ -2522,95 +2535,178 @@ def finalize_bill(request):
         employee_id   = data.get("auth-user-id")
 
         print("hospital_code_finalize_bill:", hospital_code)
-        print("branch_code_finalize_bill:", branch_code)
-        print("outlet_code_finalize_bill:", outlet_code)
+        print("branch_code_finalize_bill:",   branch_code)
+        print("outlet_code_finalize_bill:",   outlet_code)
 
+        # =====================================================
+        # ✅ VALIDATION
+        # =====================================================
         if not hospital_code or not branch_code or not outlet_code:
-            return Response({"error": "Missing hospital/branch/outlet code"}, status=400)
+            return Response(
+                {"error": "Missing hospital/branch/outlet code"},
+                status=400
+            )
 
         # =====================================================
         # ✅ INPUT
         # =====================================================
         Bill_id = data.get("Bill_id")
+
         if not Bill_id:
-            return Response({"error": "Bill_id is required"}, status=400)
+            return Response(
+                {"error": "Bill_id is required"},
+                status=400
+            )
+
+        # ── Optional: updated medicines + amounts from frontend ─────────────
+        # Frontend sends these when the user edited quantities on the Pharmacy
+        # page before clicking Bill.  If not provided, fall back to DB values.
+        frontend_medicines              = data.get("medicine_particulars")    # list | None
+        frontend_total                  = data.get("total_amount")            # float | None
+        frontend_net_amount             = data.get("net_amount")              # float | None
+        frontend_overall_discount_type  = data.get("overall_discount_type")
+        frontend_overall_discount_value = data.get("overall_discount_value")
+        frontend_overall_discount_amount= data.get("overall_discount_amount")
 
         # =====================================================
         # ✅ FETCH BILL
         # =====================================================
         bill = bill_collection.find_one({
-            "Bill_id":      Bill_id,
+            "Bill_id":       Bill_id,
             "hospital_code": hospital_code,
-            "branch_code":  branch_code,
-            "outlet_code":  outlet_code
+            "branch_code":   branch_code,
+            "outlet_code":   outlet_code,
         })
 
         if not bill:
-            return Response({"error": "Bill not found"}, status=404)
+            return Response(
+                {"error": "Bill not found"},
+                status=404
+            )
 
         # =====================================================
-        # ✅ IP ADVANCE CHECK (only for ward / inpatient bills)
+        # ✅ RESOLVE MEDICINES & TOTAL
+        # =====================================================
+        # Prefer frontend-supplied data (user may have edited qty).
+        medicines_to_use = (
+            frontend_medicines
+            if frontend_medicines is not None
+            else bill.get("medicine_particulars", [])
+        )
+
+        total_amount_to_use = (
+            float(frontend_total)
+            if frontend_total is not None
+            else float(bill.get("total_amount", 0) or 0)
+        )
+
+        # =====================================================
+        # ✅ IP ADVANCE CHECK
         # =====================================================
         inpatient_number = bill.get("inpatient_number")
 
-        # ✅ Use live total sent from frontend (user may have edited qty);
-        #    fall back to DB value if not provided.
-        current_bill_total = float(
-            data.get("current_total_amount")
-            or bill.get("total_amount")
-            or bill.get("net_amount")
-            or 0
-        )
-
         if inpatient_number:
-            from ..models import Admission  # adjust import path as needed
+            ip_advance = 0.0
+            advance_check_blocked = False  # True = block billing (no Paid advance found)
 
             try:
-                admission = Admission.objects.get(ipNumber=inpatient_number)
-                advance_payments = admission.advance_payments or []
+                admission = Admission.objects.filter(
+                    ipNumber=inpatient_number
+                ).first()
 
-                # Sum all active ip_advance entries
-                ip_advance_total = sum(
-                    float(ap.get("ip_advance", 0))
-                    for ap in advance_payments
-                    if ap.get("is_advanceActive", True)
+                if admission:
+                    advance_payments = admission.advance_payments or []
+
+                    if isinstance(advance_payments, list):
+                        # ✅ FIX 2: Only sum ip_advance from entries where status == "Paid"
+                        paid_entries = [
+                            ap for ap in advance_payments
+                            if str(ap.get("status", "")).strip().lower() == "paid"
+                        ]
+
+                        if not paid_entries:
+                            # No Paid advance at all — block billing
+                            advance_check_blocked = True
+                        else:
+                            ip_advance = sum(
+                                float(ap.get("ip_advance", 0) or 0)
+                                for ap in paid_entries
+                            )
+
+                    elif isinstance(advance_payments, dict):
+                        if str(advance_payments.get("status", "")).strip().lower() != "paid":
+                            advance_check_blocked = True
+                        else:
+                            ip_advance = float(advance_payments.get("ip_advance", 0) or 0)
+
+                else:
+                    # No admission record found — block billing
+                    advance_check_blocked = True
+
+            except Exception as adm_err:
+                print("Warning: could not fetch admission advance —", adm_err)
+                ip_advance = None  # skip check on lookup failure
+
+            # Block if no Paid advance entry exists at all
+            if advance_check_blocked:
+                return Response(
+                    {
+                        "error": "No Paid IP Advance found for this patient. Billing not allowed.",
+                    },
+                    status=400
                 )
 
-                # Sum all previously billed amounts for the same inpatient_number
-                # (exclude current bill — it is not yet Billed)
-                previous_billed_cursor = bill_collection.find({
+            if ip_advance is not None and ip_advance > 0:
+                # ✅ FIX 1: Sum total_amount of ALL other "Billed" docs for this
+                # inpatient_number (exclude current bill to avoid double-counting)
+                existing_billed_cursor = bill_collection.find({
                     "inpatient_number": inpatient_number,
-                    "hospital_code":    hospital_code,
                     "billing_status":   "Billed",
-                    "Bill_id":          {"$ne": Bill_id}
+                    "is_deleted":       {"$ne": True},
+                    "Bill_id":          {"$ne": Bill_id},
                 })
-
-                previous_billed_total = sum(
-                    float(b.get("total_amount") or b.get("net_amount") or 0)
-                    for b in previous_billed_cursor
+                existing_total = sum(
+                    float(b.get("total_amount", 0) or 0)
+                    for b in existing_billed_cursor
                 )
 
-                cumulative_total = previous_billed_total + current_bill_total
+                # ✅ FIX 1: cumulative = all previous billed + this bill's amount
+                cumulative_total = round(existing_total + total_amount_to_use, 2)
 
-                print(f"ip_advance_total: {ip_advance_total}")
-                print(f"previous_billed_total: {previous_billed_total}")
-                print(f"current_bill_total: {current_bill_total}")
-                print(f"cumulative_total: {cumulative_total}")
+                print(
+                    f"IP Advance check | ip_advance={ip_advance} "
+                    f"| existing_billed_total={existing_total} "
+                    f"| current_bill_total={total_amount_to_use} "
+                    f"| cumulative={cumulative_total}"
+                )
 
-                if cumulative_total > ip_advance_total:
+                # ✅ FIX 1: Block if cumulative exceeds ip_advance
+                if cumulative_total > ip_advance:
                     return Response(
-                        {"error": "Billing Exceeds From IP Advance"},
+                        {
+                            "error":             "Billing Exceeds From IP Advance",
+                            "ip_advance":         ip_advance,
+                            "existing_billed":    existing_total,
+                            "current_bill_total": total_amount_to_use,
+                            "cumulative_total":   cumulative_total,
+                        },
                         status=400
                     )
 
-            except Admission.DoesNotExist:
-                # No admission record found — allow billing to proceed
-                print(f"No admission record found for ipNumber: {inpatient_number}")
+            elif ip_advance == 0:
+                # ip_advance field is 0 — no advance allocated for pharmacy
+                return Response(
+                    {
+                        "error": "IP Advance amount is 0. Billing not allowed.",
+                    },
+                    status=400
+                )
 
         # =====================================================
         # ✅ GENERATE BILL NO
         # =====================================================
         if not bill.get("bill_no"):
+
             fy          = get_financial_year()
             new_bill_no = get_last_oppharmacy_billno(fy)
             bill_date   = datetime.utcnow()
@@ -2620,33 +2716,49 @@ def finalize_bill(request):
                     "Bill_id":       Bill_id,
                     "hospital_code": hospital_code,
                     "branch_code":   branch_code,
-                    "outlet_code":   outlet_code
+                    "outlet_code":   outlet_code,
                 },
-                {"$set": {"bill_no": new_bill_no, "bill_date": bill_date}}
+                {
+                    "$set": {
+                        "bill_no":   new_bill_no,
+                        "bill_date": bill_date,
+                    }
+                }
             )
+
         else:
             new_bill_no = bill.get("bill_no")
             bill_date   = bill.get("bill_date")
 
-        medicines = bill.get("medicine_particulars", [])
-
         # =====================================================
         # ✅ PREPARE MEDICINE HISTORY
         # =====================================================
-        medicine_history = []
+        # Build a map of DB medicines so we can detect qty changes
+        db_medicines_map = {
+            (str(m.get("item_id")), str(m.get("batch_number", ""))): m
+            for m in bill.get("medicine_particulars", [])
+        }
 
-        for med in medicines:
+        medicine_history = []
+        now_ts = datetime.utcnow()
+
+        for med in medicines_to_use:
+
             if med.get("is_deleted"):
                 continue
 
             try:
                 item_id = int(med.get("item_id", 0))
-            except:
+            except Exception:
                 item_id = 0
 
             try:
-                qty = float(med.get("quantity", 0))
-            except:
+                qty = float(
+                    med.get("qty")
+                    or med.get("quantity")
+                    or 0
+                )
+            except Exception:
                 qty = 0
 
             try:
@@ -2656,14 +2768,40 @@ def finalize_bill(request):
                     or med.get("rate")
                     or 0
                 )
-            except:
+            except Exception:
                 price = 0
 
             calculated_price = round(qty * price, 2)
 
-            medicine_history.append({
+            # ── Carry forward existing edit_history for this item ─────────
+            edit_history = list(med.get("edit_history") or [])
+
+            # ── FIX 3: Only record qty change if something actually changed ─
+            # Do NOT add any entry just because billing happened.
+            # edit_history inside medicine_particulars = changes only.
+            db_key = (str(item_id), str(med.get("batch_number", "")))
+            db_med = db_medicines_map.get(db_key)
+            if db_med is not None:
+                db_qty = float(
+                    db_med.get("qty")
+                    or db_med.get("quantity")
+                    or 0
+                )
+                if db_qty != qty:
+                    # Only then record — qty was actually changed by the user
+                    diff = qty - db_qty
+                    edit_history.append({
+                        "action":        "qty_changed_at_billing",
+                        "old_qty":        db_qty,
+                        "new_qty":        qty,
+                        "blocked_change": diff,
+                        "timestamp":      now_ts.isoformat(),
+                        "edited_by":      employee_id,
+                    })
+
+            med_entry = {
                 "item_id":          item_id,
-                "item_name":        med.get("item_name"),
+                "item_name":        med.get("item_name") or med.get("name"),
                 "batch_number":     med.get("batch_number"),
                 "quantity":         qty,
                 "price":            price,
@@ -2674,20 +2812,34 @@ def finalize_bill(request):
                 "expiry_date":      med.get("expiry_date"),
                 "action":           "finalized",
                 "edited_by":        employee_id,
-                "edited_at":        datetime.utcnow()
-            })
+                "edited_at":        now_ts,
+            }
+
+            # ✅ FIX 3: Only store edit_history inside medicine_particulars
+            # if there were actual changes (qty edited before billing).
+            # If nothing changed — no edit_history key stored at all.
+            if edit_history:
+                med_entry["edit_history"] = edit_history
+
+            medicine_history.append(med_entry)
 
         # =====================================================
         # ✅ STOCK UPDATE
         # =====================================================
-        for med in medicines:
+        for med in medicines_to_use:
+
             if med.get("is_deleted"):
                 continue
 
             try:
                 item_id = int(med.get("item_id"))
                 batch   = str(med.get("batch_number")).strip()
-                qty     = float(med.get("quantity", 0))
+                qty     = float(
+                    med.get("qty")
+                    or med.get("quantity")
+                    or 0
+                )
+
             except Exception as e:
                 print("Skipping invalid med:", med, "Error:", e)
                 continue
@@ -2698,47 +2850,66 @@ def finalize_bill(request):
                     "batch_number":  batch,
                     "hospital_code": hospital_code,
                     "branch_code":   branch_code,
-                    "outlet_code":   outlet_code
+                    "outlet_code":   outlet_code,
                 },
-                {"$inc": {"blocked_quantity": qty}},
-                upsert=False
+                {
+                    "$inc": {
+                        "blocked_quantity": qty
+                    }
+                },
+                upsert=False,
             )
 
             print("STOCK FILTER:", {
-                "item_id": item_id, "batch_number": batch,
+                "item_id":       item_id,
+                "batch_number":  batch,
                 "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code
+                "branch_code":   branch_code,
+                "outlet_code":   outlet_code,
             })
-            print("MATCHED:", result.matched_count, "MODIFIED:", result.modified_count)
+
+            print(
+                "MATCHED:",   result.matched_count,
+                "MODIFIED:",  result.modified_count,
+            )
 
         # =====================================================
-        # ✅ UPDATE BILL  (billing_status → Billed + is_dispatched → True)
+        # ✅ UPDATE BILL
         # =====================================================
+        set_payload = {
+
+            "billing_status":       "Billed",
+
+            # ✅ NEW: mark as dispatched when billing is finalised
+            "is_dispatched":        True,
+
+            "lastmodified_date":    now_ts,
+
+            # ✅ Store updated medicine list (with edit_history per item)
+            "medicine_particulars": medicine_history,
+        }
+
+        # Persist updated total / net amounts if frontend sent them
+        if frontend_total is not None:
+            set_payload["total_amount"] = total_amount_to_use
+        if frontend_net_amount is not None:
+            set_payload["net_amount"] = float(frontend_net_amount)
+        if frontend_overall_discount_type is not None:
+            set_payload["overall_discount_type"] = frontend_overall_discount_type
+        if frontend_overall_discount_value is not None:
+            set_payload["overall_discount_value"] = float(frontend_overall_discount_value)
+        if frontend_overall_discount_amount is not None:
+            set_payload["overall_discount_amount"] = float(frontend_overall_discount_amount)
+
         bill_collection.update_one(
             {
                 "Bill_id":       Bill_id,
                 "hospital_code": hospital_code,
                 "branch_code":   branch_code,
-                "outlet_code":   outlet_code
+                "outlet_code":   outlet_code,
             },
             {
-                "$set": {
-                    "billing_status":       "Billed",
-                    "is_dispatched":        True,
-                    "lastmodified_date":    datetime.utcnow(),
-                    "medicine_particulars": medicine_history
-                },
-                "$push": {
-                    "edit_history": {
-                        "action":    "finalized",
-                        "edited_by": employee_id,
-                        "edited_at": datetime.utcnow(),
-                        "bill_no":   new_bill_no,
-                        "bill_date": bill_date,
-                        "medicines": medicine_history
-                    }
-                }
+                "$set": set_payload,
             }
         )
 
@@ -2746,17 +2917,27 @@ def finalize_bill(request):
         # ✅ RESPONSE
         # =====================================================
         return Response({
+
             "status":   "success",
-            "message":  "Bill finalized & stock updated",
+
+            "message":  "Bill finalized, dispatched & stock updated",
+
             "bill_no":  new_bill_no,
-            "bill_date": bill_date
+
+            "bill_date": bill_date,
+
         })
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return Response({"error": str(e)}, status=500)
 
+        import traceback
+
+        traceback.print_exc()
+
+        return Response(
+            {"error": str(e)},
+            status=500
+        )
 
 
 from rest_framework.decorators import api_view, permission_classes
@@ -3106,7 +3287,6 @@ def searchby_ip(request):
                     "room_details":       parse_json_field(adm.room_details),
                     "roomShitingDetails": parse_json_field(adm.roomShitingDetails),
                     "advance_payments":   parse_json_field(adm.advance_payments),
-                    "is_admissionActive": bool(adm.is_admissionActive),
                     "is_admitted":        bool(adm.is_admitted),
                     "is_discharged":      bool(adm.is_discharged),
                     "ipserial_number":    adm.ipserial_number,

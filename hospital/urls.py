@@ -74,7 +74,7 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
-
+    
     # Inventory URLs
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
@@ -185,6 +185,7 @@ urlpatterns = [
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
     path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
+     path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
 
     # Medicine Package Master
     path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
