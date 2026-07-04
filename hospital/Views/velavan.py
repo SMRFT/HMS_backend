@@ -4,7 +4,7 @@ from django.views.decorators.http import require_http_methods
 from django.utils.decorators import method_decorator
 from django.core.paginator import Paginator
 import json
-from ..models import VelavanInvoice, VelavanVendors, VelavanItems, VelavanSalesBill, VelavanSalesReturn, VelavanPurchaseReturn
+from ..models import VelavanInvoice, VelavanVendors, VelavanItems, VelavanSalesBill, VelavanSalesReturn, VelavanPurchaseReturn, VelavanCustomers
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.decorators import api_view, permission_classes
@@ -281,6 +281,8 @@ def velavan_create_vendor(request):
             "phone":            data.get("phone", ""),
             "email":            data.get("email", ""),
             "kgstTinNumber":    data.get("kgstTinNumber", ""),
+            "msme":             data.get("msme", ""),
+            "pan":              data.get("pan", ""),
             "gstin":            gstin,
             "payment":          data.get("payment", ""),
             "tdsPercent":       data.get("tdsPercent", None),
@@ -1855,6 +1857,7 @@ def list_velavan_sales(request):
                 'customer_state':  customer_info.get('state', ''),
                 'customer_pincode':  customer_info.get('pincode', ''),
                 'customer_gstin':  customer_info.get('gstin', ''),
+                'customer_pan':    customer_info.get('pan', ''),   # ← added
                 'bill_date':         obj.bill_date.isoformat() if obj.bill_date else None,
                 'ip_number':         obj.ip_number,
                 'patient_name':      obj.patient_name,
@@ -2110,39 +2113,24 @@ def velavan_stock_by_grn(request):
         return Response({"status": "error", "message": str(e)}, status=500)
 
 def resolve_customer_names(customer_ids):
-    """Batched customer_id -> name lookup, mirrors resolve_item_names."""
+    """Batched customer_id -> profile lookup via the ORM, mirrors resolve_item_names."""
     customer_ids = {c for c in customer_ids if c not in (None, '')}
     if not customer_ids:
         return {}
     name_map = {}
     try:
-        customers_collection = db["hospital_velavan_customers"]
-        for doc in customers_collection.find(
-            {'customer_id': {'$in': list(customer_ids)}},
-            {
-                'customer_id': 1,
-                'name': 1,
-                'phone': 1,
-                'company_name': 1,
-                'addressLine1': 1,
-                'addressLine2': 1,
-                'city': 1,
-                'state': 1,
-                'pincode': 1,
-                'gstin': 1,
-                '_id': 0,
-            }
-        ):
-            name_map[doc['customer_id']] = {
-                'name': doc.get('name', ''),
-                'phone': doc.get('phone', ''),
-                'company_name': doc.get('company_name', ''),
-                'addressLine1': doc.get('addressLine1', ''),
-                'addressLine2': doc.get('addressLine2', ''),
-                'city': doc.get('city', ''),
-                'state': doc.get('state', ''),
-                'pincode': doc.get('pincode', ''),
-                'gstin': doc.get('gstin', ''),
+        for c in VelavanCustomers.objects.filter(customer_id__in=list(customer_ids)):
+            name_map[c.customer_id] = {
+                'name': c.name or '',
+                'phone': c.phone or '',
+                'company_name': c.company_name or '',
+                'addressLine1': c.addressLine1 or '',
+                'addressLine2': c.addressLine2 or '',
+                'city': c.city or '',
+                'state': c.state or '',
+                'pincode': c.pincode or '',
+                'gstin': c.gstin or '',
+                'pan': c.pan or '',   # ← added
             }
     except Exception as e:
         logger.warning(f"resolve_customer_names lookup failed: {e}")
@@ -2153,31 +2141,36 @@ def resolve_customer_names(customer_ids):
 @permission_classes([HasRoleAndDataPermission])
 def velavan_get_customers(request):
     try:
-        customers_collection = db["hospital_velavan_customers"]
-        customers_cursor = customers_collection.find({
-            "$or": [
-                {"is_active": True},
-                {"is_active": {"$exists": False}}
-            ]
-        })
+        customers = VelavanCustomers.objects.filter(is_active__in=[True])  # ← was is_active=True
 
-        customers = []
-        for customer in customers_cursor:
-            customer_data = {}
-            for key, value in customer.items():
-                if isinstance(value, ObjectId):
-                    customer_data[key] = str(value)
-                elif isinstance(value, Decimal128):
-                    customer_data[key] = float(value.to_decimal())
-                elif isinstance(value, datetime):
-                    customer_data[key] = value.isoformat()
-                else:
-                    customer_data[key] = value
-            customers.append(customer_data)
+        data = []
+        for c in customers:
+            customer_data = {
+                'customer_id':    c.customer_id,
+                'name':           c.name,
+                'addressLine1':   c.addressLine1,
+                'addressLine2':   c.addressLine2,
+                'city':           c.city,
+                'state':          c.state,
+                'pincode':        c.pincode,
+                'phone':          c.phone,
+                'email':          c.email,
+                'gstin':          c.gstin,
+                'pan':            c.pan,
+                'msme':           c.msme,
+                'customer_type':  c.customer_type,
+                'company_name':   c.company_name,
+                'is_active':      c.is_active,
+                'created_by':     getattr(c, 'created_by', None),
+                'created_date':   c.created_date.isoformat() if getattr(c, 'created_date', None) else None,
+                'lastmodified_date': c.lastmodified_date.isoformat() if getattr(c, 'lastmodified_date', None) else None,
+            }
+            data.append(customer_data)
 
-        return Response({"status": "success", "data": customers}, status=status.HTTP_200_OK)
+        return Response({"status": "success", "data": data}, status=status.HTTP_200_OK)
 
     except Exception as e:
+        logger.error(f"Error in velavan_get_customers: {str(e)}\n{traceback.format_exc()}")
         return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -2187,10 +2180,9 @@ def velavan_create_customer(request):
     try:
         data = request.data
         name = data.get("name")
-
         user_id = data.get('auth-user-id', 'system')
-        outlet_code = data.get('auth-outlet-code', 'system')
-        branch_code = data.get('auth-branch-code', 'system')
+        outlet_code = data.get('auth-outlet-code','system')
+        branch_code = data.get('auth-branch-code', 'system')        
         hospital_code = data.get('auth-hospital-code', 'system')
 
         if not name:
@@ -2199,127 +2191,139 @@ def velavan_create_customer(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        customers_collection = db["hospital_velavan_customers"]
-
-        # Duplicate guard — same name + phone
         phone = data.get("phone", "")
         if phone:
-            existing = customers_collection.find_one({
-                "name": name,
-                "phone": phone,
-                "is_active": True
-            })
+            existing = VelavanCustomers.objects.filter(
+                name=name, phone=phone, is_active__in=[True]   # ← was is_active=True
+            ).first()
             if existing:
                 return Response(
                     {"success": False, "message": "Customer with same name and phone already exists"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-        all_customer_ids = customers_collection.distinct("customer_id")
-        max_id = 0
-        for cid in all_customer_ids:
-            try:
-                numeric_id = int(cid)
-                if numeric_id > max_id:
-                    max_id = numeric_id
-            except (ValueError, TypeError):
-                continue
-        new_customer_id = str(max_id + 1)
-
-        now = datetime.now()
-        customer_doc = {
-            "customer_id":      new_customer_id,
-            "name":             name,
-            "addressLine1":     data.get("addressLine1", ""),
-            "addressLine2":     data.get("addressLine2", ""),
-            "city":             data.get("city", ""),
-            "state":            data.get("state", ""),
-            "pincode":          data.get("pincode", ""),
-            "phone":            data.get("phone", ""),
-            "email":            data.get("email", ""),
-            "gstin":            data.get("gstin", ""),
-            "customer_type":    data.get("customerType", ""),
-            "company_name":     data.get("companyName", ""),
-            "is_active":        True,
-            "created_by":       user_id,
-            "created_date":     now,
-            "lastmodified_by":  user_id,
-            "lastmodified_date": now,
-            "branch_code":      branch_code,
-            "outlet_code":      outlet_code,
-            "hospital_code":    hospital_code,
-        }
-
-        result = customers_collection.insert_one(customer_doc)
+        customer = VelavanCustomers(
+            name           = name,
+            addressLine1   = data.get("addressLine1", ""),
+            addressLine2   = data.get("addressLine2", ""),
+            city           = data.get("city", ""),
+            state          = data.get("state", ""),
+            pincode        = data.get("pincode", ""),
+            phone          = data.get("phone", ""),
+            email          = data.get("email", ""),
+            gstin          = data.get("gstin", ""),
+            pan            = data.get("pan", ""),
+            msme           = data.get("msme", ""),
+            customer_type  = data.get("customerType", ""),
+            company_name   = data.get("companyName", ""),
+            is_active      = True,
+            created_by     = user_id,
+            outlet_code    = outlet_code,
+            branch_code    = branch_code,
+            hospital_code  = hospital_code,
+        )
+        customer.save()
 
         return Response(
             {
                 "success": True,
                 "message": "Customer created successfully",
                 "data": {
-                    "id": str(result.inserted_id),
-                    "customer_id": new_customer_id,
-                    "name": name,
+                    "id": str(customer.pk),
+                    "customer_id": customer.customer_id,
+                    "name": customer.name,
                 }
             },
             status=status.HTTP_201_CREATED
         )
 
     except Exception as e:
+        logger.error(f"Error in velavan_create_customer: {str(e)}\n{traceback.format_exc()}")
         return Response(
             {"success": False, "error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def velavan_update_customer(request, customer_id):
     try:
-        customers_collection = db["hospital_velavan_customers"]
-
-        data = request.data.copy()
-        fields_to_remove = ["_id", "customer_id"]
-        auth_fields = [key for key in data.keys() if key.startswith("auth-")]
-        fields_to_remove.extend(auth_fields)
-        for field in fields_to_remove:
-            data.pop(field, None)
-
-        # accept camelCase from frontend, normalize to stored field names
-        if "customerType" in data:
-            data["customer_type"] = data.pop("customerType")
-        if "companyName" in data:
-            data["company_name"] = data.pop("companyName")
-
-        data["lastmodified_by"] = request.data.get("auth-user-id")
-        data["lastmodified_date"] = datetime.now()
-
-        result = customers_collection.update_one(
-            {"customer_id": customer_id},
-            {"$set": data}
-        )
-
-        if result.matched_count == 0:
+        # ── Confirm the target exists first, purely for the 404 case ──
+        existing = VelavanCustomers.objects.filter(customer_id=customer_id).first()
+        if not existing:
             return Response(
                 {"status": "error", "message": "Customer not found"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        updated_customer = customers_collection.find_one({"customer_id": customer_id})
-        for key, value in updated_customer.items():
-            if isinstance(value, ObjectId):
-                updated_customer[key] = str(value)
-            elif isinstance(value, Decimal128):
-                updated_customer[key] = float(value.to_decimal())
-            elif isinstance(value, datetime):
-                updated_customer[key] = value.isoformat()
+        data = request.data.copy()
+        # never let these be overwritten via the update payload
+        for field in ["_id", "customer_id", "id"]:
+            data.pop(field, None)
+        auth_fields = [key for key in data.keys() if key.startswith("auth-")]
+        for field in auth_fields:
+            data.pop(field, None)
+
+        # accept camelCase from frontend, normalize to model field names
+        if "customerType" in data:
+            data["customer_type"] = data.pop("customerType")
+        if "companyName" in data:
+            data["company_name"] = data.pop("companyName")
+
+        updatable_fields = {
+            'name', 'addressLine1', 'addressLine2', 'city', 'state', 'pincode',
+            'phone', 'email', 'gstin', 'pan', 'msme',
+            'customer_type', 'company_name', 'is_active',
+        }
+        update_kwargs = {f: v for f, v in data.items() if f in updatable_fields}
+        update_kwargs['lastmodified_by'] = request.data.get("auth-user-id")
+        update_kwargs['lastmodified_date'] = timezone.now()
+
+        # ── Update via QuerySet.update(), keyed on customer_id — NOT
+        # instance.save(). save() fetches an object then relies on Django
+        # matching it back to the same row by internal pk on UPDATE; if that
+        # pk-match fails at the djongo SQL-to-Mongo translation layer, Django
+        # silently falls back to INSERT, creating a duplicate document
+        # instead of patching the original. QuerySet.update() issues a
+        # single direct UPDATE matched on customer_id, sidestepping that
+        # entirely — it can never insert. ──
+        updated_count = VelavanCustomers.objects.filter(
+            customer_id=customer_id
+        ).update(**update_kwargs)
+
+        if updated_count == 0:
+            return Response(
+                {"status": "error", "message": "Update failed — no matching document"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        updated_customer = VelavanCustomers.objects.filter(customer_id=customer_id).first()
+
+        updated_data = {
+            'customer_id':   updated_customer.customer_id,
+            'name':          updated_customer.name,
+            'addressLine1':  updated_customer.addressLine1,
+            'addressLine2':  updated_customer.addressLine2,
+            'city':          updated_customer.city,
+            'state':         updated_customer.state,
+            'pincode':       updated_customer.pincode,
+            'phone':         updated_customer.phone,
+            'email':         updated_customer.email,
+            'gstin':         updated_customer.gstin,
+            'pan':           updated_customer.pan,
+            'msme':          updated_customer.msme,
+            'customer_type': updated_customer.customer_type,
+            'company_name':  updated_customer.company_name,
+            'is_active':     updated_customer.is_active,
+        }
 
         return Response(
-            {"status": "success", "data": updated_customer},
+            {"status": "success", "data": updated_data},
             status=status.HTTP_200_OK
         )
 
     except Exception as e:
+        logger.error(f"Error in velavan_update_customer: {str(e)}\n{traceback.format_exc()}")
         return Response(
             {"status": "error", "message": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
