@@ -1346,6 +1346,8 @@ class VelavanVendors(AuditModel):
     email = models.EmailField(blank=True, null=True)
     kgstTinNumber = models.CharField(max_length=50, blank=True, null=True)
     gstin = models.CharField(max_length=50)
+    pan = models.CharField(max_length=20, blank=True, null=True)          # ← added
+    msme = models.CharField(max_length=50, blank=True, null=True)         # ← added
     payment = models.CharField(max_length=50, blank=True, null=True)
     tdsPercent = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     is_active = models.BooleanField(default=True)
@@ -1412,6 +1414,8 @@ class VelavanCustomers(AuditModel):
     phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     gstin = models.CharField(max_length=50, blank=True, null=True)
+    pan = models.CharField(max_length=20, blank=True, null=True)          # ← added
+    msme = models.CharField(max_length=50, blank=True, null=True)         # ← added
     customer_type = models.CharField(max_length=100, blank=True, null=True)
     company_name = models.CharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
