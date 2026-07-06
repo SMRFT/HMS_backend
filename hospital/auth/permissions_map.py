@@ -30,7 +30,7 @@ PAGE_MAPPING = {
     
 
 
-
+    
     # ==================== DIET ====================
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-DO',
@@ -290,6 +290,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get_implant_items/?(\?.*)?$': 'HMS-P-OTIR',  
     '/_b_a_c_k_e_n_d/HMS/save_implant_request/': 'HMS-P-OTIR',  
     r'^/_b_a_c_k_e_n_d/HMS/get_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',             
+    r'^/_b_a_c_k_e_n_d/HMS/get_ward_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',
     r'^/_b_a_c_k_e_n_d/HMS/update_implant_request/?(\?.*)?$': 'HMS-P-OTIRE',                
     r'^/_b_a_c_k_e_n_d/HMS/delete_implant_request/?(\?.*)?$': 'HMS-P-OTIRD',      
 
