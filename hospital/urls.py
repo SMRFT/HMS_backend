@@ -473,6 +473,7 @@ urlpatterns = [
     path("get_implant_items/",       surgeryschedule.get_implant_items, name="get_implant_items"),
     path("save_implant_request/",     surgeryschedule.save_implant_request, name="save_implant_request"),
     path("get_implant_requests/",     surgeryschedule.get_implant_requests, name="get_implant_requests"),
+    path("get_ward_implant_requests/", surgeryschedule.get_ward_implant_requests, name="get_ward_implant_requests"),
     path("update_implant_request/",   surgeryschedule.update_implant_request, name="update_implant_request"),
     path("delete_implant_request/",   surgeryschedule.delete_implant_request, name="delete_implant_request"),
     path("implant/requests/report/", surgeryschedule.list_implant_requests_report, name="list_implant_requests_report"),

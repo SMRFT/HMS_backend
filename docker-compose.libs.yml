@@ -1,0 +1,16 @@
+services:
+  backend-libs:
+    build:
+      context: .
+      dockerfile: Dockerfile.libs
+    image: hms-backend-libs:latest
+    container_name: hms-django-libs
+    ports:
+      - "2609:2609"
+    volumes:
+      # Dynamically mount host source code into /app without baking code into the image
+      - .:/app
+    environment:
+      - DEBUG=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

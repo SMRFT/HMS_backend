@@ -1554,6 +1554,121 @@ def get_implant_requests(request):
             status=500,
         )
 
+# ─── 3.a List ward implant requests for a patient ─────────────────────────────
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_ward_implant_requests(request):
+    """
+    Fetch all active implant requests for a given UHID / IP number for Ward.
+    Also fetches item names from VelavanItems and checking payment status in VelavanSalesBill by IP number.
+    """
+    try:
+        from ..models import ImplantRequest, VelavanItems
+        from django.conf import settings
+        from pymongo import MongoClient
+        import json
+        from django.utils import timezone
+        import pytz
+        import traceback
+
+        uhid      = request.query_params.get("uhid", "").strip()
+        ip_number = request.query_params.get("ipNumber", "").strip()
+
+        if not uhid:
+            return Response(
+                {"success": False, "error": "UHID is required"},
+                status=400,
+            )
+
+        db_settings = settings.DATABASES['default']
+        client = MongoClient(db_settings['CLIENT']['host'])
+        db = client[db_settings['NAME']]
+
+        # Check Payment Status from Velavan Sales Bill based on IP number
+        payment_status = "Unpaid"
+        if ip_number:
+            try:
+                sales_bill = db['hospital_velavansalesbill'].find_one({"ip_number": ip_number, "payment_status": "PAID"})
+                if sales_bill:
+                    payment_status = "Paid"
+            except Exception as e:
+                pass
+
+        def _normalize_items(raw):
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        qs = ImplantRequest.objects.all()
+
+        records = [
+            rec for rec in qs
+            if rec.is_active
+            and rec.uhid == uhid
+            and (not ip_number or rec.inpatient_number == ip_number)
+        ]
+        records.sort(
+            key=lambda r: r.created_date or timezone.now(),
+            reverse=True,
+        )
+
+        ist = pytz.timezone("Asia/Kolkata")
+
+        formatted = []
+        for rec in records:
+            created = rec.created_date
+            if created and created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            if created:
+                created = created.astimezone(ist)
+
+            items = _normalize_items(rec.items)
+            
+            # Fetch item names from VelavanItems based on item_id
+            for item in items:
+                item_id = item.get("item_id")
+                if item_id:
+                    try:
+                        v_item = None
+                        if 'db' in locals():
+                            v_item = db['hospital_velavan_items'].find_one({"item_id": int(item_id)})
+                        if v_item and v_item.get('itemName'):
+                            item['itemName'] = v_item['itemName']
+                    except Exception:
+                        pass
+
+            formatted.append(
+                {
+                    "request_id":  rec.ImplantRequest_id,
+                    "uhid":        rec.uhid,
+                    "ipNumber":    rec.inpatient_number,
+                    "surgeryRef":  rec.surgery_ref or "",
+                    "surgeon_id":  rec.surgeon_id or "",
+                    "items":       items,
+                    "status":      rec.status,
+                    "paid_status": payment_status,
+                    "reqDate":     created.strftime("%d-%m-%Y") if created else "",
+                    "reqTime":     created.strftime("%I:%M %p") if created else "",
+                    "created_by":  rec.created_by or "",
+                    "branch_code": rec.branch_code or "",
+                }
+            )
+
+        return Response({"success": True, "count": len(formatted), "data": formatted})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
 # ─── 4. Update implant request (Pending only) ─────────────────────────────────
 @api_view(["PUT"])
 @permission_classes([HasRoleAndDataPermission])

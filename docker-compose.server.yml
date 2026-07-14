@@ -1,0 +1,21 @@
+services:
+  backend:
+    # -----------------------------------------------------------------------------------
+    # Replace 'yourusername' below with your Docker Hub username or AWS/Cloud Registry ID
+    # Example: parthibanmurugan/hms-backend-libs:latest
+    # -----------------------------------------------------------------------------------
+    image: parthibanshinova/hms-backend-libs:latest
+    container_name: hms-django-server
+    ports:
+      - "2609:2609"
+    volumes:
+      # Mounts the cloned Django code on your cloud server directly into the container
+      - .:/app
+    environment:
+      - DEBUG=0
+      - ALLOWED_HOSTS=*
+    env_file:
+      - .env
+    restart: always
+    # Command to run your Django app using the pre-installed libraries
+    command: python3 manage.py runserver 0.0.0.0:2609
