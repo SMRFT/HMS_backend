@@ -101,12 +101,13 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
-    r'^/_b_a_c_k_e_n_d/HMS/grn-items/?(\?.*)?$': 'HMS-P-GRN',
+    r'^/_b_a_c_k_e_n_d/HMS/grn-items/?(\?.*)?$': 'HMS-P-GRNR',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-PSH',
+    r'^/_b_a_c_k_e_n_d/HMS/grn-ocr/?(\?.*)?$': 'HMS-P-OCR',
 
     # Purchase Return
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/?(\?.*)?$': 'HMS-P-PR',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/[^/]+/?(\?.*)?$': 'HMS-P-PR',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/?(\?.*)?$': 'HMS-P-GPR',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/[^/]+/?(\?.*)?$': 'HMS-P-GPRA',
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-PSG',
     r'^/_b_a_c_k_e_n_d/HMS/get_active_outlets/?(\?.*)?$': 'HMS-P-OS',
@@ -115,10 +116,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
 
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-PO',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POL',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POA',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POA',
 
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/?$":       "HMS-P-MR",
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/.+/?$":    "HMS-P-MRL",

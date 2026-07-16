@@ -63,6 +63,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 from .models import PurchaseReturn
 class PurchaseReturnSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+    items = serializers.JSONField(required=False, default=list)
  
     class Meta:
         model  = PurchaseReturn
