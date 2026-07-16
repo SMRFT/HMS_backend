@@ -1,11 +1,11 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from ..models import Summary
+from ..models import Summary, CommunicationLog
 from ..serializers import SummarySerializer
 from django.shortcuts import render
 from rest_framework.response import Response
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from rest_framework import status
 from pymongo import MongoClient
 from django.utils.timezone import now
@@ -14,7 +14,7 @@ from bson import Decimal128
 from rest_framework.decorators import api_view, permission_classes
 from django.views.decorators.csrf import csrf_exempt
 from pymongo import MongoClient
-import os, json
+import os, json, requests
 from ..serializers import  Patient,PatientSerializer
 from ..serializers import   PatientSerializer
 from ..serializers import   VendorSerializer
@@ -690,6 +690,7 @@ def get_printsummary(request, ip_no):
             summary['patient']     = full_name   or summary.get('patient', '')
             summary['age']         = patient_record.get('age')    or summary.get('age', '')
             summary['gender']      = patient_record.get('gender') or summary.get('gender', '')
+            summary['email'] = patient_record.get('email', '')
             summary['mobilePhone'] = patient_record.get('mobilePhone', '')
             summary['address']     = full_address or summary.get('address', '')
         else:
@@ -706,10 +707,33 @@ def get_printsummary(request, ip_no):
         summary['investBillNo'] = None
         summary['signatures']   = []
 
-        # ── STEP 3: Get barcode from core_hmsbarcode by ipnumber ──────────────
+        # ── STEP 3: Get barcode from core_hmsbarcode ──────────────────────────
+        # Try to find by ipnumber first
         barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
             {"ipnumber": decoded_ip_no}
         )
+
+        # Fallback 1: Match billnumber from hospital_investbilling
+        if not barcode_record:
+            investbilling_collection = hms_db['hospital_investbilling']
+            invest_bills = list(investbilling_collection.find(
+                {'ipNumber': decoded_ip_no, 'is_active': True},
+                {'investBillNo': 1, '_id': 0}
+            ))
+            if invest_bills:
+                bill_numbers = [b['investBillNo'] for b in invest_bills if b.get('investBillNo')]
+                if bill_numbers:
+                    barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
+                        {"billnumber": {"$in": bill_numbers}}
+                    )
+
+        # Fallback 2: Match patient_id (uhid) in core_hmsbarcode ordered by latest
+        if not barcode_record and uhid:
+            barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
+                {"patient_id": uhid},
+                sort=[("created_date", -1)]
+            )
+
         if not barcode_record:
             client.close()
             return JsonResponse(summary, safe=False)

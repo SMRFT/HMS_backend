@@ -2141,3 +2141,118 @@ class ImplantRequest(AuditModel):
         if self.ImplantRequest_id is None:
             self.ImplantRequest_id = self._generate_next_id()
         super().save(*args, **kwargs)
+
+
+class CommunicationLog(AuditModel):
+    patient_id = models.CharField(max_length=50, blank=True, null=True)
+    patient_name = models.CharField(max_length=255, blank=True, null=True)
+    type = models.CharField(max_length=20) # 'Email' or 'WhatsApp'
+    recipient = models.CharField(max_length=255) # Phone or Email
+    status = models.CharField(max_length=50) # 'Success', 'Failed'
+    details = models.TextField(blank=True, null=True) # Error message or success details
+    template_name = models.CharField(max_length=255, blank=True, null=True)  # Template used for WhatsApp/Email
+    
+    def __str__(self):
+        return f"{self.type} to {self.recipient}"
+
+
+class Internship(AuditModel):
+    intern_id = models.CharField(primary_key=True, max_length=50, editable=False)
+    student_name = models.CharField(max_length=255)
+    email = models.CharField(max_length=255, blank=True, null=True)
+    mobile_number = models.CharField(max_length=20, blank=True, null=True)
+    college = models.CharField(max_length=255)
+    department = models.CharField(max_length=255)
+    degree = models.CharField(max_length=255)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    duration = models.CharField(max_length=100)
+    is_hosteller = models.BooleanField(default=False)
+    fee_per_month = models.DecimalField(max_digits=10, decimal_places=2, default=3500.0)
+    hostel_fee_per_month = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    total_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    payment_status = models.CharField(max_length=50, default="Pending")
+    payment_details = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    
+    # New fields for Certificate approval workflow, discounts & audit logging
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    discount_remarks = models.TextField(blank=True, null=True)
+    cert_template_id = models.IntegerField(blank=True, null=True)
+    cert_description = models.TextField(blank=True, null=True)
+    approved_by = models.CharField(max_length=255, blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+    deleted_by = models.CharField(max_length=255, blank=True, null=True)
+    deleted_at = models.DateTimeField(blank=True, null=True)
+
+    @classmethod
+    def _generate_next_id(cls):
+        try:
+            import datetime
+            today = datetime.date.today()
+            year = today.year
+            if today.month < 4:
+                fy = year - 1
+            else:
+                fy = year
+            prefix = f"{str(fy)[-2:]}SHINT"
+            
+            # Find existing IDs matching this prefix
+            existing_ids = list(
+                cls.objects.filter(intern_id__startswith=prefix).values_list("intern_id", flat=True)
+            )
+            
+            max_num = 0
+            for ext_id in existing_ids:
+                if isinstance(ext_id, str) and ext_id.startswith(prefix):
+                    # extract the remaining numeric part
+                    num_part = ext_id[len(prefix):]
+                    try:
+                        val = int(num_part)
+                        if val > max_num:
+                            max_num = val
+                    except ValueError:
+                        pass
+            
+            next_num = max_num + 1
+            return f"{prefix}{next_num:03d}"
+        except Exception:
+            import datetime
+            today = datetime.date.today()
+            year = today.year
+            fy = year - 1 if today.month < 4 else year
+            return f"{str(fy)[-2:]}SHINT001"
+
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            self.intern_id = self._generate_next_id()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.student_name} ({self.college})"
+
+
+class InternshipCertificateTemplate(models.Model):
+    template_id = models.IntegerField(primary_key=True, editable=False)
+    title = models.CharField(max_length=255, default="Certificate Template")
+    description = models.TextField(default="This is to certify that [Student Name] has successfully completed their internship in the department of [Department] from [Start Date] to [End Date]. During this period, their performance was [Performance].")
+    is_active = models.BooleanField(default=True)
+
+    @classmethod
+    def _generate_next_id(cls):
+        try:
+            existing_ids = list(
+                cls.objects.all().values_list("template_id", flat=True)
+            )
+            numeric_ids = [i for i in existing_ids if isinstance(i, int)]
+            return (max(numeric_ids) + 1) if numeric_ids else 1
+        except Exception:
+            return 1
+
+    def save(self, *args, **kwargs):
+        if self._state.adding or not self.template_id:
+            self.template_id = self._generate_next_id()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.title} ({self.template_id})"

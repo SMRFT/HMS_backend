@@ -191,6 +191,17 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/patient-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/patient-discharge-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/upload-pdf/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/get-file(?:/[^/]+)+/$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
+
+    #HR: 
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/?(\?.*)?$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/autocomplete/?(\?.*)?$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/payment(?:/[^/]+)+/$': 'HMS-P-HRIN',
 
     #Doctor Master: 
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  

@@ -41,6 +41,8 @@ from .Views import (
     physicalstockentry,
     salesreturn,
     medicine_package,
+    communication,
+    hr,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -274,6 +276,11 @@ urlpatterns = [
     re_path(r'^get-printsummary/(?P<ip_no>.+)/$', summary.get_printsummary, name='get_printsummary'),
     re_path(r'^patient-medicines/(?P<ip_no>.+)/$', summary.get_patient_medicines, name='get_patient_medicines'),
     re_path(r'^patient-discharge-medicines/(?P<ip_no>.+)/$', summary.get_patient_discharge_medicines, name='get_patient_discharge_medicines'),
+    path('upload-pdf/', communication.upload_pdf_to_gridfs, name='upload_pdf_to_gridfs'),
+    re_path(r'^get-file/(?P<file_id>.+)/$', communication.get_pdf_from_gridfs, name='get_pdf_from_gridfs'),
+    path('send-whatsapp/', communication.send_whatsapp, name='send_whatsapp'),
+    path('send-email/', communication.send_email, name='send_email'),
+    path('communication-logs/', communication.get_communication_logs, name='get_communication_logs'),
 
     # ICD11
     path("icd11/search/", ICD11.icd11_search, name='icd11_search'),
@@ -529,4 +536,14 @@ urlpatterns = [
     path('complaints/admin/', complaints.complaints_admin_list, name='complaints_admin_list_legacy'),
     path('complaints/admin-list/', complaints.complaints_admin_list, name='complaints_admin_list'),
     path('complaints/<path:pk>/', complaints.complaint_detail, name='complaint_detail'),
+
+    # HR Internship Management
+    path('hr/internships/', hr.list_or_create_internships, name='list_or_create_internships'),
+    path('hr/internships/autocomplete/', hr.get_internship_autocomplete, name='get_internship_autocomplete'),
+    path('hr/internships/certificate-template/', hr.certificate_template_list_or_create, name='certificate_template_list_or_create'),
+    path('hr/internships/certificate-template/<int:template_id>/', hr.certificate_template_detail, name='certificate_template_detail'),
+    path('hr/internships/approvers/', hr.list_certificate_approvers, name='list_certificate_approvers'),
+    path('hr/internships/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
+    path('hr/internships/payment/<str:pk>/', hr.add_payment, name='add_payment'),
+    path('hr/internships/approve/<str:pk>/', hr.approve_internship_certificate, name="approve_internship_certificate"),
 ]
