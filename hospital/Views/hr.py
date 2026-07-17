@@ -86,7 +86,7 @@ def list_or_create_internships(request):
             
             search_query = request.GET.get('search', '').strip()
             if search_query:
-                internships = internships.filter(student_name__icontains=search_query) | internships.filter(college__icontains=search_query)
+                internships = internships.filter(Q(intern_id__icontains=search_query) | Q(student_name__icontains=search_query) | Q(college__icontains=search_query))
             
             # Date filters
             from_date = request.GET.get('from_date')
@@ -184,6 +184,9 @@ def list_or_create_internships(request):
             
             if not student_name or not college or not start_date or not end_date:
                 return Response({"success": False, "error": "Student Name, College, Start Date, and End Date are required"}, status=400)
+                
+            if end_date < start_date:
+                return Response({"success": False, "error": "End Date must be greater than or equal to Start Date (at least 1 day must be selected)"}, status=400)
                 
             # Initial payment processing
             payment_details = []
