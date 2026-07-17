@@ -301,8 +301,8 @@ def send_email(request):
         connection = None
 
         if template_name in ["internship_certificate", "intern_pending_payment"]:
-            hr_email = os.getenv('HMS_HR_EMAIL',)
-            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD',)
+            hr_email = os.getenv('HMS_HR_EMAIL',"najmasmrft@gmail.com")
+            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD',"zpid kdqk tekw ixjk")
             from django.core.mail import get_connection
             connection = get_connection(
                 host=os.getenv('EMAIL_HOST', 'smtp.gmail.com'),
