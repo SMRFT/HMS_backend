@@ -200,8 +200,11 @@ PAGE_MAPPING = {
     #HR: 
     r'^/_b_a_c_k_e_n_d/HMS/hr/internships/?(\?.*)?$': 'HMS-P-HRIN',
     r'^/_b_a_c_k_e_n_d/HMS/hr/internships/autocomplete/?(\?.*)?$': 'HMS-P-HRIN',
-    r'^/_b_a_c_k_e_n_d/HMS/hr/internships(?:/[^/]+)+/$': 'HMS-P-HRIN',
-    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/payment(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    '/_b_a_c_k_e_n_d/HMS/hr/internships/certificate-template/': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/certificate-template(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/edit(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/payment(?:/[^/]+)+/$': 'HMS-P-HRINP',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/approve(?:/[^/]+)+/$': 'HMS-P-HRINA',
 
     #Doctor Master: 
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  

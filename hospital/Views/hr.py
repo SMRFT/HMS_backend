@@ -471,48 +471,6 @@ def get_internship_autocomplete(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
-from pymongo import MongoClient
-
-@api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
-def list_certificate_approvers(request):
-    try:
-        employee_id = request.GET.get('employee_id')
-        if not employee_id:
-            return Response({"success": True, "data": None}, status=status.HTTP_200_OK)
-            
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        global_db = client['Global']
-        profile_collection = global_db['backend_diagnostics_profile']
-        designation_collection = global_db['backend_diagnostics_Designation']
-        
-        p = profile_collection.find_one(
-            {"employeeId": str(employee_id)},
-            {"employeeId": 1, "employeeName": 1, "designation": 1, "signatureFileId": 1, "_id": 0}
-        )
-        
-        if not p:
-            return Response({"success": False, "error": "Employee not found"}, status=404)
-            
-        desig_code = p.get("designation")
-        designation_name = ""
-        if desig_code:
-            desig_doc = designation_collection.find_one({"Designation_code": desig_code}, {"designation": 1})
-            if desig_doc:
-                designation_name = desig_doc.get("designation", "")
-                
-        data = {
-            "employeeId": p.get("employeeId"),
-            "employeeName": p.get("employeeName"),
-            "designation": designation_name,
-            "hasSignature": bool(p.get("signatureFileId"))
-        }
-            
-        return Response({"success": True, "data": data}, status=status.HTTP_200_OK)
-    except Exception as e:
-        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def certificate_template_list_or_create(request):

@@ -542,8 +542,7 @@ urlpatterns = [
     path('hr/internships/autocomplete/', hr.get_internship_autocomplete, name='get_internship_autocomplete'),
     path('hr/internships/certificate-template/', hr.certificate_template_list_or_create, name='certificate_template_list_or_create'),
     path('hr/internships/certificate-template/<int:template_id>/', hr.certificate_template_detail, name='certificate_template_detail'),
-    path('hr/internships/approvers/', hr.list_certificate_approvers, name='list_certificate_approvers'),
-    path('hr/internships/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
+    path('hr/internships/edit/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
     path('hr/internships/payment/<str:pk>/', hr.add_payment, name='add_payment'),
     path('hr/internships/approve/<str:pk>/', hr.approve_internship_certificate, name="approve_internship_certificate"),
 ]
