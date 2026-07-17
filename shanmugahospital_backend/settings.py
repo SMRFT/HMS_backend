@@ -156,9 +156,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 CORS_ALLOW_ALL_ORIGINS = True  
 
 EMAIL_BACKEND = 'hospital.email_backend.Python312EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'najmasmrft@gmail.com'
-EMAIL_HOST_PASSWORD = 'zpid kdqk tekw ixjk'  
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'najmasmrft@gmail.com')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', 'zpid kdqk tekw ixjk')
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER

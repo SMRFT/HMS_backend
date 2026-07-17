@@ -15,6 +15,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 
+from pyauth.auth import HasRoleAndDataPermission
 from ..models import CommunicationLog
 
 @api_view(['POST'])
@@ -80,6 +81,7 @@ def get_pdf_from_gridfs(request, file_id):
 
 
 @api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
 def send_whatsapp(request):
     try:
         patient_name = request.data.get("patient_name", "Valued Patient")
@@ -138,7 +140,10 @@ def send_whatsapp(request):
             recipient=clean_phone,
             status=status,
             details=r.text,
-            template_name=template_name
+            template_name=template_name,
+            created_by=request.data.get('auth-user-id') or request.POST.get('auth-user-id') or request.GET.get('auth-user-id') or 'system',
+            branch_code=request.data.get('auth-branch-code') or request.POST.get('auth-branch-code') or request.GET.get('auth-branch-code') or 'system',
+            hospital_code=request.data.get('auth-hospital-code') or request.POST.get('auth-hospital-code') or request.GET.get('auth-hospital-code') or 'system'
         )
 
         if status == "Success":
@@ -156,13 +161,17 @@ def send_whatsapp(request):
             recipient=str(request.data.get("phone", "")),
             status=status,
             details=details,
-            template_name=request.data.get("template_name", "")
+            template_name=request.data.get("template_name", ""),
+            created_by=request.data.get('auth-user-id') or request.POST.get('auth-user-id') or request.GET.get('auth-user-id') or 'system',
+            branch_code=request.data.get('auth-branch-code') or request.POST.get('auth-branch-code') or request.GET.get('auth-branch-code') or 'system',
+            hospital_code=request.data.get('auth-hospital-code') or request.POST.get('auth-hospital-code') or request.GET.get('auth-hospital-code') or 'system'
         )
         return Response({"success": False, "error": str(e)}, status=500)
 
 
 @api_view(['POST'])
 @csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def send_email(request):
     recipient_list = request.POST.getlist('recipients') or ['shanmugainnovations@gmail.com']
     try:
@@ -288,12 +297,28 @@ def send_email(request):
             return JsonResponse({'status': 'error', 'message': 'At least one recipient is required to send the email.'}, status=400)
             
         files = request.FILES.getlist('attachments')
-        
+        template_name = request.POST.get('template_name', '')
+        connection = None
+
+        if template_name in ["internship_certificate", "intern_pending_payment"]:
+            hr_email = os.getenv('HMS_HR_EMAIL',)
+            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD',)
+            from django.core.mail import get_connection
+            connection = get_connection(
+                host=os.getenv('EMAIL_HOST', 'smtp.gmail.com'),
+                port=int(os.getenv('EMAIL_PORT', 587)),
+                username=hr_email,
+                password=hr_password,
+                use_tls=os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes'),
+            )
+            from_email = hr_email
+
         email = EmailMessage(
             subject=subject,
             body=html_message,
             from_email=from_email,
             to=recipient_list,
+            connection=connection,
         )
         email.content_subtype = "html"
         for file in files:
@@ -308,7 +333,10 @@ def send_email(request):
             recipient=", ".join(recipient_list),
             status="Success",
             details="Email sent successfully",
-            template_name=request.POST.get('template_name', '')
+            template_name=request.POST.get('template_name', ''),
+            created_by=request.data.get('auth-user-id') or request.POST.get('auth-user-id') or request.GET.get('auth-user-id') or 'system',
+            branch_code=request.data.get('auth-branch-code') or request.POST.get('auth-branch-code') or request.GET.get('auth-branch-code') or 'system',
+            hospital_code=request.data.get('auth-hospital-code') or request.POST.get('auth-hospital-code') or request.GET.get('auth-hospital-code') or 'system'
         )
         
         return JsonResponse({'status': 'success', 'message': 'Email sent successfully!'})
@@ -322,7 +350,10 @@ def send_email(request):
             recipient=recipient_str,
             status="Failed",
             details=str(e),
-            template_name=request.POST.get('template_name', '')
+            template_name=request.POST.get('template_name', ''),
+            created_by=request.data.get('auth-user-id') or request.POST.get('auth-user-id') or request.GET.get('auth-user-id') or 'system',
+            branch_code=request.data.get('auth-branch-code') or request.POST.get('auth-branch-code') or request.GET.get('auth-branch-code') or 'system',
+            hospital_code=request.data.get('auth-hospital-code') or request.POST.get('auth-hospital-code') or request.GET.get('auth-hospital-code') or 'system'
         )
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 

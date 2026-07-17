@@ -8,6 +8,8 @@ import json
 import time
 import pytz
 from datetime import datetime
+import os
+
 
 def clean_smart_quotes(v):
     if v is None:
@@ -57,6 +59,11 @@ class Command(BaseCommand):
             '--daemon',
             action='store_true',
             help='Run in daemon mode checking for 10:00 AM IST daily',
+        )
+        parser.add_argument(
+            '--now',
+            action='store_true',
+            help='Run the report once immediately and exit (alias for default)',
         )
 
     def send_report(self):
@@ -193,11 +200,23 @@ class Command(BaseCommand):
             """
 
         try:
+            hr_email = os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
+            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+            from django.core.mail import get_connection
+            connection = get_connection(
+                host=os.getenv('EMAIL_HOST', 'smtp.gmail.com'),
+                port=int(os.getenv('EMAIL_PORT', 587)),
+                username=hr_email,
+                password=hr_password,
+                use_tls=os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes'),
+            )
+
             email = EmailMessage(
                 subject="Internship-Pending payment alert",
                 body=html_message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=hr_email,
                 to=["najmayasu@gmail.com"],
+                connection=connection,
             )
             email.content_subtype = "html"
             email.send()
@@ -210,7 +229,10 @@ class Command(BaseCommand):
                 recipient="najmayasu@gmail.com",
                 status="Success",
                 details=f"Email sent successfully. Pending list count: {len(pending_list)}",
-                template_name="intern_pending_payment"
+                template_name="intern_pending_payment",
+                created_by="system",
+                branch_code="system",
+                hospital_code="system"
             )
             self.stdout.write(self.style.SUCCESS(f"Email sent successfully. Count: {len(pending_list)}"))
         except Exception as e:
@@ -222,12 +244,15 @@ class Command(BaseCommand):
                 recipient="najmayasu@gmail.com",
                 status="Failed",
                 details=str(e),
-                template_name="intern_pending_payment"
+                template_name="intern_pending_payment",
+                created_by="system",
+                branch_code="system",
+                hospital_code="system"
             )
             raise e
 
     def handle(self, *args, **options):
-        if not options.get('daemon'):
+        if options.get('now') or not options.get('daemon'):
             self.stdout.write(self.style.SUCCESS('Triggering email report once (run-once mode)...'))
             try:
                 self.send_report()
