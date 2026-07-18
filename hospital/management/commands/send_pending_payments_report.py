@@ -215,7 +215,7 @@ class Command(BaseCommand):
                 subject="Internship-Pending payment alert",
                 body=html_message,
                 from_email=hr_email,
-                to=["najmayasu@gmail.com"],
+                to=["avphr@smrft.org", "hr@smrft.org"],
                 connection=connection,
             )
             email.content_subtype = "html"
@@ -226,7 +226,7 @@ class Command(BaseCommand):
                 patient_id="system_pending_payment",
                 patient_name="System Admin",
                 type="Email",
-                recipient="najmayasu@gmail.com",
+                recipient="avphr@smrft.org, hr@smrft.org",
                 status="Success",
                 details=f"Email sent successfully. Pending list count: {len(pending_list)}",
                 template_name="intern_pending_payment",
@@ -241,7 +241,7 @@ class Command(BaseCommand):
                 patient_id="system_pending_payment",
                 patient_name="System Admin",
                 type="Email",
-                recipient="najmayasu@gmail.com",
+                recipient="avphr@smrft.org, hr@smrft.org",
                 status="Failed",
                 details=str(e),
                 template_name="intern_pending_payment",
