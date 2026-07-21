@@ -621,3 +621,22 @@ class DialysisDischargeSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = DialysisDischargeSummary
         fields = '__all__'
+
+
+
+
+from .models import licence_master
+class licence_masterSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = licence_master
+        fields = '__all__'
+
+
+from .models import licencemasterdetails
+class licencemasterdetailsSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = licencemasterdetails
+        fields = '__all__'
+

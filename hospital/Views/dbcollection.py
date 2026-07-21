@@ -1,0 +1,17 @@
+from pymongo import MongoClient
+import os
+
+# Create Mongo client (single place)
+mongo_url = os.getenv("GLOBAL_DB_HOST")
+client = MongoClient(mongo_url)
+
+# Databases
+
+global_db = client["Global"]
+hms_db = client["HMS"]
+
+# Collections
+
+profile_collection = global_db["backend_diagnostics_profile"]
+user_collection = global_db["backend_diagnostics_user"]
+company_secretary_collection = hms_db["hospital_licencemasterdetails"]   

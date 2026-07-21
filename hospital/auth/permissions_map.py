@@ -386,7 +386,14 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/complaints/admin-list/?(\\?.*)?$': 'HMS-P-CTIA',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTI',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTI',
-             
+
+# Company Secretary:
+
+        '/_b_a_c_k_e_n_d/HMS/get_licence_master/': 'HMS-P-CSLM',
+        '/_b_a_c_k_e_n_d/HMS/licence_master_details/': 'HMS-P-CSLD',
+        '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
+
+       
 }
 
 

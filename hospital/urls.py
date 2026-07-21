@@ -41,6 +41,7 @@ from .Views import (
     physicalstockentry,
     salesreturn,
     medicine_package,
+    companysecretary,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -503,4 +504,11 @@ urlpatterns = [
     path('complaints/admin/', complaints.complaints_admin_list, name='complaints_admin_list_legacy'),
     path('complaints/admin-list/', complaints.complaints_admin_list, name='complaints_admin_list'),
     path('complaints/<path:pk>/', complaints.complaint_detail, name='complaint_detail'),
+
+    #companysecretary
+    path('get_licence_master/', companysecretary.get_licence_master, name='get_licence_masters'),
+    path('licence_master_details/', companysecretary.licence_master_details, name='licence_master_details'),
+    path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
+    # path('autoscheduler_email/', companysecretary.autoscheduler_email, name='autoscheduler_email'),
+    
 ]
