@@ -136,6 +136,7 @@ def send_whatsapp(request):
             patient_id=patient_id,
             patient_name=patient_name,
             type="WhatsApp",
+            sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
             recipient=clean_phone,
             status=status,
             details=r.text,
@@ -157,6 +158,7 @@ def send_whatsapp(request):
             patient_id=request.data.get("patient_id", ""),
             patient_name=request.data.get("patient_name", ""),
             type="WhatsApp",
+            sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
             recipient=str(request.data.get("phone", "")),
             status=status,
             details=details,
@@ -300,15 +302,16 @@ def send_email(request):
         connection = None
 
         if template_name in ["internship_certificate", "intern_pending_payment"]:
-            hr_email = os.getenv('HMS_HR_EMAIL',"najmasmrft@gmail.com")
-            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD',"zpid kdqk tekw ixjk")
+            hr_email = getattr(settings, 'HMS_HR_EMAIL', None) or os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
+            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
             from django.core.mail import get_connection
             connection = get_connection(
-                host=os.getenv('EMAIL_HOST', 'smtp.gmail.com'),
-                port=int(os.getenv('EMAIL_PORT', 587)),
+                backend=getattr(settings, 'EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),
+                host=os.getenv('EMAIL_HOST', getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')),
+                port=int(os.getenv('EMAIL_PORT', getattr(settings, 'EMAIL_PORT', 587))),
                 username=hr_email,
                 password=hr_password,
-                use_tls=os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes'),
+                use_tls=os.getenv('EMAIL_USE_TLS', str(getattr(settings, 'EMAIL_USE_TLS', True))).lower() in ('true', '1', 'yes'),
             )
             from_email = hr_email
 
@@ -329,6 +332,7 @@ def send_email(request):
             patient_id=patient_id,
             patient_name=patient_name,
             type="Email",
+            sender=from_email,
             recipient=", ".join(recipient_list),
             status="Success",
             details="Email sent successfully",
@@ -346,6 +350,7 @@ def send_email(request):
             patient_id=request.POST.get('patient_id', ''),
             patient_name=request.POST.get('patient_name', ''),
             type="Email",
+            sender=from_email if 'from_email' in locals() else getattr(settings, 'DEFAULT_FROM_EMAIL', ''),
             recipient=recipient_str,
             status="Failed",
             details=str(e),
@@ -387,6 +392,7 @@ def get_communication_logs(request):
                 "patientId": log.patient_id,
                 "patientName": log.patient_name,
                 "type": log.type,
+                "sender": getattr(log, 'sender', '') or '',
                 "recipient": log.recipient,
                 "status": log.status,
                 "details": log.details

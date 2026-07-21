@@ -2147,6 +2147,7 @@ class CommunicationLog(AuditModel):
     patient_id = models.CharField(max_length=50, blank=True, null=True)
     patient_name = models.CharField(max_length=255, blank=True, null=True)
     type = models.CharField(max_length=20) # 'Email' or 'WhatsApp'
+    sender = models.CharField(max_length=255, blank=True, null=True) # Phone or Email
     recipient = models.CharField(max_length=255) # Phone or Email
     status = models.CharField(max_length=50) # 'Success', 'Failed'
     details = models.TextField(blank=True, null=True) # Error message or success details
