@@ -133,6 +133,7 @@ def list_or_create_internships(request):
                     "college": item.college,
                     "department": item.department,
                     "degree": item.degree,
+                    "created_date": item.created_date.strftime('%Y-%m-%d') if getattr(item, 'created_date', None) else "",
                     "start_date": item.start_date.strftime('%Y-%m-%d') if item.start_date else "",
                     "end_date": item.end_date.strftime('%Y-%m-%d') if item.end_date else "",
                     "duration": item.duration,

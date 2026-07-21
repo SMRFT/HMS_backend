@@ -200,15 +200,16 @@ class Command(BaseCommand):
             """
 
         try:
-            hr_email = os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
-            hr_password = os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+            hr_email = getattr(settings, 'HMS_HR_EMAIL', None) or os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
+            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
             from django.core.mail import get_connection
             connection = get_connection(
-                host=os.getenv('EMAIL_HOST', 'smtp.gmail.com'),
-                port=int(os.getenv('EMAIL_PORT', 587)),
+                backend=getattr(settings, 'EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),
+                host=os.getenv('EMAIL_HOST', getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')),
+                port=int(os.getenv('EMAIL_PORT', getattr(settings, 'EMAIL_PORT', 587))),
                 username=hr_email,
                 password=hr_password,
-                use_tls=os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes'),
+                use_tls=os.getenv('EMAIL_USE_TLS', str(getattr(settings, 'EMAIL_USE_TLS', True))).lower() in ('true', '1', 'yes'),
             )
 
             email = EmailMessage(
@@ -226,6 +227,7 @@ class Command(BaseCommand):
                 patient_id="system_pending_payment",
                 patient_name="System Admin",
                 type="Email",
+                sender=hr_email,
                 recipient="avphr@smrft.org, hr@smrft.org",
                 status="Success",
                 details=f"Email sent successfully. Pending list count: {len(pending_list)}",
@@ -241,6 +243,7 @@ class Command(BaseCommand):
                 patient_id="system_pending_payment",
                 patient_name="System Admin",
                 type="Email",
+                sender=hr_email,
                 recipient="avphr@smrft.org, hr@smrft.org",
                 status="Failed",
                 details=str(e),
