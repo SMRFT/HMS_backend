@@ -2106,6 +2106,55 @@ class CrashCartDailyCheck(models.Model):
     class Meta:
         unique_together = ('date', 'nursing_station', 'item')
 
+
+class licence_master(AuditModel):
+    s_no = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    licence_name = models.CharField(max_length=255)
+
+
+    def save(self, *args, **kwargs):
+        if not self.s_no:
+            last = licence_master.objects.order_by('-s_no').first()
+            if last:
+                self.s_no = last.s_no + 1
+            else:
+                self.s_no = 1
+
+        self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
+
+
+
+
+class licencemasterdetails(AuditModel):
+    s_no = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    licence_name = models.CharField(max_length=255)
+    license_number = models.CharField(max_length=255, blank=True, null=True)  # License/Case/Ref No
+    valid_from = models.DateField(blank=True, null=True)
+    expiry_date = models.DateField(blank=True, null=True)
+    Intimation_90days_about_expiry =  models.CharField(max_length=100,default="90 Day(s) Before the Due Date",blank=True,null=True)
+    Intimation_60days_about_expiry =  models.CharField(max_length=100,default="60 Day(s) Before the Due Date",blank=True,null=True)
+    Intimation_30days_about_expiry =  models.CharField(max_length=100,default="30 Day(s) Before the Due Date",blank=True,null=True)
+    Intimation_7days_about_expiry =  models.CharField(max_length=100,default="7 Day(s) Before the Due Date",blank=True,null=True)
+    Intimation_1day_about_expiry =  models.CharField(max_length=100,default="1 Day(s) Before the Due Date",blank=True,null=True)
+    incharge = models.CharField(max_length=255, blank=True, null=True)
+    respective_person = models.CharField(max_length=255, blank=True, null=True)
+    is_90days = models.BooleanField(default=False)
+    is_60days = models.BooleanField(default=False)
+    is_30days = models.BooleanField(default=False)
+    is_7days = models.BooleanField(default=False)
+    is_1day = models.BooleanField(default=False)
+
+    def save(self, *args, **kwargs):
+        if not self.s_no:
+            last = licencemasterdetails.objects.order_by('-s_no').first()
+            if last:
+                self.s_no = last.s_no + 1
+            else:
+                self.s_no = 1
+
+        self.lastmodified_date = timezone.now()
+        super().save(*args, **kwargs)
 class ImplantRequest(AuditModel): 
     ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
     uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)

@@ -41,6 +41,7 @@ from .Views import (
     physicalstockentry,
     salesreturn,
     medicine_package,
+    companysecretary,
     communication,
     hr,
 )
@@ -537,6 +538,12 @@ urlpatterns = [
     path('complaints/admin-list/', complaints.complaints_admin_list, name='complaints_admin_list'),
     path('complaints/<path:pk>/', complaints.complaint_detail, name='complaint_detail'),
 
+    #companysecretary
+    path('get_licence_master/', companysecretary.get_licence_master, name='get_licence_masters'),
+    path('licence_master_details/', companysecretary.licence_master_details, name='licence_master_details'),
+    path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
+    # path('autoscheduler_email/', companysecretary.autoscheduler_email, name='autoscheduler_email'),
+    
     # HR Internship Management
     path('hr/internships/', hr.list_or_create_internships, name='list_or_create_internships'),
     path('hr/internships/autocomplete/', hr.get_internship_autocomplete, name='get_internship_autocomplete'),

@@ -1092,7 +1092,6 @@ def collect_oppharmacy_payment(request):
         cashier_id = data.get("auth-user-id")
         counter_id = data.get("counter_id")
         if not counter_id and cashier_id:
-
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             global_db = client["Global"]
             profile_col = global_db["backend_diagnostics_profile"]
