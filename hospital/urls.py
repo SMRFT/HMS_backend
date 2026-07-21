@@ -42,6 +42,8 @@ from .Views import (
     salesreturn,
     medicine_package,
     companysecretary,
+    communication,
+    hr,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -75,7 +77,7 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
-
+    
     # Inventory URLs
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
@@ -275,6 +277,11 @@ urlpatterns = [
     re_path(r'^get-printsummary/(?P<ip_no>.+)/$', summary.get_printsummary, name='get_printsummary'),
     re_path(r'^patient-medicines/(?P<ip_no>.+)/$', summary.get_patient_medicines, name='get_patient_medicines'),
     re_path(r'^patient-discharge-medicines/(?P<ip_no>.+)/$', summary.get_patient_discharge_medicines, name='get_patient_discharge_medicines'),
+    path('upload-pdf/', communication.upload_pdf_to_gridfs, name='upload_pdf_to_gridfs'),
+    re_path(r'^get-file/(?P<file_id>.+)/$', communication.get_pdf_from_gridfs, name='get_pdf_from_gridfs'),
+    path('send-whatsapp/', communication.send_whatsapp, name='send_whatsapp'),
+    path('send-email/', communication.send_email, name='send_email'),
+    path('communication-logs/', communication.get_communication_logs, name='get_communication_logs'),
 
     # ICD11
     path("icd11/search/", ICD11.icd11_search, name='icd11_search'),
@@ -377,7 +384,24 @@ urlpatterns = [
     path('velavan/invoices/list/', velavan.list_velavan_invoices, name='list_velavan_invoices'),
     path('velavan/previous-purchases/', velavan.get_previous_purchases, name='previous_purchases'),
     path('velavan/invoices/update/<path:grn_number>/', velavan.update_velavan_invoice, name='update_velavan_invoice'),  
-    path('velavan/invoices/approve/<path:grn_number>/', velavan.approve_velavan_invoice, name='approve_velavan_invoice'),  
+    path('velavan/invoices/approve/<path:grn_number>/', velavan.approve_velavan_invoice, name='approve_velavan_invoice'), 
+    re_path(r'^vel-ip-patient/(?P<ipNumber>[\w%/-]+)/$', velavan.get_ip_patient, name='get_ip_patient'),  
+    path('velavan/purchase-return/', velavan.create_velavan_purchase_return, name='create_velavan_purchase_return'),
+    path('velavan/purchase-return/list/', velavan.list_velavan_purchase_returns, name='list_velavan_purchase_returns'),
+    
+    # Velavan Sales
+    path('velavan/sales/', velavan.create_velavan_sale, name='create_velavan_sale'),
+    path('velavan/sales/list/', velavan.list_velavan_sales, name='list_velavan_sales'),
+    path('velavan/stock/list/', velavan.velavan_get_stock, name='velavan_get_stock'),
+    path('velavan/stock/search/', velavan.velavan_search_stock, name='velavan_search_stock'),
+    path('velavan/stock/by-grn/', velavan.velavan_stock_by_grn, name='velavan_stock_by_grn'),
+    path('velavan/sales-return/', velavan.create_velavan_sales_return, name='create_velavan_sales_return'),
+    path('velavan/sales-return/list/', velavan.list_velavan_sales_returns, name='list_velavan_sales_returns'),
+     #Velavan Customers:
+    path('velavan_customers/list/', velavan.velavan_get_customers, name='velavan_get_customers'),
+    path('velavan_create_customer/', velavan.velavan_create_customer, name='velavan_create_customer'),
+    path('velavan_update_customer/<str:customer_id>/', velavan.velavan_update_customer, name='velavan_update_customer'),
+    path('velavan_delete_customer/<str:customer_id>/', velavan.velavan_delete_customer, name='velavan_delete_customer'),
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
@@ -453,6 +477,15 @@ urlpatterns = [
     path("save_ot_medicine_ward_request/", surgeryschedule.save_ot_medicine_ward_request, name="save_ot_medicine_ward_request"),
     path("update_ot_medicine_ward_request/", surgeryschedule.update_ot_medicine_ward_request, name="update_ot_medicine_ward_request"),
     path("delete_ot_medicine_ward_request/", surgeryschedule.delete_ot_medicine_ward_request, name="delete_ot_medicine_ward_request"),
+    path("mark_ot_medicine_received/", surgeryschedule.mark_ot_medicine_received, name="mark_ot_medicine_received"),
+    path("get_implant_items/",       surgeryschedule.get_implant_items, name="get_implant_items"),
+    path("save_implant_request/",     surgeryschedule.save_implant_request, name="save_implant_request"),
+    path("get_implant_requests/",     surgeryschedule.get_implant_requests, name="get_implant_requests"),
+    path("get_ward_implant_requests/", surgeryschedule.get_ward_implant_requests, name="get_ward_implant_requests"),
+    path("update_implant_request/",   surgeryschedule.update_implant_request, name="update_implant_request"),
+    path("delete_implant_request/",   surgeryschedule.delete_implant_request, name="delete_implant_request"),
+    path("implant/requests/report/", surgeryschedule.list_implant_requests_report, name="list_implant_requests_report"),
+    path("implant/requests/pending-count/", surgeryschedule.get_pending_implant_requests_count, name="get_pending_implant_requests_count"),
 
     # Diet / Food Ordering
     path("save_diet_order/", DietOrder.save_diet_order, name="save_diet_order"),
@@ -511,4 +544,12 @@ urlpatterns = [
     path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
     # path('autoscheduler_email/', companysecretary.autoscheduler_email, name='autoscheduler_email'),
     
+    # HR Internship Management
+    path('hr/internships/', hr.list_or_create_internships, name='list_or_create_internships'),
+    path('hr/internships/autocomplete/', hr.get_internship_autocomplete, name='get_internship_autocomplete'),
+    path('hr/internships/certificate-template/', hr.certificate_template_list_or_create, name='certificate_template_list_or_create'),
+    path('hr/internships/certificate-template/<int:template_id>/', hr.certificate_template_detail, name='certificate_template_detail'),
+    path('hr/internships/edit/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
+    path('hr/internships/payment/<str:pk>/', hr.add_payment, name='add_payment'),
+    path('hr/internships/approve/<str:pk>/', hr.approve_internship_certificate, name="approve_internship_certificate"),
 ]

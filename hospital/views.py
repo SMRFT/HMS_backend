@@ -132,12 +132,12 @@ def patientCreateView(request):
             payment_method = request.data.get('payment_method', None)
             doctor_id = request.data.get('employeeId', None)
 
-            # Determine billtype based on outlet_code
-            billtype = None
+            # Determine bill_type based on outlet_code
+            bill_type = None
             if outlet_code == "OLET004":
-                billtype = "19"
+                bill_type = 19
             elif outlet_code == "OLET003":
-                billtype = "5"
+                bill_type = 5
 
             Billing.objects.create(
                 patient=patient,
@@ -152,7 +152,7 @@ def patientCreateView(request):
                 branch_code=branch_code,
                 outlet_code=outlet_code,
                 shiftno=request.data.get('shiftno'),
-                billtype=billtype
+                bill_type=bill_type
             )
 
             return Response({

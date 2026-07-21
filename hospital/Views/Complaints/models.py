@@ -11,6 +11,7 @@ class Complaint(AuditModel):
     environment = models.TextField(blank=True, null=True)  # OS, Browser, Version, etc.
     ticket_type = models.CharField(max_length=50, default='Issue', blank=True, null=True)  # Issue, Add ons, Changes
     department = models.CharField(max_length=100, blank=True, null=True)  # Related department
+    modules = models.CharField(max_length=255, blank=True, null=True)  # Related module(s)
     status = models.CharField(max_length=50, default='Pending')  # Pending, In Progress, Completed
     priority = models.CharField(max_length=50, blank=True, null=True)  # Low, Medium, High, Critical
     severity = models.CharField(max_length=50, blank=True, null=True)  # Minor, Major, Critical, Blocker

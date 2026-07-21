@@ -27,8 +27,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/save_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/cancel_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    
 
 
+    
     # ==================== DIET ====================
     r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
     r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-DO',
@@ -189,6 +191,20 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-printsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/patient-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/patient-discharge-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/upload-pdf/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/get-file(?:/[^/]+)+/$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
+    r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
+
+    #HR: 
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/?(\?.*)?$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/autocomplete/?(\?.*)?$': 'HMS-P-HRIN',
+    '/_b_a_c_k_e_n_d/HMS/hr/internships/certificate-template/': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/certificate-template(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/edit(?:/[^/]+)+/$': 'HMS-P-HRIN',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/payment(?:/[^/]+)+/$': 'HMS-P-HRINP',
+    r'^/_b_a_c_k_e_n_d/HMS/hr/internships/approve(?:/[^/]+)+/$': 'HMS-P-HRINA',
 
     #Doctor Master: 
     '/_b_a_c_k_e_n_d/HMS/doctor_list_diagnostics/': 'HMS-API-DLD',                  
@@ -199,8 +215,7 @@ PAGE_MAPPING = {
 
     #Package Master:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  
-    '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                  
-    '/_b_a_c_k_e_n_d/HMS/departments/': 'HMS-P-IPKG',                  
+    '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                 
     '/_b_a_c_k_e_n_d/HMS/packages_crud/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/packages/create/': 'HMS-P-IPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/packages(?:/[^/]+)+/$': 'HMS-P-IPKG',                  
@@ -239,7 +254,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/velavan_create_item/': 'HMS-P-VI',               
     '/_b_a_c_k_e_n_d/HMS/velavan_get_items/': 'HMS-P-VI',               
     r'^/_b_a_c_k_e_n_d/HMS/velavan_update_item(?:/[^/]+)+/$': 'HMS-P-VIE',               
-    r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_item(?:/[^/]+)+/$': 'HMS-P-VID',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_item(?:/[^/]+)+/$': 'HMS-P-VID',                
+                   
 
     #Velavan Vendors:
     '/_b_a_c_k_e_n_d/HMS/velavan_vendors/list/': 'HMS-P-VV', 
@@ -251,9 +267,28 @@ PAGE_MAPPING = {
     #Velavan Invoices:
     '/_b_a_c_k_e_n_d/HMS/velavan/invoices/': 'HMS-P-VIN',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VINR',        
+    r'^/_b_a_c_k_e_n_d/HMS/vel-ip-patient(?:/[^/]+)+/$': 'HMS-P-VINR',        
     r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VINR',  
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINE',     
-    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve(?:/[^/]+)+/$': 'HMS-P-VINA',     
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve(?:/[^/]+)+/$': 'HMS-P-VINA',   
+    r'^/_b_a_c_k_e_n_d/HMS/implant/requests/report/?(\?.*)?$': 'HMS-P-OTIRV',   
+    '/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/': 'HMS-P-VIN', 
+    '/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/list/': 'HMS-P-VINR', 
+    
+    # Velavan Sales
+    '/_b_a_c_k_e_n_d/HMS/velavan/sales/': 'HMS-P-VS',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/sales/list/?(\?.*)?$': 'HMS-P-VS',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/search/?(\?.*)?$': 'HMS-P-VS',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/by-grn/?(\?.*)?$': 'HMS-P-VS',               
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/list/?(\?.*)?$': 'HMS-P-VS',  
+    '/_b_a_c_k_e_n_d/HMS/velavan/sales-return/': 'HMS-P-VS',  
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/sales-return/list/?(\?.*)?$': 'HMS-P-VS',  
+
+    #Velavan Customers:     
+    '/_b_a_c_k_e_n_d/HMS/velavan_create_customer/': 'HMS-P-VCC',       
+    '/_b_a_c_k_e_n_d/HMS/velavan_customers/list/': 'HMS-P-VCC',       
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_update_customer(?:/[^/]+)+/$': 'HMS-P-VCE',       
+    r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_customer(?:/[^/]+)+/$': 'HMS-P-VCD',       
 
     #OT Master:
     '/_b_a_c_k_e_n_d/HMS/create_ot/': 'HMS-P-OTM',               
@@ -279,22 +314,29 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
-    r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',                
-    r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_items/?(\?.*)?$': 'HMS-P-OTMB',  
+    r'^/_b_a_c_k_e_n_d/HMS/delete_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBD',  
+     r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_items/?(\?.*)?$': 'HMS-P-OTMB',
+    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB', 
 
-    '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB',  
+    #Implant Request:
+    r'^/_b_a_c_k_e_n_d/HMS/get_implant_items/?(\?.*)?$': 'HMS-P-OTIR',  
+    '/_b_a_c_k_e_n_d/HMS/save_implant_request/': 'HMS-P-OTIR',  
+    r'^/_b_a_c_k_e_n_d/HMS/get_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',             
+    r'^/_b_a_c_k_e_n_d/HMS/get_ward_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',
+    r'^/_b_a_c_k_e_n_d/HMS/update_implant_request/?(\?.*)?$': 'HMS-P-OTIRE',                
+    r'^/_b_a_c_k_e_n_d/HMS/delete_implant_request/?(\?.*)?$': 'HMS-P-OTIRD',      
+
+    
     '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
     '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
     '/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/': 'HMS-P-IB',
     r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-IB',    
-                
+               
 
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/items/?(\?.*)?$': 'HMS-P-CL',
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/daily-check/?(\?.*)?$': 'HMS-P-CL',
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/monthly-report/?(\?.*)?$': 'HMS-P-CL',
-    
-    
-     
+
 
     #Assets Management:
     '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
@@ -334,11 +376,12 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/recycle_asset/[^/]+/?(\?.*)?$': 'HMS-API-SRM',               
     '/_b_a_c_k_e_n_d/HMS/recycle_asset/.*/': 'HMS-API-SRM',   
 
-
-
     # PHARMACY 
-         r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD', 
-       '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
+         r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',
+         r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PGS',               
+
+        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
+
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',

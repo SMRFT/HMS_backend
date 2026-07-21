@@ -13,6 +13,11 @@ from pymongo import MongoClient
 import pytz
 from datetime import datetime
 from ..models import PharmacyBilling
+from ..models import ImplantRequest, VelavanItems 
+from bson.decimal128 import Decimal128
+from django.http import JsonResponse
+from ..models import VelavanItems 
+from ..models import Admission, Patient, InsuranceProvider
 
 
 client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -52,12 +57,10 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     if not ip_numbers:
         return {}
     try:
-        from ..models import Admission, Patient, InsuranceProvider
-
-        # Step 1: ip_number → (uhid, age, age_type)
+        # Step 1: ip_number → (uhid, age, age_type, is_admitted,is_discharged)
         admissions = list(
             Admission.objects.filter(ipNumber__in=ip_numbers)
-            .values("ipNumber", "uhid", "age", "age_type")
+            .values("ipNumber", "uhid", "age", "age_type", "is_admitted", "is_discharged")
         )
         if not admissions:
             return {}
@@ -98,6 +101,8 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
                 "patient_name":  full_name,
                 "age":           adm.get("age"),
                 "age_type":      adm.get("age_type"),
+                "is_admitted":   adm.get("is_admitted"),
+                "is_discharged": adm.get("is_discharged"),
                 "gender":        pt.get("gender"),
                 "customer_type": pt.get("customer_type"),
                 "company_name":  code_to_name.get(cc) if cc else None,
@@ -221,6 +226,8 @@ def _enrich_bulk(records: list) -> list:
             "patient_name":  pt.get("patient_name"),
             "age":           pt.get("age"),
             "age_type":      pt.get("age_type"),
+            "is_admitted":   pt.get("is_admitted"),
+            "is_discharged": pt.get("is_discharged"),
             "gender":        pt.get("gender"),
             "customer_type": pt.get("customer_type"),
             "company_name":  pt.get("company_name"),
@@ -544,9 +551,7 @@ def list_diagnosis(request):
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
         )
    
-    
-from bson.decimal128 import Decimal128
-from django.http import JsonResponse
+  
 
 def convert_decimals(obj):
     if isinstance(obj, list):
@@ -1301,6 +1306,799 @@ def mark_ot_medicine_received(request):
 
         client.close()
         return Response({"success": True, "message": "Marked as received successfully"})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+    
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_implant_items(request):  
+    try: 
+        search        = request.GET.get("search", "").strip()
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+ 
+        if len(search) < 2:
+            return Response({"success": True, "data": []})
+ 
+        qs = VelavanItems.objects.filter(
+            category__iexact="IMPLANT",
+            is_active=True,
+            branch_code=branch_code,
+            hospital_code=hospital_code,
+            itemName__icontains=search,
+        ).values("item_id","itemName", "hsn", "category")[:40]
+ 
+        data = [
+            {
+                "item_id":  item["item_id"],
+                "itemName": item["itemName"],
+                "hsn":      item["hsn"] or "",
+                "category": item["category"],
+            }
+            for item in qs
+        ]
+ 
+        return Response({"success": True, "data": data})
+ 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+ 
+# ─── 2. Save new implant request ──────────────────────────────────────────────
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def save_implant_request(request):
+    try:
+
+        data          = request.data
+        current_user  = data.get("auth-user-id",       "system")
+        branch_code   = data.get("auth-branch-code",   "system")
+        hospital_code = data.get("auth-hospital-code", "system")
+
+        items = data.get("items", [])
+        if not items:
+            return Response(
+                {"success": False, "message": "At least one item is required"},
+                status=400,
+            )
+
+        # ── itemName is intentionally NOT persisted here ──
+        # It's resolved live from VelavanItems via item_id on every read
+        # (see get_implant_requests), so the stored document never carries
+        # a stale/duplicate copy of the name.
+        ALLOWED_ITEM_FIELDS = {"item_id", "hsn", "quantity"}
+        cleaned_items = [
+            {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
+            for item in items
+        ]
+        for ci in cleaned_items:
+            # item_id must be stored as a native int to match VelavanItems.item_id,
+            # never as a string. Missing/invalid values become None rather than "".
+            item_id = ci.get("item_id")
+            try:
+                ci["item_id"] = int(item_id) if item_id not in (None, "") else None
+            except (ValueError, TypeError):
+                ci["item_id"] = None
+            ci.setdefault("hsn", "")
+            try:
+                ci["quantity"] = int(ci.get("quantity", 1))
+            except (ValueError, TypeError):
+                ci["quantity"] = 1
+
+        implant_req = ImplantRequest.objects.create(
+            branch_code      = branch_code,
+            hospital_code    = hospital_code,
+            outlet_code      = data.get("outlet_code", ""),
+            created_by       = current_user,
+            created_date     = timezone.now(),
+            uhid             = data.get("uhid", ""),
+            inpatient_number = data.get("ipNumber", ""),
+            surgeon_id       = data.get("surgeon_id", ""),
+            surgery_ref      = data.get("surgeryRef", ""),
+            items            = [],  # set below via raw pymongo write
+            status           = "Pending",
+            is_active        = True,
+        )
+
+        # Overwrite `items` with a raw pymongo write so it's stored as a
+        # native array, bypassing djongo's JSONField stringification.
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": implant_req.ImplantRequest_id},
+            {"$set": {"items": cleaned_items}},
+        )
+
+        return Response(
+            {
+                "success":    True,
+                "message":    "Implant request saved successfully",
+                "request_id": implant_req.ImplantRequest_id,
+            },
+            status=201,
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+# ─── 3. List implant requests for a patient ───────────────────────────────────
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_implant_requests(request):
+    try:
+        uhid      = request.query_params.get("uhid", "").strip()
+        ip_number = request.query_params.get("ipNumber", "").strip()
+
+        if not uhid:
+            return Response(
+                {"success": False, "error": "UHID is required"},
+                status=400,
+            )
+
+        def _normalize_items(raw):
+            """
+            `items` should be a native list (post-fix records use a raw
+            pymongo write to guarantee this). Older records saved before
+            this fix may still have `items` stored as a JSON-encoded
+            string by djongo's JSONField — handle both so old and new
+            documents read back correctly.
+            """
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        # No .filter(...) at all — djongo 1.3.6 cannot safely translate even
+        # a single BooleanField filter. Fetch everything and filter in Python.
+        qs = ImplantRequest.objects.all()
+
+        records = [
+            rec for rec in qs
+            if rec.is_active
+            and rec.uhid == uhid
+            and (not ip_number or rec.inpatient_number == ip_number)
+        ]
+        records.sort(
+            key=lambda r: r.created_date or timezone.now(),
+            reverse=True,
+        )
+
+        # ── Pre-parse items for every matched record, and collect every
+        # item_id referenced so item names can be resolved in a single
+        # batched query instead of a lookup per item. ──
+        parsed_items_by_id = {}
+        all_item_ids = set()
+        for rec in records:
+            parsed = _normalize_items(rec.items)
+            parsed_items_by_id[rec.ImplantRequest_id] = parsed
+            for item in parsed:
+                iid = item.get("item_id")
+                if iid not in (None, ""):
+                    try:
+                        all_item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+
+        item_name_map = {}
+        if all_item_ids:
+            try:
+                for row in VelavanItems.objects.filter(
+                    item_id__in=list(all_item_ids)
+                ).values("item_id", "itemName", "hsn"):
+                    item_name_map[row["item_id"]] = row
+            except Exception as item_lookup_err:
+                logger.warning(f"Could not fetch implant item names: {item_lookup_err}")
+
+        ist = pytz.timezone("Asia/Kolkata")
+
+        formatted = []
+        for rec in records:
+            created = rec.created_date
+            if created and created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            if created:
+                created = created.astimezone(ist)
+
+            # ── Resolve display name (and hsn as a fallback) from item_id ──
+            # Items are no longer written with a stored itemName, so it's
+            # looked up live from the master item collection. Legacy
+            # records saved before this change may still carry an
+            # itemName — keep it as a fallback so old requests don't
+            # suddenly show blank names.
+            items = parsed_items_by_id.get(rec.ImplantRequest_id, [])
+            for item in items:
+                try:
+                    iid = int(item.get("item_id")) if item.get("item_id") not in (None, "") else None
+                except (ValueError, TypeError):
+                    iid = None
+                master = item_name_map.get(iid) if iid is not None else None
+                if master:
+                    item["itemName"] = master.get("itemName", "") or item.get("itemName", "")
+                    if not item.get("hsn"):
+                        item["hsn"] = master.get("hsn", "")
+                # else: leave whatever legacy itemName (if any) is already on the item
+
+            formatted.append(
+                {
+                    "request_id":  rec.ImplantRequest_id,
+                    "uhid":        rec.uhid,
+                    "ipNumber":    rec.inpatient_number,
+                    "surgeryRef":  rec.surgery_ref or "",
+                    "surgeon_id":  rec.surgeon_id or "",
+                    "items":       _normalize_items(rec.items),
+                    "status":      rec.status,
+                    "reqDate":     created.strftime("%d-%m-%Y") if created else "",
+                    "reqTime":     created.strftime("%I:%M %p") if created else "",
+                    "created_by":  rec.created_by or "",
+                    "branch_code": rec.branch_code or "",
+                }
+            )
+
+        return Response({"success": True, "count": len(formatted), "data": formatted})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+# ─── 3.a List ward implant requests for a patient ─────────────────────────────
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_ward_implant_requests(request):
+    """
+    Fetch all active implant requests for a given UHID / IP number for Ward.
+    Also fetches item names from VelavanItems and checking payment status in VelavanSalesBill by IP number.
+    """
+    try:
+        from ..models import ImplantRequest, VelavanItems
+        from django.conf import settings
+        from pymongo import MongoClient
+        import json
+        from django.utils import timezone
+        import pytz
+        import traceback
+
+        uhid      = request.query_params.get("uhid", "").strip()
+        ip_number = request.query_params.get("ipNumber", "").strip()
+
+        if not uhid:
+            return Response(
+                {"success": False, "error": "UHID is required"},
+                status=400,
+            )
+
+        db_settings = settings.DATABASES['default']
+        client = MongoClient(db_settings['CLIENT']['host'])
+        db = client[db_settings['NAME']]
+
+        # Check Payment Status from Velavan Sales Bill based on IP number
+        payment_status = "Unpaid"
+        if ip_number:
+            try:
+                sales_bill = db['hospital_velavansalesbill'].find_one({"ip_number": ip_number, "payment_status": "PAID"})
+                if sales_bill:
+                    payment_status = "Paid"
+            except Exception as e:
+                pass
+
+        def _normalize_items(raw):
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        qs = ImplantRequest.objects.all()
+
+        records = [
+            rec for rec in qs
+            if rec.is_active
+            and rec.uhid == uhid
+            and (not ip_number or rec.inpatient_number == ip_number)
+        ]
+        records.sort(
+            key=lambda r: r.created_date or timezone.now(),
+            reverse=True,
+        )
+
+        ist = pytz.timezone("Asia/Kolkata")
+
+        formatted = []
+        for rec in records:
+            created = rec.created_date
+            if created and created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            if created:
+                created = created.astimezone(ist)
+
+            items = _normalize_items(rec.items)
+            
+            # Fetch item names from VelavanItems based on item_id
+            for item in items:
+                item_id = item.get("item_id")
+                if item_id:
+                    try:
+                        v_item = None
+                        if 'db' in locals():
+                            v_item = db['hospital_velavan_items'].find_one({"item_id": int(item_id)})
+                        if v_item and v_item.get('itemName'):
+                            item['itemName'] = v_item['itemName']
+                    except Exception:
+                        pass
+
+            formatted.append(
+                {
+                    "request_id":  rec.ImplantRequest_id,
+                    "uhid":        rec.uhid,
+                    "ipNumber":    rec.inpatient_number,
+                    "surgeryRef":  rec.surgery_ref or "",
+                    "surgeon_id":  rec.surgeon_id or "",
+                    "items":       items,
+                    "status":      rec.status,
+                    "paid_status": payment_status,
+                    "reqDate":     created.strftime("%d-%m-%Y") if created else "",
+                    "reqTime":     created.strftime("%I:%M %p") if created else "",
+                    "created_by":  rec.created_by or "",
+                    "branch_code": rec.branch_code or "",
+                }
+            )
+
+        return Response({"success": True, "count": len(formatted), "data": formatted})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
+# ─── 4. Update implant request (Pending only) ─────────────────────────────────
+@api_view(["PUT"])
+@permission_classes([HasRoleAndDataPermission])
+def update_implant_request(request):
+    try:
+
+        data         = request.data
+        current_user = data.get("auth-user-id", "system")
+        request_id   = data.get("request_id")
+
+        if not request_id:
+            return Response(
+                {"success": False, "message": "request_id is required"},
+                status=400,
+            )
+
+        try:
+            request_id = int(request_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"success": False, "message": "request_id must be a number"},
+                status=400,
+            )
+
+        # Single-field filter to stay djongo-safe; check is_active in Python.
+        implant_req = ImplantRequest.objects.filter(
+            ImplantRequest_id=request_id
+        ).first()
+
+        if not implant_req or not implant_req.is_active:
+            return Response(
+                {"success": False, "message": "Record not found"},
+                status=404,
+            )
+
+        if implant_req.status != "Pending":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Cannot edit a request with status '{implant_req.status}'",
+                },
+                status=400,
+            )
+
+        items = data.get("items", [])
+        if not items:
+            return Response(
+                {"success": False, "message": "At least one item is required"},
+                status=400,
+            )
+
+        # ── itemName intentionally not persisted — same reasoning as
+        # save_implant_request. Resolved live from VelavanItems on read. ──
+        ALLOWED_ITEM_FIELDS = {"item_id", "hsn", "quantity"}
+        cleaned_items = [
+            {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
+            for item in items
+        ]
+        for ci in cleaned_items:
+            # item_id must be stored as a native int to match VelavanItems.item_id,
+            # never as a string. Missing/invalid values become None rather than "".
+            item_id = ci.get("item_id")
+            try:
+                ci["item_id"] = int(item_id) if item_id not in (None, "") else None
+            except (ValueError, TypeError):
+                ci["item_id"] = None
+            ci.setdefault("hsn", "")
+            try:
+                ci["quantity"] = int(ci.get("quantity", 1))
+            except (ValueError, TypeError):
+                ci["quantity"] = 1
+
+        implant_req.lastmodified_by   = current_user
+        implant_req.lastmodified_date = timezone.now()
+        implant_req.save()
+
+        # Write `items` via raw pymongo so it's stored as a native array,
+        # bypassing djongo's JSONField stringification (same reasoning as
+        # save_implant_request above).
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": request_id},
+            {"$set": {"items": cleaned_items}},
+        )
+
+        return Response(
+            {"success": True, "message": "Implant request updated successfully"}
+        )
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+
+@api_view(["PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+def delete_implant_request(request):
+    try:
+        data         = request.data
+        current_user = data.get("auth-user-id", "system")
+        request_id   = data.get("request_id")
+ 
+        if not request_id:
+            return Response(
+                {"success": False, "message": "request_id is required"},
+                status=400,
+            )
+ 
+        try:
+            request_id = int(request_id)
+        except (ValueError, TypeError):
+            return Response(
+                {"success": False, "message": "request_id must be a number"},
+                status=400,
+            )
+ 
+        # Single-field filter to stay djongo-safe; check is_active in Python.
+        implant_req = ImplantRequest.objects.filter(
+            ImplantRequest_id=request_id
+        ).first()
+ 
+        if not implant_req or not implant_req.is_active:
+            return Response(
+                {"success": False, "message": "Record not found"},
+                status=404,
+            )
+ 
+        if implant_req.status != "Pending":
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Cannot delete a request with status '{implant_req.status}'",
+                },
+                status=400,
+            )
+ 
+        hms_db["hospital_implant_request"].update_one(
+            {"ImplantRequest_id": request_id},
+            {
+                "$set": {
+                    "is_active":         False,
+                    "lastmodified_by":   current_user,
+                    "lastmodified_date": timezone.now(),
+                }
+            },
+        )
+ 
+        return Response(
+            {"success": True, "message": "Implant request deleted successfully"}
+        )
+ 
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+    
+
+def _get_invoiced_item_ids_by_ip(ip_numbers: set) -> dict:
+    """
+    For the given set of IP numbers, returns:
+        { ip_number: {item_id, item_id, ...} }
+    built from every APPROVED Velavan purchase invoice matching that
+    ip_number. Used to detect whether an implant request's items have
+    already been purchased/invoiced, so its display status can be
+    upgraded from "Pending" to "Invoice Generated".
+    """
+    if not ip_numbers:
+        return {}
+    try:
+        coll = hms_db["hospital_velavansalesbill"]
+        cursor = coll.find(
+            {
+                "ip_number": {"$in": list(ip_numbers)},
+                "payment_status": "PAID",
+            },
+            {"ip_number": 1, "items.item_id": 1, "_id": 0},
+        )
+        result = {}
+        for doc in cursor:
+            ip = doc.get("ip_number")
+            if not ip:
+                continue
+            item_ids = set()
+            for it in doc.get("items", []) or []:
+                iid = it.get("item_id")
+                if iid not in (None, ""):
+                    try:
+                        item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+            if item_ids:
+                result.setdefault(ip, set()).update(item_ids)
+        return result
+    except Exception as e:
+        print(f"[ERROR] _get_invoiced_item_ids_by_ip: {e}\n{traceback.format_exc()}")
+        return {}
+
+
+def _resolve_display_status(stored_status, ip_number, request_item_ids, invoiced_map):
+    """
+    Only "Pending" requests get re-evaluated: if any of the request's
+    item_ids appear in an approved invoice for the same ip_number, the
+    display status becomes "Invoice Generated". Any other stored status
+    (Billed, Completed, Cancelled, etc.) is returned as-is, untouched.
+    """
+    if stored_status != "Pending":
+        return stored_status
+
+    invoiced_ids = invoiced_map.get(ip_number, set())
+    if request_item_ids & invoiced_ids:
+        return "Invoice Generated"
+
+    return stored_status
+    
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def list_implant_requests_report(request):
+    try:
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        from_date_str = request.GET.get("from_date", "")
+        to_date_str   = request.GET.get("to_date", "")
+        status_filter = request.GET.get("status", "").strip()
+
+        def parse_date(s):
+            if not s:
+                return None
+            try:
+                return datetime.strptime(s, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                return None
+
+        from_date = parse_date(from_date_str)
+        to_date   = parse_date(to_date_str)
+
+        def _normalize_items(raw):
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        # No .filter(...) beyond is_active in Python — djongo 1.3.6 cannot
+        # safely translate compound filters. Fetch broadly, filter in Python.
+        qs = ImplantRequest.objects.all()
+
+        records = [rec for rec in qs if rec.is_active]
+
+        if branch_code:
+            records = [r for r in records if r.branch_code == branch_code]
+        if hospital_code:
+            records = [r for r in records if r.hospital_code == hospital_code]
+        if status_filter:
+            records = [r for r in records if (r.status or "") == status_filter]
+
+        def in_range(dt):
+            if dt is None:
+                return from_date is None and to_date is None
+            d = dt.date() if hasattr(dt, "date") else dt
+            if from_date and d < from_date:
+                return False
+            if to_date and d > to_date:
+                return False
+            return True
+
+        if from_date or to_date:
+            records = [r for r in records if in_range(r.created_date)]
+
+        records.sort(key=lambda r: r.created_date or timezone.now(), reverse=True)
+
+        # ── Bulk lookups ────────────────────────────────────────────────
+        ip_numbers  = {r.inpatient_number for r in records if r.inpatient_number}
+        surgeon_ids = {str(r.surgeon_id) for r in records if r.surgeon_id}
+
+        patient_map  = _bulk_get_patient_info(ip_numbers)
+        emp_map      = _bulk_get_employee_names(surgeon_ids)
+
+        # ── Invoiced item_ids per ip_number, for Pending → Invoice
+        # Generated re-evaluation ──
+        invoiced_map = _get_invoiced_item_ids_by_ip(ip_numbers)
+
+        # ── Item name resolution (same approach as get_implant_requests) ──
+        parsed_items_by_id = {}
+        all_item_ids = set()
+        for rec in records:
+            parsed = _normalize_items(rec.items)
+            parsed_items_by_id[rec.ImplantRequest_id] = parsed
+            for item in parsed:
+                iid = item.get("item_id")
+                if iid not in (None, ""):
+                    try:
+                        all_item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+
+        item_name_map = {}
+        if all_item_ids:
+            try:
+                for row in VelavanItems.objects.filter(
+                    item_id__in=list(all_item_ids)
+                ).values("item_id", "itemName", "hsn"):
+                    item_name_map[row["item_id"]] = row
+            except Exception:
+                pass
+
+        ist = pytz.timezone("Asia/Kolkata")
+        formatted = []
+
+        for rec in records:
+            created = rec.created_date
+            if created and created.tzinfo is None:
+                created = pytz.utc.localize(created)
+            if created:
+                created = created.astimezone(ist)
+
+            items = parsed_items_by_id.get(rec.ImplantRequest_id, [])
+            request_item_ids = set()
+            for item in items:
+                try:
+                    iid = int(item.get("item_id")) if item.get("item_id") not in (None, "") else None
+                except (ValueError, TypeError):
+                    iid = None
+                if iid is not None:
+                    request_item_ids.add(iid)
+                master = item_name_map.get(iid) if iid is not None else None
+                if master:
+                    item["itemName"] = master.get("itemName", "") or item.get("itemName", "")
+                    if not item.get("hsn"):
+                        item["hsn"] = master.get("hsn", "")
+
+            pt = patient_map.get(rec.inpatient_number, {})
+
+            display_status = _resolve_display_status(
+                rec.status, rec.inpatient_number, request_item_ids, invoiced_map
+            )
+
+            formatted.append({
+                "request_id":    rec.ImplantRequest_id,
+                "uhid":          rec.uhid or pt.get("uhid") or "",
+                "ipNumber":      rec.inpatient_number,
+                "patientName":   pt.get("patient_name") or "",
+                "gender":        pt.get("gender") or "",
+                "age":           pt.get("age") or "",
+                "customerType":  pt.get("customer_type") or "",
+                "companyName":   pt.get("company_name") or "",
+                "surgeonId":     rec.surgeon_id or "",
+                "surgeonName":   emp_map.get(str(rec.surgeon_id), rec.surgeon_id or ""),
+                "surgeryRef":    rec.surgery_ref or "",
+                "items":         items,
+                "status":        display_status,        # ← re-evaluated
+                "raw_status":    rec.status,             # ← original stored status, for reference
+                "reqDate":       created.strftime("%d-%m-%Y") if created else "",
+                "reqTime":       created.strftime("%I:%M %p") if created else "",
+                "createdDateSort": created.isoformat() if created else "",
+                "created_by":    rec.created_by or "",
+                "branch_code":   rec.branch_code or "",
+            })
+
+        return Response({"success": True, "count": len(formatted), "data": formatted})
+
+    except Exception as e:
+        return Response(
+            {"success": False, "error": str(e), "traceback": traceback.format_exc()},
+            status=500,
+        )
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_pending_implant_requests_count(request):
+    try:
+        branch_code   = request.data.get("auth-branch-code",   "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        def _normalize_items(raw):
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, list) else []
+                except (ValueError, TypeError):
+                    return []
+            return []
+
+        # Only pull Pending, active records — cheap filter, single field
+        # each, djongo-safe.
+        qs = ImplantRequest.objects.filter(status="Pending")
+
+        records = [
+            r for r in qs
+            if r.is_active
+            and (not branch_code or r.branch_code == branch_code)
+            and (not hospital_code or r.hospital_code == hospital_code)
+        ]
+
+        if not records:
+            return Response({"success": True, "count": 0})
+
+        ip_numbers = {r.inpatient_number for r in records if r.inpatient_number}
+        invoiced_map = _get_invoiced_item_ids_by_ip(ip_numbers)
+
+        count = 0
+        for rec in records:
+            items = _normalize_items(rec.items)
+            request_item_ids = set()
+            for item in items:
+                iid = item.get("item_id")
+                if iid not in (None, ""):
+                    try:
+                        request_item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+
+            display_status = _resolve_display_status(
+                rec.status, rec.inpatient_number, request_item_ids, invoiced_map
+            )
+
+            # Still counts toward the notification only if it's genuinely
+            # still Pending after re-evaluation.
+            if display_status == "Pending":
+                count += 1
+
+        return Response({"success": True, "count": count})
 
     except Exception as e:
         return Response(

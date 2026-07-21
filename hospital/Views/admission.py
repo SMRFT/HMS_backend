@@ -816,9 +816,109 @@ def admission_detail(request, ipNumber):
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET / POST / PUT  /admission-advance/<ipNumber>/
-# ─────────────────────────────────────────────────────────────────────────────
+from ..models import Admission, Patient, IpAdvance_Refund
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _safe_list(value):
+    """Always return a real Python list of dicts, never a JSON string."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        import json
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _financial_year_prefix(dt=None):
+    dt = dt or timezone.now()
+    year, month = dt.year, dt.month
+    fy = (
+        f"{year % 100:02d}{(year + 1) % 100:02d}"
+        if month >= 4
+        else f"{(year - 1) % 100:02d}{year % 100:02d}"
+    )
+    return f"{fy}/"
+
+
+def _max_sequence_for_prefix(bill_numbers, prefix):
+    max_seq = 0
+    for bn in bill_numbers:
+        if isinstance(bn, str) and bn.startswith(prefix):
+            try:
+                max_seq = max(max_seq, int(bn.split('/')[-1]))
+            except (ValueError, IndexError):
+                continue
+    return max_seq
+
+
+def _generate_advance_bill_no(hospital_code, branch_code, outlet_code):
+    """
+    Continuous, FY-scoped bill number across ALL admissions for this outlet —
+    not just the current admission's advance_payments list. This is the fix
+    for bill numbers always restarting at .../000001.
+    """
+    prefix = _financial_year_prefix()
+    bill_numbers = []
+    qs = Admission.objects.filter(
+        hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
+    )
+    for adm in qs.iterator():
+        for p in _safe_list(adm.advance_payments):
+            if isinstance(p, dict) and p.get('bill_no'):
+                bill_numbers.append(p['bill_no'])
+    next_seq = _max_sequence_for_prefix(bill_numbers, prefix) + 1
+    return f"{prefix}{next_seq:06d}"
+
+
+def _generate_refund_bill_no(hospital_code, branch_code, outlet_code):
+    """Separate, independent FY-scoped sequence for refund bill numbers."""
+    prefix = _financial_year_prefix()
+    bill_numbers = list(
+        IpAdvance_Refund.objects.filter(
+            hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
+            refund_bill_no__startswith=prefix,
+        ).values_list('refund_bill_no', flat=True)
+    )
+    next_seq = _max_sequence_for_prefix(bill_numbers, prefix) + 1
+    return f"{prefix}{next_seq:06d}"
+
+
+def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
+                              advance_payments, employee_id):
+    """
+    Partial update: touches ONLY advance_payments + audit fields.
+    Replaces the old pattern of loading room_details / roomShitingDetails and
+    re-saving the entire Admission document just to change one JSON field.
+    """
+    updated = Admission.objects.filter(
+        ipNumber=str(ip_number), hospital_code=hospital_code,
+        branch_code=branch_code, outlet_code=outlet_code,
+    ).update(
+        advance_payments=advance_payments,
+        lastmodified_by=employee_id,
+        lastmodified_date=timezone.now(),
+    )
+    return updated
+
+
+def _bill_type_fields(payload):
+    """
+    Pull ONLY bill_type + billTypeNo off the incoming payload — never persist
+    the full bill-type document. The frontend gets the full list from the
+    existing `bill-types/` endpoint and just sends these two back.
+    """
+    bill_type = payload.get('bill_type')
+    bill_type_no = payload.get('billTypeNo') or payload.get('bill_type_no')
+    return bill_type, bill_type_no
+
+
+# ── view ─────────────────────────────────────────────────────────────────────
+
 @api_view(['GET', 'POST', 'PUT'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
@@ -836,40 +936,62 @@ def admission_advance(request, ipNumber=None):
             uhid      = request.GET.get("uhid",      "").strip()
             from_date = request.GET.get("from_date", "").strip()
             to_date   = request.GET.get("to_date",   "").strip()
+
             if not ip_number and not uhid and not (from_date and to_date):
                 return JsonResponse({'success': False, 'error': 'Provide ip_number/uhid or date range'}, status=400)
+
             if ip_number or uhid:
-                admissions = [a for a in Admission.objects.all()
-                              if (not ip_number or str(a.ipNumber) == ip_number)
-                              and (not uhid or str(a.uhid) == uhid)
-                              and getattr(a, 'is_admitted', False)
-                              and not getattr(a, 'is_cancelled', False)]
+                admissions = [
+                    a for a in Admission.objects.all()
+                    if (not ip_number or str(a.ipNumber) == ip_number)
+                    and (not uhid or str(a.uhid) == uhid)
+                    and getattr(a, 'is_admitted', False)
+                    and not getattr(a, 'is_cancelled', False)
+                ]
             else:
-                admissions = [a for a in Admission.objects.all()
-                              if getattr(a, 'is_admitted', False)
-                              and not getattr(a, 'is_cancelled', False)]
+                admissions = [
+                    a for a in Admission.objects.all()
+                    if getattr(a, 'is_admitted', False)
+                    and not getattr(a, 'is_cancelled', False)
+                ]
+
             if not admissions:
                 return JsonResponse({'success': False, 'error': 'No matching admissions found'}, status=404)
-            uhids = list(set(str(a.uhid) for a in admissions))
+
+            # ── Patient name lookup — works the same for ip_number OR uhid search.
+            # Keys are normalised (stripped + upper-cased) on both sides so a
+            # stray space / case mismatch between Admission.uhid and Patient.uhid
+            # never silently drops the patient name.
+            uhids = list({str(a.uhid).strip() for a in admissions if a.uhid})
             patient_map = {}
             for p in Patient.objects.filter(uhid__in=uhids):
-                patient_map[str(p.uhid)] = " ".join(filter(None, [p.salutation, p.firstName, p.lastName])).strip()
+                key = str(p.uhid).strip().upper()
+                patient_map[key] = " ".join(filter(None, [p.salutation, p.firstName, p.lastName])).strip()
+
             advance_payments = []
             for adm in admissions:
                 payments = _safe_list(adm.advance_payments)
+                patient_key = str(adm.uhid).strip().upper()
                 for p in payments:
-                    if not isinstance(p, dict): continue
-                    if p.get('status') == 'Edited': continue
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get('status') == 'Edited':
+                        continue
                     payment_mode = ""
                     if isinstance(p.get("payment_details"), dict):
                         payment_mode = p["payment_details"].get("method", "")
                     paid_date = p.get("paid_datetime") or ""
-                    if isinstance(paid_date, datetime): paid_date = paid_date.isoformat()
-                    p["ip_number"] = adm.ipNumber; p["uhid"] = adm.uhid
-                    p["patient_name"] = patient_map.get(str(adm.uhid), "")
-                    p["payment_mode"] = payment_mode; p["paid_date"] = paid_date
-                    if not isinstance(p.get("refund_details"), list): p["refund_details"] = []
+                    if isinstance(paid_date, datetime):
+                        paid_date = paid_date.isoformat()
+                    p["ip_number"]    = adm.ipNumber
+                    p["uhid"]         = adm.uhid
+                    p["patient_name"] = patient_map.get(patient_key, "")
+                    p["payment_mode"] = payment_mode
+                    p["paid_date"]    = paid_date
+                    if not isinstance(p.get("refund_details"), list):
+                        p["refund_details"] = []
                     advance_payments.append(p)
+
             if from_date and to_date:
                 try:
                     from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
@@ -877,18 +999,26 @@ def admission_advance(request, ipNumber=None):
                     filtered = []
                     for p in advance_payments:
                         date_value = p.get('created_date') or p.get('bill_date') or p.get('date')
-                        if not date_value: continue
+                        if not date_value:
+                            continue
                         try:
-                            if isinstance(date_value, datetime): p_date = date_value.date()
+                            if isinstance(date_value, datetime):
+                                p_date = date_value.date()
                             elif isinstance(date_value, str):
-                                if 'T' in date_value: p_date = datetime.fromisoformat(date_value.replace('Z', '+00:00')).date()
-                                else: p_date = datetime.strptime(date_value, "%Y-%m-%d").date()
-                            else: continue
-                            if from_dt <= p_date <= to_dt: filtered.append(p)
-                        except: continue
+                                if 'T' in date_value:
+                                    p_date = datetime.fromisoformat(date_value.replace('Z', '+00:00')).date()
+                                else:
+                                    p_date = datetime.strptime(date_value, "%Y-%m-%d").date()
+                            else:
+                                continue
+                            if from_dt <= p_date <= to_dt:
+                                filtered.append(p)
+                        except Exception:
+                            continue
                     advance_payments = filtered
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
+
             return JsonResponse({'success': True, 'data': advance_payments})
 
         # ── Find admission for POST / PUT ─────────────────────────────────────
@@ -899,29 +1029,23 @@ def admission_advance(request, ipNumber=None):
         if not adm:
             return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
 
-        rd = _safe_list(adm.room_details)
-        sd = _safe_list(adm.roomShitingDetails)
         ap = _safe_list(adm.advance_payments)
-
-        def generate_bill_number(payments_list):
-            today_dt = timezone.now()
-            year, month = today_dt.year, today_dt.month
-            fy = f"{year % 100:02d}{(year + 1) % 100:02d}" if month >= 4 else f"{(year - 1) % 100:02d}{year % 100:02d}"
-            existing_sequences = []
-            for p in payments_list:
-                if isinstance(p, dict) and p.get('bill_no'):
-                    try: existing_sequences.append(int(p['bill_no'].split('/')[-1]))
-                    except: pass
-            return f"{fy}/{max(existing_sequences, default=0) + 1:06d}"
 
         # ── POST — create new advance ─────────────────────────────────────────
         if request.method == 'POST':
             amount = request.data.get('advance_amount')
             if not amount:
                 return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
+
+            bill_type, bill_type_no = _bill_type_fields(request.data)
+            if bill_type is None or not bill_type_no:
+                return JsonResponse({'success': False, 'error': 'bill_type and billTypeNo are required'}, status=400)
+
             new_entry = {
                 "advance_id":       f"ADV{len(ap) + 1}",
-                "bill_no":          generate_bill_number(ap),
+                "bill_no":          _generate_advance_bill_no(hospital_code, branch_code, outlet_code),
+                "bill_type":        bill_type,
+                "billTypeNo":       bill_type_no,
                 "date":             request.data.get('date', now_iso[:10]),
                 "bill_date":        now_iso,
                 "advance_amount":   float(amount),
@@ -935,9 +1059,7 @@ def admission_advance(request, ipNumber=None):
                 "refund_details":   [],
             }
             ap.append(new_entry)
-            adm.lastmodified_by   = employee_id
-            adm.lastmodified_date = timezone.now()
-            _save_admission(adm, rd, sd, ap)
+            _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
             return JsonResponse({'success': True, 'data': new_entry}, status=201)
 
         # ── PUT ───────────────────────────────────────────────────────────────
@@ -952,6 +1074,7 @@ def admission_advance(request, ipNumber=None):
             if not entry:
                 return JsonResponse({'success': False, 'error': f'Advance entry "{advance_id}" not found'}, status=404)
 
+            # ── cancel ──────────────────────────────────────────────────────
             if action == 'cancel':
                 if not entry.get('is_advanceActive'):
                     return JsonResponse({'success': False, 'error': 'Advance is already inactive'}, status=400)
@@ -961,78 +1084,131 @@ def admission_advance(request, ipNumber=None):
                 entry['status']           = 'Cancelled'
                 entry['cancelled_by']     = employee_id
                 entry['cancelled_date']   = now_iso
-                adm.lastmodified_by   = employee_id
-                adm.lastmodified_date = timezone.now()
-                _save_admission(adm, rd, sd, ap)
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
                 return JsonResponse({'success': True, 'data': entry})
 
+            # ── refund — full amount only, single refund record, status -> Refunded ──
             elif action == 'refund':
                 current_status = entry.get('status')
-                if current_status not in ('Paid',):
-                    return JsonResponse({'success': False, 'error': f"Refund is only allowed for Paid advances. Current status: '{current_status}'"}, status=400)
-                raw_refund = request.data.get('refund_amount')
-                if raw_refund is None:
-                    return JsonResponse({'success': False, 'error': 'refund_amount is required'}, status=400)
-                try: refund_amount = float(raw_refund)
+                if current_status != 'Paid':
+                    return JsonResponse(
+                        {'success': False, 'error': f"Refund is only allowed for Paid advances. Current status: '{current_status}'"},
+                        status=400,
+                    )
+                if entry.get('is_refund'):
+                    return JsonResponse({'success': False, 'error': 'This advance has already been refunded'}, status=400)
+
+                advance_total = float(entry.get('advance_amount', 0))
+                raw_refund = request.data.get('refund_amount', advance_total)
+                try:
+                    refund_amount = float(raw_refund)
                 except (TypeError, ValueError):
                     return JsonResponse({'success': False, 'error': 'refund_amount must be a valid number'}, status=400)
-                if refund_amount <= 0:
-                    return JsonResponse({'success': False, 'error': 'refund_amount must be greater than 0'}, status=400)
-                refund_history = entry.get('refund_details', [])
-                if not isinstance(refund_history, list): refund_history = []
-                total_already_refunded = sum(float(r.get('refunded_amount', 0)) for r in refund_history)
-                advance_total = float(entry.get('advance_amount', 0))
-                remaining     = advance_total - total_already_refunded
-                if refund_amount > remaining + 0.001:
-                    return JsonResponse({'success': False, 'error': f"Refund amount ₹{refund_amount:.2f} exceeds refundable balance ₹{remaining:.2f}"}, status=400)
-                new_total_refunded = total_already_refunded + refund_amount
-                new_remaining      = advance_total - new_total_refunded
-                is_fully_refunded  = new_remaining <= 0.001
-                refund_record = {
-                    "refund_id":             f"REF{len(refund_history) + 1}",
-                    "refunded_amount":       f"{refund_amount:.2f}",
-                    "refunded_date":         now_iso,
-                    "refunded_by":           employee_id,
-                    "payment_mode":          request.data.get('payment_mode', 'Cash'),
-                    "remarks":               request.data.get('remarks', ''),
-                    "total_refunded_so_far": f"{new_total_refunded:.2f}",
-                    "remaining_balance":     f"{max(0, new_remaining):.2f}",
-                }
-                refund_history.append(refund_record)
-                entry['refund_details'] = refund_history
-                entry['is_refund']      = True
-                if is_fully_refunded:
-                    entry['status'] = 'Refunded'; entry['is_advanceActive'] = False; entry['fully_refunded_date'] = now_iso
-                adm.lastmodified_by   = employee_id
-                adm.lastmodified_date = timezone.now()
-                _save_admission(adm, rd, sd, ap)
-                return JsonResponse({'success': True, 'data': {'advance_entry': entry, 'refund_record': refund_record, 'total_refunded': f"{new_total_refunded:.2f}", 'remaining_balance': f"{max(0, new_remaining):.2f}", 'is_fully_refunded': is_fully_refunded}})
 
+                # No partial / split refunds — must match the full advance amount.
+                if abs(refund_amount - advance_total) > 0.001:
+                    return JsonResponse(
+                        {'success': False, 'error': f"Partial refunds are not allowed. Refund amount must equal the full advance amount of ₹{advance_total:.2f}"},
+                        status=400,
+                    )
+
+                refund_bill_type, refund_bill_type_no = _bill_type_fields(request.data)
+                if refund_bill_type is None or not refund_bill_type_no:
+                    # fall back to the advance entry's own bill type if the caller didn't pick one
+                    refund_bill_type, refund_bill_type_no = entry.get('bill_type'), entry.get('billTypeNo')
+
+                refund_bill_no = _generate_refund_bill_no(hospital_code, branch_code, outlet_code)
+
+                # 1) Persist the authoritative refund record in its own table.
+                refund_row = IpAdvance_Refund.objects.create(
+                    refund_bill_no=refund_bill_no,
+                    refund_date=timezone.now(),
+                    refund_amount=refund_amount,
+                    bill_no=entry.get('bill_no'),
+                    ip_number=str(ipNumber),
+                    uhid=str(adm.uhid),
+                    advance_amount=advance_total,
+                    remarks=request.data.get('remarks', ''),
+                    bill_type=str(refund_bill_type),
+                    billTypeNo=refund_bill_type_no,
+                    status="Refunded",
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    outlet_code=outlet_code,
+                    created_by=employee_id,
+                    created_date=timezone.now(),
+                    lastmodified_by=employee_id,
+                    lastmodified_date=timezone.now(),
+                )
+
+                # 2) Keep a lightweight copy on the advance entry for fast display
+                #    (still a real array, never a json.dumps string).
+                refund_record = {
+                    "refund_id":        str(refund_row.pk),
+                    "refund_bill_no":   refund_bill_no,
+                    "refunded_amount":  f"{refund_amount:.2f}",
+                    "refunded_date":    now_iso,
+                    "refunded_by":      employee_id,
+                    "payment_mode":     request.data.get('payment_mode', 'Cash'),
+                    "remarks":          request.data.get('remarks', ''),
+                    "bill_type":        refund_bill_type,
+                    "billTypeNo":       refund_bill_type_no,
+                }
+                entry['refund_details']     = [refund_record]   # single record only — no splits
+                entry['is_refund']          = True
+                entry['status']             = 'Refunded'
+                entry['is_advanceActive']   = False
+                entry['fully_refunded_date'] = now_iso
+
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
+
+                return JsonResponse({
+                    'success': True,
+                    'data': {
+                        'advance_entry':  entry,
+                        'refund_record':  refund_record,
+                        'refund_bill_no': refund_bill_no,
+                    },
+                })
+
+            # ── edit (only while Pending) ──────────────────────────────────
             else:
                 amount = request.data.get('advance_amount')
                 if not amount:
                     return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
                 if entry.get('status') != 'Pending':
                     return JsonResponse({'success': False, 'error': f"Cannot edit — status is '{entry.get('status')}'"}, status=400)
+
+                bill_type, bill_type_no = _bill_type_fields(request.data)
+                if bill_type is None or not bill_type_no:
+                    bill_type, bill_type_no = entry.get('bill_type'), entry.get('billTypeNo')
+
                 original_bill_no = entry.get('bill_no')
-                entry['is_advanceActive'] = False; entry['status'] = 'Edited'
-                entry['edited_by'] = employee_id; entry['edited_date'] = now_iso
+                entry['is_advanceActive'] = False
+                entry['status']           = 'Edited'
+                entry['edited_by']        = employee_id
+                entry['edited_date']      = now_iso
+
                 new_entry = {
                     "advance_id":       f"ADV{len(ap) + 1}",
-                    "bill_no":          original_bill_no,
+                    "bill_no":          original_bill_no,   # bill number is preserved across an edit
+                    "bill_type":        bill_type,
+                    "billTypeNo":       bill_type_no,
                     "date":             request.data.get('date', now_iso[:10]),
                     "bill_date":        now_iso,
                     "advance_amount":   float(amount),
                     "ip_advance":       float(request.data.get('ip_advance',      0)),
                     "billing_advance":  float(request.data.get('billing_advance', 0)),
-                    "is_advanceActive": True, "status": "Pending",
-                    "created_by":       employee_id, "created_date": now_iso,
-                    "edited_from":      advance_id, "is_refund": False, "refund_details": [],
+                    "is_advanceActive": True,
+                    "status":           "Pending",
+                    "created_by":       employee_id,
+                    "created_date":     now_iso,
+                    "edited_from":      advance_id,
+                    "is_refund":        False,
+                    "refund_details":   [],
                 }
                 ap.append(new_entry)
-                adm.lastmodified_by   = employee_id
-                adm.lastmodified_date = timezone.now()
-                _save_admission(adm, rd, sd, ap)
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
                 return JsonResponse({'success': True, 'data': {'original': entry, 'new_entry': new_entry}})
 
     except Exception as e:
