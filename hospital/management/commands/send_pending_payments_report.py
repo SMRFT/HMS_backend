@@ -272,7 +272,7 @@ class Command(BaseCommand):
             now_ist = datetime.now(ist)
             
             # Check if it is 10:00 AM (10:xx:xx) in India
-            if now_ist.hour == 11:
+            if now_ist.hour == 10:
                 self.stdout.write(f'[{now_ist}] 10:00 AM (IST) detected. Triggering email report...')
                 try:
                     self.send_report()
