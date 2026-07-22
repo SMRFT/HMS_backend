@@ -2125,39 +2125,102 @@ class licence_master(AuditModel):
 
 
 
-
+class RawJSONField(models.JSONField):
+    def get_prep_value(self, value):
+        return value
+ 
+    def from_db_value(self, value, expression, connection):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+ 
+ 
 class licencemasterdetails(AuditModel):
     s_no = models.PositiveIntegerField(primary_key=True)
     licence_name = models.CharField(max_length=255)
-    license_number = models.CharField(max_length=255, blank=True, null=True)  # License/Case/Ref No
+    license_number = models.CharField(max_length=255, blank=True, null=True)
+ 
     valid_from = models.DateField(blank=True, null=True)
     expiry_date = models.DateField(blank=True, null=True)
-    Intimation_90days_about_expiry =  models.CharField(max_length=100,default="90 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_60days_about_expiry =  models.CharField(max_length=100,default="60 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_30days_about_expiry =  models.CharField(max_length=100,default="30 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_7days_about_expiry =  models.CharField(max_length=100,default="7 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_1day_about_expiry =  models.CharField(max_length=100,default="1 Day(s) Before the Due Date",blank=True,null=True)
-    incharge = models.CharField(max_length=255, blank=True, null=True)
-    respective_person = models.CharField(max_length=255, blank=True, null=True)
+    renewal_date = models.DateField(blank=True, null=True)
+    renewwed_by = models.CharField(max_length=100, blank=True, null=True)
+ 
+    # ✅ These three now use RawJSONField instead of models.JSONField so
+    # they're stored as real arrays/subdocuments, not JSON-string text.
+    history = RawJSONField(default=list, blank=True)
+    incharge = RawJSONField(default=list, blank=True)
+    respective_person = RawJSONField(default=list, blank=True)
+ 
+    Intimation_90days_about_expiry = models.CharField(
+        max_length=100, default="90 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_60days_about_expiry = models.CharField(
+        max_length=100, default="60 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_30days_about_expiry = models.CharField(
+        max_length=100, default="30 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_7days_about_expiry = models.CharField(
+        max_length=100, default="7 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_1day_about_expiry = models.CharField(
+        max_length=100, default="1 Day(s) Before the Due Date", blank=True, null=True
+    )
+ 
     is_90days = models.BooleanField(default=False)
     is_60days = models.BooleanField(default=False)
     is_30days = models.BooleanField(default=False)
     is_7days = models.BooleanField(default=False)
     is_1day = models.BooleanField(default=False)
-
-    def save(self, *args, **kwargs):
+ 
+    def save(self, *args, is_renewal=False, **kwargs):
+        # ✅ Detect create vs update BEFORE touching s_no, since assigning
+        # s_no would make self.pk non-None even for a brand-new record.
+        is_new = self.pk is None or not licencemasterdetails.objects.filter(
+            pk=self.pk
+        ).exists()
+ 
+        # ✅ Auto increment s_no
         if not self.s_no:
             last = licencemasterdetails.objects.order_by('-s_no').first()
-            if last:
-                self.s_no = last.s_no + 1
-            else:
-                self.s_no = 1
-
+            self.s_no = last.s_no + 1 if last else 1
+ 
+        if not self.history:
+            self.history = []
+ 
+        # ✅ FIRST TIME CREATE → store initial expiry
+        if is_new and self.expiry_date:
+            self.history.append({
+                "type": "created",
+                "expiry_date": str(self.expiry_date),
+                "renewal_date": None,
+            })
+ 
+        # ✅ RENEWAL → only when explicitly requested by the caller
+        # (licence_renewal view passes is_renewal=True), never inferred
+        # from field values. This is what stops a plain edit of some
+        # other field from silently appending junk history entries.
+        if is_renewal:
+            new_entry = {
+                "type": "renewed",
+                "renewal_date": str(self.renewal_date) if self.renewal_date else None,
+                "expiry_date": str(self.expiry_date),
+                "renewed_by": self.renewwed_by,
+            }
+            if new_entry not in self.history:
+                self.history.append(new_entry)
+ 
         self.lastmodified_date = timezone.now()
         super().save(*args, **kwargs)
 
-
         
+ 
+
+
+
 class ImplantRequest(AuditModel): 
     ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
     uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)

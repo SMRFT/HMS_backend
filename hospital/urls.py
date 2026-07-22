@@ -543,6 +543,7 @@ urlpatterns = [
     path('licence_master_details/', companysecretary.licence_master_details, name='licence_master_details'),
     path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
     path('licence_master_details/<int:s_no>/', companysecretary.licence_master_details),
+    path('licence_master_details/<int:s_no>/renew/', companysecretary.licence_renewal, name='licence-renewal'),
     
     
     # HR Internship Management

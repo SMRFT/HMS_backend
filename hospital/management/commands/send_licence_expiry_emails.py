@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from django.conf import settings
 from django.core.mail import EmailMessage
@@ -17,12 +18,22 @@ THRESHOLDS = [
 ]
 
 
-# ✅ Get employee email
-def get_employee_email(employee_id):
-    if not employee_id:
-        return None
-    profile = profile_collection.find_one({"employeeId": employee_id})
-    return profile.get("email") if profile else None
+# ✅ Get employee email(s) — incharge / respective_person are stored as
+# arrays of employeeId now (multi-select), so this takes a list and
+# returns a list of emails via a single $in query instead of one lookup
+# per id. Also tolerates a lone string for any record that predates the
+# multi-select change.
+def get_employee_emails(employee_ids):
+    if not employee_ids:
+        return []
+    if isinstance(employee_ids, str):
+        employee_ids = [employee_ids]
+
+    profiles = profile_collection.find(
+        {"employeeId": {"$in": employee_ids}},
+        {"email": 1, "_id": 0},
+    )
+    return [p["email"] for p in profiles if p.get("email")]
 
 
 # ✅ Email body
@@ -86,12 +97,12 @@ def run_licence_expiry_check():
 
                 print(f"👉 Triggering {days_before}-day email")
 
-                incharge_email = get_employee_email(record.get("incharge"))
-                respective_person_email = get_employee_email(record.get("respective_person"))
+                incharge_emails = get_employee_emails(record.get("incharge"))
+                respective_person_emails = get_employee_emails(record.get("respective_person"))
 
-                print("Incharge Email:", incharge_email)
+                print("Incharge Emails:", incharge_emails)
 
-                if not incharge_email:
+                if not incharge_emails:
                     skipped.append({
                         "licence": record.get("licence_name"),
                         "reason": "No incharge email",
@@ -109,8 +120,8 @@ def run_licence_expiry_check():
                         subject=subject,
                         body=build_email_body(record, label_text, days_before),
                         from_email=settings.EMAIL_HOST_USER,
-                        to=[incharge_email],
-                        cc=[respective_person_email] if respective_person_email else [],
+                        to=incharge_emails,
+                        cc=respective_person_emails,
                     )
 
                     email.send()
@@ -153,9 +164,6 @@ def run_licence_expiry_check():
 
 
 # ✅ DJANGO COMMAND
-import time
-from django.core.management.base import BaseCommand
-
 class Command(BaseCommand):
     help = "Send licence expiry reminder emails"
 
