@@ -433,7 +433,7 @@ PAGE_MAPPING = {
 # Company Secretary:
 
         '/_b_a_c_k_e_n_d/HMS/get_licence_master/': 'HMS-P-CSLM',
-        '/_b_a_c_k_e_n_d/HMS/licence_master_details/': 'HMS-P-CSLD',
+        r'/_b_a_c_k_e_n_d/HMS/licence_master_details/?(\\?.*)?$': 'HMS-P-CSLD',
         '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
 
        

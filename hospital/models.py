@@ -2127,7 +2127,7 @@ class licence_master(AuditModel):
 
 
 class licencemasterdetails(AuditModel):
-    s_no = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    s_no = models.PositiveIntegerField(primary_key=True)
     licence_name = models.CharField(max_length=255)
     license_number = models.CharField(max_length=255, blank=True, null=True)  # License/Case/Ref No
     valid_from = models.DateField(blank=True, null=True)
@@ -2155,6 +2155,9 @@ class licencemasterdetails(AuditModel):
 
         self.lastmodified_date = timezone.now()
         super().save(*args, **kwargs)
+
+
+        
 class ImplantRequest(AuditModel): 
     ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
     uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)
