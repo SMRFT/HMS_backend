@@ -61,24 +61,46 @@ def get_licence_master(request):
 
 
 
-@api_view(['GET', 'POST'])
+@api_view(['GET', 'POST', 'PUT'])
 @permission_classes([HasRoleAndDataPermission])
-def licence_master_details(request):
+def licence_master_details(request, s_no=None):
     if request.method == 'GET':
         queryset = licencemasterdetails.objects.all().order_by('s_no')
         serializer = licencemasterdetailsSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    # POST - create a new licence detail record
-    data = request.data.copy()
-    employee_id = data.get('auth-user-id')
-    data['created_by'] = employee_id
-    data['created_date'] = timezone.now()
+    if request.method == 'POST':
+        data = request.data.copy()
+        employee_id = data.get('auth-user-id')
+        data['created_by'] = employee_id
+        data['created_date'] = timezone.now()
 
-    serializer = licencemasterdetailsSerializer(data=data)
+        serializer = licencemasterdetailsSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # PUT - update existing record by s_no
+    try:
+        instance = licencemasterdetails.objects.get(s_no=s_no)
+    except licencemasterdetails.DoesNotExist:
+        return Response({'error': 'Record not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    data = request.data.copy()
+    data['lastmodified_by'] = data.get('auth-user-id')
+    # lastmodified_date has auto_now=True, so it stamps itself on instance.save() below —
+    # no need to set it manually here.
+
+    serializer = licencemasterdetailsSerializer(instance, data=data, partial=True)
     if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()  # explicit update on the already-fetched instance
+        return Response(
+            licencemasterdetailsSerializer(instance).data,
+            status=status.HTTP_200_OK
+        )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

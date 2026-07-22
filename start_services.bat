@@ -7,5 +7,8 @@ start "Django Server" cmd /k "venv\Scripts\python manage.py runserver 0.0.0.0:26
 echo Starting Automation Worker (Daemon)...
 start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_pending_payments_report --daemon"
 
+echo Send licence expiry emails (Daemon)...
+start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_licence_expiry_emails --daemon --interval 86400"
+
 echo Services started. You can close this window.
 pause

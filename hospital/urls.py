@@ -542,7 +542,8 @@ urlpatterns = [
     path('get_licence_master/', companysecretary.get_licence_master, name='get_licence_masters'),
     path('licence_master_details/', companysecretary.licence_master_details, name='licence_master_details'),
     path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
-    # path('autoscheduler_email/', companysecretary.autoscheduler_email, name='autoscheduler_email'),
+    path('licence_master_details/<int:s_no>/', companysecretary.licence_master_details),
+    
     
     # HR Internship Management
     path('hr/internships/', hr.list_or_create_internships, name='list_or_create_internships'),

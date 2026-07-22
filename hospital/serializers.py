@@ -636,6 +636,7 @@ class licence_masterSerializer(serializers.ModelSerializer):
 from .models import licencemasterdetails
 class licencemasterdetailsSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+    s_no = serializers.IntegerField(read_only=True)
     class Meta:
         model = licencemasterdetails
         fields = '__all__'
