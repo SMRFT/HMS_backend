@@ -193,7 +193,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/patient-discharge-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/upload-pdf/?(\?.*)?$': 'HMS-P-SUM',
     r'^/_b_a_c_k_e_n_d/HMS/get-file(?:/[^/]+)+/$': 'HMS-P-SUM',
-    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
 
