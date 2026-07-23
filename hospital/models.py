@@ -26,9 +26,29 @@ class AuditModel(models.Model):
         self.lastmodified_date = timezone.now()
 
         super().save(*args, **kwargs)
+class ABHAProfile(AuditModel):
+    abha_number = models.CharField(max_length=50, unique=True)
+    first_name = models.CharField(max_length=100, blank=True, null=True)
+    last_name = models.CharField(max_length=100, blank=True, null=True)
+    dob = models.CharField(max_length=50, blank=True, null=True)
+    gender = models.CharField(max_length=10, blank=True, null=True)
+    abha_address = models.CharField(max_length=100, blank=True, null=True)
+    abha_mobile = models.CharField(max_length=20, blank=True, null=True)
+    abha_photo = models.TextField(blank=True, null=True)
+    abha_status = models.CharField(max_length=50, blank=True, null=True)
+    abha_type = models.CharField(max_length=50, blank=True, null=True)
+    abha_district_name = models.CharField(max_length=100, blank=True, null=True)
+    abha_state_name = models.CharField(max_length=100, blank=True, null=True)
+    abha_pincode = models.CharField(max_length=20, blank=True, null=True)
+    abha_full_address = models.TextField(blank=True, null=True)
+
+
 
 class Patient(AuditModel):
     company_code = models.CharField(max_length=100, blank=True, null=True)
+
+    # ABDM Integration Fields
+    abha_number = models.CharField(max_length=50, blank=True, null=True)
 
     uhid = models.CharField(max_length=20)
     # ip_number = models.CharField(max_length=20, blank=True, null=True)

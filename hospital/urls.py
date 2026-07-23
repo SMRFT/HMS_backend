@@ -44,6 +44,8 @@ from .Views import (
     companysecretary,
     communication,
     hr,
+    abdm_integration,
+    abdm_m1,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -54,7 +56,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
 from .Views.Complaints import complaints
 
 handler404 = 'hospital.views.custom_page_not_found'
@@ -363,6 +365,7 @@ urlpatterns = [
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
+    path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
 
     # Velavan Items
@@ -516,6 +519,14 @@ urlpatterns = [
     path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
+    path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
+    path('datewise-collection-summary/', accounting_reports.datewise_collection_summary, name='datewise_collection_summary'),
+    path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
+    path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),
+    path('debit-bills-report/', accounting_reports.debit_bills_report, name='debit_bills_report'),
+    path('audit-report/', accounting_reports.audit_report, name='audit_report'),
+    path('sales-tax-register/', accounting_reports.sales_tax_register, name='sales_tax_register'),
+    path('stock-report-ip-op/', accounting_reports.stock_report_ip_op, name='stock_report_ip_op'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
@@ -553,4 +564,15 @@ urlpatterns = [
     path('hr/internships/edit/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
     path('hr/internships/payment/<str:pk>/', hr.add_payment, name='add_payment'),
     path('hr/internships/approve/<str:pk>/', hr.approve_internship_certificate, name="approve_internship_certificate"),
+
+    # ABDM Integration API
+    path('abdm/update-bridge-url/', abdm_integration.update_bridge_url_api, name='update_bridge_url_api'),
+    path('abdm/add-service/', abdm_integration.add_service_api, name='add_service_api'),
+    path('abdm/get-services/', abdm_integration.get_services_api, name='get_services_api'),
+
+    # ABDM Milestone 1
+    path('abdm/m1/generate-otp/', abdm_m1.generate_otp_api, name='abdm_m1_generate_otp'),
+    path('abdm/m1/verify-otp/', abdm_m1.verify_otp_api, name='abdm_m1_verify_otp'),
+    path("abha-profiles/", abdm_m1.abha_profile_list_api, name="abha_profile_list_api"),
+
 ]

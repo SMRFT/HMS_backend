@@ -121,9 +121,9 @@ def room_occupancy_report_view(request):
         admissions = Admission.objects.filter(**admission_query)
         admissions = [
             adm for adm in admissions
-            if getattr(adm, "is_admissionActive", False) is True
+            if getattr(adm, "is_admitted", False) is True
             and getattr(adm, "is_discharged", True) is False
-            and getattr(adm, "is_admitted", False) is True
+            and getattr(adm, "is_cancelled", False) is False
         ]
 
         uhids = list(set(adm.uhid for adm in admissions if adm.uhid))
@@ -234,7 +234,9 @@ def previous_day_room_occupancy_view(request):
     Logic — a patient counts as 'occupied' on target_date if:
       1. Their admissionDateTime <= EOD of target_date
       2. AND they were NOT fully discharged before SOD of target_date
-         (i.e. dischargeDateTime >= SOD, or is_admissionActive=True)
+         (i.e. still currently admitted, or discharged on/after SOD —
+         approximated via lastmodified_date since Admission has no
+         dedicated discharge-timestamp field)
 
     Query param: target_date=YYYY-MM-DD  (defaults to yesterday)
     """
@@ -286,20 +288,25 @@ def previous_day_room_occupancy_view(request):
             if adm_dt is None or adm_dt > eod:
                 continue                                   # admitted after target date
 
-            # Still active (not yet discharged)
-            if getattr(adm, "is_admissionActive", False) is True:
+            # Still active (not yet discharged, not cancelled)
+            is_currently_active = (
+                getattr(adm, "is_admitted", False) is True
+                and getattr(adm, "is_discharged", True) is False
+                and getattr(adm, "is_cancelled", False) is False
+            )
+            if is_currently_active:
                 candidates.append(adm)
                 continue
 
-            # Discharged — include only if discharge was on or after SOD
-            discharge_dt = parse_dt(getattr(adm, "dischargeDateTime", None))
-            if discharge_dt is not None and discharge_dt >= sod:
-                candidates.append(adm)
-                continue
-
-            # Edge case: is_discharged flag is False even without discharge date
-            if getattr(adm, "is_discharged", True) is False:
-                candidates.append(adm)
+            # Discharged — include only if the discharge happened on or after SOD.
+            # There's no dedicated discharge-timestamp field, so lastmodified_date
+            # (set on every save) is used as the best available approximation,
+            # same convention used elsewhere in this codebase for discharge dating.
+            if getattr(adm, "is_discharged", False) is True:
+                discharge_dt = parse_dt(getattr(adm, "lastmodified_date", None))
+                if discharge_dt is not None and discharge_dt >= sod:
+                    candidates.append(adm)
+                    continue
 
         # ── 3. Build supporting maps ──
         uhids = list(set(adm.uhid for adm in candidates if adm.uhid))
@@ -367,8 +374,15 @@ def previous_day_room_occupancy_view(request):
             mobile       = getattr(patient, 'mobilePhone', 'N/A') if patient else 'N/A'
 
             # Compute status label for this record
-            is_active    = getattr(adm, "is_admissionActive", False) is True
-            discharge_dt = parse_dt(getattr(adm, "dischargeDateTime", None))
+            is_active = (
+                getattr(adm, "is_admitted", False) is True
+                and getattr(adm, "is_discharged", True) is False
+                and getattr(adm, "is_cancelled", False) is False
+            )
+            discharge_dt = (
+                parse_dt(getattr(adm, "lastmodified_date", None))
+                if getattr(adm, "is_discharged", False) is True else None
+            )
             if is_active:
                 status = "Still Active"
             elif discharge_dt and discharge_dt.date() == target_date:
@@ -392,7 +406,7 @@ def previous_day_room_occupancy_view(request):
                 "gender":            gender,
                 "mobile":            mobile,
                 "admissionDateTime": adm.admissionDateTime,
-                "dischargeDateTime": getattr(adm, "dischargeDateTime", None),
+                "dischargeDateTime": discharge_dt,
                 "admittingDoctor":   doc_name,
                 "packageName":       adm.packageName or "N/A",
                 "status":            status,

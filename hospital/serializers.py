@@ -18,6 +18,8 @@ class ChemicalCompositionSerializer(serializers.ModelSerializer):
         model  = ChemicalComposition
         fields = "__all__"
         read_only_fields = ["composition_id"]
+from .models import ABHAProfile
+
 
         
 from .models import PharmacyCategory,Cashcountershiftdetails
@@ -289,6 +291,13 @@ class RoomSerializer(serializers.ModelSerializer):
     
 
 from .models import Patient, InsuranceProvider, Admission
+class ABHAProfileSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = ABHAProfile
+        fields = "__all__"
+
+
 
 class PatientSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
