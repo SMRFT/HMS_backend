@@ -126,7 +126,7 @@ def send_whatsapp(request):
         # Resolve template name from request or environment variables
         req_template = str(request.data.get("template_name", "")).strip()
         if "discharge" in req_template.lower():
-            template_name = "sh_discharge_summary"
+            template_name = "sh_discharge_summary_final"
         else:
             template_name = "sh_hr_intership_final"
 
