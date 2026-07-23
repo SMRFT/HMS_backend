@@ -126,13 +126,9 @@ def send_whatsapp(request):
         # Resolve template name from request or environment variables
         req_template = str(request.data.get("template_name", "")).strip()
         if "discharge" in req_template.lower():
-            template_name = os.getenv("BOTIFY_DISCHARGE_TEMPLATE_NAME", "sh_discharge_summary")
-            if template_name in ["discharge_summary", ""]:
-                template_name = "sh_discharge_summary"
+            template_name = "sh_discharge_summary"
         else:
-            template_name = os.getenv("BOTIFY_INTERNSHIP_TEMPLATE_NAME", "hr_internship_certificate_final")
-            if template_name in ["sh_internship_certificate", "hr_sh_internship_certificate", "internship_certificate", "hr_internship_certificate", ""]:
-                template_name = "hr_internship_certificate_final"
+            template_name = "sh_hr_intership_final"
 
         # Format Document PDF Name with Student / Patient Name
         if not pdf_name:
@@ -147,11 +143,19 @@ def send_whatsapp(request):
         if not pdf_name.lower().endswith(".pdf"):
             pdf_name = f"{pdf_name}.pdf"
 
-        # Prepare template data parameters
-        # Single parameter template: {{1}} = Student/Patient Name
+        # Convert local loopback URLs (127.0.0.1 / localhost) to public URL so Meta Cloud servers & recipients can access the PDF
+        public_base_url = os.getenv("PUBLIC_BASE_URL", "https://shinova.in/").strip()
+        if "127.0.0.1" in file_url or "localhost" in file_url:
+            if "/get-file/" in file_url:
+                file_id = file_url.split("/get-file/")[1].strip("/")
+                from django.urls import reverse
+                relative_url = reverse('get_pdf_from_gridfs', args=[file_id])
+                file_url = f"{public_base_url.rstrip('/')}{relative_url}"
+
+        # Prepare template data parameters: {{1}} = Name, {{2}} = Public PDF Download URL
         template_data = request.data.get("templateData")
         if not template_data or not isinstance(template_data, list):
-            template_data = [patient_name]
+            template_data = [patient_name, file_url]
 
         botify_apikey = os.getenv("BOTIFY_API_KEY", "btfy_aa1b818c6473403a74cce7c913007df4af197c22ee4ae0c12019e5f408d93b70").strip()
         if botify_apikey.startswith("Bearer "):
@@ -168,12 +172,38 @@ def send_whatsapp(request):
             "Content-Type": "application/json"
         }
 
+        # Build Meta WhatsApp Cloud API standard components structure for Document Header Templates
+        components = [
+            {
+                "type": "header",
+                "parameters": [
+                    {
+                        "type": "document",
+                        "document": {
+                            "link": file_url,
+                            "filename": pdf_name
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "body",
+                "parameters": [
+                    {
+                        "type": "text",
+                        "text": str(p)
+                    } for p in template_data
+                ]
+            }
+        ]
+
         body_payload = {
             "to": clean_phone,
             "type": "template",
             "templateName": template_name,
             "templateData": template_data,
             "category": category,
+            "components": components,
             "filename": pdf_name,
             "fileName": pdf_name,
             "pdf_name": pdf_name,
