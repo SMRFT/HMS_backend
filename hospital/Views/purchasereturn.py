@@ -18,7 +18,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.views.decorators.csrf import csrf_exempt
 
 from pyauth.auth import HasRoleAndDataPermission
-from ..models import PharmacyStock, PharmacyItem
+from ..models import PharmacyStock, PharmacyItem, PurchaseReturn, GRN, Vendor
 from ..serializers import PurchaseReturnSerializer
 
 logger = logging.getLogger(__name__)
@@ -39,10 +39,8 @@ CAUSE_OF_RETURN_CHOICES = [
 ]
 
 PURCHASE_RETURN_STATUS_CHOICES = [
+    "Pending",
     "Returned",
-    "Supplier Collected",
-    "Partial Credit Note",
-    "Credit Note Settled",
 ]
 
 
@@ -168,11 +166,10 @@ def _serialize_doc(doc):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _next_purchase_return_bill_no():
-    collection = _get_collection()
     prefix = "2627/"
     max_seq = 0
-    for row in collection.find({"purchase_return_bill_no": {"$regex": f"^{prefix}"}}):
-        ref = str(row.get("purchase_return_bill_no", "")).strip()
+    for row in PurchaseReturn.objects.filter(purchase_return_bill_no__startswith=prefix):
+        ref = str(getattr(row, "purchase_return_bill_no", "")).strip()
         if ref.startswith(prefix):
             try:
                 seq = int(ref.split("/")[-1])
@@ -188,7 +185,7 @@ def _next_purchase_return_bill_no():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def get_grn_items(request):
     """
     Returns all PharmacyStock rows for the given GRN, enriched with
@@ -199,6 +196,8 @@ def get_grn_items(request):
         - blocked_quantity - grn_return_quantity + sales_return_quantity
     """
     grn_number = request.query_params.get("grn_number", "").strip()
+    vendor_id  = request.query_params.get("vendor_id", "").strip()
+
     if not grn_number:
         return Response({"success": False, "error": "grn_number is required"}, status=400)
 
@@ -206,6 +205,39 @@ def get_grn_items(request):
     hospital_code, branch_code, outlet_code, user_id = _get_auth(request, request_data)
 
     try:
+        if vendor_id:
+            try:
+                v_id = int(vendor_id)
+            except ValueError:
+                v_id = None
+                
+            if v_id is not None:
+                # Need to use hospital.models.GRN directly instead of inventory.GRN to avoid ImportError if circular
+                from .inventory import GRN
+                # Fetch the GRN object to avoid strict type filtering issues with vendor_id
+                grn_obj = GRN.objects.filter(hospital_code=hospital_code, branch_code=branch_code, grn_number=grn_number).first()
+                if not grn_obj:
+                    return Response({"success": False, "error": f"GRN {grn_number} not found in records."})
+                
+                # Check vendor_id manually (cast to string to safely compare)
+                db_vendor_id = str(getattr(grn_obj, "vendor_id", "")).strip()
+                if db_vendor_id != str(v_id):
+                    # Resolve both vendor names for a clearer error                                                                           
+                    from ..models import Vendor as VendorModel
+                    def _vname(vid_str):
+                        try:
+                            vobj = VendorModel.objects.filter(
+                                hospital_code=hospital_code, branch_code=branch_code, vendor_id=vid_str
+                            ).first()
+                            if vobj:
+                                return getattr(vobj, "name", None) or getattr(vobj, "vendor_name", None) or vid_str
+                        except Exception:
+                            pass
+                        return vid_str
+                    db_vname = _vname(db_vendor_id)
+                    sel_vname = _vname(str(v_id))
+                    return Response({"success": False, "error": f"GRN {grn_number} belongs to vendor '{db_vname}', not the selected vendor ('{sel_vname}')!"})
+
         stock_qs = PharmacyStock.objects.filter(
             hospital_code=hospital_code,
             branch_code=branch_code,
@@ -235,17 +267,19 @@ def get_grn_items(request):
                 or str(getattr(s, "hsn",      "") or "")
             )
 
+            exp = getattr(s, "expiry_date", None)
+            try:
+                exp_str = exp.isoformat() if hasattr(exp, "isoformat") else str(exp) if exp else None
+            except Exception:
+                exp_str = None
+
             results.append({
                 "stock_id":      getattr(s, "stock_id",      None),
                 "item_id":       iid,
                 "item_name":     item_map.get(iid, f"Item #{iid}"),
                 "hsn_code":      hsn,
                 "batch_number":  str(getattr(s, "batch_number",  "") or ""),
-                "expiry_date":   (
-                    getattr(s, "expiry_date", None).isoformat()
-                    if getattr(s, "expiry_date", None)
-                    else None
-                ),
+                "expiry_date":   exp_str,
                 "mrp":           str(_dec(getattr(s, "mrp",          0))),
                 "Selling_Price": str(_dec(getattr(s, "Selling_Price", 0))),
                 # total_stock: raw value from collection (displayed as "Batch Stock")
@@ -255,6 +289,12 @@ def get_grn_items(request):
                 "outlet_code":   str(getattr(s, "outlet_code", "") or ""),
                 "grn_number":    grn_number,
             })
+
+        if not results:
+            # Check if it exists in GRN
+            from .inventory import GRN
+            if GRN.objects.filter(hospital_code=hospital_code, branch_code=branch_code, grn_number=grn_number).exists():
+                return Response({"success": False, "error": f"GRN {grn_number} exists, but no items found in PharmacyStock. Stock may not have been updated."})
 
         return Response({"success": True, "data": results})
 
@@ -268,14 +308,12 @@ def get_grn_items(request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET", "POST", "PUT"])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def purchase_return_view(request, pk=None):
 
     request_data = request.data if hasattr(request, "data") else request.POST
     hospital_code, branch_code, outlet_code, user_id = _get_auth(request, request_data)
-
-    collection = _get_collection()
 
     # ─────────────────────────────────────────────────────────────────────────
     # GET
@@ -287,14 +325,14 @@ def purchase_return_view(request, pk=None):
         ref_no    = request.query_params.get("purchase_return_bill_no", "")
 
         if pk:
-            doc = collection.find_one({
-                "purchase_return_bill_no": pk,
-                "hospital_code": hospital_code,
-                "branch_code":   branch_code,
-            })
+            doc = PurchaseReturn.objects.filter(
+                purchase_return_bill_no=pk,
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+            ).first()
             if not doc:
                 return Response({"success": False, "error": "Record not found"}, status=404)
-            return Response({"success": True, "data": _serialize_doc(doc)})
+            return Response({"success": True, "data": PurchaseReturnSerializer(doc).data})
 
         query = {
             "hospital_code": hospital_code,
@@ -304,30 +342,125 @@ def purchase_return_view(request, pk=None):
             query["outlet_code"] = outlet_code
         if ref_no:
             query["purchase_return_bill_no"] = ref_no
+        
+        status_filter = request.query_params.get("status", "")
+        if status_filter:
+            query["status"] = status_filter
 
-        docs = list(collection.find(query).sort("created_date", -1))
+        qs = PurchaseReturn.objects.filter(**query).order_by("-created_date")
 
-        if from_date or to_date:
-            filtered = []
-            for doc in docs:
-                created = doc.get("created_date") or doc.get("purchase_return_bill_date")
-                if created:
-                    created_str = (
-                        created.strftime("%Y-%m-%d")
-                        if hasattr(created, "strftime")
-                        else str(created)[:10]
-                    )
-                    if from_date and created_str < from_date:
-                        continue
-                    if to_date and created_str > to_date:
-                        continue
-                filtered.append(doc)
-            docs = filtered
+        from datetime import datetime
+        if from_date:
+            try:
+                fd = datetime.strptime(from_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
+                qs = qs.filter(purchase_return_bill_date__gte=fd)
+            except ValueError:
+                pass
+        if to_date:
+            try:
+                td = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                qs = qs.filter(purchase_return_bill_date__lte=td)
+            except ValueError:
+                pass
+
+        serializer = PurchaseReturnSerializer(qs, many=True)
+        data_out = serializer.data
+
+        # Patch missing item_names dynamically
+        item_ids_to_fetch = set()
+        for row in data_out:
+            items_list = row.get("items")
+            if isinstance(items_list, str):
+                import json
+                try:
+                    items_list = json.loads(items_list)
+                    row["items"] = items_list
+                except:
+                    continue
+            if isinstance(items_list, list):
+                for item in items_list:
+                    if not item.get("item_name") or str(item.get("item_name")).startswith("Item #"):
+                        iid = str(item.get("item_id", ""))
+                        if iid.isdigit():
+                            item_ids_to_fetch.add(int(iid))
+
+        if item_ids_to_fetch:
+            name_map = {
+                str(itm.item_id): getattr(itm, "item_name", "") or ""
+                for itm in PharmacyItem.objects.filter(
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    item_id__in=list(item_ids_to_fetch)
+                )
+            }
+            for row in data_out:
+                items_list = row.get("items")
+                if isinstance(items_list, list):
+                    for item in items_list:
+                        if not item.get("item_name") or str(item.get("item_name")).startswith("Item #"):
+                            iid = str(item.get("item_id", ""))
+                            if iid in name_map:
+                                item["item_name"] = name_map[iid]
+
+        # Fetch vendor_names for each GRN
+        grn_numbers_to_fetch = set()
+        for row in data_out:
+            if row.get("grn_number"):
+                for g in str(row.get("grn_number", "")).split(","):
+                    g = g.strip()
+                    if g:
+                        grn_numbers_to_fetch.add(g)
+        
+        if grn_numbers_to_fetch:
+            grns = GRN.objects.filter(
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                grn_number__in=list(grn_numbers_to_fetch)
+            )
+            vendor_ids = set()
+            grn_to_vendor_id = {}
+            grn_to_purchase_category = {}
+            for grn in grns:
+                v_id = str(getattr(grn, "vendor_id", ""))
+                if v_id:
+                    vendor_ids.add(v_id)
+                    grn_to_vendor_id[grn.grn_number] = v_id
+                cat = str(getattr(grn, "purchase_category", ""))
+                if cat:
+                    grn_to_purchase_category[grn.grn_number] = cat
+            
+            vendor_name_map = {}
+            if vendor_ids:
+                vendors = Vendor.objects.filter(
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    vendor_id__in=list(vendor_ids)
+                )
+                for v in vendors:
+                    vendor_name_map[str(v.vendor_id)] = getattr(v, "name", "") or getattr(v, "vendor_name", "") or str(v.vendor_id)
+            
+            for row in data_out:
+                grn_list = [g.strip() for g in str(row.get("grn_number", "")).split(",") if g.strip()]
+                v_names = []
+                p_categories = []
+                for g in grn_list:
+                    vid = grn_to_vendor_id.get(g)
+                    if vid and vid in vendor_name_map:
+                        if vendor_name_map[vid] not in v_names:
+                            v_names.append(vendor_name_map[vid])
+                    cat = grn_to_purchase_category.get(g)
+                    if cat and cat not in p_categories:
+                        p_categories.append(cat)
+                
+                if v_names:
+                    row["vendor_name"] = ", ".join(v_names)
+                if p_categories:
+                    row["purchase_category"] = ", ".join(p_categories)
 
         return Response({
             "success": True,
-            "count":   len(docs),
-            "data":    [_serialize_doc(d) for d in docs],
+            "count":   qs.count(),
+            "data":    data_out,
         })
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -337,20 +470,7 @@ def purchase_return_view(request, pk=None):
         data = request_data
 
         outlet_code_body = str(data.get("outlet_code") or outlet_code or "").strip()
-        vendor_code      = str(data.get("vendor_code",  "")).strip()
-        vendor_name      = str(data.get("vendor_name",  "")).strip()
-        grn_number       = str(data.get("grn_number",   "")).strip()
-        return_remark    = str(data.get("return_remark", "")).strip()
-        gst_amount       = _dec(data.get("gst_amount",   0))
-        cgst_amount      = _dec(data.get("cgst_amount",  0))
-        sgst_amount      = _dec(data.get("sgst_amount",  0))
-        other_amount     = _dec(data.get("other_amount", 0))
-        round_amount     = _dec(data.get("round_amount", 0))
-
-        if not vendor_code:
-            return Response({"success": False, "error": "vendor_code is required"}, status=400)
-        if not grn_number:
-            return Response({"success": False, "error": "grn_number is required"}, status=400)
+        outlet_code_body = str(data.get("outlet_code") or outlet_code or "").strip()
 
         raw_items = data.get("items", [])
         if isinstance(raw_items, str):
@@ -362,10 +482,13 @@ def purchase_return_view(request, pk=None):
         if not raw_items:
             return Response({"success": False, "error": "At least one item is required"}, status=400)
 
+        grn_numbers = set(str(item.get("grn_number", "")).strip() for item in raw_items)
+        if "" in grn_numbers: grn_numbers.remove("")
+
         all_stocks = list(PharmacyStock.objects.filter(
             hospital_code=hospital_code,
             branch_code=branch_code,
-            grn_number=grn_number,
+            grn_number__in=grn_numbers,
         ))
 
         # Build item_name map for storing names in the document
@@ -442,47 +565,36 @@ def purchase_return_view(request, pk=None):
                 "return_qty":      return_qty,
                 "price":           float(price),
                 "cause_of_return": cause_of_return,
+                "grn_number":      str(item.get("grn_number", "")).strip(),
             })
 
         if errors:
             return Response({"success": False, "error": errors}, status=400)
 
-        total_return_amount += gst_amount + cgst_amount + sgst_amount + other_amount + round_amount
-
         bill_no = _next_purchase_return_bill_no()
         now     = timezone.now()
 
-        doc = {
-            "created_by":                user_id,
-            "created_date":              now,
-            "lastmodified_by":           None,
-            "lastmodified_date":         now,
-            "hospital_code":             hospital_code,
-            "branch_code":               branch_code,
-            "outlet_code":               outlet_code_body,
-            "vendor_code":               vendor_code,
-            "vendor_name":               vendor_name,
-            "grn_number":                grn_number,
-            "items":                     processed_items,
-            "purchase_return_amount":    str(total_return_amount.quantize(Decimal("0.01"))),
-            "purchase_return_bill_date": now,
-            "purchase_return_bill_no":   bill_no,
-            "return_remark":             return_remark,
-            "gst_amount":                str(gst_amount),
-            "cgst_amount":               str(cgst_amount),
-            "sgst_amount":               str(sgst_amount),
-            "other_amount":              str(other_amount),
-            "round_amount":              str(round_amount),
-            "status":                    "Returned",
-        }
-
-        result   = collection.insert_one(doc)
-        doc["_id"] = str(result.inserted_id)
+        pr = PurchaseReturn.objects.create(
+            created_by=user_id,
+            created_date=now,
+            lastmodified_by=user_id,
+            lastmodified_date=now,
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code_body,
+            grn_number=",".join(grn_numbers),
+            items=processed_items,
+            purchase_return_amount=str(total_return_amount.quantize(Decimal("0.01"))),
+            purchase_return_bill_date=now,
+            purchase_return_bill_no=bill_no,
+            status="Pending",
+            return_remark=str(data.get("return_remark", "")).strip()
+        )
 
         return Response({
             "success": True,
             "message": "Purchase return created successfully",
-            "data":    _serialize_doc(doc),
+            "data":    PurchaseReturnSerializer(pr).data,
         }, status=201)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -502,27 +614,61 @@ def purchase_return_view(request, pk=None):
                 status=400,
             )
 
-        result = collection.update_one(
-            {
-                "purchase_return_bill_no": bill_no,
-                "hospital_code":           hospital_code,
-                "branch_code":             branch_code,
-            },
-            {
-                "$set": {
-                    "status":            new_status,
-                    "lastmodified_by":   user_id,
-                    "lastmodified_date": timezone.now(),
-                }
-            }
-        )
+        try:
+            pr = PurchaseReturn.objects.get(
+                purchase_return_bill_no=bill_no,
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
+            if new_status == "Returned" and pr.status != "Returned":
+                # Parse items if it's a string, else use directly
+                items_data = pr.items
+                if isinstance(items_data, str):
+                    import json
+                    try:
+                        items_data = json.loads(items_data)
+                    except json.JSONDecodeError:
+                        items_data = []
+                
+                # Update PharmacyStock for each item
+                for item in items_data:
+                    stock_id = item.get("stock_id")
+                    ret_qty = int(item.get("return_qty", 0))
+                    
+                    if stock_id and ret_qty > 0:
+                        try:
+                            stock_id = int(stock_id)
+                        except ValueError:
+                            pass
+                        try:
+                            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                            db = client.HMS
+                            db.hospital_pharmacystock.update_one(
+                                {"stock_id": stock_id},
+                                {"$inc": {"grn_return_quantity": ret_qty}}
+                            )
+                        except Exception as e:
+                            logger.error(f"Error updating stock: {e}")
 
-        if result.matched_count == 0:
+            try:
+                client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                db = client.HMS
+                db.hospital_purchasereturn.update_one(
+                    {"purchase_return_bill_no": bill_no},
+                    {"$set": {
+                        "status": new_status,
+                        "lastmodified_by": user_id,
+                        "lastmodified_date": timezone.now()
+                    }}
+                )
+            except Exception as e:
+                logger.error(f"Error updating purchase return: {e}")
+                
+            pr.status = new_status
+            return Response({
+                "success": True,
+                "message": f"Status updated to '{new_status}'",
+                "data":    PurchaseReturnSerializer(pr).data,
+            })
+        except PurchaseReturn.DoesNotExist:
             return Response({"success": False, "error": "Record not found"}, status=404)
-
-        updated = collection.find_one({"purchase_return_bill_no": bill_no})
-        return Response({
-            "success": True,
-            "message": f"Status updated to '{new_status}'",
-            "data":    _serialize_doc(updated),
-        })

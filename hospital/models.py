@@ -357,39 +357,23 @@ class StockTransfer(AuditModel):
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
 
 class PurchaseReturn(AuditModel):
-    purchase_return_bill_no   = models.CharField(max_length=30, unique=True)
-    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
-    grn_number                = models.CharField(max_length=50)
-    vendor_code               = models.CharField(max_length=50, blank=True, default="")
-    vendor_name               = models.CharField(max_length=255, blank=True, default="")
     outlet_code               = models.CharField(max_length=50, blank=True, default="")
-    # items stores: item_id, item_name, stock_id, batch_number,
-    #               return_qty, price, cause_of_return
     items                     = models.JSONField(default=list)
     purchase_return_amount    = models.CharField(max_length=50, default="0.00")
-    # Charge breakdowns (stored as strings to avoid float precision issues)
-    gst_amount                = models.CharField(max_length=30, default="0.00")
-    cgst_amount               = models.CharField(max_length=30, default="0.00")
-    sgst_amount               = models.CharField(max_length=30, default="0.00")
-    other_amount              = models.CharField(max_length=30, default="0.00")
-    round_amount              = models.CharField(max_length=30, default="0.00")
-    return_remark             = models.TextField(blank=True, default="")
-    status                    = models.CharField(max_length=50, default="Returned")
+    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
+    purchase_return_bill_no   = models.CharField(max_length=30, primary_key=True)
+    grn_number                = models.CharField(max_length=50, blank=True, null=True)
+    status                    = models.CharField(max_length=50, default="Pending")
+    return_remark             = models.TextField(blank=True, null=True)
  
     def __str__(self):
         return f"{self.purchase_return_bill_no} — {self.grn_number}"
-    
 
 PR_STATUS_CHOICES = [
-    ("Draft",                     "Draft"),
-    ("Approved",                  "Approved"),
-    ("Rejected",                  "Rejected"),
-    ("Purchase Order Initiated",  "Purchase Order Initiated"),
-    ("Purchased",                 "Purchased"),
-    ("Stock Restocked",           "Stock Restocked"),
+    ("Pending",                     "Pending"),
+    ("Returned",                  "Returned"),
 ]
- 
- 
+
 class PurchaseRequisition(AuditModel):
     pr_number = models.CharField(max_length=30, primary_key=True)   # PR/2627/000001
  
