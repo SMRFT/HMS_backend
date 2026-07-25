@@ -46,6 +46,7 @@ from .Views import (
     hr,
     abdm_integration,
     abdm_m1,
+    abdm_m2_hip,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -575,4 +576,8 @@ urlpatterns = [
     path('abdm/m1/verify-otp/', abdm_m1.verify_otp_api, name='abdm_m1_verify_otp'),
     path("abha-profiles/", abdm_m1.abha_profile_list_api, name="abha_profile_list_api"),
 
+    # ABDM Milestone 2 (HIP)
+    path('v0.5/care-contexts/discover', abdm_m2_hip.discover_care_contexts, name='abdm_m2_discover'),
+    path('v0.5/links/link/init', abdm_m2_hip.link_init, name='abdm_m2_link_init'),
+    path('v0.5/links/link/confirm', abdm_m2_hip.link_confirm, name='abdm_m2_link_confirm'),
 ]
