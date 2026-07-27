@@ -47,6 +47,7 @@ from .Views import (
     abdm_integration,
     abdm_m1,
     abdm_m2_hip,
+    DoctorFeeCuts,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -580,4 +581,11 @@ urlpatterns = [
     path('v0.5/care-contexts/discover', abdm_m2_hip.discover_care_contexts, name='abdm_m2_discover'),
     path('v0.5/links/link/init', abdm_m2_hip.link_init, name='abdm_m2_link_init'),
     path('v0.5/links/link/confirm', abdm_m2_hip.link_confirm, name='abdm_m2_link_confirm'),
+
+    # Doctor Fee Cuts URLs
+    path('doctor-fee-admitted-patients/', DoctorFeeCuts.get_admitted_doctor_fee_patients, name='get_admitted_doctor_fee_patients'),
+    path('doctor-fee-cuts/approve-doctor-fee/', DoctorFeeCuts.save_doctor_fee_claim, name='save_doctor_fee_claim'),
+    path('doctor-fee-cuts-report/', DoctorFeeCuts.get_doctor_fee_cuts_report, name='get_doctor_fee_cuts_report'),
+    path('send-doctor-fee-cut-monthly-emails/', DoctorFeeCuts.send_monthly_doctor_fee_cut_emails, name='send_monthly_doctor_fee_cut_emails'),
 ]
+

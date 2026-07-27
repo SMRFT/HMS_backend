@@ -337,6 +337,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/daily-check/?(\?.*)?$': 'HMS-P-CL',
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/monthly-report/?(\?.*)?$': 'HMS-P-CL',
 
+    #Doctor Fee Cuts:
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-admitted-patients/?(\?.*)?$': 'HMS-P-DFC',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-cuts/approve-doctor-fee/?(\?.*)?$': 'HMS-P-DFC',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-cuts-report/?(\?.*)?$': 'HMS-P-DFCR',    
+    r'^/_b_a_c_k_e_n_d/HMS/send-doctor-fee-cut-monthly-emails/?(\?.*)?$': 'HMS-P-DFCR',
 
     #Assets Management:
     '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
@@ -450,8 +455,7 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_licence_master/': 'HMS-P-CSLM',
         r'/_b_a_c_k_e_n_d/HMS/licence_master_details/?(\\?.*)?$': 'HMS-P-CSLD',
         '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
-
-       
+        
 }
 
 
