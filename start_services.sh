@@ -19,5 +19,7 @@ python3 manage.py send_pending_payments_report --daemon > worker.log 2>&1 &
 
 python3 manage.py send_licence_expiry_emails --daemon --interval 86400 > licence_worker.log 2>&1 &
 
-echo "Services started with nohup. Logs: server.log, worker.log"
+python3 manage.py send_doctor_fee_cut_monthly_emails --daemon > doctor_fee_cut_worker.log 2>&1 &
+
+echo "Services started with nohup. Logs: server.log, worker.log, doctor_fee_cut_worker.log"
 

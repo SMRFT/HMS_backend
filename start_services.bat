@@ -10,5 +10,8 @@ start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_pending_pay
 echo Send licence expiry emails (Daemon)...
 start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_licence_expiry_emails --daemon --interval 86400"
 
+echo Send doctor fee cut monthly emails (Daemon)...
+start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_doctor_fee_cut_monthly_emails --daemon"
+
 echo Services started. You can close this window.
 pause

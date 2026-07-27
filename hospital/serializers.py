@@ -651,3 +651,9 @@ class licencemasterdetailsSerializer(serializers.ModelSerializer):
         model = licencemasterdetails
         fields = '__all__'
 
+
+from .models import DoctorFeeCuts
+class DoctorFeeCutsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DoctorFeeCuts
+        fields = '__all__'

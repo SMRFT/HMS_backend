@@ -2313,3 +2313,17 @@ class InternshipCertificateTemplate(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.template_id})"
+
+
+class DoctorFeeCuts(AuditModel):
+    ip_number        = models.CharField(max_length=50, primary_key=True)
+    uhid             = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    date             = models.DateTimeField(null=True, blank=True)
+    status           = models.CharField(max_length=50, default="Pending")
+    approved_by      = models.CharField(max_length=255, blank=True, null=True)
+    approved_date    = models.DateTimeField(null=True, blank=True)
+    doctor_breakdown = models.JSONField(default=list, blank=True, null=True)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"IP: {self.ip_number} | Status: {self.status}"
