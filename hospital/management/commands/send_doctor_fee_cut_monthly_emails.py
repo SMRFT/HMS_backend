@@ -170,7 +170,7 @@ class Command(BaseCommand):
         skipped_count = 0
 
         acc_email = getattr(settings, 'HMS_ACC_EMAIL', None) or os.getenv('HMS_ACC_EMAIL', 'najmasmrft@gmail.com')
-        acc_password = getattr(settings, 'HMS_ACC_EMAIL_PASSWORD', None) or os.getenv('HMS_ACC_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+        acc_password = getattr(settings, 'HMS_ACC_EMAIL_PASSWORD', None) or os.getenv('HMS_ACC_EMAIL_PASSWORD')
 
         email_connection = get_connection(
             backend=getattr(settings, 'EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),

@@ -231,7 +231,7 @@ class Command(BaseCommand):
 
         try:
             hr_email = getattr(settings, 'HMS_HR_EMAIL', None) or os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
-            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD')
             from django.core.mail import get_connection
             connection = get_connection(
                 backend=getattr(settings, 'EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),
