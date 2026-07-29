@@ -44,6 +44,14 @@ class ABHAProfile(AuditModel):
 
 
 
+class UHIDCounter(models.Model):
+    prefix = models.CharField(max_length=20, unique=True)
+    last_sequence = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.prefix}: {self.last_sequence}"
+
+
 class Patient(AuditModel):
     company_code = models.CharField(max_length=100, blank=True, null=True)
 
@@ -111,26 +119,27 @@ class Patient(AuditModel):
         prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            # 2. Get all patients of the current financial year to find the true numeric maximum.
-            # String-based sorting (order_by('-uhid')) is flawed due to inconsistent padding (e.g. S026/0006 vs S026/00007).
+            counter, created = UHIDCounter.objects.get_or_create(
+                prefix=prefix,
+                defaults={'last_sequence': 0}
+            )
+
+            # Safety check: ensure counter is at least as high as maximum existing Patient record
             year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-            
-            max_number = 0
+            max_number = counter.last_sequence
             for u in year_patients:
                 try:
-                    # Expecting format "S0YY/NNNNN"
-                    num_str = u.split('/')[-1]
-                    num = int(num_str)
+                    num = int(u.split('/')[-1])
                     if num > max_number:
                         max_number = num
                 except (ValueError, IndexError):
                     continue
+
+            counter.last_sequence = max_number + 1
+            counter.save()
             
-            last_number = max_number
-            
-            next_number = last_number + 1
-            # 3. Format with 5-digit padding as per user requirement (S026/00001)
-            self.uhid = f"{prefix}/{next_number:05d}"
+            # Format with 5-digit padding (S026/00001)
+            self.uhid = f"{prefix}/{counter.last_sequence:05d}"
 
         super().save(*args, **kwargs)
 

@@ -22,7 +22,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
     
-from .models import Billing, TempPatientRegistration, Refund
+from .models import Billing, TempPatientRegistration, Refund, Patient, UHIDCounter
 
 from .models import Billing
 from .serializers import PatientSerializer
@@ -139,7 +139,7 @@ def patientCreateView(request):
             elif outlet_code == "OLET003":
                 bill_type = 5
 
-            Billing.objects.create(
+            billing = Billing.objects.create(
                 patient=patient,
                 registration_fee=registration_fee,
                 consulting_fee=consulting_fee,
@@ -158,6 +158,7 @@ def patientCreateView(request):
             return Response({
                 "message": "Patient registered successfully.",
                 "uhid": patient.uhid,
+                "bill_number": billing.bill_number,
                 "patient": serializer.data
             }, status=status.HTTP_201_CREATED)
 
@@ -258,22 +259,27 @@ def get_last_uhid(request):
         fy_year = today.year if today.month >= 4 else today.year - 1
         prefix = f"S0{fy_year % 100:02d}"
 
-        # Get all patients of the current financial year to find the true numeric maximum.
-        # String-based sorting is flawed due to inconsistent padding.
-        year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-        
-        max_number = 0
-        latest_uhid = "None"
-        for u in year_patients:
-            try:
-                num_str = u.split('/')[-1]
-                num = int(num_str)
-                if num >= max_number:
-                    max_number = num
-                    latest_uhid = u
-            except (ValueError, IndexError):
-                continue
+        counter, created = UHIDCounter.objects.get_or_create(
+            prefix=prefix,
+            defaults={'last_sequence': 0}
+        )
 
+        if created or counter.last_sequence == 0:
+            year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
+            max_number = 0
+            for u in year_patients:
+                try:
+                    num_str = u.split('/')[-1]
+                    num = int(num_str)
+                    if num > max_number:
+                        max_number = num
+                except (ValueError, IndexError):
+                    continue
+            counter.last_sequence = max_number
+            if max_number > 0:
+                counter.save()
+
+        latest_uhid = f"{prefix}/{counter.last_sequence:05d}" if counter.last_sequence > 0 else "None"
         return Response({"uhid": latest_uhid}, status=200)
     except Exception as e:
         return Response({"error": str(e)}, status=500)
@@ -624,6 +630,8 @@ def patient_registration_stats(request):
 
 
 @api_view(['GET'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def patient_visit_list(request):
     try:
         from_date_str = request.GET.get('fromDate')
@@ -803,6 +811,8 @@ def check_qr_status(request):
         return Response({"error": str(e)}, status=500)
 
 @api_view(['GET'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
 def get_pending_qr_registrations(request):
     try:
         status = request.GET.get('status', 'pending')
