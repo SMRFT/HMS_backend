@@ -142,8 +142,18 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
+    #Vaccination Details:
+    '/_b_a_c_k_e_n_d/HMS/vaccination-masters/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/?(\?.*)?$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/add-vaccination-master/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/?(\?.*)?$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/': 'HMS-P-HVCC',
+
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
@@ -456,6 +466,16 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/licence_master_details/?(\\?.*)?$': 'HMS-P-CSLD',
         '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
         
+        # Vaccination Management & Reminders:
+        r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/add-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/send-vaccination-reminders/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/preview-vaccination-reminders/.*$': 'HMS-P-HVCC',
 }
 
 

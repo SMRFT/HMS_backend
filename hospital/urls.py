@@ -48,6 +48,7 @@ from .Views import (
     abdm_m1,
     abdm_m2_hip,
     DoctorFeeCuts,
+    vaccination,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -587,5 +588,16 @@ urlpatterns = [
     path('doctor-fee-cuts/approve-doctor-fee/', DoctorFeeCuts.save_doctor_fee_claim, name='save_doctor_fee_claim'),
     path('doctor-fee-cuts-report/', DoctorFeeCuts.get_doctor_fee_cuts_report, name='get_doctor_fee_cuts_report'),
     path('send-doctor-fee-cut-monthly-emails/', DoctorFeeCuts.send_monthly_doctor_fee_cut_emails, name='send_monthly_doctor_fee_cut_emails'),
+
+    # Vaccination Management URLs
+    path('vaccination-masters/', vaccination.get_vaccination_masters, name='get_vaccination_masters'),
+    path('add-vaccination-master/', vaccination.add_vaccination_master, name='add_vaccination_master'),
+    re_path(r'^update-vaccination-master/(?P<v_id>\d+)/$', vaccination.update_vaccination_master, name='update_vaccination_master'),
+    re_path(r'^delete-vaccination-master/(?P<v_id>\d+)/$', vaccination.delete_vaccination_master, name='delete_vaccination_master'),
+    path('pending-vaccinations/', vaccination.get_pending_vaccinations, name='get_pending_vaccinations'),
+    re_path(r'^patient-vaccination/(?P<uhid>[\w%/-]+)/$', vaccination.get_patient_vaccination, name='get_patient_vaccination'),
+    path('save-patient-vaccination/', vaccination.save_patient_vaccination, name='save_patient_vaccination'),
+    path('send-vaccination-reminders/', vaccination.send_vaccination_reminders_view, name='send_vaccination_reminders'),
+    path('preview-vaccination-reminders/', vaccination.preview_vaccination_reminders_view, name='preview_vaccination_reminders'),
 ]
 
