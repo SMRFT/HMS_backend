@@ -1598,6 +1598,9 @@ class SurgerySchedule(AuditModel):
     post_endTime    = models.TimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
     is_active         = models.BooleanField(default=True)
+    assigned_staff    = models.JSONField(default=list, blank=True, null=True)
+
+
  
     def __str__(self):
         return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
@@ -2336,3 +2339,42 @@ class DoctorFeeCuts(AuditModel):
 
     def __str__(self):
         return f"IP: {self.ip_number} | Status: {self.status}"
+
+
+class DjongoJSONField(models.JSONField):
+    def from_db_value(self, value, expression, connection):
+        if value is None:
+            return value
+        if isinstance(value, (list, dict)):
+            return value
+        try:
+            return super().from_db_value(value, expression, connection)
+        except Exception:
+            return value
+
+
+class PatientVaccination(AuditModel):
+    uhid                = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    mother_uhid         = models.CharField(max_length=50, blank=True, null=True)
+    date                = models.DateTimeField(null=True, blank=True)
+    vaccination_details = DjongoJSONField(default=list, blank=True, null=True)
+    is_active           = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_patientVaccination"
+
+    def __str__(self):
+        return f"Patient Vaccination ({self.uhid})"
+
+
+class VaccinationMaster(AuditModel):
+    vaccination_id   = models.IntegerField(primary_key=True)
+    vaccination_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_vaccinationMaster"
+
+    def __str__(self):
+        return f"{self.vaccination_id} - {self.vaccination_name}"
+

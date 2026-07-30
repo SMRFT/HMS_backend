@@ -159,6 +159,21 @@ def get_admitted_doctor_fee_patients(request):
     company_filter = request.GET.get('company')
     status_filter = (request.GET.get('status') or 'ALL').strip()
     search_query = (request.GET.get('search') or '').strip().lower()
+    from_date_str = request.GET.get('from_date') or request.GET.get('fromDate')
+    to_date_str = request.GET.get('to_date') or request.GET.get('toDate')
+
+    from_dt = None
+    to_dt = None
+    if from_date_str:
+        try:
+            from_dt = datetime.datetime.strptime(from_date_str[:10], "%Y-%m-%d")
+        except Exception:
+            pass
+    if to_date_str:
+        try:
+            to_dt = datetime.datetime.strptime(to_date_str[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        except Exception:
+            pass
 
     try:
         db = get_db()
@@ -262,6 +277,8 @@ def get_admitted_doctor_fee_patients(request):
                                     all_doctor_ids.add(doc_id)
                                     raw_doctors.append({"id": doc_id, "role": "Doctor", "fee": fee})
 
+            bill_date = bill.get('bill_date') or bill.get('created_date')
+
             parsed_admissions.append({
                 "adm": adm,
                 "ip_number": ip_number,
@@ -275,6 +292,7 @@ def get_admitted_doctor_fee_patients(request):
                 "net_amount": net_amount,
                 "medicines_amount": medicines_amount,
                 "implant_amount": implant_amount,
+                "bill_date": bill_date,
                 "raw_doctors": raw_doctors
             })
 
@@ -303,6 +321,41 @@ def get_admitted_doctor_fee_patients(request):
                 approved_date = str(approved_date_raw)
             else:
                 approved_date = None
+
+            # Date check
+            record_date_raw = claim.get('date') if claim else None
+            if not record_date_raw:
+                record_date_raw = item.get('bill_date') or adm.get('admissionDateTime') or adm.get('created_at')
+
+            record_dt = None
+            if isinstance(record_date_raw, (datetime.datetime, datetime.date)):
+                if isinstance(record_date_raw, datetime.date) and not isinstance(record_date_raw, datetime.datetime):
+                    record_dt = datetime.datetime.combine(record_date_raw, datetime.time.min)
+                else:
+                    record_dt = record_date_raw
+            elif isinstance(record_date_raw, dict) and '$date' in record_date_raw:
+                try:
+                    record_dt = datetime.datetime.fromisoformat(str(record_date_raw['$date']).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            elif record_date_raw:
+                try:
+                    record_dt = datetime.datetime.fromisoformat(str(record_date_raw).replace("Z", "+00:00"))
+                except Exception:
+                    try:
+                        record_dt = datetime.datetime.strptime(str(record_date_raw)[:10], "%Y-%m-%d")
+                    except Exception:
+                        pass
+
+            if record_dt and timezone.is_aware(record_dt):
+                record_dt = timezone.make_naive(record_dt)
+
+            if from_dt and record_dt:
+                if record_dt < from_dt:
+                    continue
+            if to_dt and record_dt:
+                if record_dt > to_dt:
+                    continue
 
             stored_bd = claim.get('doctor_breakdown', []) if claim else []
             stored_map = {}
@@ -371,6 +424,7 @@ def get_admitted_doctor_fee_patients(request):
                 "uhid": uhid,
                 "patient_name": item['patient_name'],
                 "admission_date": adm.get('admissionDateTime'),
+                "bill_date": item.get('bill_date'),
                 "admitting_doctor": adm.get('admittingDoctor', ''),
                 "customer_type": item['customer_type'],
                 "company_code": item['company_code'],

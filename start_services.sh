@@ -21,5 +21,7 @@ python3 manage.py send_licence_expiry_emails --daemon --interval 86400 > licence
 
 python3 manage.py send_doctor_fee_cut_monthly_emails --daemon > doctor_fee_cut_worker.log 2>&1 &
 
-echo "Services started with nohup. Logs: server.log, worker.log, doctor_fee_cut_worker.log"
+python3 manage.py send_vaccination_reminders --daemon > vaccination_reminders_worker.log 2>&1 &
+
+echo "Services started with nohup. Logs: server.log, worker.log, doctor_fee_cut_worker.log, vaccination_reminders_worker.log"
 
