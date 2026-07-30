@@ -125,10 +125,12 @@ def send_whatsapp(request):
 
         # Resolve template name from request or environment variables
         req_template = str(request.data.get("template_name", "")).strip()
-        if "discharge" in req_template.lower():
-            template_name = "sh_discharge_summary_final"
+        if req_template and req_template not in ["discharge", "internship"]:
+            template_name = req_template
+        elif "discharge" in req_template.lower():
+            template_name = (os.getenv("BOTIFY_DISCHARGE_TEMPLATE_NAME") or "sh_discharge_summary_final").strip()
         else:
-            template_name = "sh_hr_intership_final"
+            template_name = (os.getenv("BOTIFY_INTERNSHIP_TEMPLATE_NAME") or "sh_hr_intership_final").strip()
 
         # Format Document PDF Name with Student / Patient Name
         if not pdf_name:
@@ -157,7 +159,7 @@ def send_whatsapp(request):
         if not template_data or not isinstance(template_data, list):
             template_data = [patient_name, file_url]
 
-        botify_apikey = os.getenv("BOTIFY_API_KEY", "btfy_aa1b818c6473403a74cce7c913007df4af197c22ee4ae0c12019e5f408d93b70").strip()
+        botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
         if botify_apikey.startswith("Bearer "):
             clean_api_key = botify_apikey[7:].strip()
             auth_header = botify_apikey
