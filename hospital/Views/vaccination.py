@@ -392,7 +392,7 @@ def get_pending_vaccinations(request):
                 })
 
         # Join patient info and calculate per-patient WhatsApp sent count
-        template_name = (os.getenv("BOTIFY_VACCINATION_TEMPLATE_NAME")).strip()
+        template_name = (os.getenv("BOTIFY_VACCINATION_TEMPLATE_NAME") or "").strip()
         today_date = datetime.now().date()
         start_of_today = datetime.combine(today_date, time.min)
         end_of_today = datetime.combine(today_date, time.max)
