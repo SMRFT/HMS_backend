@@ -296,6 +296,7 @@ urlpatterns = [
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
+    path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('packages/', departmentBilling.get_packages, name='get_packages'),
     path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
     path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
@@ -472,6 +473,7 @@ urlpatterns = [
     # Surgery Schedule
     path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule, name='create_surgery_schedule'),
     path("list_surgery_schedules/", surgeryschedule.list_surgery_schedules, name='list_surgery_schedules'),
+    path("ot_staffs/", surgeryschedule.ot_staffs, name='ot_staffs'),
     path("get_surgery_schedule/", surgeryschedule.get_surgery_schedule, name='get_surgery_schedule'),
     path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
     path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),

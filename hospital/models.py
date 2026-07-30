@@ -1589,6 +1589,9 @@ class SurgerySchedule(AuditModel):
     post_endTime    = models.TimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
     is_active         = models.BooleanField(default=True)
+    assigned_staff    = models.JSONField(default=list, blank=True, null=True)
+
+
  
     def __str__(self):
         return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"

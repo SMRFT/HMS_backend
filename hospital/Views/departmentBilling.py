@@ -490,11 +490,62 @@ def estimate_billing_list(request):
             status=500,
         )
 
-
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_bill_types(request):
+    try:
+        branch_code = request.data.get('auth-branch-code')
+        outlet_code = request.data.get('auth-outlet-code')
+        hospital_code = request.data.get('auth-hospital-code')
+
+        ignore_outlet = request.GET.get('ignore_outlet') == 'true'
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        collection = db['hospital_billtype']
+
+        query = {"is_active": True}
+
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # ✅ FIX: include empty outlet also
+        if outlet_code and not ignore_outlet:
+            query["$or"] = [
+                {"outlet_code": outlet_code},
+                {"outlet_code": ""},
+                {"outlet_code": {"$exists": False}}
+            ]
+
+        print("QUERY:", query)
+
+        bill_types = list(collection.find(
+            query,
+            {
+                "_id": 0,
+                "bill_type": 1,
+                "bill_name": 1,
+                "billTypeNo": 1,
+                "outlet_code": 1,
+                "is_allowDiscount": 1,
+            }
+        ))
+
+        client.close()
+
+        return JsonResponse({"billTypes": bill_types}, safe=False)
+
+    except Exception as e:
+        return JsonResponse({
+            "error": str(e)
+        }, status=500)
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_invest_bill_types(request):
     try:
         branch_code = request.data.get('auth-branch-code')
         outlet_code = request.data.get('auth-outlet-code')
@@ -788,17 +839,30 @@ def get_investigation_items(request):
                     nabh_code = str(val.get("nabh_code", "")).strip()
                 elif val is not None:
                     price = str(val).strip()
+                else:
+                    # Fallback: check if item has any other price key (e.g. '60')
+                    for k, v in item.items():
+                        if k not in ("itemName", "item_id", "nabh_code") and v:
+                            if isinstance(v, dict):
+                                price = str(v.get("price", "0")).strip()
+                                nabh_code = str(v.get("nabh_code", "")).strip()
+                            else:
+                                price = str(v).strip()
+                            if price and price != "0":
+                                break
 
-                # Only include items that have a price for this bill_type
-                if price and price != "0" and price != "":
+                # Include items if price exists OR if it's a Surgery bill type
+                is_surgery_type = str(bill_type_no).upper().startswith("SUR")
+                if item_name and ((price and price != "0" and price != "") or is_surgery_type):
                     formatted_items.append({
                         "itemName": item_name,
                         "item_id": item_id,
-                        "price": price,
+                        "price": price if price else "0",
                         "nabh_code": nabh_code
                     })
             
             return JsonResponse({"items": formatted_items}, safe=True)
+
         else:
             return JsonResponse({"items": []}, safe=True)
     
