@@ -683,8 +683,8 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
         end_str = str(eff_end)[:5] if eff_end else "--:--"
         date_time_str = f"{date_str} ({start_str} - {end_str})"
 
-        template_name = (os.getenv("BOTIFY_OT_SCHEDULE_TEMPLATE_NAME")).strip()
-        botify_apikey = (os.getenv("BOTIFY_API_KEY")).strip()
+        template_name = (os.getenv("BOTIFY_OT_SCHEDULE_TEMPLATE_NAME") or "").strip()
+        botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
 
         if botify_apikey.startswith("Bearer "):
             auth_header = botify_apikey
