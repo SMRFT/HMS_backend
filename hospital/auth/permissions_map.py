@@ -465,11 +465,17 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTI',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTI',
 
-# Company Secretary:
+        # Company Secretary:
 
         '/_b_a_c_k_e_n_d/HMS/get_licence_master/': 'HMS-P-CSLM',
         r'/_b_a_c_k_e_n_d/HMS/licence_master_details/?(\\?.*)?$': 'HMS-P-CSLD',
         '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
+        r'/_b_a_c_k_e_n_d/HMS/licence_renewal/?(\\?.*)?$': 'HMS-P-CSLR',
+
+    #    lab inventory:
+     r'/_b_a_c_k_e_n_d/HMS/dealer_items/?(\\?.*)?$': 'HMS-P-LBDI',
+     '/_b_a_c_k_e_n_d/HMS/raise_indent/': 'HMS-P-LBRI'
+
         
         # Vaccination Management & Reminders:
         r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
