@@ -666,6 +666,10 @@ def stores_grn_detail(request, pk):
             # which guarantees we never shrink the array
             data['payment_status'] = merged
 
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
         serializer = StoresGRNSerializer(grn, data=data, partial=True)
         if serializer.is_valid():
             # ── Stock update on approval ─────────────────────────────────────
@@ -697,10 +701,6 @@ def stores_grn_detail(request, pk):
                         except ItemMaster.DoesNotExist:
                             pass  # Item not in master — skip silently
             # ────────────────────────────────────────────────────────────────
-            data['lastmodified_by'] = employee_id
-            data['branch_code'] = branch_code
-            data['outlet_code'] = outlet_code
-            
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -801,13 +801,13 @@ def create_stores_intent(request):
         5
     )
 
+    data['created_by'] = employee_id
+    data['branch_code'] = branch_code
+    data['outlet_code'] = outlet_code
+
     serializer = StoresIntentSerializer(data=data)
 
     if serializer.is_valid():
-        data['created_by'] = employee_id
-        data['branch_code'] = branch_code
-        data['outlet_code'] = outlet_code   
-
         serializer.save()
         return Response(
             {
@@ -834,13 +834,14 @@ def update_stores_intent(request, pk):
     # Store old items to compare quantities if needed
     old_items = {it.get('item_id'): it.get('approved_quantity', 0) for it in (obj.items or []) if it.get('item_id')}
     
-    serializer = StoresIntentSerializer(obj, data=request.data, partial=True)
+    data = request.data.copy()
+    data['lastmodified_by'] = employee_id
+    data['branch_code'] = branch_code
+    data['outlet_code'] = outlet_code
+
+    serializer = StoresIntentSerializer(obj, data=data, partial=True)
 
     if serializer.is_valid():
-        data['lastmodified_by'] = employee_id
-        data['branch_code'] = branch_code
-        data['outlet_code'] = outlet_code
-        
         instance = serializer.save()
         items = instance.items or []
 
