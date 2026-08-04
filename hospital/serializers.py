@@ -641,3 +641,30 @@ class licencemasterdetailsSerializer(serializers.ModelSerializer):
         model = licencemasterdetails
         fields = '__all__'
 
+from rest_framework import serializers
+from .models import LabInventory
+
+class LabInventorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LabInventory
+        fields = '__all__'
+
+
+from rest_framework import serializers
+from .models import RaiseIndent
+
+class RaiseIndentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RaiseIndent
+        fields = "__all__"
+        read_only_fields = ["indent_no"]  # auto-generated in model.save()
+
+
+
+from rest_framework import serializers
+from .models import LabApprovedItem
+
+class LabApprovedItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LabApprovedItem
+        fields = '__all__'

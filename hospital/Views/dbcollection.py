@@ -13,5 +13,6 @@ hms_db = client["HMS"]
 # Collections
 
 profile_collection = global_db["backend_diagnostics_profile"]
+department_collection = global_db["backend_diagnostics_Departments"]
 user_collection = global_db["backend_diagnostics_user"]
 company_secretary_collection = hms_db["hospital_licencemasterdetails"]   

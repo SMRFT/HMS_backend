@@ -44,6 +44,7 @@ from .Views import (
     companysecretary,
     communication,
     hr,
+    labinventory
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -442,6 +443,7 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    path('lab-approved-items/create/', stores.LabApprovedItemCreate, name='LabApprovedItemCreate'),
 
     # Assets Master
     path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
@@ -544,6 +546,11 @@ urlpatterns = [
     path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
     path('licence_master_details/<int:s_no>/', companysecretary.licence_master_details),
     path('licence_master_details/<int:s_no>/renew/', companysecretary.licence_renewal, name='licence-renewal'),
+
+
+    # lab Inventory
+     path('dealer_items/', labinventory.dealer_items, name='dealer_items'),
+     path('raise_indent/', labinventory.raise_indent, name='raise_indent'),
     
     
     # HR Internship Management

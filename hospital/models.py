@@ -2372,3 +2372,103 @@ class InternshipCertificateTemplate(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.template_id})"
+
+
+
+from django.db import models
+
+class MongoJSONField(models.JSONField):
+    """
+    Django's JSONField.get_prep_value() calls json.dumps() before handing
+    the value to the DB layer — correct for relational backends, but djongo
+    stores that string as-is instead of a native array/object.
+    This override skips the dumps() step so djongo persists real BSON.
+    """
+    def get_prep_value(self, value):
+        return value
+
+    def from_db_value(self, value, expression, connection):
+        # Tolerate legacy rows that were already stored as stringified JSON
+        if isinstance(value, str):
+            import json
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+
+    
+from django.db import models
+
+class LabInventory(AuditModel):
+    dealer_id = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    dealer_name = models.CharField(max_length=255)
+    items = MongoJSONField(default=list)   # was models.JSONField
+
+    def save(self, *args, **kwargs):
+        if not self.dealer_id:
+            last = LabInventory.objects.order_by('-dealer_id').first()
+            self.dealer_id = last.dealer_id + 1 if last else 1
+        super().save(*args, **kwargs)
+
+
+
+from django.db import models
+import json
+
+
+class MongoJSONField(models.JSONField):
+    def get_prep_value(self, value):
+        return value  # ✅ store real array in Mongo
+
+    def from_db_value(self, value, expression, connection):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
+
+
+class RaiseIndent(AuditModel):
+    dealer_items = MongoJSONField(default=list)
+    requirements = models.CharField(max_length=500)
+    stock = models.CharField(max_length=200)
+    status = models.CharField(max_length=100)
+    indent_no = models.CharField(max_length=100, unique=True)
+
+    def save(self, *args, **kwargs):
+        value = self.dealer_items
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = [value]
+        if not isinstance(value, list):
+            value = []
+        self.dealer_items = value
+
+        if not self.indent_no:
+            last = RaiseIndent.objects.order_by('-id').first()
+            next_id = last.id + 1 if last else 1
+            self.indent_no = f"IND{str(next_id).zfill(4)}"
+
+        # ❌ status intentionally NOT set here — comes from the frontend payload
+        super().save(*args, **kwargs)
+
+
+
+from django.db import models
+
+class LabApprovedItem(AuditModel):
+    item_id = models.CharField(max_length=50)
+    name = models.CharField(max_length=255)
+    hsn = models.CharField(max_length=50, null=True, blank=True)
+    quantity = models.IntegerField()
+    used_qty = models.IntegerField(null=True, blank=True, default=None)
+
+
+
+    def __str__(self):
+        return f"{self.name} ({self.item_id})"

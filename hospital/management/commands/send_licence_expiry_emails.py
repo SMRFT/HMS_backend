@@ -1,7 +1,7 @@
 import time
 from datetime import datetime
 from django.conf import settings
-from django.core.mail import EmailMessage
+from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -10,11 +10,11 @@ from ...Views.dbcollection import company_secretary_collection, profile_collecti
 
 # ✅ Thresholds (IMPORTANT: highest → lowest)
 THRESHOLDS = [
-    (90, "is_90days", "Intimation_90days_about_expiry"),
-    (60, "is_60days", "Intimation_60days_about_expiry"),
-    (30, "is_30days", "Intimation_30days_about_expiry"),
-    (7, "is_7days", "Intimation_7days_about_expiry"),
-    (1, "is_1day", "Intimation_1day_about_expiry"),
+    (90, "is_90days"),
+    (60, "is_60days"),
+    (30, "is_30days"),
+    (7,  "is_7days"),
+    (1,  "is_1day"),
 ]
 
 
@@ -36,22 +36,40 @@ def get_employee_emails(employee_ids):
     return [p["email"] for p in profiles if p.get("email")]
 
 
+# ✅ Format date — strips time portion from datetime or date objects
+def format_date(value):
+    if not value:
+        return "N/A"
+    if isinstance(value, datetime):
+        return value.strftime("%d-%m-%Y")
+    # Handle string like "2026-06-17 00:00:00"
+    try:
+        return datetime.strptime(str(value).split(" ")[0], "%Y-%m-%d").strftime("%d-%m-%Y")
+    except Exception:
+        return str(value).split(" ")[0]
+
+
 # ✅ Email body
-def build_email_body(record, label_text, days_before):
-    return f"""
-Dear Team,
+def build_email_body(record, days_before):
+    return f"""Dear Team,
 
-This is a reminder that the following licence is due to expire in {days_before} day(s) ({label_text}).
+Kindly be informed that the following licence is scheduled to expire within {days_before} day(s) from today. We request you to initiate the necessary renewal process at the earliest to avoid any compliance issues.
 
-Licence Name: {record.get('licence_name')}
-Licence/Case/Ref Number: {record.get('license_number')}
-Valid From: {record.get('valid_from')}
-Expiry Date: {record.get('expiry_date')}
+Licence Details:
+─────────────────────────────────────────
+  Licence Name          : {record.get('licence_name')}
+  Licence / Case / Ref# : {record.get('license_number')}
+  Valid From            : {format_date(record.get('valid_from'))}
+  Expiry Date           : {format_date(record.get('expiry_date'))}
+─────────────────────────────────────────
 
-Please take the necessary action before the expiry date.
+Please ensure the renewal is completed well before the expiry date to maintain uninterrupted operations.
+
+For any clarifications, please contact the Company Secretary Department.
 
 Regards,
 Shanmuga Hospital Limited
+Company Secretary Department
 """
 
 
@@ -86,7 +104,7 @@ def run_licence_expiry_check():
         updates = {}
 
         # ✅ LOOP THRESHOLDS
-        for days_before, flag_field, label_field in THRESHOLDS:
+        for days_before, flag_field in THRESHOLDS:
 
             already_sent = bool(record.get(flag_field, False))
 
@@ -111,17 +129,27 @@ def run_licence_expiry_check():
                     print("❌ Skipped: No email")
                     continue
 
-                label_text = record.get(label_field) or f"{days_before} Day(s) Before Due Date"
 
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
 
+                    # ✅ Authenticate SMTP using HMS_CS_EMAIL credentials
+                    # so the mail is truly sent FROM cs@smrft.org (env-specific)
+                    cs_connection = get_connection(
+                        host=settings.EMAIL_HOST,
+                        port=settings.EMAIL_PORT,
+                        username=settings.HMS_CS_EMAIL,
+                        password=settings.HMS_CS_EMAIL_PASSWORD,
+                        use_tls=settings.EMAIL_USE_TLS,
+                    )
+
                     email = EmailMessage(
                         subject=subject,
-                        body=build_email_body(record, label_text, days_before),
-                        from_email=settings.EMAIL_HOST_USER,
+                        body=build_email_body(record, days_before),
+                        from_email=settings.HMS_CS_EMAIL,
                         to=incharge_emails,
                         cc=respective_person_emails,
+                        connection=cs_connection,
                     )
 
                     email.send()

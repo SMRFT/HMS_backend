@@ -4,6 +4,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent
+from ...models import LabApprovedItem
+from ...serializers import LabApprovedItemSerializer
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer
@@ -11,6 +13,8 @@ from .serializer import (
 from django.shortcuts import get_object_or_404
 from datetime import datetime
 from pyauth.auth import HasRoleAndDataPermission
+from ..dbcollection import department_collection
+from django.utils import timezone
 
 def get_financial_year_string():
     now = datetime.now()
@@ -179,33 +183,65 @@ def item_price_history(request, item_id):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 # --- Department Views ---
+def serialize_doc(doc):
+    """Convert MongoDB document to JSON serializable"""
+    doc['_id'] = str(doc['_id'])
+    return doc
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def department_list_create(request):
-    employee_id  = request.data.get('auth-user-id', 'system')
+
+    employee_id = request.data.get('auth-user-id', 'system')
     branch_code = request.data.get('auth-branch-code', 'system')
     outlet_code = request.data.get('auth-outlet-code', 'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
+    # ✅ GET → Fetch only active departments
     if request.method == 'GET':
-        items = Department.objects.filter(is_active__in=[True]).order_by('-created_date')
-        serializer = DepartmentSerializer(items, many=True)
-        return Response(serializer.data)
+        departments = list(
+            department_collection.find(
+                {"is_active": True}
+            ).sort("created_date", -1)
+        )
 
+        data = [serialize_doc(doc) for doc in departments]
+        return Response(data)
+
+    # ✅ POST → Insert new department
     elif request.method == 'POST':
         data = request.data.copy()
-        if not data.get('department_id'):
-            data['department_id'] = generate_custom_id_without_fy(Department, 'department_id', 'DPT', 5)
 
+        # Generate department_code if not provided
+        if not data.get('department_code'):
+            last = department_collection.find_one(
+                {},
+                sort=[("department_code", -1)]
+            )
+
+            if last and last.get('department_code'):
+                last_num = int(last['department_code'].replace('DEPT', ''))
+                new_code = f"DEPT{str(last_num + 1).zfill(3)}"
+            else:
+                new_code = "DEPT001"
+
+            data['department_code'] = new_code
+
+        # Add audit fields
         data['created_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+        data['created_date'] = timezone.now().isoformat()
+        data['is_active'] = True
 
-        serializer = DepartmentSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Insert into MongoDB
+        result = department_collection.insert_one(dict(data))
+
+        # Return inserted document
+        inserted_doc = department_collection.find_one({"_id": result.inserted_id})
+        return Response(serialize_doc(inserted_doc), status=status.HTTP_201_CREATED)
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -865,5 +901,36 @@ def soft_delete_intent(request, pk):
     storesIntent.objects.filter(intent_id=obj.intent_id).update(is_active=False, lastmodified_by=employee_id)
 
     return Response({"message": "Soft deleted successfully"})
+
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def LabApprovedItemCreate(request):
+    """
+    POST /lab-approved-items/create/
+    Body: { "items": [ { "item_id", "name", "hsn", "quantity" }, ... ] }
+    """
+    items = request.data.get('items', [])
+ 
+    if not items or not isinstance(items, list):
+        return Response(
+            {"error": "items must be a non-empty list"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+ 
+    serializer = LabApprovedItemSerializer(data=items, many=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(
+            {
+                "message": "Lab approved items saved successfully",
+                "data": serializer.data
+            },
+            status=status.HTTP_201_CREATED
+        )
+ 
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+ 
 
 

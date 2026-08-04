@@ -153,4 +153,7 @@ EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'shanmugainnovations@gmail.com')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', 'zvpm ynxu tlqz ttch')
 HMS_HR_EMAIL = os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
 HMS_HR_EMAIL_PASSWORD = os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+
+HMS_CS_EMAIL = os.getenv('HMS_CS_EMAIL', 'cs@smrft.org')
+HMS_CS_EMAIL_PASSWORD = os.getenv('HMS_CS_EMAIL_PASSWORD')
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
