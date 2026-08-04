@@ -44,7 +44,7 @@ from .Views import (
     companysecretary,
     communication,
     hr,
-    labinventory
+    labinventory,
     abdm_integration,
     abdm_m1,
     abdm_m2_hip,
