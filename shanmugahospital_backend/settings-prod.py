@@ -145,15 +145,14 @@ STATIC_URL = '/static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = 'hospital.email_backend.Python312EmailBackend'
 EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'shanmugainnovations@gmail.com')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'najmasmrft@gmail.com')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 HMS_HR_EMAIL = os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
-HMS_HR_EMAIL_PASSWORD = os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
-
-HMS_CS_EMAIL = os.getenv('HMS_CS_EMAIL', 'cs@smrft.org')
-HMS_CS_EMAIL_PASSWORD = os.getenv('HMS_CS_EMAIL_PASSWORD')
+HMS_HR_EMAIL_PASSWORD = os.getenv('HMS_HR_EMAIL_PASSWORD')
+HMS_ACC_EMAIL = os.getenv('HMS_ACC_EMAIL', 'najmasmrft@gmail.com')
+HMS_ACC_EMAIL_PASSWORD = os.getenv('HMS_ACC_EMAIL_PASSWORD')
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
