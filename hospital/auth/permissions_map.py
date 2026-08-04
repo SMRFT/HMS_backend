@@ -474,11 +474,11 @@ PAGE_MAPPING = {
 
     #    lab inventory:
      r'/_b_a_c_k_e_n_d/HMS/dealer_items/?(\\?.*)?$': 'HMS-P-LBDI',
-     '/_b_a_c_k_e_n_d/HMS/raise_indent/': 'HMS-P-LBRI'
+     '/_b_a_c_k_e_n_d/HMS/raise_indent/': 'HMS-P-LBRI',
 
         
         # Vaccination Management & Reminders:
-        r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
+         r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
         r'^/_b_a_c_k_e_n_d/HMS/add-vaccination-master/.*$': 'HMS-P-HVCC',
         r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master/.*$': 'HMS-P-HVCC',
         r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
