@@ -47,7 +47,11 @@ def upload_pdf_to_gridfs(request):
             # Generate access URL dynamically
             from django.urls import reverse
             relative_url = reverse('get_pdf_from_gridfs', args=[str(file_id)])
-            file_url = request.build_absolute_uri(relative_url)
+            public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+            if public_base_url:
+                file_url = f"{public_base_url.rstrip('/')}{relative_url}"
+            else:
+                file_url = request.build_absolute_uri(relative_url)
 
             return JsonResponse({"file_id": str(file_id), "file_url": file_url})
             
@@ -80,54 +84,190 @@ def get_pdf_from_gridfs(request, file_id):
 
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def send_whatsapp(request):
     try:
-        patient_name = request.data.get("patient_name", "Valued Patient")
-        phone = str(request.data.get("phone", "")).strip()
-        collection_time = request.data.get("collection_time", "N/A")
-        collected_date = request.data.get("collected_date", "N/A")
-        file_url = request.data.get("file_url")
-        pdf_name = request.data.get("pdf_name", "Report.pdf")
-        patient_id = request.data.get("patient_id", "")
+        patient_name = request.data.get("patient_name") or request.POST.get("patient_name", "Valued Patient")
+        phone = str(request.data.get("phone") or request.POST.get("phone", "")).strip()
+        file_url = request.data.get("file_url") or request.POST.get("file_url")
+        pdf_name = request.data.get("pdf_name") or request.POST.get("pdf_name")
+        patient_id = request.data.get("patient_id") or request.POST.get("patient_id", "")
+        category = request.data.get("category") or request.POST.get("category", "UTILITY")
+
+        # If PDF file is passed directly in request (like email), handle PDF upload internally
+        uploaded_file = request.FILES.get("file") or request.FILES.get("attachments")
+        if not file_url and uploaded_file:
+            client = None
+            try:
+                client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+                fs = gridfs.GridFS(hms_db)
+                safe_name = re.sub(r'[^a-zA-Z0-9_\.\-]', '_', uploaded_file.name)
+                file_id = fs.put(uploaded_file, filename=safe_name)
+                from django.urls import reverse
+                relative_url = reverse('get_pdf_from_gridfs', args=[str(file_id)])
+                public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+                if public_base_url:
+                    file_url = f"{public_base_url.rstrip('/')}{relative_url}"
+                else:
+                    file_url = request.build_absolute_uri(relative_url)
+            finally:
+                if client:
+                    client.close()
 
         if not phone or not file_url:
-            return Response({"success": False, "error": "Missing phone or file URL"}, status=400)
+            return Response({"success": False, "error": "Missing phone or file URL/attachment"}, status=400)
 
         # Clean phone number (keep digits only)
         clean_phone = re.sub(r'\D', '', phone)
         if not clean_phone.startswith("91"):
             clean_phone = f"91{clean_phone}"
 
-        # Prepare template parameters (order depends on Botify template configuration)
-        # Order: 1=Name, 2=Time, 3=Date, 4=Link
-        template_params_list = [
-            patient_name,
-            collection_time,
-            collected_date,
-            file_url
-        ]
-        template_params = ",".join([str(p) for p in template_params_list])
+        # Resolve template name from request or environment variables
+        req_template = str(request.data.get("template_name", "")).strip()
+        if req_template and req_template not in ["discharge", "internship"]:
+            template_name = req_template
+        elif "discharge" in req_template.lower():
+            template_name = (os.getenv("BOTIFY_DISCHARGE_TEMPLATE_NAME") or "sh_discharge_summary_final").strip()
+        else:
+            template_name = (os.getenv("BOTIFY_INTERNSHIP_TEMPLATE_NAME") or "sh_hr_intership_final").strip()
 
-        template_name = request.data.get("template_name", os.getenv("BOTIFY_TEMPLATE_NAME", "discharge_summary"))
-        botify_apikey = os.getenv("BOTIFY_API_KEY", "ccbb8c923474d5b9d605b391f545a5688fbd54e0cad69d17")
+        # Format Document PDF Name with Student / Patient Name
+        if not pdf_name:
+            clean_name = re.sub(r'[^a-zA-Z0-9_\s\-]', '', patient_name).strip()
+            if "intern" in template_name.lower():
+                pdf_name = f"{clean_name}_Internship_Certificate.pdf"
+            elif "discharge" in template_name.lower():
+                pdf_name = f"{clean_name}_Discharge_Summary.pdf"
+            else:
+                pdf_name = f"{clean_name}.pdf"
 
-        params = {
-            "apikey": botify_apikey,
-            "contact": clean_phone,
-            "template": template_name,
-            "params": template_params,
+        if not pdf_name.lower().endswith(".pdf"):
+            pdf_name = f"{pdf_name}.pdf"
+
+        # Convert local loopback URLs (127.0.0.1 / localhost) to public URL so Meta Cloud servers & recipients can access the PDF
+        public_base_url = os.getenv("PUBLIC_BASE_URL", "https://shinova.in/").strip()
+        if "127.0.0.1" in file_url or "localhost" in file_url:
+            if "/get-file/" in file_url:
+                file_id = file_url.split("/get-file/")[1].strip("/")
+                from django.urls import reverse
+                relative_url = reverse('get_pdf_from_gridfs', args=[file_id])
+                file_url = f"{public_base_url.rstrip('/')}{relative_url}"
+
+        # Prepare template data parameters: {{1}} = Name, {{2}} = Public PDF Download URL
+        template_data = request.data.get("templateData")
+        if not template_data or not isinstance(template_data, list):
+            template_data = [patient_name, file_url]
+
+        botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
+        if botify_apikey.startswith("Bearer "):
+            clean_api_key = botify_apikey[7:].strip()
+            auth_header = botify_apikey
+        else:
+            clean_api_key = botify_apikey
+            auth_header = f"Bearer {botify_apikey}"
+
+        botify_url = "https://login.botify.in/api/whatsapp/external"
+
+        headers = {
+            "Authorization": auth_header,
+            "Content-Type": "application/json"
         }
 
-        botify_url = "https://dashboard.botify.in/api/v1/external/sendtemplatemessage"
-        r = requests.get(botify_url, params=params, timeout=20)
+        # Build Meta WhatsApp Cloud API standard components structure for Document Header Templates
+        components = [
+            {
+                "type": "header",
+                "parameters": [
+                    {
+                        "type": "document",
+                        "document": {
+                            "link": file_url,
+                            "filename": pdf_name
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "body",
+                "parameters": [
+                    {
+                        "type": "text",
+                        "text": str(p)
+                    } for p in template_data
+                ]
+            }
+        ]
+
+        body_payload = {
+            "to": clean_phone,
+            "type": "template",
+            "templateName": template_name,
+            "templateData": template_data,
+            "category": category,
+            "components": components,
+            "filename": pdf_name,
+            "fileName": pdf_name,
+            "pdf_name": pdf_name,
+            "file_name": pdf_name,
+            "url": file_url,
+            "file_url": file_url,
+            "mediaUrl": file_url,
+            "media_url": file_url,
+            "header": {
+                "type": "document",
+                "document": {
+                    "link": file_url,
+                    "url": file_url,
+                    "filename": pdf_name,
+                    "fileName": pdf_name
+                }
+            },
+            "document": {
+                "link": file_url,
+                "url": file_url,
+                "filename": pdf_name,
+                "fileName": pdf_name
+            }
+        }
+
+        # Make POST request to Botify API
+        r = requests.post(botify_url, json=body_payload, headers=headers, timeout=20)
 
         try:
             response_json = r.json()
-            is_success = r.status_code == 200 and response_json.get("success") is True
+            is_success = r.status_code in [200, 201] and (
+                response_json.get("success") is True or
+                response_json.get("status") in [True, "success", "200", 200] or
+                response_json.get("result") == "success"
+            )
         except ValueError:
             response_json = {}
-            is_success = False
+            is_success = r.status_code in [200, 201]
+
+        # Fallback to GET query params if POST method returned 400/405/404 on legacy Botify endpoint
+        if not is_success and r.status_code in [400, 404, 405]:
+            params = {
+                "apikey": clean_api_key,
+                "contact": clean_phone,
+                "template": template_name,
+                "params": ",".join([str(p) for p in template_data]),
+                "file_url": file_url,
+                "filename": pdf_name,
+                "fileName": pdf_name,
+            }
+            r_fallback = requests.get(botify_url, params=params, timeout=20)
+            try:
+                fb_json = r_fallback.json()
+                if r_fallback.status_code in [200, 201] and (
+                    fb_json.get("success") is True or
+                    fb_json.get("status") in [True, "success", "200", 200]
+                ):
+                    r = r_fallback
+                    response_json = fb_json
+                    is_success = True
+            except Exception:
+                pass
 
         status = "Success" if is_success else "Failed"
         

@@ -13,6 +13,8 @@ import pytz
 MONGO_URI = os.getenv("GLOBAL_DB_HOST") or "mongodb://localhost:27017/HMS"
 client = MongoClient(MONGO_URI)
 mongo_db = client["HMS"]
+global_db = client["Global"]
+profile_collection = global_db["backend_diagnostics_profile"]
 
 def ensure_aware(dt):
     """Ensures a datetime object is timezone-aware (UTC)."""
@@ -50,7 +52,7 @@ def advanced_dashboard_stats(request):
         total_op = mongo_db["hospital_patient"].count_documents({})
         total_ip_lifetime = mongo_db["hospital_admission"].count_documents({})
         total_discharge_lifetime = mongo_db["hospital_admission"].count_documents({"is_discharged": True})
-        current_ip = mongo_db["hospital_admission"].count_documents({"is_admissionActive": True})
+        current_ip = mongo_db["hospital_admission"].count_documents({"is_admitted": True, "is_discharged": {"$ne": True}})
         
         # Income Aggregations
         income_pipeline = [
@@ -155,7 +157,7 @@ def advanced_dashboard_stats(request):
         
         grns = list(mongo_db["hospital_grn"].find({
             "status": "Approved",
-            "created_date": {"$gte": month_start, "$lte": month_end}
+            "date": {"$gte": month_start, "$lte": month_end}
         }))
 
         for day in range(1, num_days + 1):
@@ -186,7 +188,7 @@ def advanced_dashboard_stats(request):
             d_income += sum([float(str(pb.get("net_amount") or 0)) for pb in d_pharm])
 
             # Expense
-            d_grns = [g for g in grns if d_start <= ensure_aware(g.get("created_date")) <= d_end]
+            d_grns = [g for g in grns if d_start <= ensure_aware(g.get("date")) <= d_end]
             d_expense = sum([float(str(g.get("net_invoice_amount") or 0)) for g in d_grns])
 
             monthly_income_expense.append({"day": day, "Income": d_income, "Expense": d_expense})
@@ -204,27 +206,42 @@ def advanced_dashboard_stats(request):
             methods[m] = methods.get(m, 0) + float(str(pb.get("net_amount") or 0))
         todays_income_method = [{"method": k, "amount": v} for k, v in methods.items()]
 
-        # 4. Doctor Stats
+        # 4. Doctor Stats — monthly OP/IP counts and monthly income, per doctor
+        # consultingDoctor/admittingDoctor/doctor_id all store the doctor's employeeId,
+        # so we group by that id and resolve it to a display name below (not the raw id).
         doc_stats = {}
-        t_admissions = [a for a in admissions if today_start.astimezone(pytz.UTC) <= ensure_aware(a.get("admissionDateTime")) <= today_end.astimezone(pytz.UTC)]
-        for a in t_admissions:
-            d = a.get("consultingDoctor") or a.get("admittingDoctor") or "Other"
+        for a in admissions:
+            d = str(a.get("consultingDoctor") or a.get("admittingDoctor") or "").strip()
+            if not d: continue
             if d not in doc_stats: doc_stats[d] = {"OP": 0, "IP": 0, "Amount": 0.0}
             doc_stats[d]["IP"] += 1
-            
-        for b in t_billings:
-            d = b.get("doctor_id") or "Other"
+
+        for b in billings:
+            d = str(b.get("doctor_id") or "").strip()
+            if not d: continue
             if d not in doc_stats: doc_stats[d] = {"OP": 0, "IP": 0, "Amount": 0.0}
             doc_stats[d]["OP"] += 1
-            doc_stats[d]["Amount"] += float(str(b.get("consulting_fee") or 0))
-            
-        doctor_wise = [{"name": k, "OP": v["OP"], "IP": v["IP"], "Amount": v["Amount"]} for k, v in doc_stats.items() if k != "Other"]
-        doctor_wise = sorted(doctor_wise, key=lambda x: x["OP"] + x["IP"], reverse=True)[:10]
+            doc_stats[d]["Amount"] += float(str(b.get("consulting_fee") or b.get("total_fees") or 0))
+
+        doctor_ids = list(doc_stats.keys())
+        doctor_name_map = {}
+        if doctor_ids:
+            doctor_cursor = profile_collection.find(
+                {"employeeId": {"$in": doctor_ids}},
+                {"employeeId": 1, "employeeName": 1}
+            )
+            doctor_name_map = {str(d["employeeId"]): d.get("employeeName", "") for d in doctor_cursor}
+
+        doctor_wise = [
+            {"name": doctor_name_map.get(k) or k, "OP": v["OP"], "IP": v["IP"], "Amount": v["Amount"]}
+            for k, v in doc_stats.items()
+        ]
+        doctor_wise = sorted(doctor_wise, key=lambda x: x["Amount"], reverse=True)[:10]
 
         # 5. Bed Occupancy
         total_beds_res = list(mongo_db["hospital_room"].aggregate([{"$group": {"_id": None, "total": {"$sum": "$capacity"}}}]))
         total_beds = total_beds_res[0]["total"] if total_beds_res else 0
-        occupied_beds = mongo_db["hospital_admission"].count_documents({"is_admissionActive": True})
+        occupied_beds = mongo_db["hospital_admission"].count_documents({"is_admitted": True, "is_discharged": {"$ne": True}})
         
         bed_occupancy = [
             {"name": "Occupied", "value": occupied_beds},

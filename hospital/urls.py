@@ -45,6 +45,11 @@ from .Views import (
     communication,
     hr,
     labinventory
+    abdm_integration,
+    abdm_m1,
+    abdm_m2_hip,
+    DoctorFeeCuts,
+    vaccination,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -55,7 +60,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
 from .Views.Complaints import complaints
 
 handler404 = 'hospital.views.custom_page_not_found'
@@ -292,6 +297,7 @@ urlpatterns = [
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
+    path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('packages/', departmentBilling.get_packages, name='get_packages'),
     path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
     path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
@@ -364,6 +370,7 @@ urlpatterns = [
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
+    path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
 
     # Velavan Items
@@ -468,6 +475,7 @@ urlpatterns = [
     # Surgery Schedule
     path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule, name='create_surgery_schedule'),
     path("list_surgery_schedules/", surgeryschedule.list_surgery_schedules, name='list_surgery_schedules'),
+    path("ot_staffs/", surgeryschedule.ot_staffs, name='ot_staffs'),
     path("get_surgery_schedule/", surgeryschedule.get_surgery_schedule, name='get_surgery_schedule'),
     path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
     path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
@@ -518,6 +526,14 @@ urlpatterns = [
     path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
+    path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
+    path('datewise-collection-summary/', accounting_reports.datewise_collection_summary, name='datewise_collection_summary'),
+    path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
+    path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),
+    path('debit-bills-report/', accounting_reports.debit_bills_report, name='debit_bills_report'),
+    path('audit-report/', accounting_reports.audit_report, name='audit_report'),
+    path('sales-tax-register/', accounting_reports.sales_tax_register, name='sales_tax_register'),
+    path('stock-report-ip-op/', accounting_reports.stock_report_ip_op, name='stock_report_ip_op'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
@@ -561,4 +577,37 @@ urlpatterns = [
     path('hr/internships/edit/<str:pk>/', hr.detail_or_update_internship, name='detail_or_update_internship'),
     path('hr/internships/payment/<str:pk>/', hr.add_payment, name='add_payment'),
     path('hr/internships/approve/<str:pk>/', hr.approve_internship_certificate, name="approve_internship_certificate"),
+
+    # ABDM Integration API
+    path('abdm/update-bridge-url/', abdm_integration.update_bridge_url_api, name='update_bridge_url_api'),
+    path('abdm/add-service/', abdm_integration.add_service_api, name='add_service_api'),
+    path('abdm/get-services/', abdm_integration.get_services_api, name='get_services_api'),
+
+    # ABDM Milestone 1
+    path('abdm/m1/generate-otp/', abdm_m1.generate_otp_api, name='abdm_m1_generate_otp'),
+    path('abdm/m1/verify-otp/', abdm_m1.verify_otp_api, name='abdm_m1_verify_otp'),
+    path("abha-profiles/", abdm_m1.abha_profile_list_api, name="abha_profile_list_api"),
+
+    # ABDM Milestone 2 (HIP)
+    path('v0.5/care-contexts/discover', abdm_m2_hip.discover_care_contexts, name='abdm_m2_discover'),
+    path('v0.5/links/link/init', abdm_m2_hip.link_init, name='abdm_m2_link_init'),
+    path('v0.5/links/link/confirm', abdm_m2_hip.link_confirm, name='abdm_m2_link_confirm'),
+
+    # Doctor Fee Cuts URLs
+    path('doctor-fee-admitted-patients/', DoctorFeeCuts.get_admitted_doctor_fee_patients, name='get_admitted_doctor_fee_patients'),
+    path('doctor-fee-cuts/approve-doctor-fee/', DoctorFeeCuts.save_doctor_fee_claim, name='save_doctor_fee_claim'),
+    path('doctor-fee-cuts-report/', DoctorFeeCuts.get_doctor_fee_cuts_report, name='get_doctor_fee_cuts_report'),
+    path('send-doctor-fee-cut-monthly-emails/', DoctorFeeCuts.send_monthly_doctor_fee_cut_emails, name='send_monthly_doctor_fee_cut_emails'),
+
+    # Vaccination Management URLs
+    path('vaccination-masters/', vaccination.get_vaccination_masters, name='get_vaccination_masters'),
+    path('add-vaccination-master/', vaccination.add_vaccination_master, name='add_vaccination_master'),
+    re_path(r'^update-vaccination-master/(?P<v_id>\d+)/$', vaccination.update_vaccination_master, name='update_vaccination_master'),
+    re_path(r'^delete-vaccination-master/(?P<v_id>\d+)/$', vaccination.delete_vaccination_master, name='delete_vaccination_master'),
+    path('pending-vaccinations/', vaccination.get_pending_vaccinations, name='get_pending_vaccinations'),
+    re_path(r'^patient-vaccination/(?P<uhid>[\w%/-]+)/$', vaccination.get_patient_vaccination, name='get_patient_vaccination'),
+    path('save-patient-vaccination/', vaccination.save_patient_vaccination, name='save_patient_vaccination'),
+    path('send-vaccination-reminders/', vaccination.send_vaccination_reminders_view, name='send_vaccination_reminders'),
+    path('preview-vaccination-reminders/', vaccination.preview_vaccination_reminders_view, name='preview_vaccination_reminders'),
 ]
+

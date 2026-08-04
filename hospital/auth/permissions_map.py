@@ -3,6 +3,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-visit-list/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/get-pending-qr-registrations/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/process-registration-refund/?(\?.*)?$': 'HMS-P-AIN',
@@ -12,7 +14,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
-
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
 
@@ -101,24 +102,25 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
-    r'^/_b_a_c_k_e_n_d/HMS/grn-items/?(\?.*)?$': 'HMS-P-GRN',
+    r'^/_b_a_c_k_e_n_d/HMS/grn-items/?(\?.*)?$': 'HMS-P-GRNR',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-PSH',
+    r'^/_b_a_c_k_e_n_d/HMS/grn-ocr/?(\?.*)?$': 'HMS-P-OCR',
 
     # Purchase Return
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/?(\?.*)?$': 'HMS-P-PR',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/[^/]+/?(\?.*)?$': 'HMS-P-PR',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/?(\?.*)?$': 'HMS-P-GPR',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-return/[^/]+/?(\?.*)?$': 'HMS-P-GPRA',
 
-    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-PSG',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock/[^/]+/?(\?.*)?$': 'HMS-P-PER',
     r'^/_b_a_c_k_e_n_d/HMS/get_active_outlets/?(\?.*)?$': 'HMS-P-OS',
-    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_expiry_report/?(\?.*)?$': 'HMS-P-PSG',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_expiry_report/?(\?.*)?$': 'HMS-P-PER',
 
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
 
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-PO',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POL',
-    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POL',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-action/?$': 'HMS-P-POA',
+    r'^/_b_a_c_k_e_n_d/HMS/purchase-order-email/?$': 'HMS-P-POA',
 
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/?$":       "HMS-P-MR",
     r"^/_b_a_c_k_e_n_d/HMS/medicine-requisition/.+/?$":    "HMS-P-MRL",
@@ -142,11 +144,22 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
+    #Vaccination Details:
+    '/_b_a_c_k_e_n_d/HMS/vaccination-masters/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/?(\?.*)?$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/add-vaccination-master/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/?(\?.*)?$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/': 'HMS-P-HVCC',
+
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
+    '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
@@ -193,7 +206,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/patient-discharge-medicines(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/upload-pdf/?(\?.*)?$': 'HMS-P-SUM',
     r'^/_b_a_c_k_e_n_d/HMS/get-file(?:/[^/]+)+/$': 'HMS-P-SUM',
-    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-P-SUM',
+    r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
 
@@ -310,6 +323,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSSA',                
     '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
+    r'^/_b_a_c_k_e_n_d/HMS/ot_staffs/?(\?.*)?$': 'HMS-P-OTSS',
+
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
@@ -337,6 +352,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/daily-check/?(\?.*)?$': 'HMS-P-CL',
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/monthly-report/?(\?.*)?$': 'HMS-P-CL',
 
+    #Doctor Fee Cuts:
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-admitted-patients/?(\?.*)?$': 'HMS-P-DFC',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-cuts/approve-doctor-fee/?(\?.*)?$': 'HMS-P-DFC',
+    r'^/_b_a_c_k_e_n_d/HMS/doctor-fee-cuts-report/?(\?.*)?$': 'HMS-P-DFCR',    
+    r'^/_b_a_c_k_e_n_d/HMS/send-doctor-fee-cut-monthly-emails/?(\?.*)?$': 'HMS-P-DFCR',
 
     #Assets Management:
     '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
@@ -423,6 +443,21 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/get_return_bills/' : 'HMS-P-CCGRB',
         '/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/' :'HMS-P-CCCRB',
 
+        # Accounts Reports Dashboard
+        r'^/_b_a_c_k_e_n_d/HMS/discharge-bills-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/advance-registration-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/get_shift_summary_report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/bill-cancel-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/credit-card-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/datewise-collection-summary/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/miscellaneous-payment-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/daily-cash-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/debit-bills-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/audit-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/sales-tax-register/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/stock-report-ip-op/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/SalesReturnReport/?(\?.*)?$': 'HMS-P-CCC',
+
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/admin/?(\\?.*)?$': 'HMS-P-CTIA',
@@ -441,6 +476,17 @@ PAGE_MAPPING = {
      r'/_b_a_c_k_e_n_d/HMS/dealer_items/?(\\?.*)?$': 'HMS-P-LBDI',
      '/_b_a_c_k_e_n_d/HMS/raise_indent/': 'HMS-P-LBRI'
 
+        
+        # Vaccination Management & Reminders:
+        r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/add-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/send-vaccination-reminders/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/preview-vaccination-reminders/.*$': 'HMS-P-HVCC',
 }
 
 

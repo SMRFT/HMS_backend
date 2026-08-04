@@ -1,6 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.core.mail import EmailMessage
 from django.conf import settings
+from django.utils import timezone
 from hospital.models import Internship, CommunicationLog
 from bson import Decimal128
 from decimal import Decimal
@@ -8,6 +9,7 @@ import json
 import time
 import pytz
 from datetime import datetime
+import datetime as dt
 import os
 
 
@@ -65,8 +67,36 @@ class Command(BaseCommand):
             action='store_true',
             help='Run the report once immediately and exit (alias for default)',
         )
+        parser.add_argument(
+            '--force',
+            action='store_true',
+            help='Bypass daily duplicate check and force send report',
+        )
 
-    def send_report(self):
+    def send_report(self, force=False):
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        today_date = now_ist.date()
+
+        start_of_today = timezone.make_aware(dt.datetime.combine(today_date, dt.time.min), ist)
+        end_of_today = timezone.make_aware(dt.datetime.combine(today_date, dt.time.max), ist)
+
+        if not force:
+            already_sent = CommunicationLog.objects.filter(
+                template_name="intern_pending_payment",
+                status="Success",
+                created_date__gte=start_of_today,
+                created_date__lte=end_of_today
+            ).exists()
+
+            if already_sent:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Report already sent today ({today_date}). Skipping email send to prevent duplicates."
+                    )
+                )
+                return
+
         interns = Internship.objects.filter(is_active__in=[True])
         pending_list = []
         
@@ -201,7 +231,7 @@ class Command(BaseCommand):
 
         try:
             hr_email = getattr(settings, 'HMS_HR_EMAIL', None) or os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
-            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD', 'zpid kdqk tekw ixjk')
+            hr_password = getattr(settings, 'HMS_HR_EMAIL_PASSWORD', None) or os.getenv('HMS_HR_EMAIL_PASSWORD')
             from django.core.mail import get_connection
             connection = get_connection(
                 backend=getattr(settings, 'EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend'),
@@ -255,10 +285,11 @@ class Command(BaseCommand):
             raise e
 
     def handle(self, *args, **options):
+        force = options.get('force', False)
         if options.get('now') or not options.get('daemon'):
             self.stdout.write(self.style.SUCCESS('Triggering email report once (run-once mode)...'))
             try:
-                self.send_report()
+                self.send_report(force=force)
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f'Error sending email: {e}'))
             return
@@ -275,7 +306,7 @@ class Command(BaseCommand):
             if now_ist.hour == 10:
                 self.stdout.write(f'[{now_ist}] 10:00 AM (IST) detected. Triggering email report...')
                 try:
-                    self.send_report()
+                    self.send_report(force=force)
                 except Exception as e:
                     self.stdout.write(self.style.ERROR(f'Error sending email: {e}'))
                 

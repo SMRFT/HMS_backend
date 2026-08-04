@@ -26,9 +26,37 @@ class AuditModel(models.Model):
         self.lastmodified_date = timezone.now()
 
         super().save(*args, **kwargs)
+class ABHAProfile(AuditModel):
+    abha_number = models.CharField(max_length=50, unique=True)
+    first_name = models.CharField(max_length=100, blank=True, null=True)
+    last_name = models.CharField(max_length=100, blank=True, null=True)
+    dob = models.CharField(max_length=50, blank=True, null=True)
+    gender = models.CharField(max_length=10, blank=True, null=True)
+    abha_address = models.CharField(max_length=100, blank=True, null=True)
+    abha_mobile = models.CharField(max_length=20, blank=True, null=True)
+    abha_photo = models.TextField(blank=True, null=True)
+    abha_status = models.CharField(max_length=50, blank=True, null=True)
+    abha_type = models.CharField(max_length=50, blank=True, null=True)
+    abha_district_name = models.CharField(max_length=100, blank=True, null=True)
+    abha_state_name = models.CharField(max_length=100, blank=True, null=True)
+    abha_pincode = models.CharField(max_length=20, blank=True, null=True)
+    abha_full_address = models.TextField(blank=True, null=True)
+
+
+
+class UHIDCounter(models.Model):
+    prefix = models.CharField(max_length=20, unique=True)
+    last_sequence = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.prefix}: {self.last_sequence}"
+
 
 class Patient(AuditModel):
     company_code = models.CharField(max_length=100, blank=True, null=True)
+
+    # ABDM Integration Fields
+    abha_number = models.CharField(max_length=50, blank=True, null=True)
 
     uhid = models.CharField(max_length=20)
     # ip_number = models.CharField(max_length=20, blank=True, null=True)
@@ -91,26 +119,27 @@ class Patient(AuditModel):
         prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            # 2. Get all patients of the current financial year to find the true numeric maximum.
-            # String-based sorting (order_by('-uhid')) is flawed due to inconsistent padding (e.g. S026/0006 vs S026/00007).
+            counter, created = UHIDCounter.objects.get_or_create(
+                prefix=prefix,
+                defaults={'last_sequence': 0}
+            )
+
+            # Safety check: ensure counter is at least as high as maximum existing Patient record
             year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-            
-            max_number = 0
+            max_number = counter.last_sequence
             for u in year_patients:
                 try:
-                    # Expecting format "S0YY/NNNNN"
-                    num_str = u.split('/')[-1]
-                    num = int(num_str)
+                    num = int(u.split('/')[-1])
                     if num > max_number:
                         max_number = num
                 except (ValueError, IndexError):
                     continue
+
+            counter.last_sequence = max_number + 1
+            counter.save()
             
-            last_number = max_number
-            
-            next_number = last_number + 1
-            # 3. Format with 5-digit padding as per user requirement (S026/00001)
-            self.uhid = f"{prefix}/{next_number:05d}"
+            # Format with 5-digit padding (S026/00001)
+            self.uhid = f"{prefix}/{counter.last_sequence:05d}"
 
         super().save(*args, **kwargs)
 
@@ -337,39 +366,23 @@ class StockTransfer(AuditModel):
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
 
 class PurchaseReturn(AuditModel):
-    purchase_return_bill_no   = models.CharField(max_length=30, unique=True)
-    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
-    grn_number                = models.CharField(max_length=50)
-    vendor_code               = models.CharField(max_length=50, blank=True, default="")
-    vendor_name               = models.CharField(max_length=255, blank=True, default="")
     outlet_code               = models.CharField(max_length=50, blank=True, default="")
-    # items stores: item_id, item_name, stock_id, batch_number,
-    #               return_qty, price, cause_of_return
     items                     = models.JSONField(default=list)
     purchase_return_amount    = models.CharField(max_length=50, default="0.00")
-    # Charge breakdowns (stored as strings to avoid float precision issues)
-    gst_amount                = models.CharField(max_length=30, default="0.00")
-    cgst_amount               = models.CharField(max_length=30, default="0.00")
-    sgst_amount               = models.CharField(max_length=30, default="0.00")
-    other_amount              = models.CharField(max_length=30, default="0.00")
-    round_amount              = models.CharField(max_length=30, default="0.00")
-    return_remark             = models.TextField(blank=True, default="")
-    status                    = models.CharField(max_length=50, default="Returned")
+    purchase_return_bill_date = models.DateTimeField(default=timezone.now)
+    purchase_return_bill_no   = models.CharField(max_length=30, primary_key=True)
+    grn_number                = models.CharField(max_length=50, blank=True, null=True)
+    status                    = models.CharField(max_length=50, default="Pending")
+    return_remark             = models.TextField(blank=True, null=True)
  
     def __str__(self):
         return f"{self.purchase_return_bill_no} — {self.grn_number}"
-    
 
 PR_STATUS_CHOICES = [
-    ("Draft",                     "Draft"),
-    ("Approved",                  "Approved"),
-    ("Rejected",                  "Rejected"),
-    ("Purchase Order Initiated",  "Purchase Order Initiated"),
-    ("Purchased",                 "Purchased"),
-    ("Stock Restocked",           "Stock Restocked"),
+    ("Pending",                     "Pending"),
+    ("Returned",                  "Returned"),
 ]
- 
- 
+
 class PurchaseRequisition(AuditModel):
     pr_number = models.CharField(max_length=30, primary_key=True)   # PR/2627/000001
  
@@ -1585,6 +1598,9 @@ class SurgerySchedule(AuditModel):
     post_endTime    = models.TimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
     is_active         = models.BooleanField(default=True)
+    assigned_staff    = models.JSONField(default=list, blank=True, null=True)
+
+
  
     def __str__(self):
         return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
@@ -2472,3 +2488,54 @@ class LabApprovedItem(AuditModel):
 
     def __str__(self):
         return f"{self.name} ({self.item_id})"
+class DoctorFeeCuts(AuditModel):
+    ip_number        = models.CharField(max_length=50, primary_key=True)
+    uhid             = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    date             = models.DateTimeField(null=True, blank=True)
+    status           = models.CharField(max_length=50, default="Pending")
+    approved_by      = models.CharField(max_length=255, blank=True, null=True)
+    approved_date    = models.DateTimeField(null=True, blank=True)
+    doctor_breakdown = models.JSONField(default=list, blank=True, null=True)
+    is_active        = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"IP: {self.ip_number} | Status: {self.status}"
+
+
+class DjongoJSONField(models.JSONField):
+    def from_db_value(self, value, expression, connection):
+        if value is None:
+            return value
+        if isinstance(value, (list, dict)):
+            return value
+        try:
+            return super().from_db_value(value, expression, connection)
+        except Exception:
+            return value
+
+
+class PatientVaccination(AuditModel):
+    uhid                = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    mother_uhid         = models.CharField(max_length=50, blank=True, null=True)
+    date                = models.DateTimeField(null=True, blank=True)
+    vaccination_details = DjongoJSONField(default=list, blank=True, null=True)
+    is_active           = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_patientVaccination"
+
+    def __str__(self):
+        return f"Patient Vaccination ({self.uhid})"
+
+
+class VaccinationMaster(AuditModel):
+    vaccination_id   = models.IntegerField(primary_key=True)
+    vaccination_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_vaccinationMaster"
+
+    def __str__(self):
+        return f"{self.vaccination_id} - {self.vaccination_name}"
+

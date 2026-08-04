@@ -276,7 +276,7 @@ def patch_bill_type_prices(request):
             if ':' not in composite_key:
                 continue
             inv_bill_type_no, item_name = composite_key.split(':', 1)
-            grouped.setdefault(inv_bill_type_no, {})[item_name] = str(price_value).strip()
+            grouped.setdefault(inv_bill_type_no, {})[item_name] = price_value
 
         updated_count = 0
         for inv_bill_type_no, item_price_map in grouped.items():
@@ -290,10 +290,19 @@ def patch_bill_type_prices(request):
                 item_name = item.get('itemName', '')
                 if item_name in item_price_map:
                     price_val = item_price_map[item_name]
-                    if price_val == "":
-                        item.pop(bill_type, None)
+                    if isinstance(price_val, dict):
+                        p_str = str(price_val.get('price', '')).strip()
+                        n_str = str(price_val.get('nabh_code', '')).strip()
+                        if not p_str and not n_str:
+                            item.pop(bill_type, None)
+                        else:
+                            item[bill_type] = {'price': p_str, 'nabh_code': n_str}
                     else:
-                        item[bill_type] = price_val
+                        price_str = str(price_val).strip()
+                        if price_str == "":
+                            item.pop(bill_type, None)
+                        else:
+                            item[bill_type] = {'price': price_str, 'nabh_code': ''}
                     changed = True
 
             if changed:

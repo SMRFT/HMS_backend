@@ -18,6 +18,8 @@ class ChemicalCompositionSerializer(serializers.ModelSerializer):
         model  = ChemicalComposition
         fields = "__all__"
         read_only_fields = ["composition_id"]
+from .models import ABHAProfile
+
 
         
 from .models import PharmacyCategory,Cashcountershiftdetails
@@ -63,6 +65,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 from .models import PurchaseReturn
 class PurchaseReturnSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+    items = serializers.JSONField(required=False, default=list)
  
     class Meta:
         model  = PurchaseReturn
@@ -289,6 +292,13 @@ class RoomSerializer(serializers.ModelSerializer):
     
 
 from .models import Patient, InsuranceProvider, Admission
+class ABHAProfileSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = ABHAProfile
+        fields = "__all__"
+
+
 
 class PatientSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
@@ -667,4 +677,10 @@ from .models import LabApprovedItem
 class LabApprovedItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabApprovedItem
+        fields = '__all__'
+
+from .models import DoctorFeeCuts
+class DoctorFeeCutsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DoctorFeeCuts
         fields = '__all__'

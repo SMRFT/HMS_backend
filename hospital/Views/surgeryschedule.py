@@ -1,13 +1,14 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from ..models import SurgerySchedule, OTMaster, AnesMaster
+from ..models import SurgerySchedule, OTMaster, AnesMaster, CommunicationLog
 from ..serializers import SurgeryScheduleSerializer, SurgeryScheduleWriteSerializer
 from pyauth.auth import HasRoleAndDataPermission
 from django.utils import timezone
 from django.db import connections
-import traceback, json
+import traceback, json, re, requests
 from datetime import datetime, date as date_type
 import os
+
 from pymongo import MongoClient
 from pymongo import MongoClient
 import pytz
@@ -201,6 +202,18 @@ def _enrich_bulk(records: list) -> list:
                 emp_ids.update(str(v) for v in mapping.values() if v)
             except Exception:
                 pass
+        raw_assigned = r.get("assigned_staff") or []
+        try:
+            arr = json.loads(raw_assigned) if isinstance(raw_assigned, str) else raw_assigned
+            if isinstance(arr, list):
+                for item in arr:
+                    if isinstance(item, dict):
+                        eid = item.get("employee_id") or item.get("id")
+                        if eid:
+                            emp_ids.add(str(eid))
+        except Exception:
+            pass
+
 
     # ── Batch fetch ───────────────────────────────────────────────────────────
     patient_map = _bulk_get_patient_info(ip_numbers)
@@ -245,7 +258,27 @@ def _enrich_bulk(records: list) -> list:
                 r.get("additional_doctors", "{}")
             ),
         })
+
+        raw_assigned = r.get("assigned_staff") or []
+        try:
+            parsed_assigned = json.loads(raw_assigned) if isinstance(raw_assigned, str) else raw_assigned
+        except Exception:
+            parsed_assigned = []
+
+        enriched_staff = []
+        if isinstance(parsed_assigned, list):
+            for item in parsed_assigned:
+                if isinstance(item, dict):
+                    eid = str(item.get("employee_id") or item.get("id") or "")
+                    enriched_staff.append({
+                        "title": item.get("title", ""),
+                        "employee_id": eid,
+                        "name": emp_map.get(eid) or item.get("name") or eid,
+                    })
+        r["assigned_staff_details"] = enriched_staff
+
         enriched.append(r)
+
 
     return enriched
 
@@ -501,11 +534,48 @@ def update_schedule_status(request):
         if "is_active" in request.data:
             schedule.is_active = bool(request.data["is_active"])
 
+        if "assigned_staff" in request.data:
+            raw_staff = request.data["assigned_staff"]
+            if isinstance(raw_staff, str):
+                try:
+                    raw_staff = json.loads(raw_staff)
+                except Exception:
+                    raw_staff = []
+            if not isinstance(raw_staff, list):
+                raw_staff = []
+
+            staff_val = []
+            for item in raw_staff:
+                if isinstance(item, dict):
+                    eid = str(item.get("employee_id") or item.get("id") or "").strip()
+                    title = str(item.get("title") or "").strip()
+                    if eid and title:
+                        staff_val.append({"title": title, "employee_id": eid})
+
+            schedule.assigned_staff = staff_val
+
+
         schedule.lastmodified_by   = user_id
         schedule.lastmodified_date = timezone.now()
         schedule.save()
 
+        if "assigned_staff" in request.data:
+            try:
+                hms_db["hospital_surgeryschedule"].update_one(
+                    {"reference_no": reference_no},
+                    {"$set": {"assigned_staff": staff_val}},
+                )
+            except Exception as pe:
+                print(f"[ERROR] PyMongo assigned_staff update failed: {pe}")
+
+        if new_status == "Confirmed":
+            try:
+                send_ot_schedule_whatsapp_to_doctors(schedule)
+            except Exception as wa_err:
+                print(f"[WhatsApp OT] Failed to send doctor notifications: {wa_err}")
+
         raw      = SurgeryScheduleSerializer(schedule).data
+
         enriched = _enrich(dict(raw))
 
         return Response(
@@ -519,10 +589,217 @@ def update_schedule_status(request):
         )
 
 
+def _extract_all_doctor_ids(schedule) -> set:
+    """Extract all unique doctor IDs from surgeon_id, anaesthetist_id, additional_anaesthetists, and additional_doctors."""
+    doc_ids = set()
+    if schedule.surgeon_id:
+        doc_ids.add(str(schedule.surgeon_id).strip())
+    if schedule.anaesthetist_id:
+        doc_ids.add(str(schedule.anaesthetist_id).strip())
+
+    # additional_anaesthetists (JSON string or dict)
+    raw_add_anes = getattr(schedule, "additional_anaesthetists", None) or "{}"
+    try:
+        data = json.loads(raw_add_anes) if isinstance(raw_add_anes, str) else raw_add_anes
+        if isinstance(data, dict):
+            for v in data.values():
+                if v:
+                    doc_ids.add(str(v).strip())
+        elif isinstance(data, list):
+            for v in data:
+                if v:
+                    doc_ids.add(str(v).strip())
+    except Exception:
+        pass
+
+    # additional_doctors (JSON string or dict)
+    raw_add_docs = getattr(schedule, "additional_doctors", None) or "{}"
+    try:
+        data = json.loads(raw_add_docs) if isinstance(raw_add_docs, str) else raw_add_docs
+        if isinstance(data, dict):
+            for v in data.values():
+                if v:
+                    doc_ids.add(str(v).strip())
+        elif isinstance(data, list):
+            for v in data:
+                if v:
+                    doc_ids.add(str(v).strip())
+    except Exception:
+        pass
+
+    return {did for did in doc_ids if did}
+
+
+def send_ot_schedule_whatsapp_to_doctors(schedule):
+    """
+    Sends WhatsApp OT Schedule Confirmation reminders to all assigned doctors and anaesthetists:
+    - surgeon_id
+    - anaesthetist_id
+    - additional_anaesthetists
+    - additional_doctors
+
+    Stores doctor's ID and doctor's Name in CommunicationLog (patient_id and patient_name).
+    """
+    try:
+        doc_ids = _extract_all_doctor_ids(schedule)
+        if not doc_ids:
+            print(f"[WhatsApp OT] No doctor IDs found in schedule {schedule.reference_no}")
+            return {"success": False, "error": "No doctor IDs specified"}
+
+        # Fetch doctor profiles from Global.backend_diagnostics_profile
+        global_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        global_db = global_client["Global"]
+        profile_col = global_db["backend_diagnostics_profile"]
+        profiles = list(profile_col.find({"employeeId": {"$in": list(doc_ids)}}))
+        global_client.close()
+
+        profile_map = {str(p.get("employeeId")): p for p in profiles if p.get("employeeId")}
+
+        # Resolve Patient Name
+        patient_name = ""
+        if schedule.ip_number:
+            try:
+                pt_info = _bulk_get_patient_info({schedule.ip_number})
+                patient_name = pt_info.get(schedule.ip_number, {}).get("patient_name") or ""
+            except Exception:
+                pass
+        if not patient_name:
+            patient_name = schedule.ip_number or "—"
+
+        surgery_name = schedule.surgery_name or "—"
+
+        # Determine effective date & time (postponed if available, otherwise scheduled)
+        if schedule.is_postponed and schedule.postponed_date:
+            eff_date = schedule.postponed_date
+            eff_start = schedule.post_startTime or schedule.startTime
+            eff_end = schedule.post_endTime or schedule.endTime
+        else:
+            eff_date = schedule.scheduled_date
+            eff_start = schedule.startTime
+            eff_end = schedule.endTime
+
+        date_str = str(eff_date).split("T")[0] if eff_date else ""
+        start_str = str(eff_start)[:5] if eff_start else "--:--"
+        end_str = str(eff_end)[:5] if eff_end else "--:--"
+        date_time_str = f"{date_str} ({start_str} - {end_str})"
+
+        template_name = (os.getenv("BOTIFY_OT_SCHEDULE_TEMPLATE_NAME") or "sh_ot_schedule").strip()
+        botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
+
+        if botify_apikey.startswith("Bearer "):
+            auth_header = botify_apikey
+        else:
+            auth_header = f"Bearer {botify_apikey}"
+
+        botify_url = "https://login.botify.in/api/whatsapp/external"
+        headers = {
+            "Authorization": auth_header,
+            "Content-Type": "application/json"
+        }
+
+        results = []
+        for doc_id in doc_ids:
+            doc_profile = profile_map.get(doc_id)
+            if not doc_profile:
+                print(f"[WhatsApp OT] Doctor profile not found for ID: {doc_id}")
+                continue
+
+            phone = doc_profile.get("mobileNumber") or doc_profile.get("phoneNumber") or doc_profile.get("guardianNumber")
+            doc_name = doc_profile.get("employeeName") or str(doc_id)
+
+            if not phone:
+                print(f"[WhatsApp OT] Mobile number missing for doctor: {doc_name} ({doc_id})")
+                continue
+
+            clean_phone = re.sub(r'\D', '', str(phone))
+            if len(clean_phone) == 10:
+                clean_phone = f"91{clean_phone}"
+
+            template_data = [
+                str(doc_name),
+                str(date_str),
+                str(patient_name),
+                str(surgery_name),
+                str(date_time_str)
+            ]
+
+            components = [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": str(p)} for p in template_data]
+                }
+            ]
+
+            body_payload = {
+                "to": clean_phone,
+                "type": "template",
+                "templateName": template_name,
+                "templateData": template_data,
+                "components": components
+            }
+
+            try:
+                r = requests.post(botify_url, json=body_payload, headers=headers, timeout=20)
+                print(f"[WhatsApp OT] Botify response for Dr. {doc_name} ({clean_phone}): {r.status_code} {r.text}")
+
+                is_success = r.status_code in [200, 201]
+
+                # Store outcome in CommunicationLog (patient_id=doc_id, patient_name=doc_name)
+                try:
+                    CommunicationLog.objects.create(
+                        patient_id=str(doc_id),
+                        patient_name=str(doc_name),
+                        type="WhatsApp",
+                        sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+                        recipient=str(clean_phone),
+                        status="Success" if is_success else "Failed",
+                        details=f"OT Schedule Confirmation sent to Dr. {doc_name} ({clean_phone}). Response: {r.text}",
+                        template_name=template_name,
+                        created_by="system",
+                        branch_code=schedule.branch_code or "SHB001",
+                        hospital_code=schedule.hospital_code or "SH001"
+                    )
+                except Exception as log_ex:
+                    print(f"[WhatsApp OT] Error logging CommunicationLog: {log_ex}")
+
+                results.append({"doctor_id": doc_id, "doctor_name": doc_name, "success": is_success, "response": r.text})
+
+            except Exception as req_ex:
+                print(f"[WhatsApp OT] Request error for Dr. {doc_name}: {req_ex}")
+                results.append({"doctor_id": doc_id, "doctor_name": doc_name, "success": False, "error": str(req_ex)})
+
+        return {"success": True, "results": results}
+
+    except Exception as e:
+        print(f"[WhatsApp OT] Error sending doctor messages: {e}")
+        return {"success": False, "error": str(e)}
+
+
+
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def ot_staffs(request):
+    """Get list of OT staff from backend_diagnostics_profile where department is DEPT021"""
+    try:
+        global_db = client[os.getenv('GLOBAL_DB_NAME', 'Global')]
+        diagnostics_collection = global_db['backend_diagnostics_profile']
+        
+        staffs = list(diagnostics_collection.find(
+            {"$or": [{"department": "DEPT021"}, {"departmentCode": "DEPT021"}]},
+            {"employeeId": 1, "employeeName": 1, "_id": 0}
+        ))
+        
+        return Response(staffs, status=200)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def list_diagnosis(request):
+
     """
     Fetch all active diagnosis records from hospital_diagnosis collection (HMS DB).
     Returns: { success: true, data: [{ diagnostics_id, diagnostics_name }] }

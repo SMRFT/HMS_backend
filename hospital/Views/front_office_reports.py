@@ -142,10 +142,13 @@ def front_office_report_view(request):
                 results.append(b)
 
         elif report_type == 'doctor_wise_ip_collection':
+            # DischargeBilling.bill_date is a DateField and is persisted as an
+            # ISO date string ("YYYY-MM-DD"), not a BSON datetime — compare as
+            # strings (same convention used in advanced_dashboard.py).
             query = {
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "bill_date": {"$gte": start_date, "$lte": end_date},
+                "bill_date": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()},
                 "status": "Billed",
                 "is_active": True
             }
