@@ -385,8 +385,12 @@ def list_surgery_schedules(request):
             for r in all_records:
                 scheduled_date = coerce_date(r.get("scheduled_date"))
                 postponed_date = coerce_date(r.get("postponed_date"))
+                rescheduled_date = coerce_date(r.get("rescheduled_date"))
 
-                if in_range(scheduled_date) or in_range(postponed_date):
+                # Effective scheduled date for filtering:
+                eff_date = rescheduled_date or postponed_date or scheduled_date
+
+                if in_range(eff_date):
                     filtered.append(r)
         else:
             filtered = all_records
@@ -509,7 +513,7 @@ def update_schedule_status(request):
             return Response({"success": False, "message": "Record not found"}, status=404)
 
         new_status = request.data.get("status", "").strip()
-        allowed    = ["Scheduled", "Confirmed", "Completed", "Postponed", "Cancelled"]
+        allowed    = ["Scheduled", "Confirmed", "Completed", "Postponed", "Rescheduled", "Cancelled"]
 
         if new_status not in allowed:
             return Response(
@@ -527,6 +531,28 @@ def update_schedule_status(request):
                 schedule.post_startTime = request.data["post_startTime"]
             if request.data.get("post_endTime"):
                 schedule.post_endTime = request.data["post_endTime"]
+
+            p_remarks = request.data.get("postponed_remarks") or request.data.get("remarks")
+            if p_remarks:
+                schedule.postponed_remarks = str(p_remarks or "").strip()
+
+        if new_status == "Rescheduled":
+            schedule.is_rescheduled = True
+            r_date = request.data.get("rescheduled_date") or request.data.get("postponed_date")
+            r_start = request.data.get("rescheduled_startTime") or request.data.get("post_startTime")
+            r_end = request.data.get("rescheduled_endTime") or request.data.get("post_endTime")
+
+            if r_date:
+                schedule.rescheduled_date = r_date
+            if r_start:
+                schedule.rescheduled_startTime = r_start
+            if r_end:
+                schedule.rescheduled_endTime = r_end
+
+            r_remarks = request.data.get("rescheduled_remarks") or request.data.get("remarks")
+            if r_remarks:
+                schedule.rescheduled_remarks = str(r_remarks or "").strip()
+                schedule.remarks = str(r_remarks or "").strip()
 
         if new_status == "Cancelled":
             schedule.is_active = False
@@ -552,8 +578,22 @@ def update_schedule_status(request):
                     if eid and title:
                         staff_val.append({"title": title, "employee_id": eid})
 
-            schedule.assigned_staff = staff_val
+        if new_status == "Confirmed":
+            eff_staff = staff_val if "assigned_staff" in request.data else (schedule.assigned_staff or [])
+            titles = {s.get("title") for s in eff_staff if isinstance(s, dict)}
+            missing = []
+            if "Scrub Nurse" not in titles:
+                missing.append("Scrub Nurse")
+            if "Anesthesia Technician" not in titles:
+                missing.append("Anesthesia Technician")
+            if "Floor Nurse" not in titles:
+                missing.append("Floor Nurse")
 
+            if missing:
+                return Response(
+                    {"success": False, "message": f"Please assign at least one OT staff member in each category before confirming. Missing: {', '.join(missing)}."},
+                    status=400,
+                )
 
         schedule.lastmodified_by   = user_id
         schedule.lastmodified_date = timezone.now()
@@ -568,7 +608,7 @@ def update_schedule_status(request):
             except Exception as pe:
                 print(f"[ERROR] PyMongo assigned_staff update failed: {pe}")
 
-        if new_status == "Confirmed":
+        if new_status in ["Confirmed", "Postponed", "Rescheduled"]:
             try:
                 send_ot_schedule_whatsapp_to_doctors(schedule)
             except Exception as wa_err:
@@ -632,13 +672,13 @@ def _extract_all_doctor_ids(schedule) -> set:
 
 def send_ot_schedule_whatsapp_to_doctors(schedule):
     """
-    Sends WhatsApp OT Schedule Confirmation reminders to all assigned doctors and anaesthetists:
-    - surgeon_id
-    - anaesthetist_id
-    - additional_anaesthetists
-    - additional_doctors
-
-    Stores doctor's ID and doctor's Name in CommunicationLog (patient_id and patient_name).
+    Sends WhatsApp notifications to all assigned doctors/anaesthetists using appropriate Botify templates:
+    1. If Rescheduled: BOTIFY_OT_RESCHEDULE_TEMPLATE_NAME (default: sh_ot_reschedule)
+       Params: [doc_name, patient_name, surgery_name, prev_date_time, reason, revised_date_time]
+    2. If Postponed: BOTIFY_OT_POST_SCHEDULE_TEMPLATE_NAME (default: sh_ot_post_schedule)
+       Params: [doc_name, patient_name, surgery_name, prev_date_time, reason, revised_date_time]
+    3. Initial Scheduled: BOTIFY_OT_SCHEDULE_TEMPLATE_NAME (default: sh_ot_schedule)
+       Params: [doc_name, date_str, patient_name, surgery_name, date_time_str]
     """
     try:
         doc_ids = _extract_all_doctor_ids(schedule)
@@ -668,24 +708,51 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
 
         surgery_name = schedule.surgery_name or "—"
 
-        # Determine effective date & time (postponed if available, otherwise scheduled)
-        if schedule.is_postponed and schedule.postponed_date:
-            eff_date = schedule.postponed_date
-            eff_start = schedule.post_startTime or schedule.startTime
-            eff_end = schedule.post_endTime or schedule.endTime
+        def _format_time_ampm(time_val):
+            if not time_val:
+                return "--:--"
+            t_str = str(time_val)[:5]
+            try:
+                dt = datetime.strptime(t_str, "%H:%M")
+                return dt.strftime("%I:%M %p")
+            except Exception:
+                return t_str
+
+        def _fmt_dt(d_val, s_val, e_val):
+            d_str = str(d_val).split("T")[0] if d_val else ""
+            s_str = _format_time_ampm(s_val)
+            e_str = _format_time_ampm(e_val)
+            if d_str:
+                return f"{d_str} ({s_str} - {e_str})"
+            return "N/A"
+
+        is_resch = bool(schedule.is_rescheduled or schedule.rescheduled_date or schedule.status == "Rescheduled")
+        is_post = bool(schedule.is_postponed or schedule.postponed_date or schedule.status == "Postponed")
+
+        if is_resch:
+            template_name = (os.getenv("BOTIFY_OT_RESCHEDULE_TEMPLATE_NAME") or "sh_ot_reschedule").strip()
+            if schedule.postponed_date:
+                prev_dt_str = _fmt_dt(schedule.postponed_date, schedule.post_startTime, schedule.post_endTime)
+            else:
+                prev_dt_str = _fmt_dt(schedule.scheduled_date, schedule.startTime, schedule.endTime)
+            revised_dt_str = _fmt_dt(schedule.rescheduled_date, schedule.rescheduled_startTime, schedule.rescheduled_endTime)
+            reason_str = str(schedule.rescheduled_remarks or schedule.remarks or "N/A").strip()
+            template_type = "reschedule"
+
+        elif is_post:
+            template_name = (os.getenv("BOTIFY_OT_POST_SCHEDULE_TEMPLATE_NAME") or "sh_ot_post_schedule").strip()
+            prev_dt_str = _fmt_dt(schedule.scheduled_date, schedule.startTime, schedule.endTime)
+            revised_dt_str = _fmt_dt(schedule.postponed_date, schedule.post_startTime, schedule.post_endTime)
+            reason_str = str(schedule.postponed_remarks or schedule.remarks or "N/A").strip()
+            template_type = "postponed"
+
         else:
-            eff_date = schedule.scheduled_date
-            eff_start = schedule.startTime
-            eff_end = schedule.endTime
+            template_name = (os.getenv("BOTIFY_OT_SCHEDULE_TEMPLATE_NAME") or "sh_ot_schedule").strip()
+            date_str = str(schedule.scheduled_date).split("T")[0] if schedule.scheduled_date else ""
+            date_time_str = _fmt_dt(schedule.scheduled_date, schedule.startTime, schedule.endTime)
+            template_type = "initial"
 
-        date_str = str(eff_date).split("T")[0] if eff_date else ""
-        start_str = str(eff_start)[:5] if eff_start else "--:--"
-        end_str = str(eff_end)[:5] if eff_end else "--:--"
-        date_time_str = f"{date_str} ({start_str} - {end_str})"
-
-        template_name = (os.getenv("BOTIFY_OT_SCHEDULE_TEMPLATE_NAME") or "sh_ot_schedule").strip()
         botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
-
         if botify_apikey.startswith("Bearer "):
             auth_header = botify_apikey
         else:
@@ -715,13 +782,23 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
             if len(clean_phone) == 10:
                 clean_phone = f"91{clean_phone}"
 
-            template_data = [
-                str(doc_name),
-                str(date_str),
-                str(patient_name),
-                str(surgery_name),
-                str(date_time_str)
-            ]
+            if template_type in ["reschedule", "postponed"]:
+                template_data = [
+                    str(doc_name),
+                    str(patient_name),
+                    str(surgery_name),
+                    str(prev_dt_str),
+                    str(reason_str),
+                    str(revised_dt_str)
+                ]
+            else:
+                template_data = [
+                    str(doc_name),
+                    str(date_str),
+                    str(patient_name),
+                    str(surgery_name),
+                    str(date_time_str)
+                ]
 
             components = [
                 {
@@ -740,11 +817,10 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
 
             try:
                 r = requests.post(botify_url, json=body_payload, headers=headers, timeout=20)
-                print(f"[WhatsApp OT] Botify response for Dr. {doc_name} ({clean_phone}): {r.status_code} {r.text}")
+                print(f"[WhatsApp OT ({template_type})] Botify response for Dr. {doc_name} ({clean_phone}): {r.status_code} {r.text}")
 
                 is_success = r.status_code in [200, 201]
 
-                # Store outcome in CommunicationLog (patient_id=doc_id, patient_name=doc_name)
                 try:
                     CommunicationLog.objects.create(
                         patient_id=str(doc_id),
@@ -753,7 +829,7 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
                         sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
                         recipient=str(clean_phone),
                         status="Success" if is_success else "Failed",
-                        details=f"OT Schedule Confirmation sent to Dr. {doc_name} ({clean_phone}). Response: {r.text}",
+                        details=f"OT Schedule ({template_type}) notification sent to Dr. {doc_name} ({clean_phone}). Response: {r.text}",
                         template_name=template_name,
                         created_by="system",
                         branch_code=schedule.branch_code or "SHB001",
@@ -773,6 +849,11 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
     except Exception as e:
         print(f"[WhatsApp OT] Error sending doctor messages: {e}")
         return {"success": False, "error": str(e)}
+
+
+# Alias for backward compatibility
+def send_ot_reschedule_whatsapp_to_doctors(schedule):
+    return send_ot_schedule_whatsapp_to_doctors(schedule)
 
 
 

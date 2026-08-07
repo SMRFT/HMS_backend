@@ -912,13 +912,10 @@ def invest_billing_create(request):
         if "item" in data:
             data["item"] = normalize_item(data["item"])
 
-        # ── Server-side validation for UHID, Age, and Age Type ──
-        uhid_val = str(data.get("uhid", "")).strip()
+        # ── Server-side validation for Age and Age Type ──
         age_val = str(data.get("age", "")).strip()
         age_type_val = str(data.get("age_type", "") or data.get("ageType", "")).strip()
 
-        if not uhid_val:
-            return Response({"error": "UHID is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
         if not age_val:
             return Response({"error": "Age is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
         if not age_type_val:

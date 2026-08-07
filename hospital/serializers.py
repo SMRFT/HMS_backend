@@ -508,6 +508,12 @@ class SurgeryScheduleSerializer(serializers.ModelSerializer):
             "postponed_date",
             "post_startTime",
             "post_endTime",
+            "postponed_remarks",
+            "is_rescheduled",
+            "rescheduled_date",
+            "rescheduled_startTime",
+            "rescheduled_endTime",
+            "rescheduled_remarks",
             "created_by",
             "created_date",
             "lastmodified_by",
@@ -537,6 +543,12 @@ class SurgeryScheduleWriteSerializer(serializers.ModelSerializer):
             "additional_doctors",
             "is_pack_request_CSSD",
             "is_pack_return_CSSD",
+            "postponed_remarks",
+            "is_rescheduled",
+            "rescheduled_date",
+            "rescheduled_startTime",
+            "rescheduled_endTime",
+            "rescheduled_remarks",
         ]
 
     # ── Field-level validation ─────────────────────────────────────────────
