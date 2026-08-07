@@ -1566,6 +1566,7 @@ class SurgerySchedule(AuditModel):
         ("Confirmed",  "Confirmed"),
         ("Completed",  "Completed"),
         ("Postponed",  "Postponed"),
+        ("Rescheduled", "Rescheduled"),
         ("Cancelled",  "Cancelled"),
     ]
     reference_no = models.CharField(max_length=20, primary_key=True)
@@ -1592,10 +1593,16 @@ class SurgerySchedule(AuditModel):
     additional_doctors       = models.TextField(default="{}")
     is_pack_request_CSSD = models.BooleanField(default=False)
     is_pack_return_CSSD  = models.BooleanField(default=False)
-    is_postponed    = models.BooleanField(default=False)
-    postponed_date  = models.DateField(null=True, blank=True)
-    post_startTime  = models.TimeField(null=True, blank=True)
-    post_endTime    = models.TimeField(null=True, blank=True)
+    is_postponed        = models.BooleanField(default=False)
+    postponed_date      = models.DateField(null=True, blank=True)
+    post_startTime      = models.TimeField(null=True, blank=True)
+    post_endTime        = models.TimeField(null=True, blank=True)
+    postponed_remarks   = models.TextField(blank=True, default="")
+    is_rescheduled        = models.BooleanField(default=False)
+    rescheduled_date      = models.DateField(null=True, blank=True)
+    rescheduled_startTime = models.TimeField(null=True, blank=True)
+    rescheduled_endTime   = models.TimeField(null=True, blank=True)
+    rescheduled_remarks   = models.TextField(blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
     is_active         = models.BooleanField(default=True)
     assigned_staff    = models.JSONField(default=list, blank=True, null=True)
