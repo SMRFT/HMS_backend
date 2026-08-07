@@ -671,14 +671,6 @@ class RaiseIndentSerializer(serializers.ModelSerializer):
 
 
 
-from rest_framework import serializers
-from .models import LabApprovedItem
-
-class LabApprovedItemSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = LabApprovedItem
-        fields = '__all__'
-
 from .models import DoctorFeeCuts
 class DoctorFeeCutsSerializer(serializers.ModelSerializer):
     class Meta:

@@ -127,3 +127,27 @@ class storesIntent(AuditModel):
     def __str__(self):
         return f"{self.intent_id} - {self.date}"    
 
+
+
+from django.db import models
+
+class Stores_LabApprovedItem(AuditModel):
+    item_id = models.CharField(max_length=50,primary_key=True)
+    name = models.CharField(max_length=255)
+    date = models.DateTimeField(default=now)
+    hsn = models.CharField(max_length=50, null=True, blank=True)
+    quantity = models.IntegerField()
+    used_qty = models.IntegerField(null=True, blank=True, default=None)
+
+    def __str__(self):
+        return f"{self.name} ({self.item_id})"
+
+
+class Stores_LabUsedQtyDetail(AuditModel):
+    """Daily usage record per date, storing an array of items used on that date."""
+    date = models.DateTimeField(max_length=50, primary_key=True)  # Format: YYYY-MM-DD
+    items = models.JSONField(default=list)  # [{"item_id": "...", "name": "...", "used_qty": n, "hsn": "..."}, ...]
+
+    def __str__(self):
+        return f"{self.date} — {len(self.items)} items"
+

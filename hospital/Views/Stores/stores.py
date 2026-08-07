@@ -3,12 +3,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent
-from ...models import LabApprovedItem
-from ...serializers import LabApprovedItemSerializer
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
-    GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer
+    GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer,
+    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer
 )
 from django.shortcuts import get_object_or_404
 from datetime import datetime
@@ -745,10 +744,11 @@ def get_stores_intents(request):
     dept_collection = db["hospital_department"]
     item_collection = db["hospital_itemmaster"]
 
-    # ✅ Department mapping (using ORM for robustness)
+    # ✅ Department mapping (from MongoDB department_collection, keyed by department_code)
     dept_map = {
-        d.department_id: d.department_name
-        for d in Department.objects.all()
+        doc['department_code']: doc['department_name']
+        for doc in department_collection.find({'is_active': True})
+        if doc.get('department_code') and doc.get('department_name')
     }
 
     # ✅ Item stock mapping
@@ -822,22 +822,21 @@ def create_stores_intent(request):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def update_stores_intent(request, pk):
-    employee_id  = request.data.get('auth-user-id', 'system')
-    branch_code = request.data.get('auth-branch-code', 'system')
-    outlet_code = request.data.get('auth-outlet-code', 'system')
-    hospital_code = request.data.get('auth-hospital-code', 'system')
-    
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+
     obj = get_object_or_404(storesIntent, intent_id=pk)
     if not obj.is_active:
         return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     # Store old items to compare quantities if needed
     old_items = {it.get('item_id'): it.get('approved_quantity', 0) for it in (obj.items or []) if it.get('item_id')}
-    
+
     data = request.data.copy()
     data['lastmodified_by'] = employee_id
     data['branch_code'] = branch_code
-    data['outlet_code'] = outlet_code
+    data['hospital_code'] = hospital_code
 
     serializer = StoresIntentSerializer(obj, data=data, partial=True)
 
@@ -853,20 +852,57 @@ def update_stores_intent(request, pk):
             if is_approved and item_id:
                 try:
                     item_obj = ItemMaster.objects.get(item_id=item_id)
-                    
+
                     # Logic: Only update ItemMaster if the quantity has actually changed
                     old_qty = int(old_items.get(item_id, 0))
                     diff = new_qty - old_qty
-                    
+
                     if diff != 0:
                         item_obj.approved_quantity += diff
                         item_obj.save()
 
                 except ItemMaster.DoesNotExist:
-                    continue 
+                    continue
+
+        # --- DEPT002: Save/accumulate approved items in Stores_LabApprovedItem ---
+        dept_code = instance.department
+        if dept_code == 'DEPT002':
+            for item in items:
+                item_id = item.get("item_id")
+                is_approved = item.get("approval", {}).get("approved", False)
+                new_qty = int(item.get("approved_quantity", 0))
+                old_qty = int(old_items.get(item_id, 0)) if item_id else 0
+                diff = new_qty - old_qty  # Only the newly approved quantity in this call
+
+                if is_approved and item_id and diff > 0:
+                    lab_item = Stores_LabApprovedItem.objects.filter(
+                        item_id=item_id,
+                        branch_code=branch_code,
+                        hospital_code=hospital_code,
+                    ).first()
+                    if lab_item:
+                        # Same item approved again (same branch/hospital) -> accumulate, don't duplicate
+                        lab_item.quantity = (lab_item.quantity or 0) + diff
+                        lab_item.lastmodified_by = employee_id
+                        lab_item.save()
+                    else:
+                        Stores_LabApprovedItem.objects.create(
+                            item_id=item_id,
+                            name=item.get("name", ""),
+                            hsn=item.get("hsn", None),
+                            quantity=diff,
+                            created_by=employee_id,
+                            branch_code=branch_code,
+                            hospital_code=hospital_code,
+                        )
+        # ---------------------------------------------------------------
 
         return Response({"message": "Updated successfully", "data": serializer.data})
     return Response(serializer.errors, status=400)
+
+
+
+
 
 @api_view(['DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -904,34 +940,128 @@ def soft_delete_intent(request, pk):
     return Response({"message": "Soft deleted successfully"})
 
 
+# --- Lab Approved Items Views ---
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_stores_lab_approved_items(request):
+    """Return all Stores_LabApprovedItem records with remaining balance calculated."""
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+
+    items_qs = Stores_LabApprovedItem.objects.all().order_by('-date')
+    serializer = Stores_LabApprovedItemSerializer(items_qs, many=True)
+
+    result = []
+    for item_obj, item_data in zip(items_qs, serializer.data):
+        qty = item_data.get('quantity') or 0
+        used = item_data.get('used_qty') or 0
+        remaining = qty - used
+        result.append({
+            **dict(item_data),
+            'id': str(item_obj.pk),   # always inject the real PK as a string
+            'remaining_qty': remaining
+        })
+
+    return Response(result)
+
+
 
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
-def LabApprovedItemCreate(request):
-    """
-    POST /lab-approved-items/create/
-    Body: { "items": [ { "item_id", "name", "hsn", "quantity" }, ... ] }
-    """
-    items = request.data.get('items', [])
- 
-    if not items or not isinstance(items, list):
-        return Response(
-            {"error": "items must be a non-empty list"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
- 
-    serializer = LabApprovedItemSerializer(data=items, many=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(
-            {
-                "message": "Lab approved items saved successfully",
-                "data": serializer.data
-            },
-            status=status.HTTP_201_CREATED
-        )
- 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
- 
+def stores_daily_usage_items(request):
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+    used_date = request.data.get('used_date') or datetime.now().strftime('%Y-%m-%d')
 
+    items_to_process = []
+    
+    # Check if request has bulk items
+    bulk_items = request.data.get('items')
+    if bulk_items and isinstance(bulk_items, list):
+        items_to_process = bulk_items
+    else:
+        # Single item request
+        item_id = request.data.get('item_id') or request.data.get('lab_approved_item_id')
+        new_used_qty = request.data.get('used_qty')
+        if not item_id or str(item_id).strip().lower() in ('none', 'null', 'undefined'):
+            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_used_qty is None:
+            return Response({'error': 'used_qty is required'}, status=status.HTTP_400_BAD_REQUEST)
+        items_to_process = [{'item_id': item_id, 'used_qty': new_used_qty}]
 
+    # Validate all items first
+    validated_items = []
+    for it in items_to_process:
+        it_id = it.get('item_id')
+        it_qty = it.get('used_qty')
+        if not it_id:
+            return Response({'error': 'item_id is required for all items'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            it_qty = int(it_qty)
+        except (ValueError, TypeError):
+            return Response({'error': f'used_qty must be an integer for item {it_id}'}, status=status.HTTP_400_BAD_REQUEST)
+        if it_qty <= 0:
+            return Response({'error': f'used_qty must be greater than 0 for item {it_id}'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            approved_item = Stores_LabApprovedItem.objects.get(item_id=it_id)
+        except Stores_LabApprovedItem.DoesNotExist:
+            return Response({'error': f'Lab approved item not found: {it_id}'}, status=status.HTTP_404_NOT_FOUND)
+
+        current_used = approved_item.used_qty or 0
+        total_after = current_used + it_qty
+        if total_after > approved_item.quantity:
+            remaining = approved_item.quantity - current_used
+            return Response({
+                'error': f'Cannot exceed approved quantity for item "{approved_item.name}". Remaining balance: {remaining}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_items.append((approved_item, it_qty))
+
+    # Get or create the usage detail for the date
+    usage_detail, created = Stores_LabUsedQtyDetail.objects.get_or_create(
+        date=used_date,
+        defaults={
+            'items': [],
+            'created_by': employee_id,
+            'branch_code': branch_code,
+            'hospital_code': hospital_code,
+        }
+    )
+    existing_items = usage_detail.items or []
+
+    for approved_item, it_qty in validated_items:
+        # 1) Update cumulative used_qty on Stores_LabApprovedItem
+        approved_item.used_qty = (approved_item.used_qty or 0) + it_qty
+        approved_item.lastmodified_by = employee_id
+        approved_item.save()
+
+        # 2) Accumulate/insert into usage_detail items list
+        item_found = False
+        for it in existing_items:
+            if it.get('item_id') == approved_item.item_id:
+                it['used_qty'] = (it.get('used_qty') or 0) + it_qty
+                it['lastmodified_by'] = employee_id
+                item_found = True
+                break
+
+        if not item_found:
+            existing_items.append({
+                'item_id': approved_item.item_id,
+                'name': approved_item.name,
+                'hsn': approved_item.hsn,
+                'used_qty': it_qty,
+                'created_by': employee_id,
+            })
+
+    usage_detail.items = existing_items
+    usage_detail.lastmodified_by = employee_id
+    usage_detail.save()
+
+    return Response({
+        'message': 'Usage recorded successfully',
+        'processed_count': len(validated_items)
+    })

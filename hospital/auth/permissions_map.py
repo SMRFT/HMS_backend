@@ -380,6 +380,9 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/stores-intent/create/': 'HMS-API-SINTENT',
     '/_b_a_c_k_e_n_d/HMS/stores-intent/update/.*/': 'HMS-API-SINTENT',
     '/_b_a_c_k_e_n_d/HMS/stores-intent/delete/.*/': 'HMS-API-SINTENTA',
+    '/_b_a_c_k_e_n_d/HMS/stores-get_stores_lab_approved_items/': 'HMS-P-SGLA',
+    '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-P-SDUI',
+
     
     # Stores Assets Management:
     '/_b_a_c_k_e_n_d/HMS/stores-assets-management/': 'HMS-API-SAM',               

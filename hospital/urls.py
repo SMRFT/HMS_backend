@@ -450,7 +450,9 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
-    path('lab-approved-items/create/', stores.LabApprovedItemCreate, name='LabApprovedItemCreate'),
+    path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
+    path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
+    
 
     # Assets Master
     path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
