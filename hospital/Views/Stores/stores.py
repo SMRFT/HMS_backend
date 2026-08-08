@@ -1031,7 +1031,17 @@ def stores_daily_usage_items(request):
             'hospital_code': hospital_code,
         }
     )
-    existing_items = usage_detail.items or []
+    import json
+    existing_items = usage_detail.items
+    if isinstance(existing_items, str):
+        try:
+            existing_items = json.loads(existing_items)
+        except Exception:
+            existing_items = []
+    if not isinstance(existing_items, list):
+        existing_items = []
+
+    formatted_date = str(used_date)[:10]
 
     for approved_item, it_qty in validated_items:
         # 1) Update cumulative used_qty on Stores_LabApprovedItem
@@ -1039,27 +1049,30 @@ def stores_daily_usage_items(request):
         approved_item.lastmodified_by = employee_id
         approved_item.save()
 
-        # 2) Accumulate/insert into usage_detail items list
-        item_found = False
-        for it in existing_items:
-            if it.get('item_id') == approved_item.item_id:
-                it['used_qty'] = (it.get('used_qty') or 0) + it_qty
-                it['lastmodified_by'] = employee_id
-                item_found = True
-                break
-
-        if not item_found:
-            existing_items.append({
-                'item_id': approved_item.item_id,
-                'name': approved_item.name,
-                'hsn': approved_item.hsn,
-                'used_qty': it_qty,
-                'created_by': employee_id,
-            })
+        # 2) Always store each usage entry separately into usage_detail items list with date
+        existing_items.append({
+            'date': formatted_date,
+            'item_id': approved_item.item_id,
+            'name': approved_item.name,
+            'hsn': approved_item.hsn,
+            'used_qty': it_qty,
+            'created_by': employee_id,
+            'lastmodified_by': employee_id,
+        })
 
     usage_detail.items = existing_items
     usage_detail.lastmodified_by = employee_id
     usage_detail.save()
+
+    # Direct PyMongo update to ensure native BSON Array of Objects in MongoDB, bypassing Djongo JSONField stringification
+    try:
+        from ..dbcollection import hms_db
+        hms_db["hospital_stores_labusedqtydetail"].update_one(
+            {"$or": [{"date": usage_detail.date}, {"date": used_date}]},
+            {"$set": {"items": existing_items}}
+        )
+    except Exception:
+        pass
 
     return Response({
         'message': 'Usage recorded successfully',
