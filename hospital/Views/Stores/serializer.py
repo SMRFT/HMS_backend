@@ -151,3 +151,20 @@ class StoresIntentSerializer(serializers.ModelSerializer):
                     
         return representation
 
+
+
+from rest_framework import serializers
+from .models import Stores_LabApprovedItem, Stores_LabUsedQtyDetail
+
+class Stores_LabApprovedItemSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = Stores_LabApprovedItem
+        fields = '__all__'
+
+
+
+class Stores_LabUsedQtyDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Stores_LabUsedQtyDetail
+        fields = '__all__'

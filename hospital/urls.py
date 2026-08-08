@@ -62,6 +62,8 @@ from .Views.Assets import assets
 from .Views.Insurance import insurance
 from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
 from .Views.Complaints import complaints
+from .Views.QRScan import qrscan
+
 
 handler404 = 'hospital.views.custom_page_not_found'
 
@@ -450,7 +452,9 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
-    path('lab-approved-items/create/', stores.LabApprovedItemCreate, name='LabApprovedItemCreate'),
+    path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
+    path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
+    
 
     # Assets Master
     path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
@@ -609,5 +613,19 @@ urlpatterns = [
     path('save-patient-vaccination/', vaccination.save_patient_vaccination, name='save_patient_vaccination'),
     path('send-vaccination-reminders/', vaccination.send_vaccination_reminders_view, name='send_vaccination_reminders'),
     path('preview-vaccination-reminders/', vaccination.preview_vaccination_reminders_view, name='preview_vaccination_reminders'),
+
+    # QR Scan / InPatient & OutPatient Feedback URLs
+    path('inpatient-feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create'),
+    path('inpatient-feedback/<str:feedback_id>/', qrscan.inpatient_feedback_detail, name='inpatient_feedback_detail'),
+    path('inpatient_feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create_alt'),
+    path('hospital/inpatient-feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create_hosp'),
+
+    path('outpatient-feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create'),
+    path('outpatient-feedback/<str:feedback_id>/', qrscan.outpatient_feedback_detail, name='outpatient_feedback_detail'),
+    path('outpatient_feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_alt'),
+    path('hospital/outpatient-feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_hosp'),
 ]
+
+
+
 

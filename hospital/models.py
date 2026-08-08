@@ -2482,19 +2482,7 @@ class RaiseIndent(AuditModel):
 
 
 
-from django.db import models
 
-class LabApprovedItem(AuditModel):
-    item_id = models.CharField(max_length=50)
-    name = models.CharField(max_length=255)
-    hsn = models.CharField(max_length=50, null=True, blank=True)
-    quantity = models.IntegerField()
-    used_qty = models.IntegerField(null=True, blank=True, default=None)
-
-
-
-    def __str__(self):
-        return f"{self.name} ({self.item_id})"
 class DoctorFeeCuts(AuditModel):
     ip_number        = models.CharField(max_length=50, primary_key=True)
     uhid             = models.CharField(max_length=50, blank=True, null=True, db_index=True)
