@@ -135,10 +135,9 @@ PAGE_MAPPING = {
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
-    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SADM',
-    '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
-    r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
-    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/?(\?.*)?$': 'HMS-P-DIS',
+    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-IB',
+    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/?(\?.*)?$': 'HMS-P-IB',
+    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/.+$': 'HMS-P-IB',
 
     # ==================== NURSING ======================
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
@@ -148,7 +147,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
+    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB', 
+    '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',  
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
@@ -198,6 +198,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
+
+        '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
+    r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
 
     #HR: 
     r'^/_b_a_c_k_e_n_d/HMS/hr/internships/?(\?.*)?$': 'HMS-P-HRIN',

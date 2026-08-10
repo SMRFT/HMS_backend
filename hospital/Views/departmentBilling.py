@@ -490,8 +490,6 @@ def estimate_billing_list(request):
             status=500,
         )
 
-
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_bill_types(request):
@@ -537,6 +535,70 @@ def get_bill_types(request):
         ))
 
         client.close()
+
+        return JsonResponse({"billTypes": bill_types}, safe=False)
+
+    except Exception as e:
+        return JsonResponse({
+            "error": str(e)
+        }, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_invest_bill_types(request):
+    try:
+        branch_code = request.data.get('auth-branch-code')
+        outlet_code = request.data.get('auth-outlet-code')
+        hospital_code = request.data.get('auth-hospital-code')
+
+        ignore_outlet = request.GET.get('ignore_outlet') == 'true'
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        collection = db['hospital_billtype']
+
+        excluded_bill_types = ["AD01", "DIS01", "REG01", "PH01", "SUR01", "CONS01"]
+        query = {
+            "is_active": True,
+            "billTypeNo": {"$nin": excluded_bill_types + [code.lower() for code in excluded_bill_types]}
+        }
+
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+
+        if branch_code:
+            query["branch_code"] = branch_code
+
+        # ✅ FIX: include empty outlet also
+        if outlet_code and not ignore_outlet:
+            query["$or"] = [
+                {"outlet_code": outlet_code},
+                {"outlet_code": ""},
+                {"outlet_code": {"$exists": False}}
+            ]
+
+        print("QUERY:", query)
+
+        raw_bill_types = list(collection.find(
+            query,
+            {
+                "_id": 0,
+                "bill_type": 1,
+                "bill_name": 1,
+                "billTypeNo": 1,
+                "outlet_code": 1,
+                "is_allowDiscount": 1,
+            }
+        ))
+
+        client.close()
+
+        excluded_set = {code.upper() for code in excluded_bill_types}
+        bill_types = [
+            bt for bt in raw_bill_types
+            if str(bt.get("billTypeNo", "")).strip().upper() not in excluded_set
+        ]
 
         return JsonResponse({"billTypes": bill_types}, safe=False)
 
@@ -675,20 +737,19 @@ def get_investigation_items(request):
                 "billType": bill_type
             }, status=400)
         
-        # Special case: billTypeNo = "LAB01" means fetch lab tests
-        if bill_type_no == "LAB01":
-            # Connect to MongoDB Diagnostics database
+        # Special case: billTypeNo = "LAB01" or "LAB02" (or any LAB category)
+        if str(bill_type_no).upper() in ["LAB01", "LAB02"] or str(bill_type_no).upper().startswith("LAB"):
             client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-            db = client['Diagnostics']
-            collection = db['core_testdetails']
             
-            # Build query
+            # 1. Fetch active lab tests from Diagnostics database -> core_testdetails
+            diag_db = client['Diagnostics']
+            test_collection = diag_db['core_testdetails']
+            
             query = {"is_active": True}
             if item_name:
                 query["test_name"] = {"$regex": item_name, "$options": "i"}
 
-            # Fetch active tests
-            tests = list(collection.find(
+            tests = list(test_collection.find(
                 query,
                 {
                     "test_id": 1,
@@ -698,31 +759,51 @@ def get_investigation_items(request):
                     "_id": 0
                 }
             ))
-            
+
+            # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
+            hms_db = client['HMS']
+            nabh_collection = hms_db['hospital_lab_nabh_rate']
+            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1}))
+
             client.close()
-            
-            # Determine which rate to use based on bill_type
-            # You can customize this logic based on your bill_type values
-            # For example, if bill_type ends with "SH" use SH_Rate, otherwise Credit_Rate
+
+            # Build lookup dictionary by test_id (as string)
+            nabh_map = {}
+            for n_rec in nabh_records:
+                tid = n_rec.get('test_id')
+                if tid is not None:
+                    nabh_map[str(tid).strip()] = n_rec
+
             formatted_items = []
             for test in tests:
-                # Default to SH_Rate, but you can add logic to determine which rate
-                # based on bill_type or other criteria
-                price = test.get('SH_Rate', '0')
-                
-                # Convert None, "None", empty string, or None type to "0" for consistency
+                t_id = test.get('test_id', '')
+                t_id_str = str(t_id).strip() if t_id is not None else ''
+
+                if str(bill_type_no).upper() == "LAB02":
+                    if not (t_id_str and t_id_str in nabh_map):
+                        continue
+                    nabh_info = nabh_map[t_id_str]
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    nabh_rate = nabh_info.get('nabh_rate')
+                    if nabh_rate is not None and str(nabh_rate).strip() != "" and str(nabh_rate).strip().lower() != "none":
+                        price = str(nabh_rate).strip()
+                    else:
+                        price = "0"
+                else:
+                    nabh_info = nabh_map.get(t_id_str, {})
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    price = test.get('SH_Rate', '0')
+
                 if price is None or str(price).strip().lower() == 'none' or str(price).strip() == '':
                     price = "0"
-                
-                # Ensure price is a string
-                price_str = str(price)
-                
+
                 formatted_items.append({
                     "itemName": test.get('test_name', ''),
-                    "price": price_str,
-                    "test_id": test.get('test_id', '')
+                    "price": str(price),
+                    "test_id": t_id,
+                    "nabh_code": nabh_code
                 })
-            
+
             return JsonResponse({"items": formatted_items}, safe=True)
         
         # Regular case: Fetch from hospital_investigationprice
@@ -749,15 +830,24 @@ def get_investigation_items(request):
             for item in items:
                 item_name = item.get("itemName", "")
                 item_id = item.get("item_id", "")
-                # Get the price for the specific bill_type
-                price = item.get(str(bill_type), "0")
-                
+                # Get the value for the specific bill_type
+                val = item.get(str(bill_type))
+                price = "0"
+                nabh_code = ""
+
+                if isinstance(val, dict):
+                    price = str(val.get("price", "0")).strip()
+                    nabh_code = str(val.get("nabh_code", "")).strip()
+                elif val is not None:
+                    price = str(val).strip()
+
                 # Only include items that have a price for this bill_type
-                if price and price != "0":
+                if price and price != "0" and price != "":
                     formatted_items.append({
                         "itemName": item_name,
                         "item_id": item_id,
-                        "price": price
+                        "price": price,
+                        "nabh_code": nabh_code
                     })
             
             return JsonResponse({"items": formatted_items}, safe=True)
@@ -809,6 +899,18 @@ def invest_billing_create(request):
 
         if "item" in data:
             data["item"] = normalize_item(data["item"])
+
+        # ── Server-side validation for UHID, Age, and Age Type ──
+        uhid_val = str(data.get("uhid", "")).strip()
+        age_val = str(data.get("age", "")).strip()
+        age_type_val = str(data.get("age_type", "") or data.get("ageType", "")).strip()
+
+        if not uhid_val:
+            return Response({"error": "UHID is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
+        if not age_val:
+            return Response({"error": "Age is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
+        if not age_type_val:
+            return Response({"error": "Age Type is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
 
         # ── Connect MongoDB ─────────────────────────────────────
         mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))

@@ -915,21 +915,22 @@ class DischargeBilling(AuditModel):
     non_tax_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     gst_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    room_tax          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     discount_percent  = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     discount_amount   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     disc_reason       = models.CharField(max_length=300, blank=True, null=True)
-    item_disc         = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_disc        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     net_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)   
 
     remarks           = models.TextField(blank=True, null=True)
 
-    # ── Estimate→Bill traceability ────────────────────────────────────────────
-    converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
-    is_active         = models.BooleanField(default=True)
+    # ── Cancellation & Edit History ─────────────────────────────────────────
+    is_cancelled      = models.BooleanField(default=False)
+    cancelled_by      = models.CharField(max_length=100, blank=True, null=True)
+    cancelled_date    = models.DateTimeField(blank=True, null=True)
+    cancelled_reason  = models.TextField(blank=True, null=True)
+    edit_history      = models.JSONField(default=list)
+
     next_visit_date   = models.DateField(null=True, blank=True)
 
     def save(self, *args, **kwargs):

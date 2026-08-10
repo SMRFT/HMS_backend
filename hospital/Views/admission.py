@@ -508,9 +508,9 @@ def admission_view(request):
                     "branch_code":       adm.branch_code,
                     "outlet_code":       adm.outlet_code,
                     "created_by":        adm.created_by,
-                    "created_date":      adm.created_date.isoformat()       if adm.created_date       else None,
+                    "created_date":      adm.created_date.isoformat()       if hasattr(adm.created_date, 'isoformat') else adm.created_date if adm.created_date else None,
                     "lastmodified_by":   adm.lastmodified_by,
-                    "lastmodified_date": adm.lastmodified_date.isoformat()   if adm.lastmodified_date   else None,
+                    "lastmodified_date": adm.lastmodified_date.isoformat()  if hasattr(adm.lastmodified_date, 'isoformat') else adm.lastmodified_date if adm.lastmodified_date else None,
                 }
                 _enrich_with_patient(d, hospital_code)
                 result.append(d)
