@@ -5,7 +5,16 @@ from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from ...Views.dbcollection import company_secretary_collection, profile_collection
+import os
+from pymongo import MongoClient
+
+mongo_url = os.getenv("GLOBAL_DB_HOST")
+_client = MongoClient(mongo_url)
+_global_db = _client["Global"]
+_hms_db = _client["HMS"]
+
+profile_collection = _global_db["backend_diagnostics_profile"]
+company_secretary_collection = _hms_db["hospital_licencemasterdetails"]
 
 
 # ✅ Thresholds (IMPORTANT: highest → lowest)
@@ -133,20 +142,23 @@ def run_licence_expiry_check():
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
 
+                    cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'najmasmrft@gmail.com')
+                    cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+
                     # ✅ Authenticate SMTP using HMS_CS_EMAIL credentials
                     # so the mail is truly sent FROM cs@smrft.org (env-specific)
                     cs_connection = get_connection(
-                        host=settings.EMAIL_HOST,
-                        port=settings.EMAIL_PORT,
-                        username=settings.HMS_CS_EMAIL,
-                        password=settings.HMS_CS_EMAIL_PASSWORD,
-                        use_tls=settings.EMAIL_USE_TLS,
+                        host=getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com'),
+                        port=getattr(settings, 'EMAIL_PORT', 587),
+                        username=cs_email,
+                        password=cs_password,
+                        use_tls=getattr(settings, 'EMAIL_USE_TLS', True),
                     )
 
                     email = EmailMessage(
                         subject=subject,
                         body=build_email_body(record, days_before),
-                        from_email=settings.HMS_CS_EMAIL,
+                        from_email=cs_email,
                         to=incharge_emails,
                         cc=respective_person_emails,
                         connection=cs_connection,
