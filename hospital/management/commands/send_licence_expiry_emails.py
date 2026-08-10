@@ -142,7 +142,7 @@ def run_licence_expiry_check():
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
 
-                    cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'najmasmrft@gmail.com')
+                    cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER')
                     cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
 
                     # ✅ Authenticate SMTP using HMS_CS_EMAIL credentials
