@@ -1,4 +1,5 @@
 import datetime
+import json
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -1078,3 +1079,153 @@ def stores_daily_usage_items(request):
         'message': 'Usage recorded successfully',
         'processed_count': len(validated_items)
     })
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_lab_used_qty_report(request):
+    """
+    Fetch date-wise lab daily usage records within a date range (from_date to to_date).
+    Matches created_by / lastmodified_by against backend_diagnostics_profile collection 
+    (from dbcollection.py) on employeeId to return employeeName.
+    """
+    try:
+        from_date = request.query_params.get('from_date') or request.query_params.get('startDate')
+        to_date = request.query_params.get('to_date') or request.query_params.get('endDate')
+        single_date = request.query_params.get('date')
+
+        if single_date and not from_date and not to_date:
+            from_date = single_date
+            to_date = single_date
+
+        from ..dbcollection import hms_db, profile_collection
+        col = hms_db["hospital_stores_labusedqtydetail"]
+        raw_docs = list(col.find({}))
+
+        # Collect all employee IDs to resolve names in bulk
+        employee_ids = set()
+        for doc in raw_docs:
+            if doc.get('created_by'):
+                employee_ids.add(str(doc.get('created_by')).strip())
+            if doc.get('lastmodified_by'):
+                employee_ids.add(str(doc.get('lastmodified_by')).strip())
+            items = doc.get('items') or []
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    items = []
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict):
+                        if it.get('created_by'):
+                            employee_ids.add(str(it.get('created_by')).strip())
+                        if it.get('lastmodified_by'):
+                            employee_ids.add(str(it.get('lastmodified_by')).strip())
+
+        # Map employeeId -> employeeName from backend_diagnostics_profile collection
+        employee_map = {}
+        if employee_ids:
+            profiles = list(profile_collection.find(
+                {"employeeId": {"$in": list(employee_ids)}},
+                {"employeeId": 1, "employeeName": 1, "name": 1, "_id": 0}
+            ))
+            for p in profiles:
+                emp_id = str(p.get("employeeId") or "").strip()
+                emp_name = p.get("employeeName") or p.get("name") or ""
+                if emp_id and emp_name:
+                    employee_map[emp_id] = emp_name
+
+        reports = []
+        flattened_items = []
+
+        for doc in raw_docs:
+            doc_date_raw = doc.get('date')
+            doc_date_str = ""
+            if isinstance(doc_date_raw, datetime):
+                doc_date_str = doc_date_raw.strftime('%Y-%m-%d')
+            elif isinstance(doc_date_raw, dict) and '$date' in doc_date_raw:
+                doc_date_str = str(doc_date_raw['$date'])[:10]
+            elif doc_date_raw:
+                doc_date_str = str(doc_date_raw)[:10]
+
+            c_by = str(doc.get('created_by') or '').strip()
+            m_by = str(doc.get('lastmodified_by') or '').strip()
+            c_by_name = employee_map.get(c_by, c_by)
+            m_by_name = employee_map.get(m_by, m_by)
+
+            items_raw = doc.get('items') or []
+            if isinstance(items_raw, str):
+                try:
+                    items_raw = json.loads(items_raw)
+                except Exception:
+                    items_raw = []
+            if not isinstance(items_raw, list):
+                items_raw = []
+
+            doc_branch = doc.get('branch_code') or doc.get('branch') or doc.get('auth-branch-code') or request.query_params.get('auth-branch-code') or request.query_params.get('branch_code') or 'SHB001'
+            doc_hospital = doc.get('hospital_code') or doc.get('hospital') or doc.get('auth-hospital-code') or request.query_params.get('auth-hospital-code') or request.query_params.get('hospital_code') or 'SH001'
+
+            processed_items = []
+            for it in items_raw:
+                if not isinstance(it, dict):
+                    continue
+                it_date = str(it.get('date') or doc_date_str)[:10]
+
+                # Filter by date range if provided
+                if from_date and it_date < from_date:
+                    continue
+                if to_date and it_date > to_date:
+                    continue
+
+                it_c_by = str(it.get('created_by') or c_by).strip()
+                it_m_by = str(it.get('lastmodified_by') or m_by).strip()
+
+                item_obj = {
+                    'date': it_date,
+                    'item_id': it.get('item_id', ''),
+                    'name': it.get('name', ''),
+                    'hsn': it.get('hsn', ''),
+                    'used_qty': it.get('used_qty', 0),
+                    'created_by': it_c_by,
+                    'created_by_name': employee_map.get(it_c_by, it_c_by),
+                    'lastmodified_by': it_m_by,
+                    'lastmodified_by_name': employee_map.get(it_m_by, it_m_by),
+                    'branch_code': it.get('branch_code') or doc_branch,
+                    'hospital_code': it.get('hospital_code') or doc_hospital,
+                }
+                processed_items.append(item_obj)
+                flattened_items.append(item_obj)
+
+            if processed_items:
+                reports.append({
+                    'record_date': doc_date_str,
+                    'created_by': c_by,
+                    'created_by_name': c_by_name,
+                    'lastmodified_by': m_by,
+                    'lastmodified_by_name': m_by_name,
+                    'branch_code': doc_branch,
+                    'hospital_code': doc_hospital,
+                    'items': processed_items
+                })
+
+        # Sort descending by date
+        flattened_items.sort(key=lambda x: x['date'], reverse=True)
+        reports.sort(key=lambda x: x['record_date'], reverse=True)
+
+        return Response({
+            'success': True,
+            'from_date': from_date,
+            'to_date': to_date,
+            'total_items_count': len(flattened_items),
+            'reports': reports,
+            'flattened_items': flattened_items
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        return Response({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
