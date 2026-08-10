@@ -13,6 +13,8 @@ class ItemMaster(AuditModel):
     department = models.CharField(max_length=50, null=True, blank=True)
     hsn = models.CharField(max_length=20, blank=True, null=True)
     stockReorderLevel = models.CharField(max_length=100, null=True, blank=True)
+    supplier = models.CharField(max_length=255, null=True, blank=True)
+    manufacturer = models.CharField(max_length=255, null=True, blank=True)
     total_quantity = models.IntegerField(default=0)
     approved_quantity = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -150,4 +152,35 @@ class Stores_LabUsedQtyDetail(AuditModel):
 
     def __str__(self):
         return f"{self.date} — {len(self.items)} items"
+
+
+class GeneralStoreVendor(AuditModel):
+    VENDOR_TYPE_CHOICES = [
+        ('SUPPLIER', 'Supplier'),
+        ('MANUFACTURER', 'Manufacturer'),
+        ('BOTH', 'Both'),
+    ]
+
+    vendor_id = models.CharField(max_length=50, unique=True, primary_key=True)
+    vendor_type = models.CharField(max_length=50, choices=VENDOR_TYPE_CHOICES)
+    name = models.CharField(max_length=255)
+    address_line1 = models.CharField(max_length=255, null=True, blank=True)
+    address_line2 = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=20, null=True, blank=True)
+
+    # Contact Information
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    phone = models.CharField(max_length=30, null=True, blank=True)
+    email = models.EmailField(max_length=255, null=True, blank=True)
+
+    # Additional Fields
+    gstin = models.CharField(max_length=50, null=True, blank=True)
+    payment_terms = models.CharField(max_length=50, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.vendor_id} - {self.name}"
+
 

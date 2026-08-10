@@ -1,6 +1,5 @@
 from rest_framework import serializers
-from djongo.models.fields import ObjectIdField
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN ,storesIntent 
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, GeneralStoreVendor
 
 class StoresGRNSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -207,7 +206,12 @@ class Stores_LabUsedQtyDetailSerializer(serializers.ModelSerializer):
                     representation['items'] = parsed if isinstance(parsed, list) else []
                 except Exception:
                     representation['items'] = []
-        elif not representation.get('items'):
-            representation['items'] = []
-
         return representation
+
+
+class GeneralStoreVendorSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = GeneralStoreVendor
+        fields = '__all__'

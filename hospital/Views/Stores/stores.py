@@ -4,11 +4,11 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer,
-    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer
+    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer
 )
 from django.shortcuts import get_object_or_404
 from datetime import datetime
@@ -137,8 +137,25 @@ def item_price_history(request, item_id):
 
     try:
         import json
+        from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
+
         history = []
         grns = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+
+        if from_date_str:
+            try:
+                from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+                grns = [g for g in grns if g.date and g.date >= from_d]
+            except Exception:
+                pass
+        if to_date_str:
+            try:
+                to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
+                grns = [g for g in grns if g.date and g.date <= to_d]
+            except Exception:
+                pass
+
         for grn in grns:
             items = grn.items
             if isinstance(items, str):
@@ -1229,3 +1246,72 @@ def stores_lab_used_qty_report(request):
             'error': str(e),
             'traceback': traceback.format_exc()
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# --- General Store Vendor Views ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def general_store_vendor_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    if request.method == 'GET':
+        vendors = list(GeneralStoreVendor.objects.filter(is_active__in=[True]))
+        vendors.sort(key=lambda x: x.created_date if x.created_date else timezone.now(), reverse=True)
+        serializer = GeneralStoreVendorSerializer(vendors, many=True)
+        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('vendor_id'):
+            data['vendor_id'] = generate_custom_id(GeneralStoreVendor, 'vendor_id', 'GSV', 5)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        serializer = GeneralStoreVendorSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def general_store_vendor_detail(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    try:
+        vendor = GeneralStoreVendor.objects.filter(pk=pk, is_active__in=[True]).first()
+        if not vendor:
+            return Response({"success": False, "error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'GET':
+        serializer = GeneralStoreVendorSerializer(vendor)
+        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+
+    elif request.method in ['PUT', 'PATCH']:
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = GeneralStoreVendorSerializer(vendor, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+        return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        vendor.is_active = False
+        vendor.save()
+        return Response({"success": True, "message": "Vendor deleted successfully"}, status=status.HTTP_200_OK)

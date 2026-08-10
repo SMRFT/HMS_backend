@@ -90,6 +90,8 @@ urlpatterns = [
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
     path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
+    path("general-store-vendors/", stores.general_store_vendor_list_create, name="general-store-vendor-list-create"),
+    path("general-store-vendors/<str:pk>/", stores.general_store_vendor_detail, name="general-store-vendor-detail"),
 
     # Stock URLs (Supporting both dash and underscore formatting if referenced across platforms)
     path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),

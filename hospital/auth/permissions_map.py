@@ -95,6 +95,8 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/vendors/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendors/[0-9]+/?(\?.*)?$': 'HMS-P-VNDD',
+    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/?(\?.*)?$': 'HMS-P-VND',
+    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
@@ -359,17 +361,17 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/send-doctor-fee-cut-monthly-emails/?(\?.*)?$': 'HMS-P-DFCR',
 
     #Assets Management:
-    '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/item-master/price-history/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/item-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/department-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/department-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/category-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/category-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-type-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-type-master/.*/': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/price-history/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/department-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/department-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/category-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-type-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
 
     # Stores GRN:
     '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',
