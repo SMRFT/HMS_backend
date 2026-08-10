@@ -165,6 +165,49 @@ class Stores_LabApprovedItemSerializer(serializers.ModelSerializer):
 
 
 class Stores_LabUsedQtyDetailSerializer(serializers.ModelSerializer):
+    items = serializers.JSONField(required=False, default=list)
+
     class Meta:
         model = Stores_LabUsedQtyDetail
         fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        val = getattr(instance, 'items', None)
+        if val is None:
+            val = representation.get('items')
+
+        if isinstance(val, list):
+            clean_list = []
+            for item in val:
+                if isinstance(item, (dict, OrderedDict)):
+                    clean_list.append(dict(item))
+                elif isinstance(item, str):
+                    try:
+                        clean_list.append(json.loads(item))
+                    except Exception:
+                        clean_list.append(item)
+                else:
+                    clean_list.append(item)
+            representation['items'] = clean_list
+        elif isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    representation['items'] = parsed
+                else:
+                    representation['items'] = [parsed]
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(val)
+                    representation['items'] = parsed if isinstance(parsed, list) else []
+                except Exception:
+                    representation['items'] = []
+        elif not representation.get('items'):
+            representation['items'] = []
+
+        return representation
