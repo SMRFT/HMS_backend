@@ -155,4 +155,6 @@ HMS_HR_EMAIL = os.getenv('HMS_HR_EMAIL', 'najmasmrft@gmail.com')
 HMS_HR_EMAIL_PASSWORD = os.getenv('HMS_HR_EMAIL_PASSWORD')
 HMS_ACC_EMAIL = os.getenv('HMS_ACC_EMAIL', 'najmasmrft@gmail.com')
 HMS_ACC_EMAIL_PASSWORD = os.getenv('HMS_ACC_EMAIL_PASSWORD')
+HMS_CS_EMAIL = os.getenv('HMS_CS_EMAIL', 'cs@smrft.org')
+HMS_CS_EMAIL_PASSWORD = os.getenv('HMS_CS_EMAIL_PASSWORD')
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
