@@ -395,10 +395,15 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/stores-assets-management/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
     '/_b_a_c_k_e_n_d/HMS/stores-assets-management/.*/': 'HMS-API-SAM',
 
-    # Stores Assets Maintenance:
-    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/': 'HMS-API-SAMT',               
-    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-SAMT',
-    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-SAMT',
+    # Stores Assets Maintenance & Incharge Assign:
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/?(\?.*)?$': 'HMS-API-AIA',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-AIA',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-AIA',
+
+    # Asset Maintenance Request & Approval:
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/?(\?.*)?$': 'HMS-API-AMR',               
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/[^/]+/?(\?.*)?$': 'HMS-API-AMR',
+    '/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/.*/': 'HMS-API-AMR',
 
     #Recycle Assets Management:
     '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SRM',               

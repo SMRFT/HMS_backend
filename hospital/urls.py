@@ -464,6 +464,8 @@ urlpatterns = [
     path('stores-assets-management/<path:pk>/', assets.stores_assets_management_detail, name='stores_assets_management_detail'),
     path('stores-assets-maintenance/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
     path('stores-assets-maintenance/<path:pk>/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
+    path('asset-maintenance-request/', assets.asset_maintenance_request_list_detail, name='asset_maintenance_request_list_detail'),
+    path('asset-maintenance-request/<path:pk>/', assets.asset_maintenance_request_list_detail, name='asset_maintenance_request_detail'),
     path("recycle_asset/", assets.create_recycle_asset, name="create_recycle_asset"),
     path("recycle_asset/<path:pk>/", assets.update_recycle_asset, name="update_recycle_asset"),
 
