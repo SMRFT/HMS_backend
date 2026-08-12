@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from djongo.models.fields import ObjectIdField
-from .models import StoresAssetsManagement ,StoresAssetsmaintenance ,recycle_asset
+from .models import StoresAssetsManagement ,StoresAssetsmaintenance ,recycle_asset, AssetMaintenanceRequest
 
 class StoresAssetsManagementSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -72,4 +72,27 @@ class recycle_assetSerializer(serializers.ModelSerializer):
             representation["items"] = []
 
         return representation
+
+class AssetMaintenanceRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AssetMaintenanceRequest
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        if hasattr(instance, 'service_cost') and instance.service_cost is not None:
+            try:
+                instance.service_cost = float(str(instance.service_cost))
+            except Exception:
+                instance.service_cost = 0.0
+        return super().to_representation(instance)
+
+    def update(self, instance, validated_data):
+        if hasattr(instance, 'service_cost') and instance.service_cost is not None:
+            try:
+                instance.service_cost = float(str(instance.service_cost))
+            except Exception:
+                instance.service_cost = 0.0
+        return super().update(instance, validated_data)
+
+
         
