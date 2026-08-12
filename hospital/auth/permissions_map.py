@@ -445,8 +445,13 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
+
+        # Central Cash Counter
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/get_employee_counter_assignments/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/assign_employee_cash_counter/': 'HMS-P-CCC',
+
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
         '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
         '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
