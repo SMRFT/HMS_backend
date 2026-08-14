@@ -1,14 +1,16 @@
-version: '3.8'
-
 services:
   backend:
     build: .
-    container_name: hms-django
+    image: parthiban2000/hms-backend:latest
+    container_name: hms-django-backend
     ports:
       - "2609:2609"
     volumes:
       - .:/app
     environment:
       - DEBUG=1
+    env_file:
+      - .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
