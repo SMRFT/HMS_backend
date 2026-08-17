@@ -187,6 +187,17 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
     r'^/_b_a_c_k_e_n_d/HMS/employee-signature/?(\?.*)?$': 'HMS-API-RD',  
 
+    # MHC Reports:
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-investigations/?(\?.*)?$': 'HMS-P-MHC',
+    '/_b_a_c_k_e_n_d/HMS/mhc-reports/': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/format/?(\?.*)?$': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/checkin(?:/[^/]+)+/$': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/dispatch(?:/[^/]+)+/$': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/approve(?:/[^/]+)+/$': 'HMS-P-MHCA',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/delete(?:/[^/]+)+/$': 'HMS-P-MHCD',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/edit(?:/[^/]+)+/$': 'HMS-P-MHCE',
+    r'^/_b_a_c_k_e_n_d/HMS/mhc-reports(?:/[^/]+)+/$': 'HMS-P-MHC',
+
      #Investigation Reports (RD):      
     r'^/_b_a_c_k_e_n_d/HMS/anc-register/?(\?.*)?$': 'HMS-API-JRD',  
     r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/?(\?.*)?$': 'HMS-API-JRD',  

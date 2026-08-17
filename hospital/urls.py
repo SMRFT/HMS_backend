@@ -14,6 +14,7 @@ from .Views import (
     pharmacy,
     cashcounter,
     radiology,
+    mhc,
     jrdReport,
     room,
     pharmacynotification,
@@ -267,6 +268,17 @@ urlpatterns = [
     re_path(r'^scan-reports/dispatch/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.dispatch_report, name='dispatch_report'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
     path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),  
+
+    # MHC Reports (Master Health Check-up)
+    path('mhc-investigations/', mhc.get_mhc_investigations, name='get_mhc_investigations'),
+    path('mhc-reports/', mhc.create_mhc_report, name='create_mhc_report'),
+    path('mhc-reports/format/', mhc.get_mhc_format, name='get_mhc_format'),
+    re_path(r'^mhc-reports/edit/(?P<investBillNo>.+)/$', mhc.edit_mhc_report, name='edit_mhc_report'),
+    re_path(r'^mhc-reports/approve/(?P<investBillNo>.+)/$', mhc.approve_mhc_report, name='approve_mhc_report'),
+    re_path(r'^mhc-reports/delete/(?P<investBillNo>.+)/$', mhc.soft_delete_mhc_report, name='soft_delete_mhc_report'),
+    re_path(r'^mhc-reports/checkin/(?P<investBillNo>.+)/$', mhc.mhc_patient_checkin, name='mhc_patient_checkin'),
+    re_path(r'^mhc-reports/dispatch/(?P<investBillNo>.+)/$', mhc.mhc_dispatch_report, name='mhc_dispatch_report'),
+    re_path(r'^mhc-reports/(?P<investBillNo>.+)/$', mhc.get_mhc_report_by_bill, name='get_mhc_report_by_bill'),
 
     # JRD Reports
     path('anc-register/', jrdReport.get_anc_register, name='get_anc_register'),
