@@ -363,6 +363,7 @@ def get_mhc_investigations(request):
                 row['patientIn_DateTime'] = existing_report.get('patientIn_DateTime')
                 row['scan_started_DateTime'] = existing_report.get('scan_started_DateTime')
                 row['dispatch_DateTime'] = existing_report.get('dispatch_DateTime')
+                row['is_Dispatched'] = bool(existing_report.get('is_Dispatched') or existing_report.get('dispatch_DateTime'))
                 row['impression'] = existing_report.get('impression', '')
 
             result_rows.append(row)
@@ -395,29 +396,30 @@ def get_mhc_format(request):
 
     try:
         # Build query for package_id
+        if not package_id:
+            return JsonResponse({
+                'success': False,
+                'error': 'Package ID is required'
+            }, status=400)
+
         query = {'is_active': True}
-        if package_id:
-            try:
-                pkg_num = int(package_id)
-                query['$or'] = [
-                    {'package_id': pkg_num},
-                    {'package_id': str(pkg_num)},
-                    {'packageNo': pkg_num},
-                    {'packageNo': str(pkg_num)},
-                ]
-            except ValueError:
-                query['package_id'] = package_id
+        try:
+            pkg_num = int(package_id)
+            query['$or'] = [
+                {'package_id': pkg_num},
+                {'package_id': str(pkg_num)},
+                {'packageNo': pkg_num},
+                {'packageNo': str(pkg_num)},
+            ]
+        except ValueError:
+            query['package_id'] = package_id
 
         doc = collection.find_one(query)
-
-        # Fallback: if not found by package_id, fetch any active format
-        if not doc:
-            doc = collection.find_one({'is_active': True})
 
         if not doc:
             return JsonResponse({
                 'success': False,
-                'error': f'No active MHC format found for package_id: {package_id}'
+                'error': 'There is no format for this package'
             }, status=404)
 
         # Extract gender-specific section or return whole object
@@ -846,7 +848,7 @@ def mhc_dispatch_report(request, investBillNo):
 
         collection.update_one(
             {'_id': report['_id']},
-            {'$set': {'dispatch_DateTime': now, 'lastmodified_by': user_id, 'lastmodified_date': now}}
+            {'$set': {'dispatch_DateTime': now, 'is_Dispatched': True, 'lastmodified_by': user_id, 'lastmodified_date': now}}
         )
         updated = collection.find_one({'_id': report['_id']})
         return JsonResponse(_serialize_report(updated), safe=False, status=200)
