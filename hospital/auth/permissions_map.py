@@ -196,6 +196,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/approve(?:/[^/]+)+/$': 'HMS-P-MHCA',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/delete(?:/[^/]+)+/$': 'HMS-P-MHCD',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/edit(?:/[^/]+)+/$': 'HMS-P-MHCE',
+    r'^/_b_a_c_k_e_n_d/HMS/send-mhc-reminders/.*$': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/preview-mhc-reminders/.*$': 'HMS-P-MHC',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports(?:/[^/]+)+/$': 'HMS-P-MHC',
 
      #Investigation Reports (RD):      

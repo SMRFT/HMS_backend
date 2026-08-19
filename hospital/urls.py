@@ -278,6 +278,8 @@ urlpatterns = [
     re_path(r'^mhc-reports/delete/(?P<investBillNo>.+)/$', mhc.soft_delete_mhc_report, name='soft_delete_mhc_report'),
     re_path(r'^mhc-reports/checkin/(?P<investBillNo>.+)/$', mhc.mhc_patient_checkin, name='mhc_patient_checkin'),
     re_path(r'^mhc-reports/dispatch/(?P<investBillNo>.+)/$', mhc.mhc_dispatch_report, name='mhc_dispatch_report'),
+    path('send-mhc-reminders/', mhc.send_mhc_reminders_api, name='send_mhc_reminders_api'),
+    path('preview-mhc-reminders/', mhc.preview_mhc_reminders_api, name='preview_mhc_reminders_api'),
     re_path(r'^mhc-reports/(?P<investBillNo>.+)/$', mhc.get_mhc_report_by_bill, name='get_mhc_report_by_bill'),
 
     # JRD Reports
