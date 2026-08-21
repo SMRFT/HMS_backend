@@ -292,6 +292,13 @@ urlpatterns = [
     # Summary
     path('summaries/', summary.get_summaries, name='get_summaries'),
     path('summary-type/', summary.summary_type, name='summary_type'),
+    path('summary-type/create/', summary.summary_type, name='create_summary_type'),
+    re_path(r'^summary-type/update/(?P<summary_no>[\w%/-]+)/$', summary.update_summary_type, name='update_summary_type'),
+    re_path(r'^summary-type/delete/(?P<summary_no>[\w%/-]+)/$', summary.delete_summary_type, name='delete_summary_type'),
+    path('summary-heading/', summary.summary_heading, name='summary_heading'),
+    path('summary-heading/create/', summary.summary_heading, name='create_summary_heading'),
+    re_path(r'^summary-heading/update/(?P<heading_no>[\w%/-]+)/$', summary.update_summary_heading, name='update_summary_heading'),
+    re_path(r'^summary-heading/delete/(?P<heading_no>[\w%/-]+)/$', summary.delete_summary_heading, name='delete_summary_heading'),
     path('summaries/create/', summary.create_summary, name='create_summary'),   
     re_path(r'^approve-summary/(?P<ip_no>.+)/$', summary.approve_summary, name='approve_summary'),
     re_path(r'^delete-summary/(?P<ip_no>.+)/$', summary.delete_summary, name='delete_summary'),
