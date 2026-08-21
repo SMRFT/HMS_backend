@@ -517,6 +517,15 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/.*$': 'HMS-P-HVCC',
         r'^/_b_a_c_k_e_n_d/HMS/send-vaccination-reminders/.*$': 'HMS-P-HVCC',
         r'^/_b_a_c_k_e_n_d/HMS/preview-vaccination-reminders/.*$': 'HMS-P-HVCC',
+
+
+        # Master Health Checkup
+            r'/_b_a_c_k_e_n_d/HMS/mhc_get_package/?(\\?.*)?$': 'HMS-P-MHPCK',
+            r'/_b_a_c_k_e_n_d/HMS/mhc_save_details/?(\\?.*)?$': 'HMS-P-MHPSD',
+            r'/_b_a_c_k_e_n_d/HMS/mhc_report/?(\\?.*)?$': 'HMS-P-MHCR',
+            r'/_b_a_c_k_e_n_d/HMS/mhc_dashboard/?(\\?.*)?$': 'HMS-P-MHCD',
+
+
 }
 
 

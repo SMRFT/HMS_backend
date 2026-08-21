@@ -17,5 +17,5 @@ from .Insurance import insurance
 from . import hr
 from . import DoctorFeeCuts
 from . import mhc
-
+from .MHC import View
 

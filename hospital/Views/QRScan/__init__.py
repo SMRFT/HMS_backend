@@ -5,4 +5,5 @@ __all__ = [
     'inpatient_feedback_detail',
     'InPatientFeedback',
     'InPatientFeedbackSerializer',
+
 ]
