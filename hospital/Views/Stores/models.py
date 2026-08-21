@@ -13,6 +13,8 @@ class ItemMaster(AuditModel):
     department = models.CharField(max_length=50, null=True, blank=True)
     hsn = models.CharField(max_length=20, blank=True, null=True)
     stockReorderLevel = models.CharField(max_length=100, null=True, blank=True)
+    supplier = models.CharField(max_length=255, null=True, blank=True)
+    manufacturer = models.CharField(max_length=255, null=True, blank=True)
     total_quantity = models.IntegerField(default=0)
     approved_quantity = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -126,4 +128,59 @@ class storesIntent(AuditModel):
     
     def __str__(self):
         return f"{self.intent_id} - {self.date}"    
+
+
+
+from django.db import models
+
+class Stores_LabApprovedItem(AuditModel):
+    item_id = models.CharField(max_length=50,primary_key=True)
+    name = models.CharField(max_length=255)
+    date = models.DateTimeField(default=now)
+    hsn = models.CharField(max_length=50, null=True, blank=True)
+    quantity = models.IntegerField()
+    used_qty = models.IntegerField(null=True, blank=True, default=None)
+
+    def __str__(self):
+        return f"{self.name} ({self.item_id})"
+
+
+class Stores_LabUsedQtyDetail(AuditModel):
+    """Daily usage record per date, storing an array of items used on that date."""
+    date = models.DateTimeField(max_length=50, primary_key=True)  # Format: YYYY-MM-DD
+    items = djongo_models.JSONField(default=list, blank=True)  # [{"item_id": "...", "name": "...", "used_qty": n, "hsn": "..."}, ...]
+
+    def __str__(self):
+        return f"{self.date} — {len(self.items)} items"
+
+
+class GeneralStoreVendor(AuditModel):
+    VENDOR_TYPE_CHOICES = [
+        ('SUPPLIER', 'Supplier'),
+        ('MANUFACTURER', 'Manufacturer'),
+        ('BOTH', 'Both'),
+    ]
+
+    vendor_id = models.CharField(max_length=50, unique=True, primary_key=True)
+    vendor_type = models.CharField(max_length=50, choices=VENDOR_TYPE_CHOICES)
+    name = models.CharField(max_length=255)
+    address_line1 = models.CharField(max_length=255, null=True, blank=True)
+    address_line2 = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=20, null=True, blank=True)
+
+    # Contact Information
+    contact_person = models.CharField(max_length=255, null=True, blank=True)
+    phone = models.CharField(max_length=30, null=True, blank=True)
+    email = models.EmailField(max_length=255, null=True, blank=True)
+
+    # Additional Fields
+    gstin = models.CharField(max_length=50, null=True, blank=True)
+    payment_terms = models.CharField(max_length=50, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.vendor_id} - {self.name}"
+
 

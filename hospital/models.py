@@ -821,12 +821,15 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
-    age_type            = models.CharField(max_length=10, default='')
+    age_type            = models.CharField(max_length=10, default='Y', blank=True, null=True)
     age     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)
     packageName         = models.CharField(max_length=100, blank=True, null=True)
+    customer_type       = models.CharField(max_length=100, default='General', blank=True, null=True)
+    company_code        = models.CharField(max_length=100, blank=True, null=True)
+    insurance_company   = models.CharField(max_length=200, blank=True, null=True)
     room_details        = models.JSONField(default=list)
     roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
@@ -844,6 +847,7 @@ class Admission(AuditModel):
     is_edited           = models.BooleanField(default=False)
     edited_by           = models.CharField(max_length=100, blank=True, null=True)
     edited_Reason       = models.TextField(blank=True, null=True)
+    edit_history        = models.JSONField(default=list, blank=True, null=True)
  
     # ── Ward / admission status ───────────────────────────────────────────────
     ward_status         = models.CharField(max_length=50, blank=True, null=True)
@@ -1567,6 +1571,7 @@ class SurgerySchedule(AuditModel):
         ("Confirmed",  "Confirmed"),
         ("Completed",  "Completed"),
         ("Postponed",  "Postponed"),
+        ("Rescheduled", "Rescheduled"),
         ("Cancelled",  "Cancelled"),
     ]
     reference_no = models.CharField(max_length=20, primary_key=True)
@@ -1593,12 +1598,21 @@ class SurgerySchedule(AuditModel):
     additional_doctors       = models.TextField(default="{}")
     is_pack_request_CSSD = models.BooleanField(default=False)
     is_pack_return_CSSD  = models.BooleanField(default=False)
-    is_postponed    = models.BooleanField(default=False)
-    postponed_date  = models.DateField(null=True, blank=True)
-    post_startTime  = models.TimeField(null=True, blank=True)
-    post_endTime    = models.TimeField(null=True, blank=True)
+    is_postponed        = models.BooleanField(default=False)
+    postponed_date      = models.DateField(null=True, blank=True)
+    post_startTime      = models.TimeField(null=True, blank=True)
+    post_endTime        = models.TimeField(null=True, blank=True)
+    postponed_remarks   = models.TextField(blank=True, default="")
+    is_rescheduled        = models.BooleanField(default=False)
+    rescheduled_date      = models.DateField(null=True, blank=True)
+    rescheduled_startTime = models.TimeField(null=True, blank=True)
+    rescheduled_endTime   = models.TimeField(null=True, blank=True)
+    rescheduled_remarks   = models.TextField(blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Scheduled")
     is_active         = models.BooleanField(default=True)
+    assigned_staff    = models.JSONField(default=list, blank=True, null=True)
+
+
  
     def __str__(self):
         return f"{self.reference_no} - {self.surgery_name} ({self.scheduled_date})"
@@ -2139,39 +2153,102 @@ class licence_master(AuditModel):
 
 
 
-
+class RawJSONField(models.JSONField):
+    def get_prep_value(self, value):
+        return value
+ 
+    def from_db_value(self, value, expression, connection):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+ 
+ 
 class licencemasterdetails(AuditModel):
     s_no = models.PositiveIntegerField(primary_key=True)
     licence_name = models.CharField(max_length=255)
-    license_number = models.CharField(max_length=255, blank=True, null=True)  # License/Case/Ref No
+    license_number = models.CharField(max_length=255, blank=True, null=True)
+ 
     valid_from = models.DateField(blank=True, null=True)
     expiry_date = models.DateField(blank=True, null=True)
-    Intimation_90days_about_expiry =  models.CharField(max_length=100,default="90 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_60days_about_expiry =  models.CharField(max_length=100,default="60 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_30days_about_expiry =  models.CharField(max_length=100,default="30 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_7days_about_expiry =  models.CharField(max_length=100,default="7 Day(s) Before the Due Date",blank=True,null=True)
-    Intimation_1day_about_expiry =  models.CharField(max_length=100,default="1 Day(s) Before the Due Date",blank=True,null=True)
-    incharge = models.CharField(max_length=255, blank=True, null=True)
-    respective_person = models.CharField(max_length=255, blank=True, null=True)
+    renewal_date = models.DateField(blank=True, null=True)
+    renewwed_by = models.CharField(max_length=100, blank=True, null=True)
+ 
+    # ✅ These three now use RawJSONField instead of models.JSONField so
+    # they're stored as real arrays/subdocuments, not JSON-string text.
+    history = RawJSONField(default=list, blank=True)
+    incharge = RawJSONField(default=list, blank=True)
+    respective_person = RawJSONField(default=list, blank=True)
+ 
+    Intimation_90days_about_expiry = models.CharField(
+        max_length=100, default="90 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_60days_about_expiry = models.CharField(
+        max_length=100, default="60 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_30days_about_expiry = models.CharField(
+        max_length=100, default="30 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_7days_about_expiry = models.CharField(
+        max_length=100, default="7 Day(s) Before the Due Date", blank=True, null=True
+    )
+    Intimation_1day_about_expiry = models.CharField(
+        max_length=100, default="1 Day(s) Before the Due Date", blank=True, null=True
+    )
+ 
     is_90days = models.BooleanField(default=False)
     is_60days = models.BooleanField(default=False)
     is_30days = models.BooleanField(default=False)
     is_7days = models.BooleanField(default=False)
     is_1day = models.BooleanField(default=False)
-
-    def save(self, *args, **kwargs):
+ 
+    def save(self, *args, is_renewal=False, **kwargs):
+        # ✅ Detect create vs update BEFORE touching s_no, since assigning
+        # s_no would make self.pk non-None even for a brand-new record.
+        is_new = self.pk is None or not licencemasterdetails.objects.filter(
+            pk=self.pk
+        ).exists()
+ 
+        # ✅ Auto increment s_no
         if not self.s_no:
             last = licencemasterdetails.objects.order_by('-s_no').first()
-            if last:
-                self.s_no = last.s_no + 1
-            else:
-                self.s_no = 1
-
+            self.s_no = last.s_no + 1 if last else 1
+ 
+        if not self.history:
+            self.history = []
+ 
+        # ✅ FIRST TIME CREATE → store initial expiry
+        if is_new and self.expiry_date:
+            self.history.append({
+                "type": "created",
+                "expiry_date": str(self.expiry_date),
+                "renewal_date": None,
+            })
+ 
+        # ✅ RENEWAL → only when explicitly requested by the caller
+        # (licence_renewal view passes is_renewal=True), never inferred
+        # from field values. This is what stops a plain edit of some
+        # other field from silently appending junk history entries.
+        if is_renewal:
+            new_entry = {
+                "type": "renewed",
+                "renewal_date": str(self.renewal_date) if self.renewal_date else None,
+                "expiry_date": str(self.expiry_date),
+                "renewed_by": self.renewwed_by,
+            }
+            if new_entry not in self.history:
+                self.history.append(new_entry)
+ 
         self.lastmodified_date = timezone.now()
         super().save(*args, **kwargs)
 
-
         
+ 
+
+
+
 class ImplantRequest(AuditModel): 
     ImplantRequest_id = models.IntegerField(primary_key=True, editable=False)
     uhid = models.CharField(max_length=50, null=True, blank=True, db_index=True)
@@ -2325,6 +2402,92 @@ class InternshipCertificateTemplate(models.Model):
         return f"{self.title} ({self.template_id})"
 
 
+
+from django.db import models
+
+class MongoJSONField(models.JSONField):
+    """
+    Django's JSONField.get_prep_value() calls json.dumps() before handing
+    the value to the DB layer — correct for relational backends, but djongo
+    stores that string as-is instead of a native array/object.
+    This override skips the dumps() step so djongo persists real BSON.
+    """
+    def get_prep_value(self, value):
+        return value
+
+    def from_db_value(self, value, expression, connection):
+        # Tolerate legacy rows that were already stored as stringified JSON
+        if isinstance(value, str):
+            import json
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+
+    
+from django.db import models
+
+class LabInventory(AuditModel):
+    dealer_id = models.PositiveIntegerField(unique=True, blank=True, null=True)
+    dealer_name = models.CharField(max_length=255)
+    items = MongoJSONField(default=list)   # was models.JSONField
+
+    def save(self, *args, **kwargs):
+        if not self.dealer_id:
+            last = LabInventory.objects.order_by('-dealer_id').first()
+            self.dealer_id = last.dealer_id + 1 if last else 1
+        super().save(*args, **kwargs)
+
+
+
+from django.db import models
+import json
+
+
+class MongoJSONField(models.JSONField):
+    def get_prep_value(self, value):
+        return value  # ✅ store real array in Mongo
+
+    def from_db_value(self, value, expression, connection):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
+
+
+class RaiseIndent(AuditModel):
+    dealer_items = MongoJSONField(default=list)
+    requirements = models.CharField(max_length=500)
+    stock = models.CharField(max_length=200)
+    status = models.CharField(max_length=100)
+    indent_no = models.CharField(max_length=100, unique=True)
+
+    def save(self, *args, **kwargs):
+        value = self.dealer_items
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = [value]
+        if not isinstance(value, list):
+            value = []
+        self.dealer_items = value
+
+        if not self.indent_no:
+            last = RaiseIndent.objects.order_by('-id').first()
+            next_id = last.id + 1 if last else 1
+            self.indent_no = f"IND{str(next_id).zfill(4)}"
+
+        # ❌ status intentionally NOT set here — comes from the frontend payload
+        super().save(*args, **kwargs)
+
+
+
+
 class DoctorFeeCuts(AuditModel):
     ip_number        = models.CharField(max_length=50, primary_key=True)
     uhid             = models.CharField(max_length=50, blank=True, null=True, db_index=True)
@@ -2337,3 +2500,42 @@ class DoctorFeeCuts(AuditModel):
 
     def __str__(self):
         return f"IP: {self.ip_number} | Status: {self.status}"
+
+
+class DjongoJSONField(models.JSONField):
+    def from_db_value(self, value, expression, connection):
+        if value is None:
+            return value
+        if isinstance(value, (list, dict)):
+            return value
+        try:
+            return super().from_db_value(value, expression, connection)
+        except Exception:
+            return value
+
+
+class PatientVaccination(AuditModel):
+    uhid                = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    mother_uhid         = models.CharField(max_length=50, blank=True, null=True)
+    date                = models.DateTimeField(null=True, blank=True)
+    vaccination_details = DjongoJSONField(default=list, blank=True, null=True)
+    is_active           = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_patientVaccination"
+
+    def __str__(self):
+        return f"Patient Vaccination ({self.uhid})"
+
+
+class VaccinationMaster(AuditModel):
+    vaccination_id   = models.IntegerField(primary_key=True)
+    vaccination_name = models.CharField(max_length=255)
+    is_active        = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_vaccinationMaster"
+
+    def __str__(self):
+        return f"{self.vaccination_id} - {self.vaccination_name}"
+

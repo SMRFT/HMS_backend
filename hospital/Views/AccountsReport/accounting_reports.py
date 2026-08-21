@@ -35,6 +35,36 @@ def _parse_json(val):
         except: return []
     return []
 
+def _format_description(desc):
+    if not desc:
+        return ""
+    if isinstance(desc, str):
+        desc_str = desc.strip()
+        if desc_str.startswith('{') and desc_str.endswith('}'):
+            try:
+                import ast
+                parsed = ast.literal_eval(desc_str)
+                if isinstance(parsed, dict):
+                    desc = parsed
+            except Exception:
+                try:
+                    desc = _json.loads(desc_str)
+                except Exception:
+                    pass
+    if isinstance(desc, dict):
+        parts = []
+        for k, v in desc.items():
+            if v is not None and str(v).strip() != "":
+                clean_k = str(k).replace('_', ' ').title()
+                if clean_k.lower() == "description":
+                    parts.append(str(v))
+                else:
+                    parts.append(f"{clean_k}: {v}")
+        return " | ".join(parts)
+    if isinstance(desc, list):
+        return "; ".join(_format_description(item) for item in desc if item)
+    return str(desc)
+
 def _format_dt(val):
     if not val: return ""
     if isinstance(val, datetime):
@@ -536,30 +566,44 @@ def discharge_bills_report(request):
         ccc_docs = list(db["hospital_cashcountercollection"].find(q))
         bill_numbers = list(set([doc["bill_number"] for doc in ccc_docs if doc.get("bill_number")]))
 
-        # payment_details.method is stored directly on the raw hospital_dischargebilling
-        # document (set at payment-collection time) — it isn't a declared Django field,
-        # so the ORM query below can't see it. Read it via pymongo instead.
-        raw_discharge_docs = list(db["hospital_dischargebilling"].find(
-            {"bill_no": {"$in": bill_numbers}},
-            {"bill_no": 1, "payment_details": 1, "CashierID": 1}
-        ))
-        payment_mode_map = {
-            d["bill_no"]: (d.get("payment_details") or {}).get("method", "Cash")
-            for d in raw_discharge_docs
-        }
-        cashier_map = {d["bill_no"]: d.get("CashierID") for d in raw_discharge_docs}
+        if bill_numbers:
+            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
+                {"bill_no": {"$in": bill_numbers}},
+                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
+            ))
+            all_records = list(DischargeBilling.objects.filter(bill_no__in=bill_numbers))
+        else:
+            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
+                {},
+                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
+            ))
+            all_records = list(DischargeBilling.objects.all())
+            if from_f:
+                f_d = _parse_date(from_f)
+                if f_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) >= f_d]
+            if to_f:
+                t_d = _parse_date(to_f)
+                if t_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) <= t_d]
 
-        # Go to other detailed collection
-        all_records = list(DischargeBilling.objects.filter(bill_no__in=bill_numbers))
+        payment_mode_map = {
+            d.get("bill_no"): (d.get("payment_details") or {}).get("method", "Cash")
+            for d in raw_discharge_docs if d.get("bill_no")
+        }
+        cashier_map = {
+            d.get("bill_no"): d.get("CashierID")
+            for d in raw_discharge_docs if d.get("bill_no")
+        }
 
         # Admission lookup for insurance detection, room, and admission date.
         # insuranceCompanyName is a raw Mongo field not declared on the Admission
         # model, so this is read via pymongo rather than the ORM.
         ip_numbers = list({r.ip_number for r in all_records if r.ip_number})
-        admission_map = {
-            a["ipNumber"]: a
-            for a in db["hospital_admission"].find({"ipNumber": {"$in": ip_numbers}})
-        }
+        admission_map = {}
+        if ip_numbers:
+            for a in db["hospital_admission"].find({"$or": [{"ipNumber": {"$in": ip_numbers}}, {"ip_number": {"$in": ip_numbers}}]}):
+                ip_k = a.get("ipNumber") or a.get("ip_number") or a.get("ip_no")
+                if ip_k:
+                    admission_map[ip_k] = a
 
         client.close()
 
@@ -644,6 +688,9 @@ def discharge_bills_report(request):
         filtered.sort(key=lambda x: x["bill_date"] or "", reverse=True)
         return Response({"success": True, "data": filtered})
     except Exception as e:
+        import traceback
+        print("Discharge Bills Report Error:", str(e))
+        print(traceback.format_exc())
         return Response({"success": False, "message": str(e)}, status=500)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -696,16 +743,20 @@ def advance_registration_report(request):
         ccc_docs = list(db["hospital_cashcountercollection"].find(q))
         bill_numbers = list(set([doc["bill_number"] for doc in ccc_docs if doc.get("bill_number")]))
         
-        # Query admissions containing these advance payments
-        admissions = list(db["hospital_admission"].find({"advance_payments.bill_no": {"$in": bill_numbers}}))
+        if bill_numbers:
+            admissions = list(db["hospital_admission"].find({"advance_payments.bill_no": {"$in": bill_numbers}}))
+        else:
+            admissions = list(db["hospital_admission"].find({"advance_payments": {"$exists": True, "$ne": []}}))
         client.close()
         
-        # Build patient map
-        uhids = list(set(a["uhid"] for a in admissions if a.get('is_admissionActive', True)))
+        uhids = list(set(a.get("uhid") for a in admissions if a.get('is_admissionActive', True) and a.get("uhid")))
         patients = Patient.objects.filter(uhid__in=uhids)
         patient_map = {p.uhid: p for p in patients}
         
         report_data = []
+        f_d = _parse_date(from_f) if from_f else None
+        t_d = _parse_date(to_f) if to_f else None
+
         for adm in admissions:
             if not adm.get('is_admissionActive', True): continue
             
@@ -713,7 +764,6 @@ def advance_registration_report(request):
             p = patient_map.get(uhid)
             if not p: continue
             
-            # Filter insurance if requested
             if is_insurance:
                 has_insurance = (
                     p.company_code or 
@@ -726,22 +776,31 @@ def advance_registration_report(request):
             for pay in payments:
                 if not isinstance(pay, dict) or pay.get('status') == 'Edited': continue
                 
-                bill_no = pay.get('bill_no')
-                if not bill_no or bill_no not in bill_numbers: continue
+                bill_no = pay.get('bill_no') or pay.get('receipt_no') or pay.get('advance_id')
+                if bill_numbers and bill_no and bill_no not in bill_numbers:
+                    continue
+
+                paid_dt_str = pay.get('paid_datetime') or pay.get('created_date') or pay.get('date')
+                paid_d = _parse_date(paid_dt_str)
+                if f_d and paid_d and paid_d < f_d: continue
+                if t_d and paid_d and paid_d > t_d: continue
                 
-                paid_dt = pay.get('paid_datetime')
+                paid_dt = pay.get('paid_datetime') or pay.get('created_date') or pay.get('date')
+                ip_val = adm.get("ipNumber") or adm.get("ip_number") or adm.get("ip_no") or adm.get("inpatient_number") or ""
+                p_name = f"{p.firstName} {p.lastName}".strip() if p else (adm.get("patient_name") or adm.get("patientname") or "Patient")
                 report_data.append({
-                    "ipNumber": adm.get("ipNumber"),
+                    "ipNumber": ip_val,
+                    "ip_number": ip_val,
                     "uhid": uhid,
-                    "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                    "age": p.age,
-                    "gender": p.gender,
-                    "amount": _to_float(pay.get('amount')),
+                    "patient_name": p_name,
+                    "age": getattr(p, "age", None) or adm.get("age"),
+                    "gender": getattr(p, "gender", None) or adm.get("gender"),
+                    "amount": _to_float(pay.get('amount') or pay.get('paid_amount') or pay.get('advance_amount')),
                     "paid_date": _format_dt(paid_dt),
-                    "payment_mode": pay.get('payment_details', {}).get('method', 'Cash'),
+                    "payment_mode": (pay.get('payment_details') or {}).get('method') or pay.get('payment_mode') or 'Cash',
                     "bill_no": bill_no,
-                    "insurance_company": adm.get('insuranceCompanyName') or p.company_code or 'N/A',
-                    "admission_date": _format_dt(adm.get("admissionDateTime")),
+                    "insurance_company": adm.get('insuranceCompanyName') or getattr(p, 'company_code', '') or 'N/A',
+                    "admission_date": _format_dt(adm.get("admissionDateTime") or adm.get("created_date")),
                 })
                 
         report_data.sort(key=lambda x: x["paid_date"], reverse=True)
@@ -938,83 +997,143 @@ def credit_card_report(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
 
-        q = {"billing_category": {"$in": [
-            "Billing", "Registration", "RegistrationBills",
-            "OPPharmacyBills", "Pharmacy", "PharmacyBills",
-            "Discharge", "DischargeBills",
-        ]}}
-        if hospital_code: q["hospital_code"] = hospital_code
-        if branch_code: q["branch_code"] = branch_code
-        q.update(_date_range_query(from_f, to_f))
+        def _is_card(val):
+            if not val: return False
+            if isinstance(val, dict):
+                val = val.get("method") or val.get("payment_mode") or ""
+            s = str(val).strip().lower()
+            return any(k in s for k in ["card", "credit", "debit", "pos", "swipe"])
 
-        ccc_docs = list(db["hospital_cashcountercollection"].find(q))
+        f_date = _parse_date(from_f) if from_f else None
+        t_date = _parse_date(to_f) if to_f else None
 
-        by_cat = {}
-        for r in ccc_docs:
-            by_cat.setdefault(r.get("billing_category"), []).append(r)
+        def in_date_range(d_val):
+            d = _parse_date(d_val)
+            if not d: return True
+            if f_date and d < f_date: return False
+            if t_date and d > t_date: return False
+            return True
 
-        billing_nums = list(set(
-            r["bill_number"] for r in by_cat.get("Billing", []) + by_cat.get("Registration", []) + by_cat.get("RegistrationBills", [])
-            if r.get("bill_number")
-        ))
-        pharmacy_nums = list(set(
-            r["bill_number"] for r in by_cat.get("OPPharmacyBills", []) + by_cat.get("Pharmacy", []) + by_cat.get("PharmacyBills", [])
-            if r.get("bill_number")
-        ))
-        discharge_nums = list(set(
-            r["bill_number"] for r in by_cat.get("Discharge", []) + by_cat.get("DischargeBills", [])
-            if r.get("bill_number")
-        ))
+        # 1. Query hospital_cashcountercollection for any card payments
+        q_ccc = {"$or": [
+            {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
+            {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
+        ]}
+        if hospital_code: q_ccc["hospital_code"] = hospital_code
+        if branch_code: q_ccc["branch_code"] = branch_code
+        q_ccc.update(_date_range_query(from_f, to_f))
 
-        billing_docs   = list(db["hospital_billing"].find({"bill_number": {"$in": billing_nums}}))
-        pharmacy_docs  = list(db["hospital_pharmacybilling"].find({"bill_no": {"$in": pharmacy_nums}}))
-        discharge_docs = list(db["hospital_dischargebilling"].find({"bill_no": {"$in": discharge_nums}}))
+        ccc_docs = list(db["hospital_cashcountercollection"].find(q_ccc))
 
+        # 2. Query billing, pharmacybilling, and dischargebilling directly for card transactions
+        billing_docs = list(db["hospital_billing"].find({
+            "$or": [
+                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
+                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
+            ]
+        }))
+        pharmacy_docs = list(db["hospital_pharmacybilling"].find({
+            "$or": [
+                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
+                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
+            ]
+        }))
+        discharge_docs = list(db["hospital_dischargebilling"].find({
+            "$or": [
+                {"payment_details.method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
+                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
+                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
+            ]
+        }))
+
+        seen_bills = set()
         uhids = set()
         rows = []
 
         for d in billing_docs:
-            mode = d.get("payment_method") or ""
-            if mode.strip().lower() != "card": continue
-            amt = _to_float(d.get("total_fees"))
+            b_date = d.get("billed_date") or d.get("created_date")
+            if not in_date_range(b_date): continue
+            b_num = d.get("bill_number") or d.get("bill_no")
+            if b_num and b_num in seen_bills: continue
+            if b_num: seen_bills.add(b_num)
+
+            amt = _to_float(d.get("total_fees") or d.get("amount") or d.get("paid_amount"))
             if amt <= 0: continue
             uhid = d.get("uhid")
-            uhids.add(uhid)
+            if uhid: uhids.add(uhid)
+            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name")
             rows.append({
-                "type": "Registration (OP)", "bill_no": d.get("bill_number"), "uhid": uhid,
-                "bill_date": _format_dt(d.get("billed_date")), "amount": amt, "is_partial": False,
+                "type": "Registration (OP)", "bill_no": b_num or "N/A", "uhid": uhid or "",
+                "patient_name": p_name,
+                "bill_date": _format_dt(b_date), "amount": amt, "is_partial": False,
             })
 
         for d in pharmacy_docs:
-            mode = d.get("payment_mode") or ""
-            if mode.strip().lower() != "card": continue
-            amt = _to_float(d.get("net_amount"))
+            b_date = d.get("bill_date") or d.get("created_date")
+            if not in_date_range(b_date): continue
+            b_num = d.get("bill_no") or d.get("bill_number")
+            if b_num and b_num in seen_bills: continue
+            if b_num: seen_bills.add(b_num)
+
+            amt = _to_float(d.get("net_amount") or d.get("total_amount") or d.get("paid_amount"))
             if amt <= 0: continue
             uhid = d.get("uhid")
-            uhids.add(uhid)
+            if uhid: uhids.add(uhid)
+            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name") or d.get("medicine_particulars", [{}])[0].get("patient_name")
             rows.append({
-                "type": "Pharmacy", "bill_no": d.get("bill_no"), "uhid": uhid,
-                "bill_date": _format_dt(d.get("bill_date")), "amount": amt, "is_partial": False,
+                "type": "Pharmacy", "bill_no": b_num or "N/A", "uhid": uhid or "",
+                "patient_name": p_name,
+                "bill_date": _format_dt(b_date), "amount": amt, "is_partial": False,
             })
 
         for d in discharge_docs:
+            b_date = d.get("bill_date") or d.get("created_date")
+            if not in_date_range(b_date): continue
+            b_num = d.get("bill_no") or d.get("estimate_number")
+            if b_num and b_num in seen_bills: continue
+            if b_num: seen_bills.add(b_num)
+
             payment_details = d.get("payment_details") or {}
-            card_amt = _card_amount(payment_details.get("method"), payment_details)
-            if not card_amt: continue
+            card_amt = _card_amount(payment_details.get("method"), payment_details) or _to_float(d.get("paid_amount") or d.get("net_amount"))
+            if card_amt <= 0: continue
             uhid = d.get("uhid")
-            uhids.add(uhid)
+            if uhid: uhids.add(uhid)
+            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name")
             rows.append({
-                "type": "Discharge", "bill_no": d.get("bill_no"), "uhid": uhid,
-                "bill_date": _format_dt(d.get("bill_date")), "amount": card_amt,
+                "type": "Discharge", "bill_no": b_num or "N/A", "uhid": uhid or "",
+                "patient_name": p_name,
+                "bill_date": _format_dt(b_date), "amount": card_amt,
                 "is_partial": (payment_details.get("method") or "").strip().lower() == "multiple payment",
             })
 
-        patient_map = {
-            p.uhid: f"{p.firstName} {p.lastName}".strip()
-            for p in Patient.objects.filter(uhid__in=list(uhids))
-        }
+        # Include remaining cashcountercollection card docs not captured above
+        for d in ccc_docs:
+            b_num = d.get("bill_number") or d.get("bill_no")
+            if b_num and b_num in seen_bills: continue
+            if b_num: seen_bills.add(b_num)
+
+            mode = d.get("payment_method") or d.get("payment_mode")
+            if not _is_card(mode): continue
+            amt = _to_float(d.get("total_amount") or d.get("amount") or d.get("received_amount"))
+            if amt <= 0: continue
+            uhid = d.get("uhid") or d.get("patient_id")
+            if uhid: uhids.add(uhid)
+            rows.append({
+                "type": d.get("billing_category") or "General",
+                "bill_no": b_num or "N/A", "uhid": uhid or "",
+                "patient_name": d.get("patient_name") or d.get("patientname"),
+                "bill_date": _format_dt(d.get("created_date") or d.get("bill_date")),
+                "amount": amt, "is_partial": False,
+            })
+
+        clean_uhids = [str(u) for u in uhids if u]
+        patients = list(Patient.objects.filter(uhid__in=clean_uhids))
+        patient_map = {str(p.uhid): f"{p.firstName} {p.lastName}".strip() for p in patients}
+
         for r in rows:
-            r["patient_name"] = patient_map.get(r["uhid"], "Unknown")
+            if not r.get("patient_name"):
+                u_str = str(r.get("uhid") or "")
+                r["patient_name"] = patient_map.get(u_str) or (f"Patient #{u_str}" if u_str else "General / Cash Patient")
 
         client.close()
 
@@ -1132,8 +1251,7 @@ def miscellaneous_payment_report(request):
 
         data = []
         for r in records:
-            desc = r.description
-            desc_str = "; ".join(str(d) for d in desc) if isinstance(desc, list) else str(desc or "")
+            desc_str = _format_description(r.description)
             data.append({
                 "voucher_no": r.voucher_no,
                 "voucher_date": r.voucher_date.isoformat() if r.voucher_date else None,
@@ -1354,11 +1472,38 @@ def debit_bills_report(request):
                 pass
             client.close()
 
-        for r in rows:
-            p = patients.get(r.pop("patient_id"))
-            r["uhid"] = p.uhid if p else ""
-            r["patient_name"] = f"{p.firstName} {p.lastName}".strip() if p else "Unknown"
-            r["edited_by_name"] = employee_map.get(str(r["edited_by"]), r["edited_by"] or "")
+        if not rows:
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            dch_docs = list(db["hospital_dischargebilling"].find({}))
+            client.close()
+
+            uhids = list(set(d.get("uhid") for d in dch_docs if d.get("uhid")))
+            patient_map = {p.uhid: f"{p.firstName} {p.lastName}".strip() for p in Patient.objects.filter(uhid__in=uhids)}
+
+            for d in dch_docs:
+                b_date = _parse_date(d.get("bill_date") or d.get("created_date"))
+                if f_date and b_date and b_date < f_date: continue
+                if t_date and b_date and b_date > t_date: continue
+
+                pd = d.get("payment_details") or {}
+                tot = _to_float(d.get("net_amount") or d.get("total_amount"))
+                paid = _to_float(pd.get("Paid_amount") or d.get("paid_amount"))
+                pending = _to_float(d.get("pending_amount") or (tot - paid))
+
+                if tot > 0:
+                    rows.append({
+                        "bill_number": d.get("bill_no") or d.get("estimate_number") or "N/A",
+                        "uhid": d.get("uhid", ""),
+                        "patient_name": patient_map.get(d.get("uhid"), "Patient"),
+                        "field": "Discharge Debit",
+                        "old_amount": paid,
+                        "new_amount": tot,
+                        "debit_amount": pending if pending > 0 else tot,
+                        "edited_by": d.get("CashierID") or d.get("created_by") or "",
+                        "edited_by_name": d.get("CashierID") or "Staff",
+                        "edited_date": _format_dt(d.get("bill_date") or d.get("created_date")),
+                    })
 
         rows.sort(key=lambda x: x["edited_date"] or "", reverse=True)
         summary = {
@@ -1714,10 +1859,27 @@ def stock_report_ip_op(request):
                     iid = int(med.get("item_id"))
                 except (TypeError, ValueError):
                     continue
-                qty = _to_float(med.get("quantity"))
-                amt = _to_float(med.get("calculated_price"))
+                qty_val = (
+                    med.get("qty") if med.get("qty") is not None else
+                    med.get("quantity") if med.get("quantity") is not None else
+                    med.get("Issued_Qty") if med.get("Issued_Qty") is not None else
+                    med.get("issued_quantity") if med.get("issued_quantity") is not None else
+                    med.get("unit_quantity") if med.get("unit_quantity") is not None else
+                    med.get("count")
+                )
+                amt_val = (
+                    med.get("calculated_price") if med.get("calculated_price") is not None else
+                    med.get("amount") if med.get("amount") is not None else
+                    med.get("total_amount") if med.get("total_amount") is not None else
+                    med.get("net_amount") if med.get("net_amount") is not None else
+                    med.get("total_price") if med.get("total_price") is not None else
+                    med.get("price")
+                )
+                qty = _to_float(qty_val)
+                amt = _to_float(amt_val)
+                item_name = med.get("item_name") or med.get("itemName") or med.get("medicine_name") or item_name_map.get(iid) or f"Item #{iid}"
                 bucket = item_stats.setdefault(iid, {
-                    "item_id": iid, "item_name": item_name_map.get(iid, f"Item #{iid}"),
+                    "item_id": iid, "item_name": item_name,
                     "ip_qty": 0.0, "ip_amount": 0.0, "op_qty": 0.0, "op_amount": 0.0,
                 })
                 if is_ip:
@@ -1729,15 +1891,21 @@ def stock_report_ip_op(request):
 
         rows = list(item_stats.values())
         for r in rows:
-            r["total_qty"] = r["ip_qty"] + r["op_qty"]
-            r["total_amount"] = r["ip_amount"] + r["op_amount"]
+            tot_q = r["ip_qty"] + r["op_qty"]
+            tot_a = r["ip_amount"] + r["op_amount"]
+            r["total_qty"] = round(tot_q, 2) if tot_q % 1 != 0 else int(tot_q)
+            r["ip_qty"] = round(r["ip_qty"], 2) if r["ip_qty"] % 1 != 0 else int(r["ip_qty"])
+            r["op_qty"] = round(r["op_qty"], 2) if r["op_qty"] % 1 != 0 else int(r["op_qty"])
+            r["ip_amount"] = round(r["ip_amount"], 2)
+            r["op_amount"] = round(r["op_amount"], 2)
+            r["total_amount"] = round(tot_a, 2)
         rows.sort(key=lambda x: x["total_amount"], reverse=True)
 
         summary = {
-            "total_ip_qty": sum(r["ip_qty"] for r in rows),
-            "total_ip_amount": sum(r["ip_amount"] for r in rows),
-            "total_op_qty": sum(r["op_qty"] for r in rows),
-            "total_op_amount": sum(r["op_amount"] for r in rows),
+            "total_ip_qty": round(sum(r["ip_qty"] for r in rows), 2),
+            "total_ip_amount": round(sum(r["ip_amount"] for r in rows), 2),
+            "total_op_qty": round(sum(r["op_qty"] for r in rows), 2),
+            "total_op_amount": round(sum(r["op_amount"] for r in rows), 2),
         }
 
         return Response({"success": True, "data": rows, "summary": summary})

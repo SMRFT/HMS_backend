@@ -1,46 +1,84 @@
+import time
 from datetime import datetime
 from django.conf import settings
-from django.core.mail import EmailMessage
+from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from ...Views.dbcollection import company_secretary_collection, profile_collection
+import os
+from pymongo import MongoClient
+
+mongo_url = os.getenv("GLOBAL_DB_HOST")
+_client = MongoClient(mongo_url)
+_global_db = _client["Global"]
+_hms_db = _client["HMS"]
+
+profile_collection = _global_db["backend_diagnostics_profile"]
+company_secretary_collection = _hms_db["hospital_licencemasterdetails"]
 
 
 # ✅ Thresholds (IMPORTANT: highest → lowest)
 THRESHOLDS = [
-    (90, "is_90days", "Intimation_90days_about_expiry"),
-    (60, "is_60days", "Intimation_60days_about_expiry"),
-    (30, "is_30days", "Intimation_30days_about_expiry"),
-    (7, "is_7days", "Intimation_7days_about_expiry"),
-    (1, "is_1day", "Intimation_1day_about_expiry"),
+    (90, "is_90days"),
+    (60, "is_60days"),
+    (30, "is_30days"),
+    (7,  "is_7days"),
+    (1,  "is_1day"),
 ]
 
 
-# ✅ Get employee email
-def get_employee_email(employee_id):
-    if not employee_id:
-        return None
-    profile = profile_collection.find_one({"employeeId": employee_id})
-    return profile.get("email") if profile else None
+# ✅ Get employee email(s) — incharge / respective_person are stored as
+# arrays of employeeId now (multi-select), so this takes a list and
+# returns a list of emails via a single $in query instead of one lookup
+# per id. Also tolerates a lone string for any record that predates the
+# multi-select change.
+def get_employee_emails(employee_ids):
+    if not employee_ids:
+        return []
+    if isinstance(employee_ids, str):
+        employee_ids = [employee_ids]
+
+    profiles = profile_collection.find(
+        {"employeeId": {"$in": employee_ids}},
+        {"email": 1, "_id": 0},
+    )
+    return [p["email"] for p in profiles if p.get("email")]
+
+
+# ✅ Format date — strips time portion from datetime or date objects
+def format_date(value):
+    if not value:
+        return "N/A"
+    if isinstance(value, datetime):
+        return value.strftime("%d-%m-%Y")
+    # Handle string like "2026-06-17 00:00:00"
+    try:
+        return datetime.strptime(str(value).split(" ")[0], "%Y-%m-%d").strftime("%d-%m-%Y")
+    except Exception:
+        return str(value).split(" ")[0]
 
 
 # ✅ Email body
-def build_email_body(record, label_text, days_before):
-    return f"""
-Dear Team,
+def build_email_body(record, days_before):
+    return f"""Dear Team,
 
-This is a reminder that the following licence is due to expire in {days_before} day(s) ({label_text}).
+Kindly be informed that the following licence is scheduled to expire within {days_before} day(s) from today. We request you to initiate the necessary renewal process at the earliest to avoid any compliance issues.
 
-Licence Name: {record.get('licence_name')}
-Licence/Case/Ref Number: {record.get('license_number')}
-Valid From: {record.get('valid_from')}
-Expiry Date: {record.get('expiry_date')}
+Licence Details:
+─────────────────────────────────────────
+  Licence Name          : {record.get('licence_name')}
+  Licence / Case / Ref# : {record.get('license_number')}
+  Valid From            : {format_date(record.get('valid_from'))}
+  Expiry Date           : {format_date(record.get('expiry_date'))}
+─────────────────────────────────────────
 
-Please take the necessary action before the expiry date.
+Please ensure the renewal is completed well before the expiry date to maintain uninterrupted operations.
+
+For any clarifications, please contact the Company Secretary Department.
 
 Regards,
 Shanmuga Hospital Limited
+Company Secretary Department
 """
 
 
@@ -75,7 +113,7 @@ def run_licence_expiry_check():
         updates = {}
 
         # ✅ LOOP THRESHOLDS
-        for days_before, flag_field, label_field in THRESHOLDS:
+        for days_before, flag_field in THRESHOLDS:
 
             already_sent = bool(record.get(flag_field, False))
 
@@ -86,12 +124,12 @@ def run_licence_expiry_check():
 
                 print(f"👉 Triggering {days_before}-day email")
 
-                incharge_email = get_employee_email(record.get("incharge"))
-                respective_person_email = get_employee_email(record.get("respective_person"))
+                incharge_emails = get_employee_emails(record.get("incharge"))
+                respective_person_emails = get_employee_emails(record.get("respective_person"))
 
-                print("Incharge Email:", incharge_email)
+                print("Incharge Emails:", incharge_emails)
 
-                if not incharge_email:
+                if not incharge_emails:
                     skipped.append({
                         "licence": record.get("licence_name"),
                         "reason": "No incharge email",
@@ -100,17 +138,30 @@ def run_licence_expiry_check():
                     print("❌ Skipped: No email")
                     continue
 
-                label_text = record.get(label_field) or f"{days_before} Day(s) Before Due Date"
 
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
 
+                    cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'cs@smrft.org')
+                    cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+
+                    # ✅ Authenticate SMTP using HMS_CS_EMAIL credentials
+                    # so the mail is truly sent FROM cs@smrft.org (env-specific)
+                    cs_connection = get_connection(
+                        host=getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com'),
+                        port=getattr(settings, 'EMAIL_PORT', 587),
+                        username=cs_email,
+                        password=cs_password,
+                        use_tls=getattr(settings, 'EMAIL_USE_TLS', True),
+                    )
+
                     email = EmailMessage(
                         subject=subject,
-                        body=build_email_body(record, label_text, days_before),
-                        from_email=settings.EMAIL_HOST_USER,
-                        to=[incharge_email],
-                        cc=[respective_person_email] if respective_person_email else [],
+                        body=build_email_body(record, days_before),
+                        from_email=cs_email,
+                        to=incharge_emails,
+                        cc=respective_person_emails,
+                        connection=cs_connection,
                     )
 
                     email.send()
@@ -153,9 +204,6 @@ def run_licence_expiry_check():
 
 
 # ✅ DJANGO COMMAND
-import time
-from django.core.management.base import BaseCommand
-
 class Command(BaseCommand):
     help = "Send licence expiry reminder emails"
 

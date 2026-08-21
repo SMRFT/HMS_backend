@@ -44,10 +44,12 @@ from .Views import (
     companysecretary,
     communication,
     hr,
+    labinventory,
     abdm_integration,
     abdm_m1,
     abdm_m2_hip,
     DoctorFeeCuts,
+    vaccination,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -60,6 +62,8 @@ from .Views.Assets import assets
 from .Views.Insurance import insurance
 from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
 from .Views.Complaints import complaints
+from .Views.QRScan import qrscan
+
 
 handler404 = 'hospital.views.custom_page_not_found'
 
@@ -81,11 +85,15 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
+    path('admission-mlc-doc/<path:filename>/', admission.get_mlc_doc, name='admission_mlc_doc'),
+    path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
     
     # Inventory URLs
     # Vendor URLs
     path("vendors/", inventory.vendor_view, name="vendor-list"),
     path("vendors/<str:pk>/", inventory.vendor_view, name="vendor-detail"),
+    path("general-store-vendors/", stores.general_store_vendor_list_create, name="general-store-vendor-list-create"),
+    path("general-store-vendors/<str:pk>/", stores.general_store_vendor_detail, name="general-store-vendor-detail"),
 
     # Stock URLs (Supporting both dash and underscore formatting if referenced across platforms)
     path("pharmacy-items/", inventory.pharmacy_item_view, name="pharmacy-item-list"),
@@ -297,6 +305,7 @@ urlpatterns = [
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
+    path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('packages/', departmentBilling.get_packages, name='get_packages'),
     path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
     path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
@@ -449,12 +458,18 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
+    path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
+    path('stores-stores_daily_usage_report/', stores.stores_lab_used_qty_report, name='stores_lab_used_qty_report'),
+    
 
     # Assets Master
     path('stores-assets-management/', assets.stores_assets_management_list_create, name='stores_assets_management_list_create'),
     path('stores-assets-management/<path:pk>/', assets.stores_assets_management_detail, name='stores_assets_management_detail'),
     path('stores-assets-maintenance/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
     path('stores-assets-maintenance/<path:pk>/', assets.stores_assets_maintenance_details, name='stores_assets_maintenance_details'),
+    path('asset-maintenance-request/', assets.asset_maintenance_request_list_detail, name='asset_maintenance_request_list_detail'),
+    path('asset-maintenance-request/<path:pk>/', assets.asset_maintenance_request_list_detail, name='asset_maintenance_request_detail'),
     path("recycle_asset/", assets.create_recycle_asset, name="create_recycle_asset"),
     path("recycle_asset/<path:pk>/", assets.update_recycle_asset, name="update_recycle_asset"),
 
@@ -473,6 +488,7 @@ urlpatterns = [
     # Surgery Schedule
     path("create_surgery_schedule/", surgeryschedule.create_surgery_schedule, name='create_surgery_schedule'),
     path("list_surgery_schedules/", surgeryschedule.list_surgery_schedules, name='list_surgery_schedules'),
+    path("ot_staffs/", surgeryschedule.ot_staffs, name='ot_staffs'),
     path("get_surgery_schedule/", surgeryschedule.get_surgery_schedule, name='get_surgery_schedule'),
     path("update_surgery_schedule/", surgeryschedule.update_surgery_schedule, name='update_surgery_schedule'),
     path("cancel_surgery_schedule/", surgeryschedule.cancel_surgery_schedule, name='cancel_surgery_schedule'),
@@ -519,6 +535,8 @@ urlpatterns = [
     path("shift_basis_accounts_report/", shift_basis_report.shift_basis_accounts_report, name="shift_basis_accounts_report"),
     path("bill_wise_report/", bill_wise_report.bill_wise_report, name="bill_wise_report"),
     path("cash_counter_manager/", cash_counter_manager.cash_counter_manager, name="cash_counter_manager"),
+    path("get_employee_counter_assignments/", cash_counter_manager.get_employee_counter_assignments, name="get_employee_counter_assignments"),
+    path("assign_employee_cash_counter/", cash_counter_manager.assign_employee_cash_counter, name="assign_employee_cash_counter"),
     path('discharge-bills-report/', accounting_reports.discharge_bills_report, name='discharge_bills_report'),
     path('advance-registration-report/', accounting_reports.advance_registration_report, name='advance_registration_report'),
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
@@ -558,6 +576,12 @@ urlpatterns = [
     path('licence_master_details/', companysecretary.licence_master_details, name='licence_master_details'),
     path('get_incharge_list/', companysecretary.get_incharge_list, name='get_incharge_list'),
     path('licence_master_details/<int:s_no>/', companysecretary.licence_master_details),
+    path('licence_master_details/<int:s_no>/renew/', companysecretary.licence_renewal, name='licence-renewal'),
+
+
+    # lab Inventory
+     path('dealer_items/', labinventory.dealer_items, name='dealer_items'),
+     path('raise_indent/', labinventory.raise_indent, name='raise_indent'),
     
     
     # HR Internship Management
@@ -589,5 +613,30 @@ urlpatterns = [
     path('doctor-fee-cuts/approve-doctor-fee/', DoctorFeeCuts.save_doctor_fee_claim, name='save_doctor_fee_claim'),
     path('doctor-fee-cuts-report/', DoctorFeeCuts.get_doctor_fee_cuts_report, name='get_doctor_fee_cuts_report'),
     path('send-doctor-fee-cut-monthly-emails/', DoctorFeeCuts.send_monthly_doctor_fee_cut_emails, name='send_monthly_doctor_fee_cut_emails'),
+
+    # Vaccination Management URLs
+    path('vaccination-masters/', vaccination.get_vaccination_masters, name='get_vaccination_masters'),
+    path('add-vaccination-master/', vaccination.add_vaccination_master, name='add_vaccination_master'),
+    re_path(r'^update-vaccination-master/(?P<v_id>\d+)/$', vaccination.update_vaccination_master, name='update_vaccination_master'),
+    re_path(r'^delete-vaccination-master/(?P<v_id>\d+)/$', vaccination.delete_vaccination_master, name='delete_vaccination_master'),
+    path('pending-vaccinations/', vaccination.get_pending_vaccinations, name='get_pending_vaccinations'),
+    re_path(r'^patient-vaccination/(?P<uhid>[\w%/-]+)/$', vaccination.get_patient_vaccination, name='get_patient_vaccination'),
+    path('save-patient-vaccination/', vaccination.save_patient_vaccination, name='save_patient_vaccination'),
+    path('send-vaccination-reminders/', vaccination.send_vaccination_reminders_view, name='send_vaccination_reminders'),
+    path('preview-vaccination-reminders/', vaccination.preview_vaccination_reminders_view, name='preview_vaccination_reminders'),
+
+    # QR Scan / InPatient & OutPatient Feedback URLs
+    path('inpatient-feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create'),
+    path('inpatient-feedback/<str:feedback_id>/', qrscan.inpatient_feedback_detail, name='inpatient_feedback_detail'),
+    path('inpatient_feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create_alt'),
+    path('hospital/inpatient-feedback/', qrscan.inpatient_feedback_list_create, name='inpatient_feedback_list_create_hosp'),
+
+    path('outpatient-feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create'),
+    path('outpatient-feedback/<str:feedback_id>/', qrscan.outpatient_feedback_detail, name='outpatient_feedback_detail'),
+    path('outpatient_feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_alt'),
+    path('hospital/outpatient-feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_hosp'),
 ]
+
+
+
 

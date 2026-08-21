@@ -1,16 +1,20 @@
 import datetime
+import json
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
-    GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer
+    GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer,
+    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer
 )
 from django.shortcuts import get_object_or_404
 from datetime import datetime
 from pyauth.auth import HasRoleAndDataPermission
+from ..dbcollection import department_collection
+from django.utils import timezone
 
 def get_financial_year_string():
     now = datetime.now()
@@ -133,8 +137,25 @@ def item_price_history(request, item_id):
 
     try:
         import json
+        from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
+
         history = []
         grns = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+
+        if from_date_str:
+            try:
+                from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+                grns = [g for g in grns if g.date and g.date >= from_d]
+            except Exception:
+                pass
+        if to_date_str:
+            try:
+                to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
+                grns = [g for g in grns if g.date and g.date <= to_d]
+            except Exception:
+                pass
+
         for grn in grns:
             items = grn.items
             if isinstance(items, str):
@@ -179,33 +200,65 @@ def item_price_history(request, item_id):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 # --- Department Views ---
+def serialize_doc(doc):
+    """Convert MongoDB document to JSON serializable"""
+    doc['_id'] = str(doc['_id'])
+    return doc
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def department_list_create(request):
-    employee_id  = request.data.get('auth-user-id', 'system')
+
+    employee_id = request.data.get('auth-user-id', 'system')
     branch_code = request.data.get('auth-branch-code', 'system')
     outlet_code = request.data.get('auth-outlet-code', 'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
+    # ✅ GET → Fetch only active departments
     if request.method == 'GET':
-        items = Department.objects.filter(is_active__in=[True]).order_by('-created_date')
-        serializer = DepartmentSerializer(items, many=True)
-        return Response(serializer.data)
+        departments = list(
+            department_collection.find(
+                {"is_active": True}
+            ).sort("created_date", -1)
+        )
 
+        data = [serialize_doc(doc) for doc in departments]
+        return Response(data)
+
+    # ✅ POST → Insert new department
     elif request.method == 'POST':
         data = request.data.copy()
-        if not data.get('department_id'):
-            data['department_id'] = generate_custom_id_without_fy(Department, 'department_id', 'DPT', 5)
 
+        # Generate department_code if not provided
+        if not data.get('department_code'):
+            last = department_collection.find_one(
+                {},
+                sort=[("department_code", -1)]
+            )
+
+            if last and last.get('department_code'):
+                last_num = int(last['department_code'].replace('DEPT', ''))
+                new_code = f"DEPT{str(last_num + 1).zfill(3)}"
+            else:
+                new_code = "DEPT001"
+
+            data['department_code'] = new_code
+
+        # Add audit fields
         data['created_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+        data['created_date'] = timezone.now().isoformat()
+        data['is_active'] = True
 
-        serializer = DepartmentSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Insert into MongoDB
+        result = department_collection.insert_one(dict(data))
+
+        # Return inserted document
+        inserted_doc = department_collection.find_one({"_id": result.inserted_id})
+        return Response(serialize_doc(inserted_doc), status=status.HTTP_201_CREATED)
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -630,6 +683,10 @@ def stores_grn_detail(request, pk):
             # which guarantees we never shrink the array
             data['payment_status'] = merged
 
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
         serializer = StoresGRNSerializer(grn, data=data, partial=True)
         if serializer.is_valid():
             # ── Stock update on approval ─────────────────────────────────────
@@ -661,10 +718,6 @@ def stores_grn_detail(request, pk):
                         except ItemMaster.DoesNotExist:
                             pass  # Item not in master — skip silently
             # ────────────────────────────────────────────────────────────────
-            data['lastmodified_by'] = employee_id
-            data['branch_code'] = branch_code
-            data['outlet_code'] = outlet_code
-            
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -709,10 +762,11 @@ def get_stores_intents(request):
     dept_collection = db["hospital_department"]
     item_collection = db["hospital_itemmaster"]
 
-    # ✅ Department mapping (using ORM for robustness)
+    # ✅ Department mapping (from MongoDB department_collection, keyed by department_code)
     dept_map = {
-        d.department_id: d.department_name
-        for d in Department.objects.all()
+        doc['department_code']: doc['department_name']
+        for doc in department_collection.find({'is_active': True})
+        if doc.get('department_code') and doc.get('department_name')
     }
 
     # ✅ Item stock mapping
@@ -765,13 +819,13 @@ def create_stores_intent(request):
         5
     )
 
+    data['created_by'] = employee_id
+    data['branch_code'] = branch_code
+    data['outlet_code'] = outlet_code
+
     serializer = StoresIntentSerializer(data=data)
 
     if serializer.is_valid():
-        data['created_by'] = employee_id
-        data['branch_code'] = branch_code
-        data['outlet_code'] = outlet_code   
-
         serializer.save()
         return Response(
             {
@@ -786,25 +840,25 @@ def create_stores_intent(request):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def update_stores_intent(request, pk):
-    employee_id  = request.data.get('auth-user-id', 'system')
-    branch_code = request.data.get('auth-branch-code', 'system')
-    outlet_code = request.data.get('auth-outlet-code', 'system')
-    hospital_code = request.data.get('auth-hospital-code', 'system')
-    
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+
     obj = get_object_or_404(storesIntent, intent_id=pk)
     if not obj.is_active:
         return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
-    
+
     # Store old items to compare quantities if needed
     old_items = {it.get('item_id'): it.get('approved_quantity', 0) for it in (obj.items or []) if it.get('item_id')}
-    
-    serializer = StoresIntentSerializer(obj, data=request.data, partial=True)
+
+    data = request.data.copy()
+    data['lastmodified_by'] = employee_id
+    data['branch_code'] = branch_code
+    data['hospital_code'] = hospital_code
+
+    serializer = StoresIntentSerializer(obj, data=data, partial=True)
 
     if serializer.is_valid():
-        data['lastmodified_by'] = employee_id
-        data['branch_code'] = branch_code
-        data['outlet_code'] = outlet_code
-        
         instance = serializer.save()
         items = instance.items or []
 
@@ -816,20 +870,57 @@ def update_stores_intent(request, pk):
             if is_approved and item_id:
                 try:
                     item_obj = ItemMaster.objects.get(item_id=item_id)
-                    
+
                     # Logic: Only update ItemMaster if the quantity has actually changed
                     old_qty = int(old_items.get(item_id, 0))
                     diff = new_qty - old_qty
-                    
+
                     if diff != 0:
                         item_obj.approved_quantity += diff
                         item_obj.save()
 
                 except ItemMaster.DoesNotExist:
-                    continue 
+                    continue
+
+        # --- DEPT002: Save/accumulate approved items in Stores_LabApprovedItem ---
+        dept_code = instance.department
+        if dept_code == 'DEPT002':
+            for item in items:
+                item_id = item.get("item_id")
+                is_approved = item.get("approval", {}).get("approved", False)
+                new_qty = int(item.get("approved_quantity", 0))
+                old_qty = int(old_items.get(item_id, 0)) if item_id else 0
+                diff = new_qty - old_qty  # Only the newly approved quantity in this call
+
+                if is_approved and item_id and diff > 0:
+                    lab_item = Stores_LabApprovedItem.objects.filter(
+                        item_id=item_id,
+                        branch_code=branch_code,
+                        hospital_code=hospital_code,
+                    ).first()
+                    if lab_item:
+                        # Same item approved again (same branch/hospital) -> accumulate, don't duplicate
+                        lab_item.quantity = (lab_item.quantity or 0) + diff
+                        lab_item.lastmodified_by = employee_id
+                        lab_item.save()
+                    else:
+                        Stores_LabApprovedItem.objects.create(
+                            item_id=item_id,
+                            name=item.get("name", ""),
+                            hsn=item.get("hsn", None),
+                            quantity=diff,
+                            created_by=employee_id,
+                            branch_code=branch_code,
+                            hospital_code=hospital_code,
+                        )
+        # ---------------------------------------------------------------
 
         return Response({"message": "Updated successfully", "data": serializer.data})
     return Response(serializer.errors, status=400)
+
+
+
+
 
 @api_view(['DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -867,3 +958,360 @@ def soft_delete_intent(request, pk):
     return Response({"message": "Soft deleted successfully"})
 
 
+# --- Lab Approved Items Views ---
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_stores_lab_approved_items(request):
+    """Return all Stores_LabApprovedItem records with remaining balance calculated."""
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+
+    items_qs = Stores_LabApprovedItem.objects.all().order_by('-date')
+    serializer = Stores_LabApprovedItemSerializer(items_qs, many=True)
+
+    result = []
+    for item_obj, item_data in zip(items_qs, serializer.data):
+        qty = item_data.get('quantity') or 0
+        used = item_data.get('used_qty') or 0
+        remaining = qty - used
+        result.append({
+            **dict(item_data),
+            'id': str(item_obj.pk),   # always inject the real PK as a string
+            'remaining_qty': remaining
+        })
+
+    return Response(result)
+
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_daily_usage_items(request):
+    employee_id  = request.data.get('auth-user-id')
+    branch_code = request.data.get('auth-branch-code')
+    hospital_code = request.data.get('auth-hospital-code')
+    used_date = request.data.get('used_date') or datetime.now().strftime('%Y-%m-%d')
+
+    items_to_process = []
+    
+    # Check if request has bulk items
+    bulk_items = request.data.get('items')
+    if bulk_items and isinstance(bulk_items, list):
+        items_to_process = bulk_items
+    else:
+        # Single item request
+        item_id = request.data.get('item_id') or request.data.get('lab_approved_item_id')
+        new_used_qty = request.data.get('used_qty')
+        if not item_id or str(item_id).strip().lower() in ('none', 'null', 'undefined'):
+            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_used_qty is None:
+            return Response({'error': 'used_qty is required'}, status=status.HTTP_400_BAD_REQUEST)
+        items_to_process = [{'item_id': item_id, 'used_qty': new_used_qty}]
+
+    # Validate all items first
+    validated_items = []
+    for it in items_to_process:
+        it_id = it.get('item_id')
+        it_qty = it.get('used_qty')
+        if not it_id:
+            return Response({'error': 'item_id is required for all items'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            it_qty = int(it_qty)
+        except (ValueError, TypeError):
+            return Response({'error': f'used_qty must be an integer for item {it_id}'}, status=status.HTTP_400_BAD_REQUEST)
+        if it_qty <= 0:
+            return Response({'error': f'used_qty must be greater than 0 for item {it_id}'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            approved_item = Stores_LabApprovedItem.objects.get(item_id=it_id)
+        except Stores_LabApprovedItem.DoesNotExist:
+            return Response({'error': f'Lab approved item not found: {it_id}'}, status=status.HTTP_404_NOT_FOUND)
+
+        current_used = approved_item.used_qty or 0
+        total_after = current_used + it_qty
+        if total_after > approved_item.quantity:
+            remaining = approved_item.quantity - current_used
+            return Response({
+                'error': f'Cannot exceed approved quantity for item "{approved_item.name}". Remaining balance: {remaining}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_items.append((approved_item, it_qty))
+
+    # Get or create the usage detail for the date
+    usage_detail, created = Stores_LabUsedQtyDetail.objects.get_or_create(
+        date=used_date,
+        defaults={
+            'items': [],
+            'created_by': employee_id,
+            'branch_code': branch_code,
+            'hospital_code': hospital_code,
+        }
+    )
+    import json
+    existing_items = usage_detail.items
+    if isinstance(existing_items, str):
+        try:
+            existing_items = json.loads(existing_items)
+        except Exception:
+            existing_items = []
+    if not isinstance(existing_items, list):
+        existing_items = []
+
+    formatted_date = str(used_date)[:10]
+
+    for approved_item, it_qty in validated_items:
+        # 1) Update cumulative used_qty on Stores_LabApprovedItem
+        approved_item.used_qty = (approved_item.used_qty or 0) + it_qty
+        approved_item.lastmodified_by = employee_id
+        approved_item.save()
+
+        # 2) Always store each usage entry separately into usage_detail items list with date
+        existing_items.append({
+            'date': formatted_date,
+            'item_id': approved_item.item_id,
+            'name': approved_item.name,
+            'hsn': approved_item.hsn,
+            'used_qty': it_qty,
+            'created_by': employee_id,
+            'lastmodified_by': employee_id,
+        })
+
+    usage_detail.items = existing_items
+    usage_detail.lastmodified_by = employee_id
+    usage_detail.save()
+
+    # Direct PyMongo update to ensure native BSON Array of Objects in MongoDB, bypassing Djongo JSONField stringification
+    try:
+        from ..dbcollection import hms_db
+        hms_db["hospital_stores_labusedqtydetail"].update_one(
+            {"$or": [{"date": usage_detail.date}, {"date": used_date}]},
+            {"$set": {"items": existing_items}}
+        )
+    except Exception:
+        pass
+
+    return Response({
+        'message': 'Usage recorded successfully',
+        'processed_count': len(validated_items)
+    })
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_lab_used_qty_report(request):
+    """
+    Fetch date-wise lab daily usage records within a date range (from_date to to_date).
+    Matches created_by / lastmodified_by against backend_diagnostics_profile collection 
+    (from dbcollection.py) on employeeId to return employeeName.
+    """
+    try:
+        from_date = request.query_params.get('from_date') or request.query_params.get('startDate')
+        to_date = request.query_params.get('to_date') or request.query_params.get('endDate')
+        single_date = request.query_params.get('date')
+
+        if single_date and not from_date and not to_date:
+            from_date = single_date
+            to_date = single_date
+
+        from ..dbcollection import hms_db, profile_collection
+        col = hms_db["hospital_stores_labusedqtydetail"]
+        raw_docs = list(col.find({}))
+
+        # Collect all employee IDs to resolve names in bulk
+        employee_ids = set()
+        for doc in raw_docs:
+            if doc.get('created_by'):
+                employee_ids.add(str(doc.get('created_by')).strip())
+            if doc.get('lastmodified_by'):
+                employee_ids.add(str(doc.get('lastmodified_by')).strip())
+            items = doc.get('items') or []
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    items = []
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict):
+                        if it.get('created_by'):
+                            employee_ids.add(str(it.get('created_by')).strip())
+                        if it.get('lastmodified_by'):
+                            employee_ids.add(str(it.get('lastmodified_by')).strip())
+
+        # Map employeeId -> employeeName from backend_diagnostics_profile collection
+        employee_map = {}
+        if employee_ids:
+            profiles = list(profile_collection.find(
+                {"employeeId": {"$in": list(employee_ids)}},
+                {"employeeId": 1, "employeeName": 1, "name": 1, "_id": 0}
+            ))
+            for p in profiles:
+                emp_id = str(p.get("employeeId") or "").strip()
+                emp_name = p.get("employeeName") or p.get("name") or ""
+                if emp_id and emp_name:
+                    employee_map[emp_id] = emp_name
+
+        reports = []
+        flattened_items = []
+
+        for doc in raw_docs:
+            doc_date_raw = doc.get('date')
+            doc_date_str = ""
+            if isinstance(doc_date_raw, datetime):
+                doc_date_str = doc_date_raw.strftime('%Y-%m-%d')
+            elif isinstance(doc_date_raw, dict) and '$date' in doc_date_raw:
+                doc_date_str = str(doc_date_raw['$date'])[:10]
+            elif doc_date_raw:
+                doc_date_str = str(doc_date_raw)[:10]
+
+            c_by = str(doc.get('created_by') or '').strip()
+            m_by = str(doc.get('lastmodified_by') or '').strip()
+            c_by_name = employee_map.get(c_by, c_by)
+            m_by_name = employee_map.get(m_by, m_by)
+
+            items_raw = doc.get('items') or []
+            if isinstance(items_raw, str):
+                try:
+                    items_raw = json.loads(items_raw)
+                except Exception:
+                    items_raw = []
+            if not isinstance(items_raw, list):
+                items_raw = []
+
+            doc_branch = doc.get('branch_code') or doc.get('branch') or doc.get('auth-branch-code') or request.query_params.get('auth-branch-code') or request.query_params.get('branch_code') or 'SHB001'
+            doc_hospital = doc.get('hospital_code') or doc.get('hospital') or doc.get('auth-hospital-code') or request.query_params.get('auth-hospital-code') or request.query_params.get('hospital_code') or 'SH001'
+
+            processed_items = []
+            for it in items_raw:
+                if not isinstance(it, dict):
+                    continue
+                it_date = str(it.get('date') or doc_date_str)[:10]
+
+                # Filter by date range if provided
+                if from_date and it_date < from_date:
+                    continue
+                if to_date and it_date > to_date:
+                    continue
+
+                it_c_by = str(it.get('created_by') or c_by).strip()
+                it_m_by = str(it.get('lastmodified_by') or m_by).strip()
+
+                item_obj = {
+                    'date': it_date,
+                    'item_id': it.get('item_id', ''),
+                    'name': it.get('name', ''),
+                    'hsn': it.get('hsn', ''),
+                    'used_qty': it.get('used_qty', 0),
+                    'created_by': it_c_by,
+                    'created_by_name': employee_map.get(it_c_by, it_c_by),
+                    'lastmodified_by': it_m_by,
+                    'lastmodified_by_name': employee_map.get(it_m_by, it_m_by),
+                    'branch_code': it.get('branch_code') or doc_branch,
+                    'hospital_code': it.get('hospital_code') or doc_hospital,
+                }
+                processed_items.append(item_obj)
+                flattened_items.append(item_obj)
+
+            if processed_items:
+                reports.append({
+                    'record_date': doc_date_str,
+                    'created_by': c_by,
+                    'created_by_name': c_by_name,
+                    'lastmodified_by': m_by,
+                    'lastmodified_by_name': m_by_name,
+                    'branch_code': doc_branch,
+                    'hospital_code': doc_hospital,
+                    'items': processed_items
+                })
+
+        # Sort descending by date
+        flattened_items.sort(key=lambda x: x['date'], reverse=True)
+        reports.sort(key=lambda x: x['record_date'], reverse=True)
+
+        return Response({
+            'success': True,
+            'from_date': from_date,
+            'to_date': to_date,
+            'total_items_count': len(flattened_items),
+            'reports': reports,
+            'flattened_items': flattened_items
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        return Response({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# --- General Store Vendor Views ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def general_store_vendor_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    if request.method == 'GET':
+        vendors = list(GeneralStoreVendor.objects.filter(is_active__in=[True]))
+        vendors.sort(key=lambda x: x.created_date if x.created_date else timezone.now(), reverse=True)
+        serializer = GeneralStoreVendorSerializer(vendors, many=True)
+        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('vendor_id'):
+            data['vendor_id'] = generate_custom_id(GeneralStoreVendor, 'vendor_id', 'GSV', 5)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        serializer = GeneralStoreVendorSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def general_store_vendor_detail(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    try:
+        vendor = GeneralStoreVendor.objects.filter(pk=pk, is_active__in=[True]).first()
+        if not vendor:
+            return Response({"success": False, "error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'GET':
+        serializer = GeneralStoreVendorSerializer(vendor)
+        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+
+    elif request.method in ['PUT', 'PATCH']:
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = GeneralStoreVendorSerializer(vendor, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+        return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        vendor.is_active = False
+        vendor.save()
+        return Response({"success": True, "message": "Vendor deleted successfully"}, status=status.HTTP_200_OK)

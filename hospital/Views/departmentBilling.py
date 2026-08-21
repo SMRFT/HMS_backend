@@ -543,7 +543,6 @@ def get_bill_types(request):
             "error": str(e)
         }, status=500)
 
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_invest_bill_types(request):
@@ -840,17 +839,30 @@ def get_investigation_items(request):
                     nabh_code = str(val.get("nabh_code", "")).strip()
                 elif val is not None:
                     price = str(val).strip()
+                else:
+                    # Fallback: check if item has any other price key (e.g. '60')
+                    for k, v in item.items():
+                        if k not in ("itemName", "item_id", "nabh_code") and v:
+                            if isinstance(v, dict):
+                                price = str(v.get("price", "0")).strip()
+                                nabh_code = str(v.get("nabh_code", "")).strip()
+                            else:
+                                price = str(v).strip()
+                            if price and price != "0":
+                                break
 
-                # Only include items that have a price for this bill_type
-                if price and price != "0" and price != "":
+                # Include items if price exists OR if it's a Surgery bill type
+                is_surgery_type = str(bill_type_no).upper().startswith("SUR")
+                if item_name and ((price and price != "0" and price != "") or is_surgery_type):
                     formatted_items.append({
                         "itemName": item_name,
                         "item_id": item_id,
-                        "price": price,
+                        "price": price if price else "0",
                         "nabh_code": nabh_code
                     })
             
             return JsonResponse({"items": formatted_items}, safe=True)
+
         else:
             return JsonResponse({"items": []}, safe=True)
     
@@ -900,13 +912,10 @@ def invest_billing_create(request):
         if "item" in data:
             data["item"] = normalize_item(data["item"])
 
-        # ── Server-side validation for UHID, Age, and Age Type ──
-        uhid_val = str(data.get("uhid", "")).strip()
+        # ── Server-side validation for Age and Age Type ──
         age_val = str(data.get("age", "")).strip()
         age_type_val = str(data.get("age_type", "") or data.get("ageType", "")).strip()
 
-        if not uhid_val:
-            return Response({"error": "UHID is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
         if not age_val:
             return Response({"error": "Age is required!"}, status=drf_status.HTTP_400_BAD_REQUEST)
         if not age_type_val:

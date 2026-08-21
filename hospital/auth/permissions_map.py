@@ -95,6 +95,8 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/vendors/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendors/[0-9]+/?(\?.*)?$': 'HMS-P-VNDD',
+    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/?(\?.*)?$': 'HMS-P-VND',
+    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
@@ -143,12 +145,22 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-ip/[^/]+/?(\?.*)?$': 'HMS-P-AIP',
 
+    #Vaccination Details:
+    '/_b_a_c_k_e_n_d/HMS/vaccination-masters/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/?(\?.*)?$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/add-vaccination-master/': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/?(\?.*)?$': 'HMS-P-HVCC',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination(?:/[^/]+)+/$': 'HMS-P-HVCC',
+    '/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/': 'HMS-P-HVCC',
+
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB', 
-    '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',  
+    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
+    '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
@@ -315,6 +327,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/cancel_surgery_schedule/': 'HMS-P-OTSSD',                
     '/_b_a_c_k_e_n_d/HMS/update_schedule_status/': 'HMS-P-OTSSA',                
     '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
+    r'^/_b_a_c_k_e_n_d/HMS/ot_staffs/?(\?.*)?$': 'HMS-P-OTSS',
+
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
@@ -349,17 +363,17 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/send-doctor-fee-cut-monthly-emails/?(\?.*)?$': 'HMS-P-DFCR',
 
     #Assets Management:
-    '/_b_a_c_k_e_n_d/HMS/item-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/item-master/price-history/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/item-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/department-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/department-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/category-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/category-master/.*/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-type-master/': 'HMS-API-IT',
-    '/_b_a_c_k_e_n_d/HMS/group-type-master/.*/': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/price-history/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/item-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/department-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/department-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/category-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-type-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
 
     # Stores GRN:
     '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',
@@ -370,16 +384,28 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/stores-intent/create/': 'HMS-API-SINTENT',
     '/_b_a_c_k_e_n_d/HMS/stores-intent/update/.*/': 'HMS-API-SINTENT',
     '/_b_a_c_k_e_n_d/HMS/stores-intent/delete/.*/': 'HMS-API-SINTENTA',
+    '/_b_a_c_k_e_n_d/HMS/stores-get_stores_lab_approved_items/': 'HMS-P-SGLA',
+    '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-P-SDUI',
+    '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_report/?(\?.*)?$': 'HMS-P-SDUI',
+ 
+
+
+
     
     # Stores Assets Management:
     '/_b_a_c_k_e_n_d/HMS/stores-assets-management/': 'HMS-API-SAM',               
     r'^/_b_a_c_k_e_n_d/HMS/stores-assets-management/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
     '/_b_a_c_k_e_n_d/HMS/stores-assets-management/.*/': 'HMS-API-SAM',
 
-    # Stores Assets Maintenance:
-    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/': 'HMS-API-SAMT',               
-    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-SAMT',
-    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-SAMT',
+    # Stores Assets Maintenance & Incharge Assign:
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/?(\?.*)?$': 'HMS-API-AIA',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-AIA',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-AIA',
+
+    # Asset Maintenance Request & Approval:
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/?(\?.*)?$': 'HMS-API-AMR',               
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/[^/]+/?(\?.*)?$': 'HMS-API-AMR',
+    '/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/.*/': 'HMS-API-AMR',
 
     #Recycle Assets Management:
     '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SRM',               
@@ -421,8 +447,13 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
+
+        # Central Cash Counter
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/get_employee_counter_assignments/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/assign_employee_cash_counter/': 'HMS-P-CCC',
+
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
         '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
         '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
@@ -455,12 +486,28 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(?P<pk>[^/]+)/?$': 'HMS-P-CTI',
         r'^/_b_a_c_k_e_n_d/HMS/complaints/(\\?.*)?$': 'HMS-P-CTI',
 
-# Company Secretary:
+        # Company Secretary:
 
         '/_b_a_c_k_e_n_d/HMS/get_licence_master/': 'HMS-P-CSLM',
         r'/_b_a_c_k_e_n_d/HMS/licence_master_details/?(\\?.*)?$': 'HMS-P-CSLD',
         '/_b_a_c_k_e_n_d/HMS/get_incharge_list/': 'HMS-P-CSIL',
+        r'/_b_a_c_k_e_n_d/HMS/licence_renewal/?(\\?.*)?$': 'HMS-P-CSLR',
+
+    #    lab inventory:
+     r'/_b_a_c_k_e_n_d/HMS/dealer_items/?(\\?.*)?$': 'HMS-P-LBDI',
+     '/_b_a_c_k_e_n_d/HMS/raise_indent/': 'HMS-P-LBRI',
+
         
+        # Vaccination Management & Reminders:
+         r'^/_b_a_c_k_e_n_d/HMS/vaccination-masters/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/add-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/update-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/delete-vaccination-master/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/pending-vaccinations/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/send-vaccination-reminders/.*$': 'HMS-P-HVCC',
+        r'^/_b_a_c_k_e_n_d/HMS/preview-vaccination-reminders/.*$': 'HMS-P-HVCC',
 }
 
 
