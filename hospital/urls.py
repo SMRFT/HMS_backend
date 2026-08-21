@@ -50,6 +50,7 @@ from .Views import (
     abdm_m1,
     abdm_m2_hip,
     DoctorFeeCuts,
+    MHC,
     vaccination,
 )
 from .Views.AccountsReport import (
@@ -279,7 +280,7 @@ urlpatterns = [
     re_path(r'^mhc-reports/checkin/(?P<investBillNo>.+)/$', mhc.mhc_patient_checkin, name='mhc_patient_checkin'),
     re_path(r'^mhc-reports/dispatch/(?P<investBillNo>.+)/$', mhc.mhc_dispatch_report, name='mhc_dispatch_report'),
     re_path(r'^mhc-reports/(?P<investBillNo>.+)/$', mhc.get_mhc_report_by_bill, name='get_mhc_report_by_bill'),
-
+    
     # JRD Reports
     path('anc-register/', jrdReport.get_anc_register, name='get_anc_register'),
     path('jrd-reports/', jrdReport.list_jrd_reports, name='jrd_list'),
@@ -643,6 +644,13 @@ urlpatterns = [
     path('outpatient-feedback/<str:feedback_id>/', qrscan.outpatient_feedback_detail, name='outpatient_feedback_detail'),
     path('outpatient_feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_alt'),
     path('hospital/outpatient-feedback/', qrscan.outpatient_feedback_list_create, name='outpatient_feedback_list_create_hosp'),
+
+    # Master Health Checkup
+    path('mhc_get_package/', MHC.mhc_get_package, name='mhc_get_package'),
+    path('mhc_save_details/', MHC.mhc_save_details, name='mhc_save_details'),
+    path('mhc_report/', MHC.mhc_report, name='mhc_report'),
+    path('mhc_dashboard/', MHC.mhc_dashboard, name='mhc_dashboard'),
+
 ]
 
 
