@@ -155,6 +155,26 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             room_no = latest_room.get("roomNo")
             bed_no = latest_room.get("bedNo")
 
+        # ── IST (UTC+5:30) conversion for admissionDateTime ──
+        from datetime import timezone as py_timezone, timedelta as py_timedelta
+        IST = py_timezone(py_timedelta(hours=5, minutes=30))
+
+        adm_date = None
+        adm_time = None
+        if admission.admissionDateTime:
+            dt = admission.admissionDateTime
+            if isinstance(dt, str):
+                try:
+                    dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=py_timezone.utc)
+                dt_ist = dt.astimezone(IST)
+                adm_date = dt_ist.strftime("%Y-%m-%d")
+                adm_time = dt_ist.strftime("%H:%M")
+
         # ── Response ───────────────────────────────
         response_data = {
             'ipNumber': admission.ipNumber,
@@ -166,14 +186,8 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'room_details': admission.room_details,
             'roomShitingDetails': getattr(admission, 'roomShitingDetails', []),
 
-            'admissionDate': (
-                admission.admissionDateTime.strftime("%Y-%m-%d")
-                if admission.admissionDateTime else None
-            ),
-            'admissionTime': (
-                admission.admissionDateTime.strftime("%H:%M")
-                if admission.admissionDateTime else None
-            ),
+            'admissionDate': adm_date,
+            'admissionTime': adm_time,
             'admittingDoctor': admission.admittingDoctor,
             'consultingDoctor': admission.consultingDoctor,
             'packageName': admission.packageName,

@@ -16,5 +16,8 @@ start "Automation Worker" cmd /k "venv\Scripts\python manage.py send_doctor_fee_
 echo Starting Vaccination Reminders Worker (Daemon)...
 start "Vaccination Reminders Worker" cmd /k "venv\Scripts\python manage.py send_vaccination_reminders --daemon"
 
+echo Starting MHC Reminders Worker (Daemon)...
+start "MHC Reminders Worker" cmd /k "venv\Scripts\python manage.py send_mhc_reminders --daemon"
+
 echo Services started. You can close this window.
 pause

@@ -688,3 +688,18 @@ class DoctorFeeCutsSerializer(serializers.ModelSerializer):
     class Meta:
         model = DoctorFeeCuts
         fields = '__all__'
+
+
+from .models import SummaryType, SummaryHeading
+
+class SummaryTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SummaryType
+        fields = '__all__'
+
+
+class SummaryHeadingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SummaryHeading
+        fields = '__all__'
+

@@ -1033,7 +1033,9 @@ class Summary(AuditModel):
     surgeryDate = models.DateField(null=True, blank=True)
     nextReviewDate = models.DateField(null=True, blank=True)
     doctor = models.CharField(max_length=100, blank=True, null=True)
+    summaryNo = models.CharField(max_length=50, blank=True, null=True)
     summaryType = models.CharField(max_length=100, blank=True, null=True)
+    headingNo = models.CharField(max_length=50, blank=True, null=True)
     heading = models.CharField(max_length=200, blank=True, null=True)
     diseaseCode = models.CharField(max_length=100, blank=True, null=True)
     disease = models.CharField(max_length=200, blank=True, null=True)
@@ -2533,4 +2535,29 @@ class VaccinationMaster(AuditModel):
 
     def __str__(self):
         return f"{self.vaccination_id} - {self.vaccination_name}"
+
+
+class SummaryType(AuditModel):
+    summaryNo   = models.CharField(max_length=50, blank=True, null=True)
+    summaryType = models.CharField(max_length=200)
+    is_active   = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_summarytype"
+
+    def __str__(self):
+        return f"{self.summaryNo} - {self.summaryType}"
+
+
+class SummaryHeading(AuditModel):
+    headingNo = models.CharField(max_length=50, blank=True, null=True)
+    heading   = models.CharField(max_length=200)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_summaryheading"
+
+    def __str__(self):
+        return f"{self.headingNo} - {self.heading}"
+
 

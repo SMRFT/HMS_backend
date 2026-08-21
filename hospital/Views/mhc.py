@@ -5,13 +5,18 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from pyauth.auth import HasRoleAndDataPermission
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+from datetime import datetime, date, time, timedelta
 from django.utils import timezone
 from bson import ObjectId
+from pathlib import Path
+from dotenv import load_dotenv
 import pytz
 import os
+import re
 import json
+import requests
 import logging
+from ..models import CommunicationLog, Patient
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +200,8 @@ def get_mhc_investigations(request):
                         'gender': getattr(p, 'gender', '') or '',
                         'age': getattr(p, 'age', '') or '',
                         'dob': getattr(p, 'dob', None),
+                        'mobilePhone': getattr(p, 'mobilePhone', '') or getattr(p, 'phone', '') or '',
+                        'phone': getattr(p, 'phone', '') or getattr(p, 'mobilePhone', '') or '',
                     }
                     patient_map[p_uhid] = p_data
                     patient_map[p_uhid.upper()] = p_data
@@ -357,9 +364,34 @@ def get_mhc_investigations(request):
                 'report': existing_report or None,
             }
 
+            # Attach phone/contact details
+            phone_val = (
+                patient_doc.get('mobilePhone')
+                or patient_doc.get('phone')
+                or patient_doc.get('mobile')
+                or patient_doc.get('phoneNumber')
+                or record.get('mobilePhone')
+                or record.get('phone')
+                or record.get('mobile')
+                or ''
+            )
+            row['phone'] = str(phone_val).strip() if phone_val else ''
+            row['mobilePhone'] = str(phone_val).strip() if phone_val else ''
+
             # Attach review / next due date and check-in flags from report
             if existing_report:
-                row['next_due_date'] = existing_report.get('next_due_date') or existing_report.get('next_review_date', '')
+                due_val = existing_report.get('next_due_date') or existing_report.get('next_review_date', '')
+                if not due_val and existing_report.get('formattedValuedetails'):
+                    f_details = existing_report.get('formattedValuedetails', {})
+                    if isinstance(f_details, dict):
+                        due_sec = f_details.get('next_master_health_check-up_due')
+                        if isinstance(due_sec, list):
+                            d_item = next((i for i in due_sec if isinstance(i, dict) and i.get('test_code') == 'NMHCD02'), None)
+                            if d_item:
+                                due_val = d_item.get('value', '')
+                        elif isinstance(due_sec, dict):
+                            due_val = due_sec.get('NMHCD02', '')
+                row['next_due_date'] = due_val or ''
                 row['patientIn_DateTime'] = existing_report.get('patientIn_DateTime')
                 row['scan_started_DateTime'] = existing_report.get('scan_started_DateTime')
                 row['dispatch_DateTime'] = existing_report.get('dispatch_DateTime')
@@ -857,3 +889,457 @@ def mhc_dispatch_report(request, investBillNo):
         return JsonResponse({'error': str(e)}, status=500)
     finally:
         client.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  MHC WHATSAPP REMINDERS (TEMPLATE: mhc_reminder)
+# ════════════════════════════════════════════════════════════════════════════
+
+def get_mhc_template_name():
+    env_path = Path(__file__).resolve().parent.parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    return (os.getenv("BOTIFY_MHC_TEMPLATE_NAME") or "mhc_reminder_final").strip()
+
+
+def _normalize_due_date(val):
+    """
+    Parses various date formats and returns (iso_date_str_YYYY_MM_DD, formatted_display_date_DD_MM_YYYY)
+    """
+    if not val:
+        return None, None
+    if isinstance(val, (datetime, date)):
+        return val.strftime('%Y-%m-%d'), val.strftime('%d/%m/%Y')
+    s = str(val).strip()
+    if not s:
+        return None, None
+    # ISO YYYY-MM-DD
+    if re.match(r'^\d{4}-\d{2}-\d{2}', s):
+        try:
+            d = datetime.strptime(s[:10], '%Y-%m-%d').date()
+            return d.strftime('%Y-%m-%d'), d.strftime('%d/%m/%Y')
+        except Exception:
+            pass
+    # DD/MM/YYYY or DD-MM-YYYY
+    parts = re.split(r'[/.-]', s)
+    if len(parts) == 3:
+        try:
+            if len(parts[0]) == 4:  # YYYY/MM/DD
+                d = date(int(parts[0]), int(parts[1]), int(parts[2]))
+            else:  # DD/MM/YYYY
+                d = date(int(parts[2]), int(parts[1]), int(parts[0]))
+            return d.strftime('%Y-%m-%d'), d.strftime('%d/%m/%Y')
+        except Exception:
+            pass
+    return s[:10], s
+
+
+def send_whatsapp_mhc_reminder(patient_id, patient_name, phone, next_due_date_str, package_name="", force=False):
+    """
+    Sends WhatsApp MHC reminder using Botify API template 'mhc_reminder_final'.
+    Template variables:
+      {{1}} = Patient Name
+      {{2}} = Next Due Date
+      {{3}} = Patient Name
+      {{4}} = Next Due Date
+    Logs outcome in CommunicationLog model.
+    """
+    clean_phone = re.sub(r'\D', '', str(phone or ''))
+    if len(clean_phone) == 10:
+        clean_phone = f"91{clean_phone}"
+
+    template_name = get_mhc_template_name()
+    botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
+
+    # Formatted due date string (e.g. 20/08/2026)
+    _, formatted_due_date = _normalize_due_date(next_due_date_str)
+    if not formatted_due_date:
+        formatted_due_date = str(next_due_date_str)
+
+    if not clean_phone or len(clean_phone) < 10:
+        err_msg = f"Invalid mobile phone number: '{phone}' for patient {patient_name} ({patient_id})"
+        logger.warning(err_msg)
+        try:
+            CommunicationLog.objects.create(
+                patient_id=str(patient_id or ''),
+                patient_name=str(patient_name or patient_id or ''),
+                type="WhatsApp",
+                sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+                recipient=str(phone or ''),
+                status="Failed",
+                details=err_msg,
+                template_name=template_name,
+                created_by="system",
+                branch_code="SHB001",
+                hospital_code="SH001"
+            )
+        except Exception as log_ex:
+            logger.error(f"Error logging failed CommunicationLog: {str(log_ex)}")
+        return {"success": False, "error": err_msg}
+
+    # One-Time Reminder Check: check if already successfully sent for this patient_id, template_name, and due date
+    if not force:
+        try:
+            # Check CommunicationLog for existing successful reminder for this patient and due date
+            already_sent = CommunicationLog.objects.filter(
+                patient_id=str(patient_id),
+                template_name=template_name,
+                status="Success",
+                details__icontains=str(formatted_due_date)
+            ).exists()
+
+            if not already_sent and next_due_date_str:
+                iso_d, _ = _normalize_due_date(next_due_date_str)
+                if iso_d:
+                    already_sent = CommunicationLog.objects.filter(
+                        patient_id=str(patient_id),
+                        template_name=template_name,
+                        status="Success",
+                        details__icontains=str(iso_d)
+                    ).exists()
+
+            if already_sent:
+                msg = f"MHC reminder already sent previously for patient {patient_name} ({patient_id}) due on {formatted_due_date}"
+                logger.info(msg)
+                return {"success": True, "skipped": True, "message": msg}
+        except Exception as dup_ex:
+            logger.warning(f"Duplicate check warning: {str(dup_ex)}")
+
+    if botify_apikey.startswith("Bearer "):
+        clean_api_key = botify_apikey[7:].strip()
+        auth_header = botify_apikey
+    else:
+        clean_api_key = botify_apikey
+        auth_header = f"Bearer {botify_apikey}"
+
+    botify_url = "https://login.botify.in/api/whatsapp/external"
+    headers = {
+        "Authorization": auth_header,
+        "Content-Type": "application/json"
+    }
+
+    # {{1}} = Patient Name, {{2}} = Next Due Date, {{3}} = Patient Name, {{4}} = Next Due Date
+    p_name = str(patient_name or patient_id or "Valued Client").strip()
+    template_data = [
+        p_name,
+        str(formatted_due_date),
+        p_name,
+        str(formatted_due_date)
+    ]
+
+    components = [
+        {
+            "type": "body",
+            "parameters": [
+                {
+                    "type": "text",
+                    "text": str(p)
+                } for p in template_data
+            ]
+        }
+    ]
+
+    body_payload = {
+        "to": clean_phone,
+        "type": "template",
+        "templateName": template_name,
+        "templateData": template_data,
+        "components": components
+    }
+
+    try:
+        r = requests.post(botify_url, json=body_payload, headers=headers, timeout=20)
+        try:
+            response_json = r.json()
+            is_success = r.status_code in [200, 201] and (
+                response_json.get("success") is True or
+                response_json.get("status") in [True, "success", "200", 200] or
+                response_json.get("result") == "success"
+            )
+        except ValueError:
+            response_json = {}
+            is_success = r.status_code in [200, 201]
+
+        # Fallback if single parameter is configured in Botify
+        if not is_success and "does not match the expected number of params" in r.text:
+            alt_template_data = [str(formatted_due_date)]
+            alt_components = [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": str(p)} for p in alt_template_data]
+                }
+            ]
+            alt_payload = {
+                "to": clean_phone,
+                "type": "template",
+                "templateName": template_name,
+                "templateData": alt_template_data,
+                "components": alt_components
+            }
+            r_alt = requests.post(botify_url, json=alt_payload, headers=headers, timeout=20)
+            try:
+                alt_json = r_alt.json()
+                if r_alt.status_code in [200, 201] and (
+                    alt_json.get("success") is True or
+                    alt_json.get("status") in [True, "success", "200", 200] or
+                    alt_json.get("result") == "success"
+                ):
+                    r = r_alt
+                    response_json = alt_json
+                    is_success = True
+            except Exception:
+                pass
+
+        status_str = "Success" if is_success else "Failed"
+        details_text = f"MHC Reminder for next due date {formatted_due_date} (Pkg: {package_name}). Botify Response: {r.text}"
+
+        CommunicationLog.objects.create(
+            patient_id=str(patient_id or ''),
+            patient_name=str(patient_name or patient_id or ''),
+            type="WhatsApp",
+            sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+            recipient=clean_phone,
+            status=status_str,
+            details=details_text,
+            template_name=template_name,
+            created_by="system",
+            branch_code="SHB001",
+            hospital_code="SH001"
+        )
+
+        return {"success": is_success, "recipient": clean_phone, "response": response_json, "status_code": r.status_code}
+
+    except Exception as e:
+        err_text = f"Exception sending MHC reminder WhatsApp to {clean_phone}: {str(e)}"
+        logger.error(err_text)
+        try:
+            CommunicationLog.objects.create(
+                patient_id=str(patient_id or ''),
+                patient_name=str(patient_name or patient_id or ''),
+                type="WhatsApp",
+                sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+                recipient=clean_phone,
+                status="Failed",
+                details=err_text,
+                template_name=template_name,
+                created_by="system",
+                branch_code="SHB001",
+                hospital_code="SH001"
+            )
+        except Exception:
+            pass
+        return {"success": False, "error": str(e)}
+
+
+def process_pending_mhc_reminders(target_date=None, force=False, target_uhid=None):
+    """
+    Finds active MHC patients where next_due_date is target_date (default: tomorrow, i.e. 1 day before next due date).
+    Sends WhatsApp reminders via Botify API with template 'mhc_reminder' and logs in CommunicationLog.
+    """
+    if not target_date:
+        # 1 day before next due date => next due date is tomorrow
+        target_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    client = None
+    results = {
+        "target_date": target_date,
+        "total_patients_checked": 0,
+        "reminders_sent": 0,
+        "reminders_skipped": 0,
+        "failed_sends": 0,
+        "details": []
+    }
+
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        mhc_report_coll = db['hospital_mhcreport']
+        patient_coll = db['hospital_patient']
+
+        # Find all active MHC reports
+        report_query = {"is_active": True}
+        if target_uhid:
+            report_query["uhid"] = str(target_uhid)
+
+        reports = list(mhc_report_coll.find(report_query))
+        
+        due_patients = {}  # uhid -> { 'due_date': ..., 'formatted_due_date': ..., 'packageName': ... }
+
+        for rep in reports:
+            raw_due = rep.get('next_due_date') or rep.get('next_review_date')
+            if not raw_due and rep.get('formattedValuedetails'):
+                f_details = rep.get('formattedValuedetails', {})
+                if isinstance(f_details, dict):
+                    due_sec = f_details.get('next_master_health_check-up_due')
+                    if isinstance(due_sec, list):
+                        d_item = next((i for i in due_sec if isinstance(i, dict) and i.get('test_code') == 'NMHCD02'), None)
+                        if d_item:
+                            raw_due = d_item.get('value', '')
+                    elif isinstance(due_sec, dict):
+                        raw_due = due_sec.get('NMHCD02', '')
+
+            iso_due, disp_due = _normalize_due_date(raw_due)
+            if iso_due == target_date:
+                u = str(rep.get('uhid', '')).strip()
+                if u:
+                    due_patients[u] = {
+                        'due_date': raw_due,
+                        'formatted_due_date': disp_due,
+                        'investBillNo': rep.get('investBillNo', ''),
+                        'packageName': rep.get('packageName', 'Master Health Check-up')
+                    }
+
+        uhid_list = list(due_patients.keys())
+        results["total_patients_checked"] = len(uhid_list)
+
+        if uhid_list:
+            patients = list(patient_coll.find({"uhid": {"$in": uhid_list}}))
+            p_map = {p.get("uhid"): p for p in patients}
+
+            for uhid, info in due_patients.items():
+                p_info = p_map.get(uhid, {})
+                sal = p_info.get("salutation", "")
+                fn = p_info.get("firstName", "")
+                ln = p_info.get("lastName", "")
+                patient_name = f"{sal} {fn} {ln}".strip() if (fn or ln) else uhid
+
+                phone = p_info.get("mobilePhone") or p_info.get("phone") or p_info.get("mobile") or ""
+
+                res = send_whatsapp_mhc_reminder(
+                    patient_id=uhid,
+                    patient_name=patient_name,
+                    phone=phone,
+                    next_due_date_str=info['due_date'],
+                    package_name=info['packageName'],
+                    force=force
+                )
+
+                if res.get("skipped"):
+                    results["reminders_skipped"] += 1
+                elif res.get("success"):
+                    results["reminders_sent"] += 1
+                    if info.get('investBillNo'):
+                        try:
+                            mhc_report_coll.update_many(
+                                {"investBillNo": info['investBillNo'], "is_active": True},
+                                {"$set": {
+                                    "reminder_sent": True,
+                                    "reminder_sent_date": datetime.now(),
+                                    "reminder_due_date": info['formatted_due_date']
+                                }}
+                            )
+                        except Exception:
+                            pass
+                else:
+                    results["failed_sends"] += 1
+
+                results["details"].append({
+                    "uhid": uhid,
+                    "patient_name": patient_name,
+                    "phone": phone,
+                    "next_due_date": info['formatted_due_date'],
+                    "status": "Skipped" if res.get("skipped") else ("Success" if res.get("success") else "Failed"),
+                    "result": res
+                })
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error in process_pending_mhc_reminders: {str(e)}")
+        results["error"] = str(e)
+        return results
+    finally:
+        if client:
+            client.close()
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def send_mhc_reminders_api(request):
+    """
+    Trigger sending MHC reminders for a target date (default: tomorrow, 1 day before due date).
+    """
+    try:
+        target_date = request.data.get('date') or request.GET.get('date')
+        force = request.data.get('force', False) or request.GET.get('force') == 'true'
+        target_uhid = request.data.get('uhid') or request.GET.get('uhid')
+
+        results = process_pending_mhc_reminders(target_date=target_date, force=force, target_uhid=target_uhid)
+        return Response({"success": True, "data": results}, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(f"Error in send_mhc_reminders_api: {str(e)}")
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def preview_mhc_reminders_api(request):
+    """
+    Preview pending MHC reminders for a target date (default: tomorrow).
+    """
+    try:
+        target_date = request.GET.get('date')
+        if not target_date:
+            target_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        mhc_report_coll = db['hospital_mhcreport']
+        patient_coll = db['hospital_patient']
+
+        reports = list(mhc_report_coll.find({"is_active": True}))
+        preview_list = []
+
+        for rep in reports:
+            raw_due = rep.get('next_due_date') or rep.get('next_review_date')
+            if not raw_due and rep.get('formattedValuedetails'):
+                f_details = rep.get('formattedValuedetails', {})
+                if isinstance(f_details, dict):
+                    due_sec = f_details.get('next_master_health_check-up_due')
+                    if isinstance(due_sec, list):
+                        d_item = next((i for i in due_sec if isinstance(i, dict) and i.get('test_code') == 'NMHCD02'), None)
+                        if d_item:
+                            raw_due = d_item.get('value', '')
+                    elif isinstance(due_sec, dict):
+                        raw_due = due_sec.get('NMHCD02', '')
+
+            iso_due, disp_due = _normalize_due_date(raw_due)
+            if iso_due == target_date:
+                u = str(rep.get('uhid', '')).strip()
+                p_doc = patient_coll.find_one({"uhid": u}) or {}
+                sal = p_doc.get("salutation", "")
+                fn = p_doc.get("firstName", "")
+                ln = p_doc.get("lastName", "")
+                name = f"{sal} {fn} {ln}".strip() if (fn or ln) else u
+                phone = p_doc.get("mobilePhone") or p_doc.get("phone") or ""
+
+                already_sent = CommunicationLog.objects.filter(
+                    patient_id=u,
+                    template_name=get_mhc_template_name(),
+                    status="Success",
+                    details__icontains=str(disp_due or raw_due)
+                ).exists()
+
+                preview_list.append({
+                    "uhid": u,
+                    "patient_name": name,
+                    "phone": phone,
+                    "package_name": rep.get('packageName', 'Master Health Check-up'),
+                    "investBillNo": rep.get('investBillNo', ''),
+                    "next_due_date": disp_due or raw_due,
+                    "already_sent": already_sent
+                })
+
+        client.close()
+        return Response({
+            "success": True,
+            "target_date": target_date,
+            "count": len(preview_list),
+            "data": preview_list
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Error in preview_mhc_reminders_api: {str(e)}")
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

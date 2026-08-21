@@ -43,34 +43,377 @@ import base64
 from bson import ObjectId
 import gridfs
 
-@api_view(['GET'])
+import re
+from ..models import Summary, CommunicationLog, SummaryType, SummaryHeading
+from ..serializers import SummarySerializer, SummaryTypeSerializer, SummaryHeadingSerializer
+
+@api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def summary_type(request):
-    """Get list of active summary types from hospital_summarytype collection"""
+    """Get list of active summary types or create a new summary type in hospital_summarytype collection"""
+    client = None
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db = client['HMS']
         summary_collection = hms_db['hospital_summarytype']
 
-        summary_types = list(summary_collection.find(
-            {"is_active": True},                           # filter
-            {"_id": 0, "summaryNo": 1, "summaryType": 1}  # projection
-        ))
+        if request.method == 'GET':
+            summary_types = list(summary_collection.find(
+                {"is_active": True},                           # filter
+                {"_id": 0, "summaryNo": 1, "summaryType": 1}  # projection
+            ))
+            return Response(summary_types, status=status.HTTP_200_OK)
 
-        return Response(summary_types, status=status.HTTP_200_OK)
+        elif request.method == 'POST':
+            summary_type_val = (request.data.get('summaryType') or '').strip()
+            if not summary_type_val:
+                return Response({"error": "Summary type is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Case-insensitive duplicate check
+            existing = summary_collection.find_one({
+                "summaryType": {"$regex": f"^{re.escape(summary_type_val)}$", "$options": "i"},
+                "is_active": True
+            })
+            if existing:
+                return Response({"error": f"Summary type '{summary_type_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Auto-increment summaryNo
+            all_types = list(summary_collection.find({}, {"summaryNo": 1, "_id": 0}))
+            numbers = []
+            for item in all_types:
+                s_no = str(item.get('summaryNo', '')).strip()
+                digits = re.findall(r'\d+', s_no)
+                if digits:
+                    numbers.append(int(digits[0]))
+            next_num = max(numbers) + 1 if numbers else 1
+            next_summary_no = f"{next_num:02d}"
+
+            created_by = request.data.get('auth-user-id', "system")
+            branch_code = request.data.get('auth-branch-code', "system")
+            hospital_code = request.data.get('auth-hospital-code', "system")
+            outlet_code = request.data.get('auth-outlet-code', "system")
+
+            now_dt = datetime.utcnow()
+            new_doc = {
+                "summaryNo": next_summary_no,
+                "summaryType": summary_type_val,
+                "is_active": True,
+                "created_by": created_by,
+                "created_date": now_dt,
+                "lastmodified_by": None,
+                "lastmodified_date": None,
+                "branch_code": branch_code,
+                "hospital_code": hospital_code,
+                "outlet_code": outlet_code,
+            }
+            summary_collection.insert_one(new_doc)
+
+            return Response({
+                "message": "Summary type created successfully",
+                "data": {
+                    "summaryNo": next_summary_no,
+                    "summaryType": summary_type_val
+                }
+            }, status=status.HTTP_201_CREATED)
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     finally:
-        client.close()
+        if client:
+            client.close()
+
+
+@api_view(['PUT', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def update_summary_type(request, summary_no):
+    """Update summary type name by summaryNo"""
+    client = None
+    try:
+        summary_type_val = (request.data.get('summaryType') or '').strip()
+        if not summary_type_val:
+            return Response({"error": "Summary type name is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        summary_collection = hms_db['hospital_summarytype']
+
+        # Duplicate check excluding current
+        existing = summary_collection.find_one({
+            "summaryNo": {"$ne": str(summary_no)},
+            "summaryType": {"$regex": f"^{re.escape(summary_type_val)}$", "$options": "i"},
+            "is_active": True
+        })
+        if existing:
+            return Response({"error": f"Summary type '{summary_type_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+        modified_by = request.data.get('auth-user-id', "system")
+        res = summary_collection.update_one(
+            {"summaryNo": str(summary_no)},
+            {"$set": {
+                "summaryType": summary_type_val,
+                "lastmodified_by": modified_by,
+                "lastmodified_date": datetime.utcnow()
+            }}
+        )
+
+        if res.matched_count == 0:
+            return Response({"error": "Summary type not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"message": "Summary type updated successfully"}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(['DELETE', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def delete_summary_type(request, summary_no):
+    """Soft delete summary type by summaryNo"""
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        summary_collection = hms_db['hospital_summarytype']
+
+        modified_by = request.data.get('auth-user-id', "system")
+        res = summary_collection.update_one(
+            {"summaryNo": str(summary_no)},
+            {"$set": {
+                "is_active": False,
+                "lastmodified_by": modified_by,
+                "lastmodified_date": datetime.utcnow()
+            }}
+        )
+
+        if res.matched_count == 0:
+            return Response({"error": "Summary type not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"message": "Summary type deleted successfully"}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def summary_heading(request):
+    """Get list of active headings or create a new heading in hospital_summaryheading collection"""
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        heading_collection = hms_db['hospital_summaryheading']
+
+        if request.method == 'GET':
+            headings = list(heading_collection.find(
+                {"is_active": True},                           # filter
+                {"_id": 0, "headingNo": 1, "heading": 1}      # projection
+            ))
+            return Response(headings, status=status.HTTP_200_OK)
+
+        elif request.method == 'POST':
+            heading_val = (request.data.get('heading') or '').strip()
+            if not heading_val:
+                return Response({"error": "Heading is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Case-insensitive duplicate check
+            existing = heading_collection.find_one({
+                "heading": {"$regex": f"^{re.escape(heading_val)}$", "$options": "i"},
+                "is_active": True
+            })
+            if existing:
+                return Response({"error": f"Heading '{heading_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Auto-increment headingNo
+            all_headings = list(heading_collection.find({}, {"headingNo": 1, "_id": 0}))
+            numbers = []
+            for item in all_headings:
+                h_no = str(item.get('headingNo', '')).strip()
+                digits = re.findall(r'\d+', h_no)
+                if digits:
+                    numbers.append(int(digits[0]))
+            next_num = max(numbers) + 1 if numbers else 1
+            next_heading_no = f"{next_num:02d}"
+
+            created_by = request.data.get('auth-user-id', "system")
+            branch_code = request.data.get('auth-branch-code', "system")
+            hospital_code = request.data.get('auth-hospital-code', "system")
+            outlet_code = request.data.get('auth-outlet-code', "system")
+
+            now_dt = datetime.utcnow()
+            new_doc = {
+                "headingNo": next_heading_no,
+                "heading": heading_val,
+                "is_active": True,
+                "created_by": created_by,
+                "created_date": now_dt,
+                "lastmodified_by": None,
+                "lastmodified_date": None,
+                "branch_code": branch_code,
+                "hospital_code": hospital_code,
+                "outlet_code": outlet_code,
+            }
+            heading_collection.insert_one(new_doc)
+
+            return Response({
+                "message": "Summary heading created successfully",
+                "data": {
+                    "headingNo": next_heading_no,
+                    "heading": heading_val
+                }
+            }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(['PUT', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def update_summary_heading(request, heading_no):
+    """Update heading name by headingNo"""
+    client = None
+    try:
+        heading_val = (request.data.get('heading') or '').strip()
+        if not heading_val:
+            return Response({"error": "Heading name is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        heading_collection = hms_db['hospital_summaryheading']
+
+        # Duplicate check excluding current
+        existing = heading_collection.find_one({
+            "headingNo": {"$ne": str(heading_no)},
+            "heading": {"$regex": f"^{re.escape(heading_val)}$", "$options": "i"},
+            "is_active": True
+        })
+        if existing:
+            return Response({"error": f"Heading '{heading_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+
+        modified_by = request.data.get('auth-user-id', "system")
+        res = heading_collection.update_one(
+            {"headingNo": str(heading_no)},
+            {"$set": {
+                "heading": heading_val,
+                "lastmodified_by": modified_by,
+                "lastmodified_date": datetime.utcnow()
+            }}
+        )
+
+        if res.matched_count == 0:
+            return Response({"error": "Heading not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"message": "Heading updated successfully"}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(['DELETE', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def delete_summary_heading(request, heading_no):
+    """Soft delete heading by headingNo"""
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        heading_collection = hms_db['hospital_summaryheading']
+
+        modified_by = request.data.get('auth-user-id', "system")
+        res = heading_collection.update_one(
+            {"headingNo": str(heading_no)},
+            {"$set": {
+                "is_active": False,
+                "lastmodified_by": modified_by,
+                "lastmodified_date": datetime.utcnow()
+            }}
+        )
+
+        if res.matched_count == 0:
+            return Response({"error": "Heading not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"message": "Heading deleted successfully"}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
 
 from datetime import datetime
 
-from datetime import datetime
-from pymongo import MongoClient
-from bson import ObjectId
-import json
+def enrich_summary_type_and_heading(summaries, hms_db):
+    """
+    Resolves summaryType name from summaryNo (and summaryNo from summaryType)
+    and heading name from headingNo (and headingNo from heading).
+    """
+    if not summaries:
+        return summaries
+
+    is_single = isinstance(summaries, dict)
+    items = [summaries] if is_single else summaries
+
+    type_map = {}
+    type_rev_map = {}
+    heading_map = {}
+    heading_rev_map = {}
+
+    try:
+        types = list(hms_db['hospital_summarytype'].find({}, {"_id": 0, "summaryNo": 1, "summaryType": 1}))
+        for t in types:
+            s_no = str(t.get('summaryNo', '')).strip()
+            s_type = str(t.get('summaryType', '')).strip()
+            if s_no and s_type:
+                type_map[s_no] = s_type
+                type_rev_map[s_type.upper()] = s_no
+
+        headings = list(hms_db['hospital_summaryheading'].find({}, {"_id": 0, "headingNo": 1, "heading": 1}))
+        for h in headings:
+            h_no = str(h.get('headingNo', '')).strip()
+            h_val = str(h.get('heading', '')).strip()
+            if h_no and h_val:
+                heading_map[h_no] = h_val
+                heading_rev_map[h_val.upper()] = h_no
+    except Exception as e:
+        logger.warning(f"Error fetching summary type/heading mappings: {e}")
+
+    for s in items:
+        # summaryType <-> summaryNo
+        cur_no = str(s.get('summaryNo') or '').strip()
+        cur_type = str(s.get('summaryType') or '').strip()
+        if cur_no and cur_no in type_map:
+            s['summaryType'] = type_map[cur_no]
+            s['summaryNo'] = cur_no
+        elif cur_type and cur_type.upper() in type_rev_map:
+            s['summaryNo'] = type_rev_map[cur_type.upper()]
+        
+        # heading <-> headingNo
+        cur_h_no = str(s.get('headingNo') or '').strip()
+        cur_h_val = str(s.get('heading') or '').strip()
+        if cur_h_no and cur_h_no in heading_map:
+            s['heading'] = heading_map[cur_h_no]
+            s['headingNo'] = cur_h_no
+        elif cur_h_val and cur_h_val.upper() in heading_rev_map:
+            s['headingNo'] = heading_rev_map[cur_h_val.upper()]
+
+    return items[0] if is_single else summaries
+
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -108,16 +451,27 @@ def get_summaries(request):
                 date_filter['$lte'] = to_dt.replace(hour=23, minute=59, second=59)
             query['date'] = date_filter
 
-        # ── Summary type filter ─────────────────
+        # ── Summary type filter (supports summaryType text or summaryNo) ─────────────────
         summary_type = request.query_params.get('summaryType', '').strip()
         if summary_type:
-            query['summaryType'] = {'$regex': summary_type, '$options': 'i'}
+            matching_nos = [t['summaryNo'] for t in hms_db['hospital_summarytype'].find(
+                {"summaryType": {'$regex': summary_type, '$options': 'i'}},
+                {"_id": 0, "summaryNo": 1}
+            ) if t.get('summaryNo')]
+            query['$or'] = [
+                {'summaryType': {'$regex': summary_type, '$options': 'i'}},
+                {'summaryNo': {'$in': matching_nos}},
+                {'summaryNo': summary_type}
+            ]
 
         print("SUMMARY QUERY:", query)  # debug
 
         summaries = list(summary_collection.find(query, {"_id": 0}))
 
         if summaries:
+            # ── Enrich summaryType and heading from masters ─────────────────
+            enrich_summary_type_and_heading(summaries, hms_db)
+
             # ── Batch patient fetch ─────────────────
             uhids = list({s['uhid'] for s in summaries if s.get('uhid')})
 
@@ -140,10 +494,25 @@ def get_summaries(request):
                 full_name = f"{p.get('salutation', '')} {p.get('firstName', '')} {p.get('lastName', '')}".strip()
                 patient_map[p['uhid']] = full_name
 
-            # Attach names
+            # Attach names and convert approve_time to IST (+5:30)
+            from datetime import timezone, timedelta
+            IST = timezone(timedelta(hours=5, minutes=30))
+
             for s in summaries:
                 uhid = s.get('uhid', '')
                 s['patient'] = patient_map.get(uhid, s.get('patient', ''))
+
+                ap = s.get('approve_time')
+                if ap:
+                    if isinstance(ap, str):
+                        try:
+                            ap = datetime.fromisoformat(ap.replace("Z", "+00:00"))
+                        except Exception:
+                            pass
+                    if isinstance(ap, datetime):
+                        if ap.tzinfo is None:
+                            ap = ap.replace(tzinfo=timezone.utc)
+                        s['approve_time'] = ap.astimezone(IST).isoformat()
 
         return Response(summaries, status=status.HTTP_200_OK)
 
@@ -162,6 +531,42 @@ def create_summary(request):
 
     if data.get('date'):
         data['date'] = str(data['date'])[:10]
+
+    # Resolve summaryNo and headingNo if names were passed
+    summary_no = (data.get('summaryNo') or '').strip()
+    heading_no = (data.get('headingNo') or '').strip()
+
+    if not summary_no and data.get('summaryType'):
+        try:
+            client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            hms_db = client['HMS']
+            match_t = hms_db['hospital_summarytype'].find_one({
+                "summaryType": {"$regex": f"^{re.escape(str(data['summaryType']).strip())}$", "$options": "i"}
+            })
+            if match_t:
+                summary_no = match_t.get('summaryNo', '')
+            client.close()
+        except Exception as e:
+            logger.warning(f"Error resolving summaryNo: {e}")
+
+    if not heading_no and data.get('heading'):
+        try:
+            client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            hms_db = client['HMS']
+            match_h = hms_db['hospital_summaryheading'].find_one({
+                "heading": {"$regex": f"^{re.escape(str(data['heading']).strip())}$", "$options": "i"}
+            })
+            if match_h:
+                heading_no = match_h.get('headingNo', '')
+            client.close()
+        except Exception as e:
+            logger.warning(f"Error resolving headingNo: {e}")
+
+    data['summaryNo'] = summary_no
+    data['headingNo'] = heading_no
+    # Do not store raw text names in database
+    data.pop('summaryType', None)
+    data.pop('heading', None)
 
     serializer = SummarySerializer(data=data)
     if serializer.is_valid():
@@ -184,9 +589,7 @@ def create_summary(request):
             created_date=datetime.utcnow()
         )
 
-        # ── After ORM save, fix fieldsData in MongoDB ──────────────────────
-        # The ORM serializes fieldsData as a JSON string; patch the document
-        # directly so it's stored as a native array (like medicine_particulars).
+        # ── After ORM save, fix fieldsData and ensure summaryNo/headingNo in MongoDB ──
         raw_fields = request.data.get('fieldsData', [])
         if isinstance(raw_fields, str):
             try:
@@ -194,7 +597,6 @@ def create_summary(request):
             except (json.JSONDecodeError, ValueError):
                 raw_fields = []
 
-        # Validate shape and filter blanks
         if isinstance(raw_fields, list):
             fields_array = [
                 f for f in raw_fields
@@ -205,18 +607,26 @@ def create_summary(request):
         else:
             fields_array = []
 
-        if fields_array:
-            try:
-                client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-                db = client['HMS']
-                db['hospital_summary'].update_one(
-                    {"ipNo": ip_no},
-                    {"$set": {"fieldsData": fields_array}}
-                )
-                client.close()
-            except Exception as e:
-                # Non-fatal — summary was created, fieldsData just needs fixing
-                logger.warning(f"fieldsData patch failed for {ip_no}: {e}")
+        try:
+            client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            db = client['HMS']
+            patch_doc = {
+                "summaryNo": summary_no,
+                "headingNo": heading_no,
+            }
+            if fields_array:
+                patch_doc["fieldsData"] = fields_array
+            
+            db['hospital_summary'].update_one(
+                {"ipNo": ip_no},
+                {
+                    "$set": patch_doc,
+                    "$unset": {"summaryType": "", "heading": ""}
+                }
+            )
+            client.close()
+        except Exception as e:
+            logger.warning(f"Mongo patch failed for {ip_no}: {e}")
 
         return Response(
             {"message": "Summary created successfully", "ipNo": instance.ipNo},
@@ -224,6 +634,7 @@ def create_summary(request):
         )
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 @require_http_methods(["GET"])
@@ -307,14 +718,13 @@ def get_patient_investigations(request, ip_no):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def approve_summary(request, ip_no):
-    # MongoDB connection setup
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     db = client['HMS']
-    collection = db['hospital_summary']  # Changed collection name to 'hospital_summary'
-    try:
-        # Get the user who is performing the soft delete (if available)
-        created_by = request.data.get('auth-user-id', "system")
+    collection = db['hospital_summary']
 
+    try:
+        created_by = request.data.get('auth-user-id', "system")
+        now_dt = datetime.utcnow()
         
         # Find the summary by IP number and update
         result = collection.update_one(
@@ -322,7 +732,7 @@ def approve_summary(request, ip_no):
             {"$set": {
                 "approve": True,
                 "approved_by": created_by,
-                "approve_time": datetime.now().isoformat()  # Set the current time
+                "approve_time": now_dt  # Store as Date/Time object in MongoDB (ISODate)
             }}
         )
         
@@ -494,6 +904,9 @@ def get_editsummary(request, ip_no):
         # for summaries saved before this change, so we don't need to convert
         # anything here — just pass the raw value through.
 
+        # ── Enrich summaryType and heading from masters ───────────────────────
+        enrich_summary_type_and_heading(summary, db)
+
         return Response(summary, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -522,7 +935,7 @@ def update_summary_fields(request, ip_no):
             # Strip ALL auth-* keys
             *[k for k in request.data.keys() if k.startswith('auth-')],
             # Frontend-only state fields not stored in DB
-            'notes', 'currentField', 'dateTime', 'dateTime',
+            'notes', 'currentField', 'dateTime',
             'approve_time_time', 'selectedDiseases',
             # Patient info fetched from hospital_patient — not stored in summary
             'patient', 'age', 'gender', 'address',
@@ -533,17 +946,31 @@ def update_summary_fields(request, ip_no):
         if 'fieldsData' not in data or not data['fieldsData']:
             return Response({"error": "No fieldsData provided"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # ── Resolve summaryNo & headingNo and do not store raw names ──
+        summary_no = str(data.get('summaryNo') or '').strip()
+        if not summary_no and data.get('summaryType'):
+            match_t = db['hospital_summarytype'].find_one({
+                "summaryType": {"$regex": f"^{re.escape(str(data['summaryType']).strip())}$", "$options": "i"}
+            })
+            if match_t:
+                summary_no = match_t.get('summaryNo', '')
+
+        heading_no = str(data.get('headingNo') or '').strip()
+        if not heading_no and data.get('heading'):
+            match_h = db['hospital_summaryheading'].find_one({
+                "heading": {"$regex": f"^{re.escape(str(data['heading']).strip())}$", "$options": "i"}
+            })
+            if match_h:
+                heading_no = match_h.get('headingNo', '')
+
+        data['summaryNo'] = summary_no
+        data['headingNo'] = heading_no
+        data.pop('summaryType', None)
+        data.pop('heading', None)
+
         # ── fieldsData is now a native array of {"key": ..., "value": ...} ──
-        # objects (previously this was a plain {key: value} dict, stored as
-        # a JSON string). We validate the shape here, but no longer call
-        # json.dumps() on it — Mongo/pymongo stores a list of dicts directly,
-        # so the document itself contains a real array, not a string holding
-        # escaped JSON. get_editsummary/get_printsummary hand it back as-is.
         fields_data = data['fieldsData']
 
-        # Accept a JSON string too, in case the caller already serialized it
-        # (e.g. an older frontend build) — we still normalize it to a native
-        # list before saving so the DB never stores a stringified array.
         if isinstance(fields_data, str):
             try:
                 fields_data = json.loads(fields_data)
@@ -594,13 +1021,30 @@ def update_summary_fields(request, ip_no):
             if field in data:
                 data[field] = to_time(data[field])
 
+        # DateTimeField columns → datetime object (ISODate in Mongo)
+        if 'approve_time' in data:
+            ap_val = data['approve_time']
+            if ap_val:
+                if isinstance(ap_val, str):
+                    try:
+                        data['approve_time'] = datetime.fromisoformat(ap_val.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except Exception:
+                        data['approve_time'] = datetime.utcnow()
+                elif isinstance(ap_val, datetime):
+                    data['approve_time'] = ap_val
+            else:
+                data['approve_time'] = None
+
         # Only set lastmodified_* from auth
         data['lastmodified_date'] = datetime.utcnow()
         data['lastmodified_by']   = lastmodified_by
 
         updated = collection.update_one(
             {"ipNo": decoded_ip_no},
-            {"$set": data}
+            {
+                "$set": data,
+                "$unset": {"summaryType": "", "heading": ""}
+            }
         )
 
         if updated.matched_count > 0:
@@ -642,11 +1086,6 @@ def get_printsummary(request, ip_no):
         summary['_id'] = str(summary['_id'])
 
         # ── STEP 1b: fieldsData — hand back exactly as stored ─────────────────
-        # Stored natively in Mongo as an array: [{"key": "...", "value": "..."}].
-        # SummaryPrint.js looks up sections via fieldsData.find(f => f.key === key).
-        # The isinstance(str) branch below is only a fallback for documents
-        # saved by an older version of update_summary_fields that stringified
-        # the array with json.dumps() before saving.
         raw_fields_data = summary.get('fieldsData')
         if isinstance(raw_fields_data, str):
             try:
@@ -661,6 +1100,9 @@ def get_printsummary(request, ip_no):
             parsed = [{"key": k, "value": v} for k, v in parsed.items()]
 
         summary['fieldsData'] = parsed
+
+        # ── Enrich summaryType and heading from masters ───────────────────────
+        enrich_summary_type_and_heading(summary, hms_db)
 
         # ── STEP 2: Patient info from hospital_patient ────────────────────────
         uhid           = summary.get('uhid')

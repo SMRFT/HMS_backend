@@ -157,6 +157,7 @@ def get_admitted_doctor_fee_patients(request):
     """
     hospital_code = request.headers.get("auth-hospital-code") or "system"
     company_filter = request.GET.get('company')
+    customer_type_filter = (request.GET.get('customer_type') or request.GET.get('customerType') or 'ALL').strip()
     status_filter = (request.GET.get('status') or 'ALL').strip()
     search_query = (request.GET.get('search') or '').strip().lower()
     from_date_str = request.GET.get('from_date') or request.GET.get('fromDate')
@@ -183,7 +184,15 @@ def get_admitted_doctor_fee_patients(request):
         admissions = list(db['hospital_admission'].find(query).sort("admissionDateTime", -1))
         
         # Cache Insurance Providers for fast company_name lookup
-        providers = {p.company_code: p.company_name for p in InsuranceProvider.objects.all() if p.company_code}
+        providers = {}
+        try:
+            for p in db['hospital_insuranceprovider'].find({}, {"_id": 0, "company_code": 1, "company_name": 1}):
+                if p.get('company_code'):
+                    providers[p['company_code']] = p.get('company_name', '')
+        except Exception:
+            pass
+        if not providers:
+            providers = {p.company_code: p.company_name for p in InsuranceProvider.objects.all() if p.company_code}
 
         # Step 1: Pre-process admissions and fetch billing records + collect all doctor IDs
         parsed_admissions = []
@@ -198,6 +207,11 @@ def get_admitted_doctor_fee_patients(request):
             customer_type = adm.get('customer_type', '') or (patient.get('customer_type', '') if patient else '') or 'General'
             company_code = adm.get('company_code', '') or (patient.get('company_code', '') if patient else '') or ''
             company_name = providers.get(company_code, '') or adm.get('insurance_company', '') or (patient.get('insurance_company', '') if patient else '') or ''
+
+            # Apply Customer Type Filter
+            if customer_type_filter and customer_type_filter.upper() != 'ALL':
+                if customer_type.lower() != customer_type_filter.lower():
+                    continue
 
             # Apply Insurance Company Filter
             if company_filter and company_filter != 'ALL':

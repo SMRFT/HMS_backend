@@ -196,6 +196,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/approve(?:/[^/]+)+/$': 'HMS-P-MHCA',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/delete(?:/[^/]+)+/$': 'HMS-P-MHCD',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports/edit(?:/[^/]+)+/$': 'HMS-P-MHCE',
+    r'^/_b_a_c_k_e_n_d/HMS/send-mhc-reminders/.*$': 'HMS-P-MHC',
+    r'^/_b_a_c_k_e_n_d/HMS/preview-mhc-reminders/.*$': 'HMS-P-MHC',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports(?:/[^/]+)+/$': 'HMS-P-MHC',
 
      #Investigation Reports (RD):      
@@ -207,7 +209,8 @@ PAGE_MAPPING = {
 
     #Summary:    
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
-    '/_b_a_c_k_e_n_d/HMS/summary-type/': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/summary-type/?.*$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/summary-heading/?.*$': 'HMS-P-SUM',                  
     '/_b_a_c_k_e_n_d/HMS/summaries/create/': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/approve-summary(?:/[^/]+)+/$': 'HMS-P-SUMA',                  
     r'^/_b_a_c_k_e_n_d/HMS/delete-summary(?:/[^/]+)+/$': 'HMS-P-SUMD',                  
