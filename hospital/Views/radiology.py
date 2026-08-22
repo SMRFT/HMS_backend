@@ -418,7 +418,9 @@ def get_investigations(request):
         patients = list(patient_collection.find(
             patient_filter,
             {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'middleName': 1,
-             'lastName': 1, 'gender': 1}
+             'lastName': 1, 'gender': 1, 'address': 1, 'address1': 1, 'address2': 1,
+             'city': 1, 'area': 1, 'pincode': 1, 'state': 1, 'door_no': 1, 'street': 1,
+             'mobilePhone': 1, 'mobile_number': 1}
         ))
         patient_map = {p['uhid']: p for p in patients}
 
@@ -520,6 +522,19 @@ def get_investigations(request):
             base['middleName']  = middle_name
             base['lastName']    = last_name
             base['gender']      = gender
+
+            # Address resolution
+            addr_parts = [
+                patient.get('door_no'),
+                patient.get('street') or patient.get('address1') or patient.get('address'),
+                patient.get('address2') or patient.get('area'),
+                patient.get('city'),
+                patient.get('state'),
+                patient.get('pincode')
+            ]
+            full_addr = ', '.join([str(p).strip() for p in addr_parts if p and str(p).strip()])
+            base['address'] = full_addr or record.get('address', '') or record.get('patientAddress', '') or ''
+            base['patientType'] = 'IP' if record.get('ipNumber') else (record.get('patientType') or record.get('customerType') or 'OP')
 
             # ── Doctor name ───────────────────────────────────────────────────
             doc_val = record.get('doctor', '')

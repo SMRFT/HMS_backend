@@ -52,6 +52,7 @@ from .Views import (
     DoctorFeeCuts,
     MHC,
     vaccination,
+    mrd,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -660,7 +661,13 @@ urlpatterns = [
     path('mhc_report/', MHC.mhc_report, name='mhc_report'),
     path('mhc_dashboard/', MHC.mhc_dashboard, name='mhc_dashboard'),
 
+    # MRD (Medical Records Department)
+    path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),
+    path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
+    path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
+
 ]
+
 
 
 

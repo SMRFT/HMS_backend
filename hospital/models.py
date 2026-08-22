@@ -2561,3 +2561,80 @@ class SummaryHeading(AuditModel):
         return f"{self.headingNo} - {self.heading}"
 
 
+class MRD(AuditModel):
+    STATUS_CHOICES = [
+        ('Pending', 'Pending'),
+        ('Received', 'Received'),
+        ('Scanned', 'Scanned'),
+    ]
+    mrd_id        = models.CharField(max_length=50, primary_key=True, editable=False)
+    ip_no         = models.CharField(max_length=50, unique=True, db_index=True)
+    uhid          = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    status        = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    
+    received_date = models.DateTimeField(null=True, blank=True)
+    received_by   = models.CharField(max_length=100, null=True, blank=True)
+    
+    scanned_date  = models.DateTimeField(null=True, blank=True)
+    scanned_by    = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Error tracking (Nurse & Doctor error)
+    is_error            = models.BooleanField(default=False)
+    nurse_error         = models.TextField(blank=True, null=True)
+    doctor_error        = models.TextField(blank=True, null=True)
+    is_error_resolved   = models.BooleanField(default=False)
+    error_reported_by   = models.CharField(max_length=100, null=True, blank=True)
+    error_reported_date = models.DateTimeField(null=True, blank=True)
+    error_resolved_by   = models.CharField(max_length=100, null=True, blank=True)
+    error_resolved_date = models.DateTimeField(null=True, blank=True)
+
+    is_active     = models.BooleanField(default=True)
+
+
+
+    class Meta:
+        db_table = "hospital_mrd"
+        ordering = ["-created_date"]
+
+    @classmethod
+    def _generate_next_id(cls):
+        try:
+            import datetime
+            today = datetime.date.today()
+            year = today.year
+            if today.month < 4:
+                fy = f"{str(year - 1)[-2:]}{str(year)[-2:]}"
+            else:
+                fy = f"{str(year)[-2:]}{str(year + 1)[-2:]}"
+            prefix = f"MRD/{fy}/"
+
+            existing_ids = list(
+                cls.objects.filter(mrd_id__startswith=prefix).values_list("mrd_id", flat=True)
+            )
+
+            max_num = 0
+            for ext_id in existing_ids:
+                if isinstance(ext_id, str) and ext_id.startswith(prefix):
+                    num_part = ext_id[len(prefix):]
+                    try:
+                        val = int(num_part)
+                        if val > max_num:
+                            max_num = val
+                    except ValueError:
+                        pass
+
+            next_num = max_num + 1
+            return f"{prefix}{next_num:06d}"
+        except Exception:
+            return "MRD/000001"
+
+    def save(self, *args, **kwargs):
+        if self._state.adding or not self.mrd_id:
+            self.mrd_id = self._generate_next_id()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.mrd_id} | {self.ip_no} ({self.status})"
+
+
+
