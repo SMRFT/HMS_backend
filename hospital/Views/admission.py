@@ -1,7 +1,11 @@
 from decimal import Decimal, InvalidOperation
+import os
+import mimetypes
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
-from django.http import JsonResponse
+from rest_framework.permissions import AllowAny
+from django.http import JsonResponse, FileResponse
+from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -12,6 +16,34 @@ import traceback
 import json
 import ast
 from datetime import datetime, date
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Serve MLC Document endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_mlc_doc(request, filename):
+    try:
+        clean_name = filename.replace("mlc_docs/", "").replace("mlc_docs\\", "").strip()
+        # Look in mlc_docs folder first, then BASE_DIR
+        file_path = os.path.join(settings.BASE_DIR, "mlc_docs", clean_name)
+        if not os.path.exists(file_path):
+            file_path = os.path.join(settings.BASE_DIR, filename)
+        if not os.path.exists(file_path):
+            base_name = os.path.basename(filename)
+            file_path = os.path.join(settings.BASE_DIR, "mlc_docs", base_name)
+        if not os.path.exists(file_path):
+            return JsonResponse({"error": "File not found"}, status=404)
+        
+        mime_type, _ = mimetypes.guess_type(file_path)
+        mime_type = mime_type or 'application/octet-stream'
+        response = FileResponse(open(file_path, 'rb'), content_type=mime_type)
+        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}"'
+        return response
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,30 +75,47 @@ def _safe_list(value):
     return result if isinstance(result, list) else []
 
 
+def _normalize_age_type(val):
+    if not val:
+        return "Y"
+    v = str(val).strip().upper()
+    if v.startswith("Y"):
+        return "Y"
+    elif v.startswith("M"):
+        return "M"
+    elif v.startswith("D"):
+        return "D"
+    return "Y"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Age from DOB helper
-# Returns age as a formatted string e.g. "34Y" or "34Y 3M"
+# Returns (age_number, age_type) e.g. (25, "Y") or (6, "M") or (15, "D")
 # ─────────────────────────────────────────────────────────────────────────────
-def _calc_age_from_dob(dob_value):
+def _calc_age_and_type_from_dob(dob_value):
     """
     Accepts a date, datetime, or ISO string.
-    Returns a concise age string like "34Y" or "34Y 3M 10D".
-    Returns None if dob_value is falsy or unparseable.
+    Calculates age and unit: Y for years, M for months, D for days.
+    Returns: (age_number, age_type) e.g. (25, "Y"), (6, "M"), (15, "D")
     """
     if not dob_value:
-        return None
+        return None, ""
     try:
-        if isinstance(dob_value, (date, datetime)):
-            dob = dob_value if isinstance(dob_value, date) else dob_value.date()
+        if isinstance(dob_value, datetime):
+            dob = dob_value.date()
+        elif isinstance(dob_value, date):
+            dob = dob_value
         elif isinstance(dob_value, str):
             dob_value = dob_value.strip()
             if not dob_value:
-                return None
-            # Handle ISO datetime strings
+                return None, ""
             if "T" in dob_value:
-                dob = datetime.fromisoformat(dob_value.replace("Z", "+00:00")).date()
+                dob = parse_datetime(dob_value)
+                if dob:
+                    dob = dob.date()
+                else:
+                    return None, ""
             else:
-                # Try common date formats
                 for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
                     try:
                         dob = datetime.strptime(dob_value, fmt).date()
@@ -74,9 +123,9 @@ def _calc_age_from_dob(dob_value):
                     except ValueError:
                         continue
                 else:
-                    return None
+                    return None, ""
         else:
-            return None
+            return None, ""
 
         today = date.today()
         years  = today.year  - dob.year
@@ -91,19 +140,30 @@ def _calc_age_from_dob(dob_value):
             months += 12
 
         if years >= 1:
-            return f"{years}Y"
+            return years, "Y"
         elif months >= 1:
-            return f"{months}M"
+            return months, "M"
         else:
-            return f"{days}D"
+            return max(0, days), "D"
     except Exception:
-        return None
+        return None, ""
+
+
+def _calc_age_from_dob(dob_value):
+    """
+    Accepts a date, datetime, or ISO string.
+    Returns a formatted age string like "25 Years" or "6 Months" or "15 Days".
+    """
+    num, unit = _calc_age_and_type_from_dob(dob_value)
+    if num is not None and unit:
+        return f"{num} {unit}"
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _sync_to_mongo
 # ─────────────────────────────────────────────────────────────────────────────
-def _sync_to_mongo(ip, room_details, shifting_details, advance_payments):
+def _sync_to_mongo(ip, room_details, shifting_details, advance_payments, extra_fields=None):
     try:
         import os
         from pymongo import MongoClient
@@ -111,13 +171,16 @@ def _sync_to_mongo(ip, room_details, shifting_details, advance_payments):
         if not MONGO_URI:
             return
         client = MongoClient(MONGO_URI)
+        update_doc = {
+            "room_details":       room_details       if isinstance(room_details,       list) else _safe_list(room_details),
+            "roomShitingDetails": shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details),
+            "advance_payments":   advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments),
+        }
+        if extra_fields and isinstance(extra_fields, dict):
+            update_doc.update(extra_fields)
         client["HMS"]["hospital_admission"].update_one(
             {"ipNumber": str(ip)},
-            {"$set": {
-                "room_details":       room_details       if isinstance(room_details,       list) else _safe_list(room_details),
-                "roomShitingDetails": shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details),
-                "advance_payments":   advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments),
-            }}
+            {"$set": update_doc}
         )
     except Exception as ex:
         print(f"[_sync_to_mongo] Failed for {ip}: {ex}")
@@ -132,7 +195,7 @@ def _sync_advance_to_mongo(ip, adm_obj, payments_list):
     )
 
 
-def _save_admission(adm, room_details, shifting_details, advance_payments):
+def _save_admission(adm, room_details, shifting_details, advance_payments, extra_fields=None):
     rd  = room_details       if isinstance(room_details,       list) else _safe_list(room_details)
     sd  = shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details)
     ap  = advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments)
@@ -142,7 +205,26 @@ def _save_admission(adm, room_details, shifting_details, advance_payments):
     adm.advance_payments   = ap
 
     adm.save()
-    _sync_to_mongo(adm.ipNumber, rd, sd, ap)
+    sync_extra = {
+        "customer_type":      getattr(adm, "customer_type", "General") or "General",
+        "company_code":       getattr(adm, "company_code", "") or "",
+        "insurance_company":  getattr(adm, "insurance_company", "") or "",
+        "age":                getattr(adm, "age", None),
+        "age_type":           getattr(adm, "age_type", "") or "",
+        "mlc_type":           getattr(adm, "mlc_type", "") or "",
+        "mlc_doc":            getattr(adm, "mlc_doc", "") or "",
+        "mlc_remarks":        getattr(adm, "mlc_remarks", "") or "",
+        "is_edited":          getattr(adm, "is_edited", False),
+        "edited_by":          getattr(adm, "edited_by", None),
+        "edited_Reason":      getattr(adm, "edited_Reason", None),
+        "edit_history":       _safe_list(getattr(adm, "edit_history", [])),
+        "is_cancelled":       getattr(adm, "is_cancelled", False),
+        "cancelled_by":       getattr(adm, "cancelled_by", None),
+        "cancelled_Reason":   getattr(adm, "cancelled_Reason", None),
+    }
+    if extra_fields and isinstance(extra_fields, dict):
+        sync_extra.update(extra_fields)
+    _sync_to_mongo(adm.ipNumber, rd, sd, ap, sync_extra)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,7 +237,7 @@ def _build_patient_map(hospital_code):
         if not key:
             continue
         dob = getattr(patient, "dob", None) or getattr(patient, "dateOfBirth", None)
-        age_from_dob = _calc_age_from_dob(dob)
+        calc_num, calc_unit = _calc_age_and_type_from_dob(dob)
         patient_map[key] = {
             "uhid":                 key,
             "salutation":           str(patient.salutation  or ""),
@@ -163,7 +245,8 @@ def _build_patient_map(hospital_code):
             "middleName":           str(getattr(patient, "middleName", "") or ""),
             "lastName":             str(patient.lastName    or ""),
             "dob":                  str(dob or ""),
-            "age":                  age_from_dob or patient.age,
+            "age":                  calc_num if calc_num is not None else patient.age,
+            "age_type":             calc_unit or getattr(patient, "age_type", "") or "Years",
             "gender":               str(patient.gender      or ""),
             "mobilePhone":          str(patient.mobilePhone or ""),
             "permanent_address":    str(getattr(patient, "permanent_address", "") or ""),
@@ -172,7 +255,7 @@ def _build_patient_map(hospital_code):
             "city":                 str(getattr(patient, "city",    "") or ""),
             "state":                str(getattr(patient, "state",   "") or ""),
             "customerType":         str(getattr(patient, "customer_type", "") or
-                                        getattr(patient, "customerType", "") or ""),
+                                        getattr(patient, "customerType", "") or "General"),
             "insuranceCompanyName": "",
             "company_code":         str(getattr(patient, "company_code", "") or ""),
         }
@@ -187,9 +270,11 @@ def _enrich_with_patient(adm_data, hospital_code):
         pt = Patient.objects.filter(hospital_code=hospital_code, uhid=uhid).first()
         if not pt:
             return adm_data
-        ins_name = ""
-        company_code = str(getattr(pt, "company_code", "") or "")
-        if company_code:
+        
+        # Insurance name determination: prefer admission's company_code/insurance_company, fallback to patient
+        company_code = str(adm_data.get("company_code") or getattr(pt, "company_code", "") or "").strip()
+        ins_name = str(adm_data.get("insurance_company") or adm_data.get("insuranceCompanyName") or "").strip()
+        if not ins_name and company_code:
             try:
                 prov = InsuranceProvider.objects.get(company_code=company_code)
                 ins_name = prov.company_name
@@ -198,14 +283,16 @@ def _enrich_with_patient(adm_data, hospital_code):
 
         # Calculate age from DOB; fall back to stored age
         dob = getattr(pt, "dob", None) or getattr(pt, "dateOfBirth", None)
-        age_from_dob = _calc_age_from_dob(dob)
+        calc_num, calc_unit = _calc_age_and_type_from_dob(dob)
 
         adm_data["salutation"]           = pt.salutation or ""
         adm_data["firstName"]            = pt.firstName  or ""
         adm_data["middleName"]           = getattr(pt, "middleName", "") or ""
         adm_data["lastName"]             = pt.lastName   or ""
         adm_data["dob"]                  = str(dob or "")
-        adm_data["age"]                  = age_from_dob or pt.age
+        if adm_data.get("age") is None:
+            adm_data["age"]              = calc_num if calc_num is not None else pt.age
+        adm_data["age_type"]             = _normalize_age_type(adm_data.get("age_type") or calc_unit or getattr(pt, "age_type", "Y"))
         adm_data["gender"]               = pt.gender     or ""
         adm_data["mobilePhone"]          = pt.mobilePhone or ""
         adm_data["permanent_address"]    = getattr(pt, "permanent_address", "") or ""
@@ -213,9 +300,14 @@ def _enrich_with_patient(adm_data, hospital_code):
         adm_data["zipcode"]              = getattr(pt, "zipcode", "") or ""
         adm_data["city"]                 = getattr(pt, "city",    "") or ""
         adm_data["state"]                = getattr(pt, "state",   "") or ""
-        adm_data["customerType"]         = str(getattr(pt, "customer_type", "") or
-                                               getattr(pt, "customerType", "") or "")
+        if not adm_data.get("customerType") and not adm_data.get("customer_type"):
+            adm_data["customerType"]     = str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or "General")
+            adm_data["customer_type"]    = adm_data["customerType"]
+        else:
+            adm_data["customerType"]     = adm_data.get("customerType") or adm_data.get("customer_type")
+            adm_data["customer_type"]    = adm_data["customerType"]
         adm_data["insuranceCompanyName"] = ins_name
+        adm_data["insurance_company"]    = ins_name
         adm_data["company_code"]         = company_code
     except Exception:
         pass
@@ -401,20 +493,30 @@ def op_patient_detail_by_uhid(request, uhid):
         serializer = PatientSerializer(patient)
         data = dict(serializer.data)
 
-        # Calculate age from DOB and overwrite the age field
+        # Calculate age and age_type from DOB and overwrite the age field
         dob = data.get("dob") or data.get("dateOfBirth") or getattr(patient, "dob", None) or getattr(patient, "dateOfBirth", None)
-        age_from_dob = _calc_age_from_dob(dob)
-        if age_from_dob:
-            data["age"]     = age_from_dob
-        data["dob"]         = str(dob or "")
+        calc_age, calc_age_type = _calc_age_and_type_from_dob(dob)
+        if calc_age is not None:
+            data["age"]      = calc_age
+            data["age_type"] = _normalize_age_type(calc_age_type)
+        else:
+            data["age_type"] = _normalize_age_type(getattr(patient, "age_type", "Y"))
+        data["dob"]          = str(dob or "")
+
+        # Customer type
+        cust_type = str(data.get('customer_type') or getattr(patient, 'customer_type', '') or getattr(patient, 'customerType', '') or "General")
+        data['customer_type'] = cust_type
+        data['customerType']  = cust_type
 
         # Insurance name
         company_code = (data.get('company_code') or "").strip()
         if company_code:
             insurance = InsuranceProvider.objects.filter(company_code=company_code).first()
             data['company_name'] = insurance.company_name if insurance else None
+            data['insuranceCompanyName'] = insurance.company_name if insurance else None
         else:
             data['company_name'] = None
+            data['insuranceCompanyName'] = None
 
         return Response(data)
     except Exception as e:
@@ -432,7 +534,6 @@ def admission_view(request):
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
     outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
-
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
         try:
@@ -487,30 +588,39 @@ def admission_view(request):
                     "consultingDoctor":  adm.consultingDoctor  or "",
                     "packageNo":         adm.packageName       or "",
                     "reasonForAdmission":adm.reasonForAdmission or "",
+                    "customer_type":     getattr(adm, "customer_type", "General") or "General",
+                    "customerType":      getattr(adm, "customer_type", "General") or "General",
+                    "company_code":      getattr(adm, "company_code", "") or "",
+                    "insurance_company": getattr(adm, "insurance_company", "") or "",
+                    "insuranceCompanyName": getattr(adm, "insurance_company", "") or "",
+                    "age":               getattr(adm, "age", None),
+                    "age_type":          getattr(adm, "age_type", "") or "",
+                    "mlc_type":          adm.mlc_type     or "",
+                    "mlc_doc":           adm.mlc_doc      or "",
+                    "mlc_remarks":       adm.mlc_remarks  or "",
                     "room_details":      _safe_list(adm.room_details),
                     "roomShitingDetails":_safe_list(adm.roomShitingDetails),
                     "advance_payments":  _safe_list(adm.advance_payments),
-                    # ── NEW status fields ──────────────────────────────────────
+                    # ── Cancellation & Edit status fields ─────────────────────
                     "is_cancelled":      bool(getattr(adm, "is_cancelled",    False)),
                     "cancelled_by":      getattr(adm, "cancelled_by",         None),
                     "cancelled_Reason":  getattr(adm, "cancelled_Reason",     None),
                     "is_edited":         bool(getattr(adm, "is_edited",       False)),
                     "edited_by":         getattr(adm, "edited_by",            None),
                     "edited_Reason":     getattr(adm, "edited_Reason",        None),
+                    "edit_history":      _safe_list(getattr(adm, "edit_history", [])),
                     "ward_status":       getattr(adm, "ward_status",          ""),
                     # ──────────────────────────────────────────────────────────
                     "is_admitted":       bool(adm.is_admitted),
                     "is_discharged":     bool(adm.is_discharged),
                     "ipserial_number":   adm.ipserial_number,
-                    "mlc_type":          adm.mlc_type     or "",
-                    "mlc_remarks":       adm.mlc_remarks  or "",
                     "hospital_code":     adm.hospital_code,
                     "branch_code":       adm.branch_code,
                     "outlet_code":       adm.outlet_code,
                     "created_by":        adm.created_by,
-                    "created_date":      adm.created_date.isoformat()       if adm.created_date       else None,
+                    "created_date":      adm.created_date.isoformat()       if hasattr(adm.created_date, 'isoformat') else adm.created_date if adm.created_date else None,
                     "lastmodified_by":   adm.lastmodified_by,
-                    "lastmodified_date": adm.lastmodified_date.isoformat()   if adm.lastmodified_date   else None,
+                    "lastmodified_date": adm.lastmodified_date.isoformat()  if hasattr(adm.lastmodified_date, 'isoformat') else adm.lastmodified_date if adm.lastmodified_date else None,
                 }
                 _enrich_with_patient(d, hospital_code)
                 result.append(d)
@@ -564,45 +674,103 @@ def admission_view(request):
                 "startDateTime":  now_iso,
                 "endDateTime":    None,
             }]
+
+            # Extract customer type and insurance
+            customer_type = str(data.get("customer_type") or data.get("customerType") or "General").strip() or "General"
+            company_code = str(data.get("company_code") or data.get("insuranceProviderCode") or "").strip()
+            insurance_company = str(data.get("insurance_company") or data.get("insuranceCompanyName") or "").strip()
+            if customer_type == "Insurance" and company_code and not insurance_company:
+                try:
+                    prov = InsuranceProvider.objects.get(company_code=company_code)
+                    insurance_company = prov.company_name
+                except Exception:
+                    insurance_company = company_code
+
+            # Extract age & age_type (from request or calculated from Patient DOB)
+            age_val = data.get("age")
+            age_type_val = str(data.get("age_type") or data.get("ageType") or "").strip()
+            patient_obj = Patient.objects.filter(hospital_code=hospital_code, uhid=uhid).first()
+            if age_val is not None and str(age_val).isdigit():
+                final_age = int(age_val)
+                final_age_type = _normalize_age_type(age_type_val)
+            elif patient_obj:
+                p_dob = getattr(patient_obj, "dob", None) or getattr(patient_obj, "dateOfBirth", None)
+                calc_n, calc_u = _calc_age_and_type_from_dob(p_dob)
+                final_age = calc_n if calc_n is not None else getattr(patient_obj, "age", None)
+                final_age_type = _normalize_age_type(calc_u or getattr(patient_obj, "age_type", "Y"))
+            else:
+                final_age = None
+                final_age_type = _normalize_age_type(age_type_val)
+
+            # MLC handling (file upload + remarks)
+            mlc_type = str(data.get("mlc_type") or "").strip() or None
+            mlc_remarks = str(data.get("mlc_remarks") or "").strip() or None
+            mlc_doc_name = None
+            if request.FILES.get("mlc_doc"):
+                mlc_file = request.FILES["mlc_doc"]
+                try:
+                    from django.core.files.storage import default_storage
+                    saved_path = default_storage.save(f"mlc_docs/{mlc_file.name}", mlc_file)
+                    mlc_doc_name = saved_path
+                except Exception:
+                    mlc_doc_name = mlc_file.name
+            elif data.get("mlc_doc") and isinstance(data.get("mlc_doc"), str):
+                mlc_doc_name = data.get("mlc_doc")
+
             adm = Admission.objects.create(
                 uhid=uhid, ipNumber=ip_number, admissionDateTime=admission_dt,
                 hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
                 admittingDoctor=str(data.get('admittingDoctor') or ""),
                 consultingDoctor=data.get('consultingDoctor'),
                 packageName=str(data.get('packageNo') or "") if data.get('packageNo') else "",
+                customer_type=customer_type, company_code=company_code, insurance_company=insurance_company,
+                age=final_age, age_type=final_age_type,
+                mlc_type=mlc_type, mlc_doc=mlc_doc_name, mlc_remarks=mlc_remarks,
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
-                # ── NEW fields ──────────────────────────────────────────────
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
                 is_edited=False,    edited_by=None,    edited_Reason=None,
+                edit_history=[],
                 ward_status=None,
-                # ────────────────────────────────────────────────────────────
                 is_discharged=False, is_admitted=True,
                 created_by=employee_id, created_date=timezone.now(),
                 lastmodified_by=employee_id, lastmodified_date=timezone.now(),
             )
-            _sync_to_mongo(ip_number, room_details, [], [])
+            _sync_to_mongo(ip_number, room_details, [], [], {
+                "customer_type": customer_type,
+                "company_code": company_code,
+                "insurance_company": insurance_company,
+                "age": final_age,
+                "age_type": final_age_type,
+                "mlc_type": mlc_type,
+                "mlc_doc": mlc_doc_name,
+                "mlc_remarks": mlc_remarks,
+                "edit_history": [],
+            })
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
                 "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                 "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
+                "customer_type": customer_type, "customerType": customer_type,
+                "company_code": company_code,
+                "insurance_company": insurance_company, "insuranceCompanyName": insurance_company,
+                "age": final_age, "age_type": final_age_type,
+                "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "is_edited": False,    "edited_by": None,    "edited_Reason": None,
+                "edit_history": [],
                 "ward_status": None,
                 "is_admitted": True, "is_discharged": False,
-                "ipserial_number": adm.ipserial_number, "mlc_type": adm.mlc_type or "", "mlc_remarks": adm.mlc_remarks or "",
+                "ipserial_number": adm.ipserial_number,
             }
             _enrich_with_patient(d, hospital_code)
             return JsonResponse({"success": True, "message": "Admission created successfully", "data": d}, status=201)
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"success": False, "error": str(e)}, status=500)
-        
 
-        
-        
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET / PUT / DELETE  /admissions/<ipNumber>/
@@ -633,22 +801,24 @@ def admission_detail(request, ipNumber):
                 if not uhid: return {}
                 pt = Patient.objects.filter(hospital_code=hospital_code, uhid=uhid).first()
                 if not pt: return {}
-                ins_name = ""
-                if getattr(pt, 'company_code', None):
+                company_code = getattr(adm, 'company_code', None) or getattr(pt, 'company_code', None) or ""
+                ins_name = getattr(adm, 'insurance_company', None) or ""
+                if not ins_name and company_code:
                     try:
-                        prov = InsuranceProvider.objects.get(company_code=pt.company_code)
+                        prov = InsuranceProvider.objects.get(company_code=company_code)
                         ins_name = prov.company_name
                     except Exception:
-                        ins_name = pt.company_code or ""
+                        ins_name = company_code
                 dob = getattr(pt, "dob", None) or getattr(pt, "dateOfBirth", None)
-                age_from_dob = _calc_age_from_dob(dob)
+                calc_num, calc_unit = _calc_age_and_type_from_dob(dob)
                 return {
                     'salutation':    pt.salutation or "",
                     'firstName':     pt.firstName  or "",
                     'middleName':    getattr(pt, "middleName", "") or "",
                     'lastName':      pt.lastName   or "",
                     'dob':           str(dob or ""),
-                    'age':           age_from_dob or pt.age,
+                    'age':           getattr(adm, "age", None) if getattr(adm, "age", None) is not None else (calc_num if calc_num is not None else pt.age),
+                    'age_type':      getattr(adm, "age_type", "") or calc_unit or getattr(pt, "age_type", "Years") or "Years",
                     'gender':        pt.gender     or "",
                     'mobilePhone':   pt.mobilePhone or "",
                     'permanent_address': getattr(pt, "permanent_address", "") or "",
@@ -656,9 +826,11 @@ def admission_detail(request, ipNumber):
                     'zipcode': getattr(pt, "zipcode", "") or "",
                     'city':    getattr(pt, "city",    "") or "",
                     'state':   getattr(pt, "state",   "") or "",
-                    'customerType': str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or ""),
+                    'customerType': getattr(adm, "customer_type", None) or str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or "General"),
+                    'customer_type': getattr(adm, "customer_type", None) or str(getattr(pt, "customer_type", "") or getattr(pt, "customerType", "") or "General"),
                     'insuranceCompanyName': ins_name,
-                    'company_code': getattr(pt, "company_code", "") or "",
+                    'insurance_company': ins_name,
+                    'company_code': getattr(adm, "company_code", "") or getattr(pt, "company_code", "") or "",
                 }
             except Exception:
                 return {}
@@ -681,16 +853,25 @@ def admission_detail(request, ipNumber):
                 'roomNo':  current_room.get('roomNo', ''),
                 'bedNo':   current_room.get('bedNo',  ''),
                 'reasonForAdmission': adm.reasonForAdmission or "",
-                'mlc_type':   adm.mlc_type    or "",
-                'mlc_remarks':adm.mlc_remarks  or "",
-                'advance_payments': ap,
-                # ── NEW status fields ────────────────────────────────────────
+                'customer_type':     getattr(adm, "customer_type", "General") or "General",
+                'customerType':      getattr(adm, "customer_type", "General") or "General",
+                'company_code':      getattr(adm, "company_code", "") or "",
+                'insurance_company': getattr(adm, "insurance_company", "") or "",
+                'insuranceCompanyName': getattr(adm, "insurance_company", "") or "",
+                'age':               getattr(adm, "age", None),
+                'age_type':          getattr(adm, "age_type", "") or "",
+                'mlc_type':          adm.mlc_type    or "",
+                'mlc_doc':           adm.mlc_doc     or "",
+                'mlc_remarks':       adm.mlc_remarks or "",
+                'advance_payments':  ap,
+                # ── Cancellation & Edit status fields ─────────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
                 'cancelled_by':     getattr(adm, "cancelled_by",         None),
                 'cancelled_Reason': getattr(adm, "cancelled_Reason",     None),
                 'is_edited':        bool(getattr(adm, "is_edited",       False)),
                 'edited_by':        getattr(adm, "edited_by",            None),
                 'edited_Reason':    getattr(adm, "edited_Reason",        None),
+                'edit_history':     _safe_list(getattr(adm, "edit_history", [])),
                 'ward_status':      getattr(adm, "ward_status",          ""),
                 # ────────────────────────────────────────────────────────────
                 'is_admitted':       bool(adm.is_admitted),
@@ -756,6 +937,41 @@ def admission_detail(request, ipNumber):
                     val = get_val(data.get('packageNo'))
                     adm.packageName = str(val) if val else ""
 
+                if 'customer_type' in data or 'customerType' in data:
+                    c_type = str(get_val(data.get('customer_type')) or get_val(data.get('customerType')) or 'General')
+                    adm.customer_type = c_type
+                if 'company_code' in data or 'insuranceProviderCode' in data:
+                    c_code = str(get_val(data.get('company_code')) or get_val(data.get('insuranceProviderCode')) or '')
+                    adm.company_code = c_code
+                if 'insurance_company' in data or 'insuranceCompanyName' in data:
+                    i_comp = str(get_val(data.get('insurance_company')) or get_val(data.get('insuranceCompanyName')) or '')
+                    adm.insurance_company = i_comp
+                elif adm.customer_type == "Insurance" and adm.company_code:
+                    try:
+                        prov = InsuranceProvider.objects.get(company_code=adm.company_code)
+                        adm.insurance_company = prov.company_name
+                    except Exception:
+                        pass
+
+                if 'age' in data:
+                    age_v = get_val(data.get('age'))
+                    if age_v is not None and str(age_v).isdigit():
+                        adm.age = int(age_v)
+                if 'age_type' in data or 'ageType' in data:
+                    at_v = str(get_val(data.get('age_type')) or get_val(data.get('ageType')) or '')
+                    if at_v:
+                        adm.age_type = _normalize_age_type(at_v)
+
+                # Handle MLC Document file upload on edit if provided
+                if request.FILES.get("mlc_doc"):
+                    mlc_file = request.FILES["mlc_doc"]
+                    try:
+                        from django.core.files.storage import default_storage
+                        saved_path = default_storage.save(f"mlc_docs/{mlc_file.name}", mlc_file)
+                        adm.mlc_doc = saved_path
+                    except Exception:
+                        adm.mlc_doc = mlc_file.name
+
                 new_room_no = str(get_val(data.get("roomNo")) or "").strip()
                 new_bed_no  = str(get_val(data.get("bedNo"))  or "").strip()
 
@@ -780,6 +996,15 @@ def admission_detail(request, ipNumber):
                         "lastmodified_by": employee_id, "lastmodified_date": timezone.now().isoformat(),
                     })
 
+                # Append to edit_history array
+                edit_history = _safe_list(getattr(adm, "edit_history", []))
+                edit_entry = {
+                    "edited_by": str(employee_id),
+                    "edited_date": timezone.now().isoformat(),
+                    "edited_reason": edit_reason,
+                }
+                edit_history.append(edit_entry)
+                adm.edit_history       = edit_history
                 adm.is_edited          = True
                 adm.edited_by          = employee_id
                 adm.edited_Reason      = edit_reason

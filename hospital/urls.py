@@ -87,6 +87,8 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
+    path('admission-mlc-doc/<path:filename>/', admission.get_mlc_doc, name='admission_mlc_doc'),
+    path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
     
     # Inventory URLs
     # Vendor URLs
@@ -235,6 +237,7 @@ urlpatterns = [
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),
+    path("discharge-billing/<str:pk>/cancel/", discharge.cancel_discharge_billing, name="discharge-billing-cancel"),
     path("dialysis-discharge-summary/", discharge.create_dialysis_discharge_summary, name="dialysis-discharge-summary"),
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
 
@@ -322,6 +325,7 @@ urlpatterns = [
     # Investigation Billing
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
+    path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
     path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
     path('packages/', departmentBilling.get_packages, name='get_packages'),

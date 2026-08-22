@@ -821,12 +821,15 @@ class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
-    age_type            = models.CharField(max_length=10, default='')
+    age_type            = models.CharField(max_length=10, default='Y', blank=True, null=True)
     age     = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)
     packageName         = models.CharField(max_length=100, blank=True, null=True)
+    customer_type       = models.CharField(max_length=100, default='General', blank=True, null=True)
+    company_code        = models.CharField(max_length=100, blank=True, null=True)
+    insurance_company   = models.CharField(max_length=200, blank=True, null=True)
     room_details        = models.JSONField(default=list)
     roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
@@ -844,6 +847,7 @@ class Admission(AuditModel):
     is_edited           = models.BooleanField(default=False)
     edited_by           = models.CharField(max_length=100, blank=True, null=True)
     edited_Reason       = models.TextField(blank=True, null=True)
+    edit_history        = models.JSONField(default=list, blank=True, null=True)
  
     # ── Ward / admission status ───────────────────────────────────────────────
     ward_status         = models.CharField(max_length=50, blank=True, null=True)
@@ -915,21 +919,22 @@ class DischargeBilling(AuditModel):
     non_tax_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     gst_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    room_tax          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     discount_percent  = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     discount_amount   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     disc_reason       = models.CharField(max_length=300, blank=True, null=True)
-    item_disc         = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_disc        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     net_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)   
 
     remarks           = models.TextField(blank=True, null=True)
 
-    # ── Estimate→Bill traceability ────────────────────────────────────────────
-    converted_from_id = models.IntegerField(blank=True, null=True)   # pk of original estimate
-    is_active         = models.BooleanField(default=True)
+    # ── Cancellation & Edit History ─────────────────────────────────────────
+    is_cancelled      = models.BooleanField(default=False)
+    cancelled_by      = models.CharField(max_length=100, blank=True, null=True)
+    cancelled_date    = models.DateTimeField(blank=True, null=True)
+    cancelled_reason  = models.TextField(blank=True, null=True)
+    edit_history      = models.JSONField(default=list)
+
     next_visit_date   = models.DateField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
