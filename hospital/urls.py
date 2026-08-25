@@ -669,6 +669,7 @@ urlpatterns = [
     path('mhc_save_details/', MHC.mhc_save_details, name='mhc_save_details'),
     path('mhc_report/', MHC.mhc_report, name='mhc_report'),
     path('mhc_dashboard/', MHC.mhc_dashboard, name='mhc_dashboard'),
+    path('mhc_source/', MHC.mhc_source, name='mhc_source'),
 
     # MRD (Medical Records Department)
     path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),

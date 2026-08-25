@@ -529,6 +529,7 @@ PAGE_MAPPING = {
             r'/_b_a_c_k_e_n_d/HMS/mhc_save_details/?(\\?.*)?$': 'HMS-P-MHPSD',
             r'/_b_a_c_k_e_n_d/HMS/mhc_report/?(\\?.*)?$': 'HMS-P-MHCR',
             r'/_b_a_c_k_e_n_d/HMS/mhc_dashboard/?(\\?.*)?$': 'HMS-P-MHCD',
+            '/_b_a_c_k_e_n_d/HMS/mhc_source/': 'HMS-P-MHCS',
 
         # MRD (Medical Records Department)
         r'/_b_a_c_k_e_n_d/HMS/mrd/discharged-files/?(\\?.*)?$': 'HMS-P-MRD',
@@ -536,7 +537,7 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/mrd/stats/?(\\?.*)?$': 'HMS-P-MRD',
 
 }
-
+ 
 
 PAGE_ACTION_MAPPING = {
     'xxx': {
