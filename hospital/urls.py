@@ -38,6 +38,7 @@ from .Views import (
     Purchase_Requisition,
     front_office_reports,
     registration_updates,
+    op_emr,
     laundry,
     physicalstockentry,
     salesreturn,
@@ -445,7 +446,11 @@ urlpatterns = [
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
     path('advanced-dashboard/stats/', advanced_dashboard.advanced_dashboard_stats, name='advanced_dashboard_stats'),
-    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+    # OP EMR URLs
+    path('op-emr/queue/', op_emr.get_op_doctor_queue, name='get_op_doctor_queue'),
+    path('op-emr/patient-history/', op_emr.get_patient_emr_history, name='get_patient_emr_history'),
+    path('op-emr/save-consultation/', op_emr.save_op_consultation, name='save_op_consultation'),
+    path('op-emr/rx-templates/', op_emr.rx_templates_api, name='rx_templates_api'),
 
     # User Permissions (Dynamic Table)
     path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),

@@ -78,6 +78,8 @@ class Patient(AuditModel):
     home_phone = models.CharField(max_length=15, blank=True, null=True)
     blood_group =models.CharField(max_length=20, blank=True, null=True)
     spouse_name = models.CharField(max_length=100, blank=True, null=True)
+    occupation = models.CharField(max_length=100, blank=True, null=True)
+    annual_income = models.CharField(max_length=100, blank=True, null=True)
 
     # Referred fields
     referredBy = models.CharField(max_length=100, blank=True, null=True)
@@ -2124,6 +2126,7 @@ class CrashCartDailyCheck(models.Model):
     nursing_station = models.CharField(max_length=100) # e.g., "CHEMO WARD"
     item = models.ForeignKey(CrashCartItem, on_delete=models.CASCADE)
     expiry_date = models.CharField(max_length=50, null=True, blank=True) # Expiry date
+    available_qty = models.IntegerField(null=True, blank=True) # Available quantity on date
     is_checked = models.BooleanField(default=False)
     checked_by = models.CharField(max_length=100) # Nurse Name/ID
 
