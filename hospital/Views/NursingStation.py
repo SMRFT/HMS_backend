@@ -264,12 +264,12 @@ def get_wards_list(request):
 def get_location_mapping(request):
     """
     Returns a complete mapping of all rooms to their blocks, categories, and nursing stations.
-    Used for perfect bidirectional filtering on the frontend.
+    Includes room_status and bed_status / is_blocked for room & bed status rendering.
     """
     try:
         rooms = list(mongo_db["hospital_room"].find(
             {"is_active": True},
-            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1, "beds": 1, "capacity": 1}
+            {"room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1, "beds": 1, "capacity": 1, "room_status": 1, "status": 1, "is_blocked": 1}
         ))
         
         # Pre-fetch ID mappings to avoid repeated lookups
@@ -282,7 +282,30 @@ def get_location_mapping(request):
             b_name = r.get("block")
             c_name = r.get("room_category")
             s_name = r.get("nursing_station")
-            
+            r_status = r.get("room_status") or r.get("status") or ""
+            r_blocked = bool(r.get("is_blocked") or str(r_status).strip().lower() == "blocked")
+
+            beds_list = r.get("beds", [])
+            processed_beds = []
+            if isinstance(beds_list, list):
+                for bed in beds_list:
+                    if isinstance(bed, dict):
+                        b_status = bed.get("bed_status") or bed.get("status") or ""
+                        b_blocked = bool(bed.get("is_blocked") or str(b_status).strip().lower() == "blocked" or r_blocked)
+                        processed_beds.append({
+                            "bed_no": bed.get("bed_number") or bed.get("bed_no") or bed.get("bedNumber"),
+                            "bed_number": bed.get("bed_number") or bed.get("bed_no") or bed.get("bedNumber"),
+                            "bed_status": b_status,
+                            "status": b_status,
+                            "is_blocked": b_blocked
+                        })
+                    else:
+                        processed_beds.append({
+                            "bed_no": str(bed),
+                            "bed_number": str(bed),
+                            "is_blocked": r_blocked
+                        })
+
             enriched.append({
                 "room_no": r.get("room_number"),
                 "room_number": r.get("room_number"),
@@ -293,12 +316,16 @@ def get_location_mapping(request):
                 "room_category_id": cats_map.get(c_name),
                 "nursing_station": s_name,
                 "nursing_station_id": wards_map.get(s_name),
-                "beds": r.get("beds", []),
-                "capacity": r.get("capacity", 0)
+                "beds": processed_beds if processed_beds else beds_list,
+                "capacity": r.get("capacity", 0),
+                "room_status": r_status,
+                "status": r_status,
+                "is_blocked": r_blocked
             })
             
         return Response({"success": True, "data": enriched})
     except Exception as e:
+        print("ERROR IN GET_LOCATION_MAPPING:", e)
         return Response({"success": False, "error": str(e)}, status=500)
 
 
@@ -1685,42 +1712,88 @@ def get_crash_cart_items(request):
     except Exception as e:
         return Response({"success": False, "error": str(e)}, status=500)
 
-@api_view(["POST"])
+@api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 def save_crash_cart_daily_check(request):
     try:
-        data = request.data
-        date_str = data.get("date")
-        nursing_station = data.get("nursing_station")
-        checks = data.get("checks", [])
-        checked_by = data.get("auth-employee-name", "Nurse")
+        if request.method == "GET":
+            date_str = request.GET.get("date")
+            nursing_station = request.GET.get("nursing_station")
 
-        if not date_str or not nursing_station:
-            return Response({"success": False, "error": "Date and Nursing Station are required."}, status=400)
+            if not date_str or not nursing_station:
+                return Response({"success": False, "error": "Date and Nursing Station are required."}, status=400)
 
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-        for check in checks:
-            item_id = check.get("item_id")
-            expiry_date = check.get("expiry_date")
-            is_checked = check.get("is_checked", False)
+            items = CrashCartItem.objects.filter(nursing_station=nursing_station).order_by('box_category', 'id')
+            if not items.exists():
+                items = CrashCartItem.objects.all().order_by('box_category', 'id')
 
-            item = CrashCartItem.objects.filter(id=item_id).first()
-            if not item:
-                continue
-
-            obj, created = CrashCartDailyCheck.objects.update_or_create(
+            checks = CrashCartDailyCheck.objects.filter(
                 date=date_obj,
-                nursing_station=nursing_station,
-                item=item,
-                defaults={
+                nursing_station=nursing_station
+            )
+            checks_dict = {check.item_id: check for check in checks}
+
+            data = []
+            for item in items:
+                check = checks_dict.get(item.id)
+                avail_qty = getattr(check, 'available_qty', None) if check else None
+                data.append({
+                    "id": item.id,
+                    "box_category": item.box_category,
+                    "drug_name": item.drug_name,
+                    "required_stock": item.required_stock,
+                    "available_qty": avail_qty if avail_qty is not None else item.required_stock,
+                    "expiry_date": check.expiry_date if check else "",
+                    "is_checked": check.is_checked if check else False,
+                    "checked_by": check.checked_by if check else "",
+                })
+            return Response({"success": True, "data": data})
+
+        elif request.method == "POST":
+            data = request.data
+            date_str = data.get("date")
+            nursing_station = data.get("nursing_station")
+            checks = data.get("checks", [])
+            checked_by = data.get("auth-employee-name", "Nurse")
+
+            if not date_str or not nursing_station:
+                return Response({"success": False, "error": "Date and Nursing Station are required."}, status=400)
+
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+            for check in checks:
+                item_id = check.get("item_id")
+                expiry_date = check.get("expiry_date", "")
+                is_checked = check.get("is_checked", False)
+                available_qty = check.get("available_qty")
+
+                item = CrashCartItem.objects.filter(id=item_id).first()
+                if not item:
+                    continue
+
+                defaults = {
                     "expiry_date": expiry_date,
                     "is_checked": is_checked,
                     "checked_by": checked_by,
                 }
-            )
+                if available_qty is not None:
+                    try:
+                        defaults["available_qty"] = int(available_qty)
+                    except (ValueError, TypeError):
+                        defaults["available_qty"] = item.required_stock
+                else:
+                    defaults["available_qty"] = item.required_stock
 
-        return Response({"success": True, "message": "Daily check saved successfully."})
+                obj, created = CrashCartDailyCheck.objects.update_or_create(
+                    date=date_obj,
+                    nursing_station=nursing_station,
+                    item=item,
+                    defaults=defaults
+                )
+
+            return Response({"success": True, "message": "Daily check saved successfully."})
     except Exception as e:
         import traceback
         print(traceback.format_exc())
@@ -1738,7 +1811,9 @@ def get_crash_cart_monthly_report(request):
             return Response({"success": False, "error": "Month, Year, and Nursing Station are required."}, status=400)
 
         # Get all items
-        items = CrashCartItem.objects.all().order_by('box_category', 'id')
+        items = CrashCartItem.objects.filter(nursing_station=nursing_station).order_by('box_category', 'id')
+        if not items.exists():
+            items = CrashCartItem.objects.all().order_by('box_category', 'id')
         
         # Get all checks for the given month and year
         import calendar
@@ -1758,6 +1833,7 @@ def get_crash_cart_monthly_report(request):
             checks_map[(check.item_id, check.date.day)] = {
                 "is_checked": check.is_checked,
                 "expiry_date": check.expiry_date,
+                "available_qty": getattr(check, 'available_qty', None),
                 "checked_by": check.checked_by
             }
 
@@ -1776,13 +1852,17 @@ def get_crash_cart_monthly_report(request):
             for day in range(1, last_day + 1):
                 check = checks_map.get((item.id, day))
                 if check:
-                    item_row["days"][day] = check["is_checked"]
+                    item_row["days"][day] = {
+                        "is_checked": check["is_checked"],
+                        "available_qty": check["available_qty"] if check["available_qty"] is not None else item.required_stock,
+                        "checked_by": check["checked_by"]
+                    }
                     if check["expiry_date"]:
                         latest_expiry = check["expiry_date"]
                 else:
-                    item_row["days"][day] = False
+                    item_row["days"][day] = None
 
-            item_row["expiry_date"] = latest_expiry # take the most recently noted expiry
+            item_row["expiry_date"] = latest_expiry
             report_data.append(item_row)
 
         return Response({"success": True, "data": report_data})

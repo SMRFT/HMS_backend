@@ -22,8 +22,25 @@ def update_registration_visit(request):
         consulting_fee = data.get('consultingFee')
         total_fees = data.get('totalFees')
         
-        employee_id = data.get('auth-user-id', 'system')
-        hospital_code = data.get('auth-hospital-code', 'system')
+        employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id') or data.get('employee_id') or 'system'
+        hospital_code = request.headers.get('hospital-code') or data.get('auth-hospital-code') or 'system'
+
+        # Resolve employee name for history log
+        user_name = employee_id
+        if employee_id and employee_id != 'system':
+            try:
+                import os
+                from pymongo import MongoClient
+                mongo_host = os.getenv("GLOBAL_DB_HOST")
+                if mongo_host:
+                    client = MongoClient(mongo_host)
+                    global_db = client['Global']
+                    diag_collection = global_db['backend_diagnostics_profile']
+                    u_doc = diag_collection.find_one({"employeeId": employee_id}, {"employeeName": 1})
+                    if u_doc and u_doc.get("employeeName"):
+                        user_name = u_doc.get("employeeName")
+            except Exception:
+                pass
 
         if not bill_number:
             return Response({"success": False, "message": "Bill number is required"}, status=400)
@@ -36,7 +53,7 @@ def update_registration_visit(request):
         # Prepare history log
         history_entry = {
             "date": timezone.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user": employee_id,
+            "user": user_name,
             "changes": {}
         }
         
