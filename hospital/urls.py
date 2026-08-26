@@ -54,6 +54,7 @@ from .Views import (
     MHC,
     vaccination,
     mrd,
+    OPEMR
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -681,6 +682,11 @@ urlpatterns = [
     path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
     path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
 
+
+    # OPEMR
+
+    path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
+    path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
 ]
 
 

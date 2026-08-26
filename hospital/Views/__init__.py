@@ -19,5 +19,7 @@ from . import DoctorFeeCuts
 from . import mhc
 from .MHC import View
 from . import mrd
+from . import OPEMR
+
 
 

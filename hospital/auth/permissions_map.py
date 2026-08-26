@@ -536,6 +536,12 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/mrd/update-status/?(\\?.*)?$': 'HMS-P-MRD',
         r'/_b_a_c_k_e_n_d/HMS/mrd/stats/?(\\?.*)?$': 'HMS-P-MRD',
 
+        # OP EMR
+
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/': 'HMS-P-OPEMRGP',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/': 'HMS-P-OPEMRVE',
+
+
 }
  
 
