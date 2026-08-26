@@ -14,7 +14,9 @@ _global_db = _client["Global"]
 _hms_db = _client["HMS"]
 
 profile_collection = _global_db["backend_diagnostics_profile"]
+department_collection = _global_db["backend_diagnostics_Departments"]
 company_secretary_collection = _hms_db["hospital_licencemasterdetails"]
+
 
 
 # ✅ Thresholds (IMPORTANT: highest → lowest)
@@ -27,22 +29,43 @@ THRESHOLDS = [
 ]
 
 
-# ✅ Get employee email(s) — incharge / respective_person are stored as
-# arrays of employeeId now (multi-select), so this takes a list and
-# returns a list of emails via a single $in query instead of one lookup
-# per id. Also tolerates a lone string for any record that predates the
-# multi-select change.
-def get_employee_emails(employee_ids):
+# ✅ Get employee email(s) & department code(s) — incharge / respective_person
+def get_employee_emails_and_departments(employee_ids):
     if not employee_ids:
-        return []
+        return [], []
     if isinstance(employee_ids, str):
         employee_ids = [employee_ids]
 
     profiles = profile_collection.find(
         {"employeeId": {"$in": employee_ids}},
+        {"email": 1, "department": 1, "_id": 0},
+    )
+    emails = []
+    dept_codes = []
+    for p in profiles:
+        if p.get("email"):
+            emails.append(p["email"].strip())
+        if p.get("department"):
+            dept_codes.append(str(p["department"]).strip())
+    return emails, dept_codes
+
+
+# ✅ Get department email(s) from backend_diagnostics_Departments
+def get_department_emails(department_codes):
+    if not department_codes:
+        return []
+
+    departments = department_collection.find(
+        {"department_code": {"$in": department_codes}},
         {"email": 1, "_id": 0},
     )
-    return [p["email"] for p in profiles if p.get("email")]
+    dept_emails = []
+    for d in departments:
+        email = d.get("email")
+        if email and isinstance(email, str) and email.strip():
+            dept_emails.append(email.strip())
+    return dept_emails
+
 
 
 # ✅ Format date — strips time portion from datetime or date objects
@@ -124,10 +147,21 @@ def run_licence_expiry_check():
 
                 print(f"👉 Triggering {days_before}-day email")
 
-                incharge_emails = get_employee_emails(record.get("incharge"))
-                respective_person_emails = get_employee_emails(record.get("respective_person"))
+                incharge_emails, incharge_depts = get_employee_emails_and_departments(record.get("incharge"))
+                respective_person_emails, respective_depts = get_employee_emails_and_departments(record.get("respective_person"))
+
+                incharge_emails = list(dict.fromkeys(incharge_emails))
+
+                all_dept_codes = list(set(incharge_depts + respective_depts))
+                dept_emails = get_department_emails(all_dept_codes)
+
+                cc_emails = []
+                for mail in respective_person_emails + dept_emails:
+                    if mail not in incharge_emails and mail not in cc_emails:
+                        cc_emails.append(mail)
 
                 print("Incharge Emails:", incharge_emails)
+                print("CC Emails:", cc_emails)
 
                 if not incharge_emails:
                     skipped.append({
@@ -160,7 +194,7 @@ def run_licence_expiry_check():
                         body=build_email_body(record, days_before),
                         from_email=cs_email,
                         to=incharge_emails,
-                        cc=respective_person_emails,
+                        cc=cc_emails,
                         connection=cs_connection,
                     )
 
@@ -221,29 +255,37 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        import sys
+        if hasattr(sys.stdout, 'reconfigure'):
+            try:
+                sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+            except Exception:
+                pass
+
         daemon = options.get("daemon")
         interval = options.get("interval")
 
         if daemon:
-            self.stdout.write("🚀 Starting Licence Expiry Daemon...\n")
+            self.stdout.write("[START] Starting Licence Expiry Daemon...\n")
 
             while True:
-                self.stdout.write(f"\n⏰ Running at {timezone.now()}\n")
+                self.stdout.write(f"\n[TIME] Running at {timezone.now()}\n")
 
                 result = run_licence_expiry_check()
 
-                self.stdout.write("\n📊 RESULT")
-                self.stdout.write(f"✅ Sent: {result['total_sent']}")
-                self.stdout.write(f"❌ Skipped: {result['total_skipped']}")
+                self.stdout.write("\n[RESULT]")
+                self.stdout.write(f"Sent: {result['total_sent']}")
+                self.stdout.write(f"Skipped: {result['total_skipped']}")
 
-                self.stdout.write(f"\n⏳ Sleeping for {interval} seconds...\n")
+                self.stdout.write(f"\n[SLEEP] Sleeping for {interval} seconds...\n")
                 time.sleep(interval)
 
         else:
-            self.stdout.write("🚀 Running once...\n")
+            self.stdout.write("[START] Running once...\n")
 
             result = run_licence_expiry_check()
 
-            self.stdout.write("\n📊 FINAL RESULT")
-            self.stdout.write(f"✅ Sent: {result['total_sent']}")
-            self.stdout.write(f"❌ Skipped: {result['total_skipped']}")
+            self.stdout.write("\n[FINAL RESULT]")
+            self.stdout.write(f"Sent: {result['total_sent']}")
+            self.stdout.write(f"Skipped: {result['total_skipped']}")
+
