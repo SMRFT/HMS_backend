@@ -22,6 +22,7 @@ from .Views import (
     dashboard,
     advanced_dashboard,
     doctor_dashboard,
+    department_dashboard,
     insurance_provider,
     summary,
     investigation_price,
@@ -346,7 +347,9 @@ urlpatterns = [
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
     path('invest-refund/', departmentBilling.invest_refund_create, name='invest_refund_create'),
 
-    # Doctor Master
+    # Doctor Master & Dashboards
+    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+    path('department-dashboard/stats/', department_dashboard.department_dashboard_stats, name='department_dashboard_stats'),
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
     path('doctor_schedule/<str:employee_id>/', doctormaster.doctor_schedule_detail, name='doctor_schedule_detail'),
