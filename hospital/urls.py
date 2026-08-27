@@ -52,6 +52,7 @@ from .Views import (
     DoctorFeeCuts,
     MHC,
     vaccination,
+    patient_inquiry,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -242,6 +243,7 @@ urlpatterns = [
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
 
     # Patient URLs
+    path('patient-inquiry/', patient_inquiry.patient_inquiry_view, name='patient-inquiry'),
     path('patients/register/', views.patientCreateView, name='patient-register'),
     path('create/', views.patientCreateView, name='patient-list'),
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),

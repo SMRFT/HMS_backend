@@ -1,4 +1,5 @@
 PAGE_MAPPING = {
+    r'^/_b_a_c_k_e_n_d/HMS/patient-inquiry/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',

@@ -843,10 +843,7 @@ class Admission(AuditModel):
     cancelled_by        = models.CharField(max_length=100, blank=True, null=True)
     cancelled_Reason    = models.TextField(blank=True, null=True)
  
-    # ── Edit tracking ─────────────────────────────────────────────────────────
-    is_edited           = models.BooleanField(default=False)
-    edited_by           = models.CharField(max_length=100, blank=True, null=True)
-    edited_Reason       = models.TextField(blank=True, null=True)
+    # ── Edit tracking (array of audit entries) ────────────────────────────────
     edit_history        = models.JSONField(default=list, blank=True, null=True)
  
     # ── Ward / admission status ───────────────────────────────────────────────

@@ -1157,7 +1157,10 @@ def room_enquiry_view(request):
         ):
             uhid        = str(admission.uhid or "")
             ip_number   = str(admission.ipNumber or "")
-            patient_info = patient_map.get(uhid, {})
+            p_dict = patient_map.get(uhid, {})
+            patient_info = dict(p_dict) if isinstance(p_dict, dict) else {}
+            patient_info["admittingDoctor"] = str(getattr(admission, "admittingDoctor", "") or "")
+            patient_info["admissionDateTime"] = str(getattr(admission, "admissionDateTime", "") or "")
 
             details  = parse_json_field(admission.room_details)
             shifts   = parse_json_field(admission.roomShitingDetails)
@@ -1691,11 +1694,12 @@ def get_active_admission(request):
             adm for adm in all_admissions
             if getattr(adm, "is_admitted",        False) is True
             and getattr(adm, "is_discharged",      True)  is False
+            and getattr(adm, "is_cancelled",       False) is False
         ]
 
         if not active_records:
             return Response(
-                {"success": False, "message": "No active admission found"},
+                {"success": False, "error": "No active admission found", "message": "No active admission found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -1873,17 +1877,14 @@ def room_shifting_view(request):
     # GET — list shifting history
     # ════════════════════════════════════════════════════════════════════════
     if request.method == "GET":
-        from_date = str(request.GET.get("from_date", "")).strip()
-        to_date   = str(request.GET.get("to_date",   "")).strip()
+        from_date = str(request.GET.get("from_date", "")).strip()[:10]
+        to_date   = str(request.GET.get("to_date",   "")).strip()[:10]
         uhid      = str(request.GET.get("uhid",      "")).strip()
         ip_number = str(request.GET.get("ip_number", "")).strip()
 
         results = []
 
         for admission in Admission.objects.all():
-            if not getattr(admission, "is_admitted", False):
-                continue
-
             if uhid      and uhid.lower()      not in str(admission.uhid     or "").lower():
                 continue
             if ip_number and ip_number.lower() not in str(admission.ipNumber or "").lower():
@@ -1917,7 +1918,14 @@ def room_shifting_view(request):
                 if not isinstance(shift, dict):
                     continue
 
-                shift_date = str(shift.get("shiftingDateTime", ""))[:10]
+                raw_dt = shift.get("shiftingDateTime") or shift.get("startDateTime") or ""
+                if isinstance(raw_dt, dict) and "$date" in raw_dt:
+                    raw_dt = raw_dt["$date"]
+                if hasattr(raw_dt, "strftime"):
+                    shift_date = raw_dt.strftime("%Y-%m-%d")
+                else:
+                    shift_date = str(raw_dt).replace("T", " ")[:10]
+
                 if from_date and shift_date and shift_date < from_date:
                     continue
                 if to_date   and shift_date and shift_date > to_date:
@@ -1970,13 +1978,15 @@ def room_shifting_view(request):
             if (
                 str(adm.ipNumber) == ip_number
                 and bool(adm.is_admitted)
+                and not bool(adm.is_discharged)
+                and not bool(getattr(adm, "is_cancelled", False))
             ):
                 admission = adm
                 break
 
         if not admission:
             return Response(
-                {"success": False, "error": "Admission not found"},
+                {"success": False, "error": "No active admission found for this IP Number"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 

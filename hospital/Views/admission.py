@@ -1,10 +1,14 @@
 from decimal import Decimal, InvalidOperation
 import os
+import re
 import mimetypes
+import gridfs
+from bson.objectid import ObjectId
+from pymongo import MongoClient
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
-from django.http import JsonResponse, FileResponse
+from django.http import JsonResponse, FileResponse, HttpResponse
 from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -19,30 +23,70 @@ from datetime import datetime, date
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Serve MLC Document endpoint
+# GridFS MLC Document Helpers & Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
+def _upload_to_gridfs(file_obj):
+    """Uploads a file object to MongoDB GridFS in 'HMS' database and returns str(file_id)"""
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        fs = gridfs.GridFS(hms_db)
+        safe_name = re.sub(r'[^a-zA-Z0-9_\.\-]', '_', getattr(file_obj, 'name', 'mlc_doc'))
+        content_type = getattr(file_obj, 'content_type', None) or mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+        file_id = fs.put(file_obj, filename=safe_name, content_type=content_type)
+        return str(file_id)
+    finally:
+        if client:
+            client.close()
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_mlc_doc(request, filename):
+    """Serves MLC Document directly from MongoDB GridFS, with local fallback for legacy records"""
+    client = None
     try:
-        clean_name = filename.replace("mlc_docs/", "").replace("mlc_docs\\", "").strip()
-        # Look in mlc_docs folder first, then BASE_DIR
-        file_path = os.path.join(settings.BASE_DIR, "mlc_docs", clean_name)
+        raw_id = str(filename or "").replace("mlc_docs/", "").replace("mlc_docs\\", "").strip()
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        fs = gridfs.GridFS(hms_db)
+
+        grid_file = None
+        # 1. Try GridFS ObjectId lookup
+        try:
+            if ObjectId.is_valid(raw_id):
+                grid_file = fs.get(ObjectId(raw_id))
+        except Exception:
+            grid_file = None
+
+        # 2. Try GridFS filename lookup
+        if not grid_file:
+            grid_file = fs.find_one({"filename": raw_id})
+
+        if grid_file:
+            c_type = getattr(grid_file, 'content_type', None) or mimetypes.guess_type(grid_file.filename)[0] or 'application/octet-stream'
+            response = HttpResponse(grid_file.read(), content_type=c_type)
+            response["Content-Disposition"] = f'inline; filename="{grid_file.filename}"'
+            return response
+
+        # 3. Fallback to local file if it was previously saved on disk
+        file_path = os.path.join(settings.BASE_DIR, "mlc_docs", raw_id)
         if not os.path.exists(file_path):
             file_path = os.path.join(settings.BASE_DIR, filename)
-        if not os.path.exists(file_path):
-            base_name = os.path.basename(filename)
-            file_path = os.path.join(settings.BASE_DIR, "mlc_docs", base_name)
-        if not os.path.exists(file_path):
-            return JsonResponse({"error": "File not found"}, status=404)
-        
-        mime_type, _ = mimetypes.guess_type(file_path)
-        mime_type = mime_type or 'application/octet-stream'
-        response = FileResponse(open(file_path, 'rb'), content_type=mime_type)
-        response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}"'
-        return response
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            mime_type, _ = mimetypes.guess_type(file_path)
+            mime_type = mime_type or 'application/octet-stream'
+            response = FileResponse(open(file_path, 'rb'), content_type=mime_type)
+            response["Content-Disposition"] = f'inline; filename="{os.path.basename(file_path)}"'
+            return response
+
+        return JsonResponse({"error": "File not found"}, status=404)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+    finally:
+        if client:
+            client.close()
 
 
 
@@ -163,7 +207,7 @@ def _calc_age_from_dob(dob_value):
 # ─────────────────────────────────────────────────────────────────────────────
 # _sync_to_mongo
 # ─────────────────────────────────────────────────────────────────────────────
-def _sync_to_mongo(ip, room_details, shifting_details, advance_payments, extra_fields=None):
+def _sync_to_mongo(ip, room_details=None, shifting_details=None, advance_payments=None, extra_fields=None):
     try:
         import os
         from pymongo import MongoClient
@@ -171,38 +215,70 @@ def _sync_to_mongo(ip, room_details, shifting_details, advance_payments, extra_f
         if not MONGO_URI:
             return
         client = MongoClient(MONGO_URI)
-        update_doc = {
-            "room_details":       room_details       if isinstance(room_details,       list) else _safe_list(room_details),
-            "roomShitingDetails": shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details),
-            "advance_payments":   advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments),
-        }
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        update_doc = {}
+        if room_details is not None:
+            update_doc["room_details"] = room_details if isinstance(room_details, list) else _safe_list(room_details)
+        if shifting_details is not None:
+            update_doc["roomShitingDetails"] = shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details)
+        if advance_payments is not None:
+            update_doc["advance_payments"] = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
         if extra_fields and isinstance(extra_fields, dict):
             update_doc.update(extra_fields)
-        client["HMS"]["hospital_admission"].update_one(
+
+        # Unset legacy single-edit fields from MongoDB document
+        unset_doc = {}
+        for legacy_f in ["is_edited", "edited_by", "edited_Reason"]:
+            if legacy_f in update_doc:
+                del update_doc[legacy_f]
+            unset_doc[legacy_f] = ""
+
+        mongo_update = {"$set": update_doc}
+        if unset_doc:
+            mongo_update["$unset"] = unset_doc
+
+        hms_db["hospital_admission"].update_one(
             {"ipNumber": str(ip)},
-            {"$set": update_doc}
+            mongo_update
         )
+        client.close()
     except Exception as ex:
         print(f"[_sync_to_mongo] Failed for {ip}: {ex}")
 
 
-def _sync_advance_to_mongo(ip, adm_obj, payments_list):
-    _sync_to_mongo(
-        ip,
-        _safe_list(adm_obj.room_details),
-        _safe_list(adm_obj.roomShitingDetails),
-        payments_list if isinstance(payments_list, list) else _safe_list(payments_list),
-    )
+def _sync_advance_to_mongo(ip, payments_list, employee_id=None):
+    try:
+        import os
+        from pymongo import MongoClient
+        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+        if not MONGO_URI:
+            return
+        client = MongoClient(MONGO_URI)
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        clean_ap = payments_list if isinstance(payments_list, list) else _safe_list(payments_list)
+        up_doc = {"advance_payments": clean_ap}
+        if employee_id:
+            up_doc["lastmodified_by"] = employee_id
+            up_doc["lastmodified_date"] = timezone.now()
+        hms_db["hospital_admission"].update_one(
+            {"ipNumber": str(ip)},
+            {"$set": up_doc}
+        )
+        client.close()
+    except Exception as ex:
+        print(f"[_sync_advance_to_mongo] Failed for {ip}: {ex}")
 
 
 def _save_admission(adm, room_details, shifting_details, advance_payments, extra_fields=None):
     rd  = room_details       if isinstance(room_details,       list) else _safe_list(room_details)
     sd  = shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details)
     ap  = advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments)
+    eh  = _safe_list(getattr(adm, "edit_history", []))
 
     adm.room_details       = rd
     adm.roomShitingDetails = sd
     adm.advance_payments   = ap
+    adm.edit_history       = eh
 
     adm.save()
     sync_extra = {
@@ -210,14 +286,11 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
         "company_code":       getattr(adm, "company_code", "") or "",
         "insurance_company":  getattr(adm, "insurance_company", "") or "",
         "age":                getattr(adm, "age", None),
-        "age_type":           getattr(adm, "age_type", "") or "",
+        "age_type":           getattr(adm, "age_type", "") or "Y",
         "mlc_type":           getattr(adm, "mlc_type", "") or "",
         "mlc_doc":            getattr(adm, "mlc_doc", "") or "",
         "mlc_remarks":        getattr(adm, "mlc_remarks", "") or "",
-        "is_edited":          getattr(adm, "is_edited", False),
-        "edited_by":          getattr(adm, "edited_by", None),
-        "edited_Reason":      getattr(adm, "edited_Reason", None),
-        "edit_history":       _safe_list(getattr(adm, "edit_history", [])),
+        "edit_history":       eh,
         "is_cancelled":       getattr(adm, "is_cancelled", False),
         "cancelled_by":       getattr(adm, "cancelled_by", None),
         "cancelled_Reason":   getattr(adm, "cancelled_Reason", None),
@@ -601,13 +674,10 @@ def admission_view(request):
                     "room_details":      _safe_list(adm.room_details),
                     "roomShitingDetails":_safe_list(adm.roomShitingDetails),
                     "advance_payments":  _safe_list(adm.advance_payments),
-                    # ── Cancellation & Edit status fields ─────────────────────
+                    # ── Cancellation status & Edit history ───────────────────
                     "is_cancelled":      bool(getattr(adm, "is_cancelled",    False)),
                     "cancelled_by":      getattr(adm, "cancelled_by",         None),
                     "cancelled_Reason":  getattr(adm, "cancelled_Reason",     None),
-                    "is_edited":         bool(getattr(adm, "is_edited",       False)),
-                    "edited_by":         getattr(adm, "edited_by",            None),
-                    "edited_Reason":     getattr(adm, "edited_Reason",        None),
                     "edit_history":      _safe_list(getattr(adm, "edit_history", [])),
                     "ward_status":       getattr(adm, "ward_status",          ""),
                     # ──────────────────────────────────────────────────────────
@@ -702,17 +772,16 @@ def admission_view(request):
                 final_age = None
                 final_age_type = _normalize_age_type(age_type_val)
 
-            # MLC handling (file upload + remarks)
+            # MLC handling (GridFS file upload + remarks)
             mlc_type = str(data.get("mlc_type") or "").strip() or None
             mlc_remarks = str(data.get("mlc_remarks") or "").strip() or None
             mlc_doc_name = None
             if request.FILES.get("mlc_doc"):
                 mlc_file = request.FILES["mlc_doc"]
                 try:
-                    from django.core.files.storage import default_storage
-                    saved_path = default_storage.save(f"mlc_docs/{mlc_file.name}", mlc_file)
-                    mlc_doc_name = saved_path
-                except Exception:
+                    mlc_doc_name = _upload_to_gridfs(mlc_file)
+                except Exception as ex:
+                    print(f"GridFS upload failed: {ex}")
                     mlc_doc_name = mlc_file.name
             elif data.get("mlc_doc") and isinstance(data.get("mlc_doc"), str):
                 mlc_doc_name = data.get("mlc_doc")
@@ -729,7 +798,6 @@ def admission_view(request):
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
-                is_edited=False,    edited_by=None,    edited_Reason=None,
                 edit_history=[],
                 ward_status=None,
                 is_discharged=False, is_admitted=True,
@@ -746,6 +814,11 @@ def admission_view(request):
                 "mlc_doc": mlc_doc_name,
                 "mlc_remarks": mlc_remarks,
                 "edit_history": [],
+                "is_cancelled": False,
+                "cancelled_by": None,
+                "cancelled_Reason": None,
+                "is_discharged": False,
+                "is_admitted": True,
             })
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
@@ -759,7 +832,6 @@ def admission_view(request):
                 "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
-                "is_edited": False,    "edited_by": None,    "edited_Reason": None,
                 "edit_history": [],
                 "ward_status": None,
                 "is_admitted": True, "is_discharged": False,
@@ -864,13 +936,10 @@ def admission_detail(request, ipNumber):
                 'mlc_doc':           adm.mlc_doc     or "",
                 'mlc_remarks':       adm.mlc_remarks or "",
                 'advance_payments':  ap,
-                # ── Cancellation & Edit status fields ─────────────────────────
+                # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
                 'cancelled_by':     getattr(adm, "cancelled_by",         None),
                 'cancelled_Reason': getattr(adm, "cancelled_Reason",     None),
-                'is_edited':        bool(getattr(adm, "is_edited",       False)),
-                'edited_by':        getattr(adm, "edited_by",            None),
-                'edited_Reason':    getattr(adm, "edited_Reason",        None),
                 'edit_history':     _safe_list(getattr(adm, "edit_history", [])),
                 'ward_status':      getattr(adm, "ward_status",          ""),
                 # ────────────────────────────────────────────────────────────
@@ -962,14 +1031,13 @@ def admission_detail(request, ipNumber):
                     if at_v:
                         adm.age_type = _normalize_age_type(at_v)
 
-                # Handle MLC Document file upload on edit if provided
+                # Handle MLC Document GridFS upload on edit if provided
                 if request.FILES.get("mlc_doc"):
                     mlc_file = request.FILES["mlc_doc"]
                     try:
-                        from django.core.files.storage import default_storage
-                        saved_path = default_storage.save(f"mlc_docs/{mlc_file.name}", mlc_file)
-                        adm.mlc_doc = saved_path
-                    except Exception:
+                        adm.mlc_doc = _upload_to_gridfs(mlc_file)
+                    except Exception as ex:
+                        print(f"GridFS upload on edit failed: {ex}")
                         adm.mlc_doc = mlc_file.name
 
                 new_room_no = str(get_val(data.get("roomNo")) or "").strip()
@@ -996,7 +1064,7 @@ def admission_detail(request, ipNumber):
                         "lastmodified_by": employee_id, "lastmodified_date": timezone.now().isoformat(),
                     })
 
-                # Append to edit_history array
+                # Append to edit_history array (single source of truth)
                 edit_history = _safe_list(getattr(adm, "edit_history", []))
                 edit_entry = {
                     "edited_by": str(employee_id),
@@ -1005,9 +1073,6 @@ def admission_detail(request, ipNumber):
                 }
                 edit_history.append(edit_entry)
                 adm.edit_history       = edit_history
-                adm.is_edited          = True
-                adm.edited_by          = employee_id
-                adm.edited_Reason      = edit_reason
                 adm.lastmodified_by    = employee_id
                 adm.lastmodified_date  = timezone.now()
                 _save_admission(adm, rd, sd, ap)
@@ -1116,18 +1181,19 @@ def _generate_refund_bill_no(hospital_code, branch_code, outlet_code):
 def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
                               advance_payments, employee_id):
     """
-    Partial update: touches ONLY advance_payments + audit fields.
-    Replaces the old pattern of loading room_details / roomShitingDetails and
-    re-saving the entire Admission document just to change one JSON field.
+    Partial update: touches ONLY advance_payments + audit fields in Djongo model and MongoDB.
+    Always saves advance_payments as native BSON array in MongoDB.
     """
+    clean_ap = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
     updated = Admission.objects.filter(
         ipNumber=str(ip_number), hospital_code=hospital_code,
         branch_code=branch_code, outlet_code=outlet_code,
     ).update(
-        advance_payments=advance_payments,
+        advance_payments=clean_ap,
         lastmodified_by=employee_id,
         lastmodified_date=timezone.now(),
     )
+    _sync_advance_to_mongo(ip_number, clean_ap, employee_id)
     return updated
 
 
@@ -1259,8 +1325,26 @@ def admission_advance(request, ipNumber=None):
         # ── POST — create new advance ─────────────────────────────────────────
         if request.method == 'POST':
             amount = request.data.get('advance_amount')
-            if not amount:
+            if amount is None or str(amount).strip() == '':
                 return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
+
+            ip_adv_raw = request.data.get('ip_advance')
+            bill_adv_raw = request.data.get('billing_advance')
+            if ip_adv_raw is None or str(ip_adv_raw).strip() == '' or bill_adv_raw is None or str(bill_adv_raw).strip() == '':
+                return JsonResponse({'success': False, 'error': 'Both ip_advance and billing_advance must be entered'}, status=400)
+
+            try:
+                adv_amt = float(amount)
+                ip_adv = float(ip_adv_raw)
+                bill_adv = float(bill_adv_raw)
+            except (ValueError, TypeError):
+                return JsonResponse({'success': False, 'error': 'Invalid numeric values for advance amounts'}, status=400)
+
+            if adv_amt <= 0:
+                return JsonResponse({'success': False, 'error': 'advance_amount must be greater than 0'}, status=400)
+
+            if abs((ip_adv + bill_adv) - adv_amt) > 0.01:
+                return JsonResponse({'success': False, 'error': f'Sum of IP Advance (₹{ip_adv:.2f}) and Billing Advance (₹{bill_adv:.2f}) must equal Advance Amount (₹{adv_amt:.2f})'}, status=400)
 
             bill_type, bill_type_no = _bill_type_fields(request.data)
             if bill_type is None or not bill_type_no:
@@ -1273,9 +1357,9 @@ def admission_advance(request, ipNumber=None):
                 "billTypeNo":       bill_type_no,
                 "date":             request.data.get('date', now_iso[:10]),
                 "bill_date":        now_iso,
-                "advance_amount":   float(amount),
-                "ip_advance":       float(request.data.get('ip_advance',      0)),
-                "billing_advance":  float(request.data.get('billing_advance', 0)),
+                "advance_amount":   adv_amt,
+                "ip_advance":       ip_adv,
+                "billing_advance":  bill_adv,
                 "is_advanceActive": True,
                 "status":           "Pending",
                 "created_by":       employee_id,
