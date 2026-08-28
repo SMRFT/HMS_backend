@@ -12,6 +12,12 @@ class VitalEntry(AuditModel):
         null=True
     )
 
+    doctor_id = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+
     height = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -81,3 +87,21 @@ class VitalEntry(AuditModel):
 
     def __str__(self):
         return self.uhid or "Vital Entry"
+
+
+class DoctorConsultation(AuditModel):
+    uhid = models.CharField(max_length=50, blank=True, null=True)
+    patient_name = models.CharField(max_length=255, blank=True, null=True)
+    doctor_id = models.CharField(max_length=50, blank=True, null=True)
+    doctor_name = models.CharField(max_length=255, blank=True, null=True)
+    vitals = models.JSONField(default=dict, blank=True, null=True)
+    symptoms = models.JSONField(default=list, blank=True, null=True)
+    investigation_test_ids = models.JSONField(default=list, blank=True, null=True)
+    investigation_details = models.JSONField(default=list, blank=True, null=True)
+    prescription_item_ids = models.JSONField(default=list, blank=True, null=True)
+    prescription_details = models.JSONField(default=list, blank=True, null=True)
+    finding = models.TextField(blank=True, null=True)
+    followup_date = models.CharField(max_length=50, blank=True, null=True)
+
+    def __str__(self):
+        return f"Consultation {self.uhid} - Dr. {self.doctor_name}"

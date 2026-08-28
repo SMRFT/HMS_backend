@@ -132,7 +132,7 @@ def mhc_save_details(request):
     # POST - save new MHC details
     try:
         data = request.data.copy()
-        employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id')
+        employee_id = request.headers.get('auth-user-id') 
         data['created_by'] = employee_id
         data['lastmodified_by'] = employee_id
         data['created_date'] = timezone.now()

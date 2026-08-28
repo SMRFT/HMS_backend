@@ -4,22 +4,21 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from bson import Decimal128
-from hospital.models import Patient
-from .models import VitalEntry
-from .serializer import VitalEntrySerializer
+from django.utils.timezone import now
+from hospital.models import Patient, Billing
+from .models import VitalEntry, DoctorConsultation
+from .serializer import VitalEntrySerializer, DoctorConsultationSerializer
 
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from rest_framework.decorators import api_view, permission_classes
+from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list,medicine_package
 
 
 
-def get_db():
-    mongo_host = os.getenv('GLOBAL_DB_HOST') or 'mongodb://localhost:27017/'
-    db_name = (os.getenv('HMS_DB_NAME') or 'HMS').strip()
-    client = MongoClient(mongo_host)
-    return client[db_name]
+
+
 
 
 def safe_float(val):
@@ -37,131 +36,68 @@ def safe_float(val):
 @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_billing_patient(request):
     """
-    Get patient details for paid billed patients only.
-    Compares Billing.patient_id with Patient collection/model data to fetch patient details (including UHID),
-    along with any recorded VitalEntry data.
+    Get patient details for paid billed patients only using Django ORM Billing and Patient models.
     """
     try:
-        db = get_db()
-        billing_coll = db['hospital_billing']
-        patient_coll = db['hospital_patient']
+        employee_id = request.headers.get('auth-user-id') or request.query_params.get('auth-user-id')
+        if not employee_id and hasattr(request, 'data') and isinstance(request.data, dict):
+            employee_id = request.data.get('auth-user-id')
 
-        # Query paid bills from hospital_billing collection sorted by billed_date descending
-        raw_billings = list(billing_coll.find({
-            "payment_status": {"$regex": "^paid$", "$options": "i"}
-        }).sort("billed_date", -1))
+        # Query paid bills via Django ORM Billing model
+        paid_bills = Billing.objects.filter(payment_status__iexact="paid").select_related('patient').order_by('-billed_date')
+
+        if employee_id:
+            emp_str = str(employee_id).strip()
+            paid_bills = paid_bills.filter(doctor_id=emp_str)
 
         result = []
-        for bill in raw_billings:
-            pay_status = bill.get("payment_status", "Pending")
-            if not pay_status or str(pay_status).strip().lower() != "paid":
+        for bill in paid_bills:
+            patient_obj = getattr(bill, 'patient', None)
+            if not patient_obj:
                 continue
 
-            raw_pid = bill.get("patient_id")
-            patient_doc = None
+            salutation = getattr(patient_obj, 'salutation', '') or ''
+            first_name = getattr(patient_obj, 'firstName', '') or ''
+            last_name = getattr(patient_obj, 'lastName', '') or ''
+            full_name = f"{salutation} {first_name} {last_name}".strip()
 
-            # 1. Direct PyMongo $or lookup in hospital_patient collection by id (int/str) or uhid
-            if raw_pid is not None:
-                or_clauses = [{"id": raw_pid}, {"id": str(raw_pid)}]
-                try:
-                    or_clauses.append({"id": int(raw_pid)})
-                except (ValueError, TypeError):
-                    pass
-                or_clauses.append({"uhid": str(raw_pid)})
-                patient_doc = patient_coll.find_one({"$or": or_clauses})
-
-            if not patient_doc:
-                uhid_val = bill.get("uhid") or bill.get("patient_uhid")
-                if uhid_val:
-                    patient_doc = patient_coll.find_one({"uhid": str(uhid_val)})
-
-            patient_data = {}
-            if patient_doc:
-                salutation = patient_doc.get("salutation", "") or ""
-                first_name = patient_doc.get("firstName", "") or ""
-                last_name = patient_doc.get("lastName", "") or ""
-                full_name = f"{salutation} {first_name} {last_name}".strip()
-
-                patient_data = {
-                    "id": patient_doc.get("id") or raw_pid,
-                    "uhid": patient_doc.get("uhid", "") or "",
-                    "salutation": salutation,
-                    "firstName": first_name,
-                    "lastName": last_name,
-                    "patient_name": full_name or f"Patient #{patient_doc.get('id', raw_pid)}",
-                    "age": patient_doc.get("age", ""),
-                    "gender": patient_doc.get("gender", ""),
-                    "dob": str(patient_doc.get("dob", "")) if patient_doc.get("dob") else "",
-                    "mobilePhone": patient_doc.get("mobilePhone", "") or patient_doc.get("mobile", "") or "",
-                    "blood_group": patient_doc.get("blood_group", "") or "",
-                    "city": patient_doc.get("city", "") or "",
-                    "permanent_address": patient_doc.get("permanent_address", "") or "",
-                    "doctorName": patient_doc.get("doctorName", "") or "",
-                    "emergency_contact": patient_doc.get("emergency_contact", "") or "",
-                }
-            else:
-                # 2. Django ORM Fallback
-                orm_patient = None
-                if raw_pid is not None:
-                    try:
-                        orm_patient = Patient.objects.filter(id=raw_pid).first()
-                        if not orm_patient and str(raw_pid).isdigit():
-                            orm_patient = Patient.objects.filter(id=int(raw_pid)).first()
-                        if not orm_patient:
-                            orm_patient = Patient.objects.filter(uhid=str(raw_pid)).first()
-                    except Exception:
-                        pass
-
-                if orm_patient:
-                    salutation = orm_patient.salutation or ""
-                    first_name = orm_patient.firstName or ""
-                    last_name = orm_patient.lastName or ""
-                    full_name = f"{salutation} {first_name} {last_name}".strip()
-                    patient_data = {
-                        "id": orm_patient.id,
-                        "uhid": orm_patient.uhid or "",
-                        "salutation": salutation,
-                        "firstName": first_name,
-                        "lastName": last_name,
-                        "patient_name": full_name or f"Patient #{orm_patient.id}",
-                        "age": orm_patient.age,
-                        "gender": orm_patient.gender,
-                        "dob": str(orm_patient.dob) if orm_patient.dob else "",
-                        "mobilePhone": orm_patient.mobilePhone or "",
-                        "blood_group": orm_patient.blood_group or "",
-                        "city": orm_patient.city or "",
-                        "permanent_address": orm_patient.permanent_address or "",
-                        "doctorName": orm_patient.doctorName or "",
-                        "emergency_contact": orm_patient.emergency_contact or "",
-                    }
-                else:
-                    patient_data = {
-                        "id": raw_pid,
-                        "uhid": bill.get("uhid", "") or bill.get("patient_uhid", "") or "",
-                        "patient_name": bill.get("patient_name", "") or "",
-                        "mobilePhone": bill.get("mobilePhone", "") or bill.get("mobile", "") or "",
-                        "doctorName": bill.get("doctorName", "") or bill.get("doctor_name", "") or "",
-                    }
+            patient_data = {
+                "id": getattr(patient_obj, 'id', None),
+                "uhid": getattr(patient_obj, 'uhid', '') or '',
+                "salutation": salutation,
+                "firstName": first_name,
+                "lastName": last_name,
+                "patient_name": full_name or f"Patient ({getattr(patient_obj, 'uhid', '')})",
+                "age": getattr(patient_obj, 'age', None),
+                "gender": getattr(patient_obj, 'gender', '') or '',
+                "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
+                "mobilePhone": getattr(patient_obj, 'mobilePhone', '') or '',
+                "blood_group": getattr(patient_obj, 'blood_group', '') or '',
+                "city": getattr(patient_obj, 'city', '') or '',
+                "permanent_address": getattr(patient_obj, 'permanent_address', '') or '',
+                "doctorName": getattr(patient_obj, 'doctorName', '') or '',
+                "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
+            }
 
             latest_vital = None
-            uhid = patient_data.get("uhid")
-            if uhid:
-                vital_entry_obj = VitalEntry.objects.filter(uhid=uhid).order_by('-created_date').first()
+            uhid_str = patient_data.get("uhid")
+            if uhid_str:
+                vital_entry_obj = VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date').first()
                 if vital_entry_obj:
                     latest_vital = VitalEntrySerializer(vital_entry_obj).data
 
-            billed_d = bill.get("billed_date") or bill.get("created_date")
-            billed_date_str = str(billed_d) if billed_d else None
+            billed_d = getattr(bill, 'billed_date', None)
+            billed_date_str = billed_d.isoformat() if billed_d else ""
 
             result.append({
-                "bill_number": bill.get("bill_number"),
+                "bill_number": getattr(bill, 'bill_number', ''),
                 "billed_date": billed_date_str,
-                "payment_status": pay_status,
-                "total_fees": safe_float(bill.get("total_fees")),
-                "registration_fee": safe_float(bill.get("registration_fee")),
-                "consulting_fee": safe_float(bill.get("consulting_fee")),
-                "payment_method": bill.get("payment_method"),
-                "doctor_id": bill.get("doctor_id"),
+                "payment_status": getattr(bill, 'payment_status', 'Paid'),
+                "total_fees": safe_float(getattr(bill, 'total_fees', None)),
+                "registration_fee": safe_float(getattr(bill, 'registration_fee', None)),
+                "consulting_fee": safe_float(getattr(bill, 'consulting_fee', None)),
+                "payment_method": getattr(bill, 'payment_method', '') or '',
+                "doctor_id": getattr(bill, 'doctor_id', '') or '',
                 "patient": patient_data,
                 "vital_entry": latest_vital,
                 "vital_status": "Completed" if latest_vital else "Pending"
@@ -177,20 +113,137 @@ def OPEMR_get_billing_patient(request):
 @permission_classes([HasRoleAndDataPermission])
 def OPEMR_VitalEntry(request):
     """
-    GET: Retrieve list of VitalEntry records (optionally filtered by ?uhid=...)
+    GET: Retrieve list of VitalEntry records (optionally filtered by ?uhid=... or auth-user-id matching doctor_id)
     POST: Create a new VitalEntry record using VitalEntrySerializer
     """
     if request.method == 'GET':
         uhid = request.query_params.get('uhid')
+        employee_id = request.headers.get('auth-user-id') or request.query_params.get('auth-user-id')
+        if not employee_id and hasattr(request, 'data') and isinstance(request.data, dict):
+            employee_id = request.data.get('auth-user-id')
+
+        paid_bills = Billing.objects.filter(payment_status__iexact="paid").select_related('patient').order_by('-billed_date')
+
+        if employee_id:
+            emp_str = str(employee_id).strip()
+            paid_bills = paid_bills.filter(doctor_id=emp_str)
+
+        result = []
+        seen_uhids = set()
+
+        for bill in paid_bills:
+            patient_obj = getattr(bill, 'patient', None)
+            if not patient_obj:
+                continue
+
+            patient_uhid = getattr(patient_obj, 'uhid', '') or ''
+            if uhid and patient_uhid != uhid:
+                continue
+
+            salutation = getattr(patient_obj, 'salutation', '') or ''
+            first_name = getattr(patient_obj, 'firstName', '') or ''
+            last_name = getattr(patient_obj, 'lastName', '') or ''
+            full_name = f"{salutation} {first_name} {last_name}".strip()
+
+            patient_data = {
+                "id": getattr(patient_obj, 'id', None),
+                "uhid": patient_uhid,
+                "salutation": salutation,
+                "firstName": first_name,
+                "lastName": last_name,
+                "patient_name": full_name or f"Patient ({patient_uhid})",
+                "age": getattr(patient_obj, 'age', None),
+                "gender": getattr(patient_obj, 'gender', '') or '',
+                "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
+                "mobilePhone": getattr(patient_obj, 'mobilePhone', '') or '',
+                "blood_group": getattr(patient_obj, 'blood_group', '') or '',
+                "city": getattr(patient_obj, 'city', '') or '',
+                "permanent_address": getattr(patient_obj, 'permanent_address', '') or '',
+                "doctorName": getattr(patient_obj, 'doctorName', '') or '',
+                "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
+            }
+
+            latest_vital = None
+            if patient_uhid:
+                vital_entry_obj = VitalEntry.objects.filter(uhid=patient_uhid).order_by('-created_date').first()
+                if vital_entry_obj:
+                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
+
+            billed_d = getattr(bill, 'billed_date', None)
+            billed_date_str = billed_d.isoformat() if billed_d else ""
+
+            seen_uhids.add(patient_uhid)
+            result.append({
+                "bill_number": getattr(bill, 'bill_number', ''),
+                "billed_date": billed_date_str,
+                "payment_status": getattr(bill, 'payment_status', 'Paid'),
+                "total_fees": safe_float(getattr(bill, 'total_fees', None)),
+                "registration_fee": safe_float(getattr(bill, 'registration_fee', None)),
+                "consulting_fee": safe_float(getattr(bill, 'consulting_fee', None)),
+                "payment_method": getattr(bill, 'payment_method', '') or '',
+                "doctor_id": getattr(bill, 'doctor_id', '') or '',
+                "patient": patient_data,
+                "vital_entry": latest_vital,
+                "vital_status": "Completed" if latest_vital else "Pending"
+            })
+
+        # Also include any standalone VitalEntry records
+        remaining_vitals = VitalEntry.objects.all()
         if uhid:
-            vitals = VitalEntry.objects.filter(uhid=uhid).order_by('-created_date')
-        else:
-            vitals = VitalEntry.objects.all().order_by('-created_date')
-        serializer = VitalEntrySerializer(vitals, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+            remaining_vitals = remaining_vitals.filter(uhid=uhid)
+        if employee_id:
+            emp_str = str(employee_id).strip()
+            remaining_vitals = remaining_vitals.filter(doctor_id=emp_str)
+
+        for v in remaining_vitals.order_by('-created_date'):
+            if v.uhid in seen_uhids:
+                continue
+            seen_uhids.add(v.uhid)
+            patient_obj = Patient.objects.filter(uhid=v.uhid).first()
+            if patient_obj:
+                salutation = getattr(patient_obj, 'salutation', '') or ''
+                first_name = getattr(patient_obj, 'firstName', '') or ''
+                last_name = getattr(patient_obj, 'lastName', '') or ''
+                full_name = f"{salutation} {first_name} {last_name}".strip()
+                patient_data = {
+                    "id": getattr(patient_obj, 'id', None),
+                    "uhid": getattr(patient_obj, 'uhid', '') or '',
+                    "salutation": salutation,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "patient_name": full_name or f"Patient ({getattr(patient_obj, 'uhid', '')})",
+                    "age": getattr(patient_obj, 'age', None),
+                    "gender": getattr(patient_obj, 'gender', '') or '',
+                    "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
+                    "mobilePhone": getattr(patient_obj, 'mobilePhone', '') or '',
+                    "doctorName": getattr(patient_obj, 'doctorName', '') or '',
+                }
+            else:
+                patient_data = {
+                    "uhid": v.uhid,
+                    "patient_name": f"Patient ({v.uhid})"
+                }
+
+            result.append({
+                "bill_number": "",
+                "billed_date": v.vital_entry_date.isoformat() if v.vital_entry_date else "",
+                "payment_status": "Paid",
+                "doctor_id": v.doctor_id or "",
+                "patient": patient_data,
+                "vital_entry": VitalEntrySerializer(v).data,
+                "vital_status": "Completed"
+            })
+
+        return Response(result, status=status.HTTP_200_OK)
 
     elif request.method == 'POST':
-        serializer = VitalEntrySerializer(data=request.data)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        employee_id = data.get("auth-user-id") or data.get("created_by")
+        if employee_id:
+            data['created_by'] = employee_id
+            data['lastmodified_by'] = employee_id
+
+        serializer = VitalEntrySerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response(
@@ -201,3 +254,158 @@ def OPEMR_VitalEntry(request):
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_symptoms(request):
+    """
+    Get symptoms list from HMS_Symptoms_list dbcollection.py.
+    Returns array of unique symptoms alone.
+    """
+    try:
+        docs = list(HMS_Symptoms_list.find({"is_active": True}))
+        if not docs:
+            docs = list(HMS_Symptoms_list.find({}))
+
+        symptoms_set = set()
+        for doc in docs:
+            sym_list = doc.get("symptoms", [])
+            if isinstance(sym_list, list):
+                for s in sym_list:
+                    if s and isinstance(s, str):
+                        symptoms_set.add(s.strip())
+
+        sorted_symptoms = sorted(list(symptoms_set))
+        return Response({"symptoms": sorted_symptoms}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_diagnostics_tests(request):
+    """
+    Get diagnostics test details from Diagnostics_test_details dbcollection.py.
+    Displays test_name in dropdown, but returns test_id to store upon selection.
+    """
+    try:
+        docs = list(Diagnostics_test_details.find({"is_active": True}))
+
+        if not docs:
+            docs = list(Diagnostics_test_details.find({}))
+
+        tests = []
+        for doc in docs:
+            t_id = doc.get("test_id")
+            t_name = doc.get("test_name")
+            if t_id is not None and t_name:
+                tests.append({
+                    "test_id": int(t_id) if str(t_id).isdigit() else t_id,
+                    "test_name": str(t_name).strip(),
+                    "department": doc.get("department", "") or "",
+                    "shortcut": doc.get("shortcut", "") or "",
+                    "MRP": safe_float(doc.get("MRP"))
+                })
+
+        tests.sort(key=lambda x: x["test_name"])
+        return Response(tests, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_medicines(request):
+    """
+    Get medicines list from medicine_package (hospital_pharmacyitem) dbcollection.py.
+    Displays item_name in dropdown, returns item_id to store upon selection.
+    """
+    try:
+        docs = list(medicine_package.find({"is_active": True}))
+        if not docs:
+            docs = list(medicine_package.find({}))
+
+        medicines = []
+        for doc in docs:
+            m_id = doc.get("item_id")
+            m_name = doc.get("item_name")
+            if m_id is not None and m_name:
+                medicines.append({
+                    "item_id": int(m_id) if str(m_id).isdigit() else m_id,
+                    "item_name": str(m_name).strip(),
+                    "category": doc.get("category", "") or "",
+                    "chemical_composition": doc.get("chemical_composition", "") or ""
+                })
+
+        medicines.sort(key=lambda x: x["item_name"])
+        return Response(medicines, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_DoctorConsultation(request):
+    """
+    GET: Retrieve doctor consultation records using DoctorConsultation model (filtered by ?uhid=...)
+    POST: Save doctor consultation record using DoctorConsultation model and DoctorConsultationSerializer.
+    """
+    try:
+        if request.method == 'GET':
+            uhid = request.query_params.get('uhid')
+            if uhid:
+                records = DoctorConsultation.objects.filter(uhid=uhid).order_by('-created_date')
+            else:
+                records = DoctorConsultation.objects.all().order_by('-created_date')
+            serializer = DoctorConsultationSerializer(records, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        elif request.method == 'POST':
+            data = request.data
+            uhid = data.get("uhid")
+            if not uhid:
+                return Response({"error": "uhid is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id') or data.get('created_by')
+
+            vitals_data = data.get("vitals", {})
+            if isinstance(vitals_data, dict):
+                vitals_data = {k: v for k, v in vitals_data.items() if k != "id"}
+
+            consult_data = {
+                "uhid": uhid,
+                "created_by": employee_id,
+                "lastmodified_by": employee_id,
+                "patient_name": data.get("patient_name", ""),
+                "doctor_id": data.get("doctor_id", ""),
+                "doctor_name": data.get("doctor_name", ""),
+                "vitals": vitals_data,
+                "symptoms": data.get("symptoms", []),
+                "investigation_test_ids": data.get("investigation_test_ids", []),
+                "investigation_details": data.get("investigation_details", []),
+                "prescription_item_ids": data.get("prescription_item_ids", []),
+                "prescription_details": data.get("prescription_details", []),
+                "finding": data.get("finding", ""),
+                "followup_date": data.get("followup_date", None)
+            }
+
+            serializer = DoctorConsultationSerializer(data=consult_data)
+            if serializer.is_valid():
+                obj = serializer.save()
+                return Response(
+                    {
+                        "message": "Doctor consultation saved successfully.",
+                        "data": DoctorConsultationSerializer(obj).data
+                    },
+                    status=status.HTTP_201_CREATED
+                )
+            else:
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

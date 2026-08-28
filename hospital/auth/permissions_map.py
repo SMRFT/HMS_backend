@@ -538,11 +538,19 @@ PAGE_MAPPING = {
 
         # OP EMR
 
-        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/': 'HMS-P-OPEMRGP',
-        '/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/': 'HMS-P-OPEMRVE',
+        #  Nursing
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+
+        # OPDOCTOR
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_symptoms/': 'HMS-P-OPEMRGS',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
 
 
 }
+
  
 
 PAGE_ACTION_MAPPING = {
