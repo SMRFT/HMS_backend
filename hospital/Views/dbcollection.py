@@ -9,6 +9,7 @@ client = MongoClient(mongo_url)
 
 global_db = client["Global"]
 hms_db = client["HMS"]
+Diagnostics_db=client["Diagnostics"]
 
 # Collections
 
@@ -17,3 +18,7 @@ department_collection = global_db["backend_diagnostics_Departments"]
 user_collection = global_db["backend_diagnostics_user"]
 company_secretary_collection = hms_db["hospital_licencemasterdetails"]  
 MHC_Package =hms_db["hospital_MHC_Package"] 
+MHC_Source= hms_db["hospital_MHC_Source"]
+HMS_Symptoms_list=hms_db["hospital_Symptoms_list"]
+medicine_package=hms_db["hospital_pharmacyitem"]
+Diagnostics_test_details = Diagnostics_db["core_testdetails"]

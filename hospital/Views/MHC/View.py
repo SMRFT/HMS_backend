@@ -11,7 +11,7 @@ import traceback
 
 from .models import MasterHealthcheckup
 from .serializer import MasterHealthcheckupSerializer
-from ..dbcollection import MHC_Package as MHC_Package_Collection
+from ..dbcollection import MHC_Package as MHC_Package_Collection, MHC_Source as MHC_Source_Collection
 
 
 @api_view(['GET'])
@@ -30,6 +30,26 @@ def mhc_get_package(request):
             )
         )
         return Response({'packages': packages}, status=status.HTTP_200_OK)
+    except Exception as e:
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+# @permission_classes([HasRoleAndDataPermission])
+def mhc_source(request):
+    """
+    GET: Returns all active MHC sources from MongoDB (hospital_MHC_Source)
+    Only returns documents where is_active = True
+    """
+    try:
+        sources = list(
+            MHC_Source_Collection.find(
+                {'is_active': True},
+                {'_id': 0, 'source': 1}
+            )
+        )
+        return Response({'sources': sources}, status=status.HTTP_200_OK)
     except Exception as e:
         traceback.print_exc()
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -112,7 +132,7 @@ def mhc_save_details(request):
     # POST - save new MHC details
     try:
         data = request.data.copy()
-        employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id')
+        employee_id = request.headers.get('auth-user-id') 
         data['created_by'] = employee_id
         data['lastmodified_by'] = employee_id
         data['created_date'] = timezone.now()

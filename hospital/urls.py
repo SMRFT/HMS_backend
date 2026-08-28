@@ -55,6 +55,7 @@ from .Views import (
     MHC,
     vaccination,
     mrd,
+    OPEMR
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -126,10 +127,15 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    path("substitute_medicine/", pharmacy.substitute_medicine),
-    path("convert_to_bill/", pharmacy.convert_to_bill),
-    path("finalize_bill/", pharmacy.finalize_bill),
-    path("cashcounter_outlet/", pharmacy.cashcounter_outlet),
+    # path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("salesreturn_get_uhid_bills/",  pharmacy.salesreturn_get_uhid_bills),
+    # path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    # path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
+    path("substitute_medicine/",  pharmacy.substitute_medicine),
+    path("convert_to_bill/",       pharmacy.convert_to_bill),
+    path("finalize_bill/",   pharmacy.finalize_bill),
+    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),
 
     
@@ -673,13 +679,24 @@ urlpatterns = [
     path('mhc_save_details/', MHC.mhc_save_details, name='mhc_save_details'),
     path('mhc_report/', MHC.mhc_report, name='mhc_report'),
     path('mhc_dashboard/', MHC.mhc_dashboard, name='mhc_dashboard'),
+    path('mhc_source/', MHC.mhc_source, name='mhc_source'),
 
     # MRD (Medical Records Department)
     path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),
     path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
     path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
 
+
+    # OPEMR
+
+    path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
+    path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
+    path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),
+    path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
+    path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
+    path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
 ]
+
 
 
 
