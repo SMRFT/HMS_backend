@@ -420,9 +420,19 @@ def get_investigations(request):
             {'_id': 0, 'uhid': 1, 'salutation': 1, 'firstName': 1, 'middleName': 1,
              'lastName': 1, 'gender': 1, 'address': 1, 'address1': 1, 'address2': 1,
              'city': 1, 'area': 1, 'pincode': 1, 'state': 1, 'door_no': 1, 'street': 1,
-             'mobilePhone': 1, 'mobile_number': 1}
+             'mobilePhone': 1, 'mobile_number': 1, 'customer_type': 1, 'customerType': 1,
+             'company_code': 1}
         ))
         patient_map = {p['uhid']: p for p in patients}
+
+        # ── 5a. Insurance Providers Cache ─────────────────────────────────────
+        company_codes = list({str(p.get('company_code')).strip() for p in patients if p.get('company_code') and str(p.get('company_code')).strip()})
+        insurance_map = {}
+        if company_codes:
+            insurance_provider_coll = db['hospital_insuranceprovider']
+            for ip in insurance_provider_coll.find({'company_code': {'$in': company_codes}}, {'_id': 0, 'company_code': 1, 'company_name': 1}):
+                if ip.get('company_code'):
+                    insurance_map[str(ip['company_code'])] = ip.get('company_name', '')
 
         # ── 5b. Doctor / ReferredBy Cache ─────────────────────────────────────
         doctor_ids      = set()
@@ -535,6 +545,17 @@ def get_investigations(request):
             full_addr = ', '.join([str(p).strip() for p in addr_parts if p and str(p).strip()])
             base['address'] = full_addr or record.get('address', '') or record.get('patientAddress', '') or ''
             base['patientType'] = 'IP' if record.get('ipNumber') else (record.get('patientType') or record.get('customerType') or 'OP')
+
+            # Customer Type & Insurance Company
+            cust_type = patient.get('customer_type') or patient.get('customerType') or record.get('customer_type') or record.get('customerType') or 'General'
+            comp_code = str(patient.get('company_code') or record.get('company_code') or '').strip()
+            comp_name = insurance_map.get(comp_code, '') or patient.get('insurance_company') or record.get('insurance_company') or (comp_code if comp_code else '')
+
+            base['customer_type']     = cust_type
+            base['customerType']      = cust_type
+            base['company_code']      = comp_code
+            base['company_name']      = comp_name
+            base['insurance_company'] = comp_name
 
             # ── Doctor name ───────────────────────────────────────────────────
             doc_val = record.get('doctor', '')
@@ -1387,4 +1408,104 @@ def dispatch_report(request, investBillNo, item_id):
         return JsonResponse({"error": str(e)}, status=500)
     finally:
         client.close()
+
+
+# ─── DICOM & Orthanc Integration ─────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_dicom_study_url(request):
+    """
+    Queries Orthanc PACS server to locate DICOM studies specifically for a given investBillNo (Accession Number).
+    Returns the OHIF Viewer URL without exposing Orthanc credentials to the frontend.
+    """
+    import urllib.request
+    import urllib.parse
+    import base64
+
+    invest_bill_no = request.GET.get('investBillNo', '').strip()
+
+    if not invest_bill_no:
+        return JsonResponse({'success': False, 'error': 'investBillNo is required.'}, status=400)
+
+    orthanc_url  = (os.getenv('ORTHANC_URL') or '').strip().rstrip('/')
+    orthanc_user = (os.getenv('ORTHANC_USERNAME') or '').strip()
+    orthanc_pass = (os.getenv('ORTHANC_PASSWORD') or '').strip()
+    ohif_url     = (os.getenv('OHIF_VIEWER_URL') or '').strip().rstrip('/')
+
+    if not orthanc_url or not ohif_url:
+        return JsonResponse({
+            'success': False,
+            'error': 'ORTHANC_URL or OHIF_VIEWER_URL is not configured in .env'
+        }, status=500)
+
+    find_url = f"{orthanc_url}/tools/find"
+
+    # Query Orthanc /tools/find by PatientID (where bill no is stored in DICOM), fallback to AccessionNumber
+    queries_to_try = [
+        {"Level": "Study", "Query": {"PatientID": invest_bill_no}},
+        {"Level": "Study", "Query": {"AccessionNumber": invest_bill_no}},
+    ]
+
+    study_ids = []
+    for payload in queries_to_try:
+        try:
+            req = urllib.request.Request(
+                find_url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            if orthanc_user and orthanc_pass:
+                auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
+                req.add_header('Authorization', f"Basic {auth_header}")
+
+            with urllib.request.urlopen(req, timeout=5) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result and isinstance(result, list) and len(result) > 0:
+                    study_ids = result
+                    break
+        except Exception as e:
+            logger.warning(f"Orthanc /tools/find query error for {payload}: {e}")
+            continue
+
+    if not study_ids:
+        return JsonResponse({
+            'success': False,
+            'message': f'No DICOM studies found in Orthanc for Bill No: {invest_bill_no}. Please ensure modality has pushed images.'
+        })
+
+    # Retrieve StudyInstanceUIDs from study details
+    study_instance_uids = []
+    for sid in study_ids:
+        try:
+            study_detail_url = f"{orthanc_url}/studies/{sid}"
+            req = urllib.request.Request(study_detail_url)
+            if orthanc_user and orthanc_pass:
+                auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
+                req.add_header('Authorization', f"Basic {auth_header}")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                detail = json.loads(response.read().decode('utf-8'))
+                main_tags = detail.get('MainDicomTags', {})
+                siuid = main_tags.get('StudyInstanceUID')
+                if siuid and siuid not in study_instance_uids:
+                    study_instance_uids.append(siuid)
+        except Exception as e:
+            logger.warning(f"Error fetching study detail for {sid}: {e}")
+
+    if not study_instance_uids:
+        return JsonResponse({
+            'success': False,
+            'message': 'Study found in Orthanc but could not resolve StudyInstanceUID.'
+        })
+
+    siuid_param = ",".join(study_instance_uids)
+    viewer_url = f"{ohif_url}?StudyInstanceUIDs={siuid_param}"
+
+    return JsonResponse({
+        'success': True,
+        'viewerUrl': viewer_url,
+        'studyInstanceUIDs': study_instance_uids,
+        'orthancStudyIds': study_ids
+    })
+
 

@@ -275,6 +275,7 @@ urlpatterns = [
     re_path(r'^scan-reports/dispatch/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.dispatch_report, name='dispatch_report'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
     path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),  
+    path('radiology/dicom-study/', radiology.get_dicom_study_url, name='get_dicom_study_url'),
 
     # MHC Reports (Master Health Check-up)
     path('mhc-investigations/', mhc.get_mhc_investigations, name='get_mhc_investigations'),
