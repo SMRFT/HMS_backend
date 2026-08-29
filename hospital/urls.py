@@ -492,6 +492,13 @@ urlpatterns = [
     path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
     path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
     path('stores-stores_daily_usage_report/', stores.stores_lab_used_qty_report, name='stores_lab_used_qty_report'),
+    path('vending-machine-sales/', stores.vending_machine_sales_list_create, name='vending_machine_sales_list_create'),
+    path('vending-machine-sales/import-excel/', stores.vending_machine_sales_import_excel, name='vending_machine_sales_import_excel'),
+    path('vending-machine-report/', stores.vending_machine_report, name='vending_machine_report'),
+    path('stores-grn-supplier-report/', stores.stores_grn_supplier_report, name='stores_grn_supplier_report'),
+    path('stores-indent-department-report/', stores.stores_indent_department_report, name='stores_indent_department_report'),
+
+
     
 
     # Assets Master

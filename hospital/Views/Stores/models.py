@@ -17,12 +17,25 @@ class ItemMaster(AuditModel):
     manufacturer = models.CharField(max_length=255, null=True, blank=True)
     total_quantity = models.IntegerField(default=0)
     approved_quantity = models.IntegerField(default=0)
+    VED_CHOICES = [
+        ('V', 'Vital'),
+        ('E', 'Essential'),
+        ('D', 'Desirable'),
+    ]
+    unit_price = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    ved_category = models.CharField(max_length=10, choices=VED_CHOICES, default='D')
+    is_VM = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return self.itemName
 
     def save(self, *args, **kwargs):
+        for field in self._meta.fields:
+            if field.get_internal_type() == 'DecimalField':
+                val = getattr(self, field.name, None)
+                if hasattr(val, 'to_decimal'):
+                    setattr(self, field.name, val.to_decimal())
         if self.pk:  # If updating existing record
             self.lastmodified_date = timezone.now()
         super().save(*args, **kwargs)
@@ -116,7 +129,7 @@ class storesGRN(AuditModel):
     is_approved = models.BooleanField(default=False)    
     
     def __str__(self):
-        return f"{self.grn_number} - {self.vendor}"    
+        return f"{self.grn_number} - {self.vendor_id or ''}"    
 
 class storesIntent(AuditModel):
     intent_id = models.CharField(max_length=50,primary_key=True)
@@ -182,5 +195,27 @@ class GeneralStoreVendor(AuditModel):
 
     def __str__(self):
         return f"{self.vendor_id} - {self.name}"
+
+
+class VendingMachineSale(AuditModel):
+    sale_id = models.CharField(max_length=50, primary_key=True)
+    item_id = models.CharField(max_length=50, null=True, blank=True)
+    product_name = models.CharField(max_length=255)
+    brand_id = models.CharField(max_length=100, null=True, blank=True)
+    brand_name = models.CharField(max_length=255, null=True, blank=True)
+    category_id = models.CharField(max_length=100, null=True, blank=True)
+    category_name = models.CharField(max_length=255, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    quantity_sold = models.IntegerField(default=1)
+    total_sales_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    date = models.DateField(default=now)
+    image_link = models.CharField(max_length=500, null=True, blank=True)
+    excel_product_id = models.CharField(max_length=100, null=True, blank=True)
+    source = models.CharField(max_length=50, default='MANUAL')
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.product_name} - Qty: {self.quantity_sold} - {self.date}"
+
 
 
