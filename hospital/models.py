@@ -845,16 +845,18 @@ class Admission(AuditModel):
     mlc_type            = models.CharField(max_length=50, blank=True, null=True)
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
+
+    # ── Attender details ──────────────────────────────────────────────────────
+    attender_name        = models.CharField(max_length=150, blank=True, null=True)
+    attender_relationship= models.CharField(max_length=100, blank=True, null=True)
+    attender_phone       = models.CharField(max_length=20, blank=True, null=True)
  
     # ── Cancellation tracking ─────────────────────────────────────────────────
     is_cancelled        = models.BooleanField(default=False)
     cancelled_by        = models.CharField(max_length=100, blank=True, null=True)
     cancelled_Reason    = models.TextField(blank=True, null=True)
  
-    # ── Edit tracking ─────────────────────────────────────────────────────────
-    is_edited           = models.BooleanField(default=False)
-    edited_by           = models.CharField(max_length=100, blank=True, null=True)
-    edited_Reason       = models.TextField(blank=True, null=True)
+    # ── Edit tracking (array of audit entries) ────────────────────────────────
     edit_history        = models.JSONField(default=list, blank=True, null=True)
  
     # ── Ward / admission status ───────────────────────────────────────────────
@@ -886,18 +888,19 @@ class Admission(AuditModel):
 class IpAdvance_Refund(models.Model):
     refund_bill_no   = models.CharField(max_length=30, unique=True)
     refund_date      = models.DateTimeField()
-    refund_amount        = models.DecimalField(max_digits=12, decimal_places=2)
+    refund_amount    = models.DecimalField(max_digits=12, decimal_places=2)
 
     bill_no          = models.CharField(max_length=30) 
     ip_number        = models.CharField(max_length=50)
     uhid             = models.CharField(max_length=50)
 
-    advance_amount       = models.DecimalField(max_digits=12, decimal_places=2)
-    remarks              = models.TextField(blank=True, default="")
+    advance_amount   = models.DecimalField(max_digits=12, decimal_places=2)
+    remarks          = models.TextField(blank=True, default="")
 
     bill_type        = models.CharField(max_length=20)
     billTypeNo       = models.CharField(max_length=20, blank=True, default="") 
     status           = models.CharField(max_length=20, default="Pending")
+
 
 class DischargeBilling(AuditModel):
     # ── Identity ──────────────────────────────────────────────────────────────
@@ -927,6 +930,7 @@ class DischargeBilling(AuditModel):
     non_tax_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     gst_amount        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    room_tax          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     discount_percent  = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     discount_amount   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -2309,6 +2313,23 @@ class CommunicationLog(AuditModel):
     
     def __str__(self):
         return f"{self.type} to {self.recipient}"
+
+
+class PatientNextVisitLog(AuditModel):
+    uhid = models.CharField(max_length=50, blank=True, null=True)
+    ip_number = models.CharField(max_length=50, blank=True, null=True)
+    patient_name = models.CharField(max_length=255, blank=True, null=True)
+    type = models.CharField(max_length=20, default='WhatsApp') # 'WhatsApp' or 'SMS' or 'Email'
+    sender = models.CharField(max_length=255, blank=True, null=True)
+    recipient = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=50) # 'Success', 'Failed'
+    details = models.TextField(blank=True, null=True) # Error message or success details
+    template_name = models.CharField(max_length=255, blank=True, null=True)
+
+    def __str__(self):
+        return f"Next Visit Reminder to {self.patient_name} ({self.uhid}) - {self.status}"
+
+
 
 
 class Internship(AuditModel):

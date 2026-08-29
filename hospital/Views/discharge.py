@@ -34,9 +34,15 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+import requests
+import re
+import logging
+from datetime import timedelta
+
+logger = logging.getLogger(__name__)
 
 from pyauth.auth import HasRoleAndDataPermission
-from ..models import Patient, Admission, DischargeBilling
+from ..models import Patient, Admission, DischargeBilling, PatientNextVisitLog
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +96,51 @@ def _to_float(v):
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def parse_json_field(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, str):
+        try:
+            parsed = _json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+            return []
+        except Exception:
+            return []
+    return []
+
+
+def _parse_dt(val):
+    if not val:
+        return None
+    if isinstance(val, dict) and "$date" in val:
+        val = val["$date"]
+    if isinstance(val, _datetime):
+        return val
+    if isinstance(val, _date):
+        return _datetime.combine(val, _datetime.min.time())
+    if isinstance(val, str):
+        try:
+            return _datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except Exception:
+            pass
+        try:
+            return _datetime.strptime(val[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+        try:
+            return _datetime.strptime(val[:10], "%Y-%m-%d")
+        except Exception:
+            pass
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -294,8 +345,9 @@ def _safe_isoformat(dt):
 # DecimalField names — used by _normalise_decimals before every .save()
 _DECIMAL_FIELDS = [
     "total_amount", "advance_amount", "sales_return", "medicines_amount",
-    "taxable_amount", "non_tax_amount", "gst_amount", "room_tax",
-    "discount_percent", "discount_amount", "item_disc", "total_disc", "net_amount",
+    "taxable_amount", "non_tax_amount",
+    "gst_amount", "room_tax",
+    "discount_percent", "discount_amount", "net_amount",
 ]
 
 
@@ -305,7 +357,8 @@ def _normalise_decimals(obj):
     a Decimal128 / smart-quoted string when validating on save().
     """
     for field in _DECIMAL_FIELDS:
-        setattr(obj, field, _to_float(getattr(obj, field, None)))
+        if hasattr(obj, field):
+            setattr(obj, field, _to_float(getattr(obj, field, None)))
 
 
 _employee_name_cache = {}
@@ -378,6 +431,8 @@ def _obj_to_dict(obj):
                 "age":            p.age,
                 "gender":         p.gender,
                 "mobile":         p.mobilePhone,
+                "mobilePhone":    p.mobilePhone,
+                "phone":          p.mobilePhone,
                 "address":        full_address,
                 "guardian":       getattr(p, "spouse_name", "") or getattr(p, "emergency_contact", "") or "",
                 "doctor":         doc_name or doc_id,
@@ -413,11 +468,13 @@ def _obj_to_dict(obj):
         "taxable_amount":    _to_float(obj.taxable_amount),
         "non_tax_amount":    _to_float(obj.non_tax_amount),
         "gst_amount":        _to_float(obj.gst_amount),
+        "room_tax":          _to_float(getattr(obj, "room_tax", 0)),
         "discount_percent":  _to_float(obj.discount_percent),
         "discount_amount":   _to_float(obj.discount_amount),
         "disc_reason":       obj.disc_reason or "",
         "net_amount":        _to_float(obj.net_amount),
         "remarks":           obj.remarks or "",
+        "next_visit_date":   _safe_isoformat(getattr(obj, "next_visit_date", None)),
 
         "created_by":        created_by_val,
         "created_by_name":   created_by_name,
@@ -477,12 +534,23 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.taxable_amount   = flt("taxable_amount")
     obj.non_tax_amount   = flt("non_tax_amount")
     obj.gst_amount       = flt("gst_amount")
+    obj.room_tax         = flt("room_tax")
     obj.discount_percent = flt("discount_percent")
     obj.discount_amount  = flt("discount_amount")
     obj.disc_reason      = s("disc_reason")
     obj.net_amount       = flt("net_amount")
     obj.remarks          = s("remarks")
     obj.shiftno          = s("shiftno")
+
+    # Handle optional next_visit_date
+    nv_date = data.get("next_visit_date")
+    if nv_date:
+        parsed_nv = _parse_dt(nv_date)
+        obj.next_visit_date = parsed_nv.date() if parsed_nv else None
+    elif "next_visit_date" in data and not nv_date:
+        obj.next_visit_date = None
+    elif existing and getattr(existing, "next_visit_date", None):
+        obj.next_visit_date = existing.next_visit_date
 
     # ── Audit & Organization Fields ──────────────────────────────────────────
     user_id = None
@@ -592,19 +660,234 @@ def _apply_fields(obj, data, existing=None, request=None):
             curr_history = getattr(existing, "edit_history", []) or []
             if not isinstance(curr_history, list):
                 curr_history = []
-def _mark_admission_discharged(ip_number):
-    if not ip_number:
+def _finalize_discharge(ip_number, user_id=None, uhid=None):
+    """
+    Called upon final discharge billing generation (status='Billed') or conversion from Estimate.
+    1. Updates Admission:
+       - is_discharged = True, is_admitted = False, status = "Discharged", ward_status = "Discharged"
+       - In room_details and roomShitingDetails:
+         makes is_roomActive = False, is_roomCleaned = True, sets endDateTime / end_time to now.
+       - updates lastmodified_by, lastmodified_date.
+    2. Updates Pharmacy Billing:
+       - For outlet_code: "OLET001", matching ip_number/uhid, payment_mode: "Credit", billing_status: "Billed", is_ward_request: True
+       - Updates billing_status to "Completed", lastmodified_by, lastmodified_date.
+    3. Updates Invest Billing:
+       - For matching ipNumber/uhid, paymentMethod: "Credit", paymentStatus: "Pending"
+       - Updates paymentStatus to "Billed", lastmodified_by, lastmodified_date.
+    """
+    if not ip_number and not uhid:
         return
+
+    now_dt = timezone.now()
+    now_iso = now_dt.isoformat()
+    user_str = str(user_id).strip() if user_id else "System"
+
     try:
-        adm = Admission.objects.filter(ipNumber=ip_number).first()
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        # ── 1. Update Admission & Room Process ──────────────────────────────
+        adm = None
+        if ip_number:
+            adm = Admission.objects.filter(ipNumber=ip_number).first()
+        if not adm and uhid:
+            adm = Admission.objects.filter(uhid=uhid, is_admitted=True).first()
+
         if adm:
-            adm.ward_status = "Discharged"
-            adm.status = "Discharged"
             adm.is_discharged = True
             adm.is_admitted = False
+            adm.lastmodified_by = user_str
+            adm.lastmodified_date = now_dt
+
+            def _to_native_list(val):
+                if val is None:
+                    return []
+                if isinstance(val, list):
+                    parsed = val
+                elif isinstance(val, dict):
+                    parsed = [val]
+                elif isinstance(val, str):
+                    s_val = val.strip()
+                    if not s_val or s_val in ("null", "None", "[]", "{}"):
+                        return []
+                    try:
+                        res = _json.loads(s_val)
+                        parsed = res if isinstance(res, list) else [res] if isinstance(res, dict) else []
+                    except Exception:
+                        return []
+                else:
+                    parsed = []
+                return _json.loads(_json.dumps(parsed, default=str))
+
+            # Update room_details (strictly as native array)
+            room_details = parse_json_field(adm.room_details)
+            updated_room_details = []
+            for r in (room_details if isinstance(room_details, list) else []):
+                if isinstance(r, dict):
+                    r_copy = dict(r)
+                    if r_copy.get("is_roomActive"):
+                        r_copy["is_roomActive"] = False
+                        r_copy["is_roomCleaned"] = False
+                        r_copy["endDateTime"] = now_iso
+                    # Ensure no extra non-standard date variables exist
+                    r_copy.pop("end_time", None)
+                    r_copy.pop("endTime", None)
+                    updated_room_details.append(r_copy)
+                elif r:
+                    updated_room_details.append(r)
+
+            # Update roomShitingDetails (strictly as native array)
+            shifts = parse_json_field(adm.roomShitingDetails)
+            updated_shifts = []
+            for s in (shifts if isinstance(shifts, list) else []):
+                if isinstance(s, dict):
+                    s_copy = dict(s)
+                    if s_copy.get("is_roomActive"):
+                        s_copy["is_roomActive"] = False
+                        s_copy["is_roomCleaned"] = False
+                        s_copy["endDateTime"] = now_iso
+                    # Ensure no extra non-standard date variables exist
+                    s_copy.pop("end_time", None)
+                    s_copy.pop("endTime", None)
+                    updated_shifts.append(s_copy)
+                elif s:
+                    updated_shifts.append(s)
+
+            # Read advance_payments (strictly as native array)
+            adv_payments = parse_json_field(getattr(adm, "advance_payments", []))
+
+            rd_array = _to_native_list(updated_room_details)
+            sd_array = _to_native_list(updated_shifts)
+            ap_array = _to_native_list(adv_payments)
+
+            adm.room_details       = rd_array
+            adm.roomShitingDetails = sd_array
+            adm.advance_payments   = ap_array
+
             adm.save()
+
+            # Sync to MongoDB hospital_admission ensuring all 3 remain native BSON arrays
+            db["hospital_admission"].update_one(
+                {"ipNumber": str(adm.ipNumber)},
+                {"$set": {
+                    "is_discharged":       True,
+                    "is_admitted":         False,
+                    "room_details":       rd_array,
+                    "roomShitingDetails": sd_array,
+                    "advance_payments":   ap_array,
+                    "lastmodified_by":    user_str,
+                    "lastmodified_date":  now_dt,
+                }}
+            )
+
+        # ── 2. Update Pharmacy Billing ───────────────────────────────────────
+        # Criteria: outlet_code: "OLET001", ip_no / inpatient_number, payment_mode: "Credit", billing_status: "Billed", is_ward_request: True
+        # Update: billing_status -> "Completed"
+        pharm_ip_filter = []
+        if ip_number:
+            pharm_ip_filter.extend([
+                {"inpatient_number": str(ip_number)},
+                {"ipNumber": str(ip_number)},
+                {"ip_number": str(ip_number)},
+                {"ip_no": str(ip_number)},
+            ])
+        if uhid:
+            pharm_ip_filter.append({"uhid": str(uhid)})
+
+        pharm_match = {
+            "$and": [
+                {"$or": pharm_ip_filter},
+                {
+                    "$or": [
+                        {"outlet_code": "OLET001"},
+                        {"outlet_code": {"$regex": "OLET", "$options": "i"}},
+                    ]
+                },
+                {"billing_status": "Billed"},
+                {"is_ward_request": True},
+                {
+                    "$or": [
+                        {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                        {"paymentMethod": {"$regex": "^credit$", "$options": "i"}},
+                        {"payment_details.payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                    ]
+                }
+            ]
+        }
+
+        # Update in HMS DB hospital_pharmacybilling
+        db["hospital_pharmacybilling"].update_many(
+            pharm_match,
+            {"$set": {
+                "billing_status": "Completed",
+                "lastmodified_by": user_str,
+                "lastmodified_date": now_dt,
+            }}
+        )
+
+        # Also update in secondary pharmacy DB if present
+        try:
+            pharm_client = MongoClient(os.getenv("PHARMACY_DB_HOST", os.getenv("GLOBAL_DB_HOST")))
+            pharm_db = pharm_client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
+            pharm_db["pharmacy_billing"].update_many(
+                pharm_match,
+                {"$set": {
+                    "billing_status": "Completed",
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+        except Exception:
+            pass
+
+        # ── 3. Update Invest Billing ─────────────────────────────────────────
+        # Criteria: ipNumber, paymentMethod: "Credit", paymentStatus: "Pending"
+        # Update: paymentStatus -> "Billed"
+        invest_ip_filter = []
+        if ip_number:
+            invest_ip_filter.extend([
+                {"ipNumber": str(ip_number)},
+                {"inpatient_number": str(ip_number)},
+                {"ip_number": str(ip_number)},
+            ])
+        if uhid:
+            invest_ip_filter.append({"uhid": str(uhid)})
+
+        invest_match = {
+            "$and": [
+                {"$or": invest_ip_filter},
+                {
+                    "$or": [
+                        {"paymentMethod": {"$regex": "^credit$", "$options": "i"}},
+                        {"payment_method": {"$regex": "^credit$", "$options": "i"}},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"paymentStatus": "Pending"},
+                        {"payment_status": "Pending"},
+                    ]
+                }
+            ]
+        }
+        db["hospital_investbilling"].update_many(
+            invest_match,
+            {"$set": {
+                "paymentStatus": "Billed",
+                "payment_status": "Billed",
+                "lastmodified_by": user_str,
+                "lastmodified_date": now_dt,
+            }}
+        )
+
     except Exception as e:
-        print(f"Failed to update admission status for {ip_number}: {e}")
+        import traceback
+        print(f"Error in _finalize_discharge for IP {ip_number}: {e}")
+        traceback.print_exc()
+
+
+def _mark_admission_discharged(ip_number, user_id=None, uhid=None):
+    _finalize_discharge(ip_number, user_id=user_id, uhid=uhid)
 
 
 def _revert_admission_discharge(ip_number):
@@ -707,13 +990,6 @@ def search_discharge_patient(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Verify ward_status: must be "Sent for billing"
-    if ward_status != "Sent for billing":
-        return Response(
-            {"error": "Not Ready For Billing", "ward_status": ward_status},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
     adm_dt  = getattr(admission, "admissionDateTime", None) if admission else None
     if isinstance(adm_dt, _datetime):
         adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
@@ -728,21 +1004,49 @@ def search_discharge_patient(request):
     else:
         adm_str = ""
 
-    room_details = (admission.room_details or []) if admission else []
+    # Resolve latest room / bed and room category
+    room_details = parse_json_field(getattr(admission, "room_details", [])) if admission else []
     current_room = ""
+    current_bed = ""
+    current_room_cat = "GENERAL WARD"
     if room_details and isinstance(room_details, list):
         last_room = room_details[-1]
         if isinstance(last_room, dict):
-            current_room = last_room.get("roomNumber", "") or last_room.get("room_number", "")
+            current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
+            current_bed  = str(last_room.get("bedNo") or last_room.get("bedNumber") or last_room.get("bed_number") or "")
+
+    shiftings_details = parse_json_field(getattr(admission, "roomShitingDetails", [])) if admission else []
+    if shiftings_details and isinstance(shiftings_details, list):
+        active_shifts = [s for s in shiftings_details if isinstance(s, dict) and s.get("is_roomActive")]
+        if active_shifts:
+            last_shift = active_shifts[-1]
+            current_room = str(last_shift.get("newRoomNo") or current_room)
+            current_bed  = str(last_shift.get("newBedNo") or current_bed)
 
     total_days = 0
     if adm_dt:
         try:
             today    = _date.today()
-            adm_date = adm_dt.date() if isinstance(adm_dt, _datetime) else adm_dt
-            total_days = (today - adm_date).days
+            adm_date = adm_dt.date() if isinstance(adm_dt, _datetime) else (adm_dt if isinstance(adm_dt, _date) else _parse_dt(adm_dt).date())
+            total_days = max(1, (today - adm_date).days)
         except Exception:
-            total_days = 0
+            total_days = 1
+    else:
+        total_days = 1
+
+    # Advance Payments calculation
+    total_advance = 0.0
+    adv_payments = parse_json_field(getattr(admission, "advance_payments", [])) if admission else []
+    for adv in adv_payments:
+        if isinstance(adv, dict) and adv.get("is_advanceActive") and str(adv.get("status", "")).lower() != "cancelled":
+            amt = _to_float(adv.get("advance_amount", 0))
+            refunds = adv.get("refund_details", [])
+            ref_amt = 0.0
+            if isinstance(refunds, list):
+                for r in refunds:
+                    if isinstance(r, dict):
+                        ref_amt += _to_float(r.get("refunded_amount", 0))
+            total_advance += max(0.0, amt - ref_amt)
 
     addr_parts = [getattr(patient, "permanent_address", ""), getattr(patient, "area", ""), getattr(patient, "city", ""), getattr(patient, "state", ""), getattr(patient, "zipcode", "")]
     full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
@@ -750,24 +1054,53 @@ def search_discharge_patient(request):
     doc_id = getattr(admission, "admittingDoctor", "") if admission else ""
     doc_name = _resolve_employee_name(doc_id) if doc_id else ""
 
+    # Resolve full insurance company name
+    raw_company = getattr(admission, "company_code", "") or getattr(patient, "company_code", "") or getattr(admission, "insurance_company", "") or getattr(patient, "company_name", "") or ""
+    company_name = ""
+    if raw_company:
+        try:
+            from ..models import InsuranceProvider
+            prov = InsuranceProvider.objects.filter(company_code=str(raw_company)).first()
+            if prov and prov.company_name:
+                company_name = prov.company_name
+            else:
+                prov2 = InsuranceProvider.objects.filter(company_name__iexact=str(raw_company)).first()
+                if prov2 and prov2.company_name:
+                    company_name = prov2.company_name
+                else:
+                    client_temp = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                    db_temp = client_temp[os.getenv("HMS_DB_NAME", "HMS")]
+                    ins_doc = db_temp["hospital_insuranceprovider"].find_one({"company_code": str(raw_company)})
+                    if ins_doc and ins_doc.get("company_name"):
+                        company_name = ins_doc.get("company_name")
+                    else:
+                        company_name = str(raw_company)
+        except Exception:
+            company_name = str(raw_company)
+
     patient_info = {
-        "uhid":           patient.uhid,
-        "patient_name":   f"{patient.firstName} {patient.lastName}".strip(),
-        "age":            patient.age,
-        "gender":         patient.gender,
-        "mobile":         patient.mobilePhone,
-        "ip_number":      admission.ipNumber if admission else None,
-        "ipNumber":       admission.ipNumber if admission else None,
-        "admission_date": adm_str,
-        "patient_type":   getattr(patient, "customer_type", ""),
-        "company":        getattr(patient, "company_code", "") or "",
-        "room_no":        current_room,
-        "total_days":     total_days,
-        "doctor":         doc_name or doc_id,
-        "doctor_id":      doc_id,
-        "address":        full_address,
-        "guardian":       getattr(patient, "spouse_name", "") or getattr(patient, "emergency_contact", "") or "",
-        "ward_status":    ward_status,
+        "uhid":                 patient.uhid,
+        "patient_name":         f"{patient.firstName} {patient.lastName}".strip(),
+        "age":                  patient.age,
+        "gender":               patient.gender,
+        "mobile":               patient.mobilePhone,
+        "ip_number":            admission.ipNumber if admission else None,
+        "ipNumber":             admission.ipNumber if admission else None,
+        "admission_date":       adm_str,
+        "patient_type":         getattr(patient, "customer_type", "") or getattr(admission, "patient_type", ""),
+        "company":              company_name,
+        "company_code":         raw_company,
+        "room_no":              current_room,
+        "bed_no":               current_bed,
+        "room_category":        current_room_cat,
+        "total_days":           total_days,
+        "advance_amount":       total_advance,
+        "doctor":               doc_name or doc_id,
+        "doctor_id":            doc_id,
+        "address":              full_address,
+        "guardian":             getattr(patient, "spouse_name", "") or getattr(patient, "emergency_contact", "") or "",
+        "ward_status":          ward_status,
+        "is_ready_for_billing": ward_status == "Sent for billing",
     }
 
     effective_ip   = ip_number or (admission.ipNumber if admission else None)
@@ -778,6 +1111,150 @@ def search_discharge_patient(request):
     try:
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client[os.getenv("HMS_DB_NAME", "HMS")]
+
+        # ── 0. Room Charges (Services & Room Kits) ───────────────────────────
+        try:
+            raw_movements = []
+            adm_start_dt = _parse_dt(adm_dt) or _datetime.now()
+
+            for r in room_details:
+                if isinstance(r, dict):
+                    r_no = str(r.get("roomNo") or r.get("roomNumber") or r.get("room_number") or "").strip()
+                    b_no = str(r.get("bedNo") or r.get("bedNumber") or r.get("bed_number") or "").strip()
+                    s_dt = _parse_dt(r.get("startDateTime")) or adm_start_dt
+                    e_dt = _parse_dt(r.get("endDateTime"))
+                    if r_no:
+                        raw_movements.append({
+                            "room_no": r_no,
+                            "bed_no": b_no,
+                            "start_dt": s_dt,
+                            "end_dt": e_dt,
+                        })
+
+            for s in shiftings_details:
+                if isinstance(s, dict):
+                    r_no = str(s.get("newRoomNo") or "").strip()
+                    b_no = str(s.get("newBedNo") or "").strip()
+                    s_dt = _parse_dt(s.get("shiftingDateTime") or s.get("startDateTime")) or adm_start_dt
+                    e_dt = _parse_dt(s.get("endDateTime"))
+                    if r_no:
+                        raw_movements.append({
+                            "room_no": r_no,
+                            "bed_no": b_no,
+                            "start_dt": s_dt,
+                            "end_dt": e_dt,
+                        })
+
+            raw_movements.sort(key=lambda x: x["start_dt"] or adm_start_dt)
+
+            # Merge contiguous movements in the same room (e.g. bed shifting inside the same room)
+            room_stays = []
+            for mov in raw_movements:
+                if room_stays and room_stays[-1]["room_no"] == mov["room_no"]:
+                    room_stays[-1]["end_dt"] = mov["end_dt"]
+                    room_stays[-1]["bed_no"] = mov["bed_no"]
+                else:
+                    room_stays.append(dict(mov))
+
+            now_dt = _datetime.now()
+            accumulated_days = 0
+
+            # If no room stays were in room_details or shifts, but current_room exists:
+            if not room_stays and current_room:
+                room_stays.append({
+                    "room_no": current_room,
+                    "bed_no": current_bed,
+                    "start_dt": adm_start_dt,
+                    "end_dt": now_dt,
+                })
+
+            for stay in room_stays:
+                r_no = stay["room_no"]
+                s_dt = stay["start_dt"] or adm_start_dt
+                e_dt = stay["end_dt"] or now_dt
+
+                # Stay calculation: calculate days patient stayed; minimum 1 day even if vacated within an hour
+                days_diff = (e_dt.date() - s_dt.date()).days
+                stay_days = max(1, days_diff)
+                accumulated_days += stay_days
+
+                room_doc = db["hospital_room"].find_one({"room_number": r_no})
+                if not room_doc:
+                    room_doc = db["hospital_room"].find_one({"room_number": str(r_no)})
+
+                if room_doc:
+                    room_cat = room_doc.get("room_category", "")
+                    if room_cat:
+                        patient_info["room_category"] = room_cat
+
+                    # A. Room Services (e.g. ROOM RENT, NURSING CHARGES)
+                    services = room_doc.get("services", [])
+                    if isinstance(services, str):
+                        try:
+                            services = _json.loads(services)
+                        except Exception:
+                            services = []
+
+                    for srv in (services if isinstance(services, list) else []):
+                        if isinstance(srv, dict):
+                            srv_desc = str(srv.get("description") or srv.get("service_name") or "Room Rent").strip()
+                            srv_rate = _to_float(srv.get("amount") or srv.get("price") or 0)
+                            srv_amt  = srv_rate * stay_days
+                            invest_items.append({
+                                "invest_bill_no": f"ROOM-{r_no}",
+                                "bill_object_id": str(room_doc.get("_id", "")),
+                                "itemName":       srv_desc,
+                                "price":          srv_rate,
+                                "rate":           str(srv_rate),
+                                "quantity":       stay_days,
+                                "discount":       0,
+                                "amount":         srv_amt,
+                                "billTypeNo":     "DIS01",
+                                "bill_type":      2,
+                                "test_id":        None,
+                                "doctor":         doc_name or doc_id,
+                                "payment_status": "Pending",
+                                "package_name":   f"Room {r_no} ({room_cat})" if room_cat else f"Room {r_no}",
+                                "source":         "hospital_room_services",
+                            })
+
+                    # B. Room Kits (e.g. Bed Sheet, etc.)
+                    kits = room_doc.get("room_kits", [])
+                    if isinstance(kits, str):
+                        try:
+                            kits = _json.loads(kits)
+                        except Exception:
+                            kits = []
+
+                    for kit in (kits if isinstance(kits, list) else []):
+                        if isinstance(kit, dict):
+                            kit_name = str(kit.get("kit_item") or kit.get("name") or "Room Kit").strip()
+                            kit_rate = _to_float(kit.get("amount") or kit.get("price") or 0)
+                            invest_items.append({
+                                "invest_bill_no": f"KIT-{r_no}",
+                                "bill_object_id": str(room_doc.get("_id", "")),
+                                "itemName":       kit_name,
+                                "price":          kit_rate,
+                                "rate":           str(kit_rate),
+                                "quantity":       1,
+                                "discount":       0,
+                                "amount":         kit_rate,
+                                "billTypeNo":     "DIS01",
+                                "bill_type":      2,
+                                "test_id":        None,
+                                "doctor":         doc_name or doc_id,
+                                "payment_status": "Pending",
+                                "package_name":   f"Room {r_no} Kit",
+                                "source":         "hospital_room_kits",
+                            })
+
+            if accumulated_days > 0:
+                patient_info["total_days"] = accumulated_days
+
+        except Exception as e:
+            import traceback
+            print(f"Error fetching room charges: {e}")
+            traceback.print_exc()
 
         def get_query(ip_fields, extra_filters=None):
             conditions = []
@@ -895,66 +1372,50 @@ def search_discharge_patient(request):
                 })
 
         # ── 4. hospital_pharmacybilling ────────────────────────────────────────
-        # get if ipNumber exists and payment_mode: "Credit" -> display Medicine Charges as single payment
+        # Calculate Medicine Charges from pharmacy bills for this IP stay
         pharm_q = get_query(
             ["inpatient_number", "ipNumber", "ip_number"],
-            {"payment_mode": "Credit", "is_deleted": {"$ne": True}}
+            {"is_deleted": {"$ne": True}}
         )
+        total_pharm_amt = 0.0
         if pharm_q:
             pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q))
-            if pharm_docs:
-                total_pharm_amt = 0.0
-                total_pharm_disc = 0.0
-                bill_nos = []
-                last_doc = pharm_docs[-1]
+            for doc in pharm_docs:
+                tot_amt = _to_float(
+                    doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
+                )
+                if tot_amt == 0:
+                    meds = doc.get("medicine_particulars", [])
+                    if isinstance(meds, list) and len(meds) > 0:
+                        for med in meds:
+                            if isinstance(med, dict):
+                                qty = int(med.get("qty") or med.get("quantity") or 1)
+                                rate = _to_float(med.get("rate") or med.get("price") or med.get("mrp") or 0)
+                                d_val = _to_float(med.get("discount") or 0)
+                                amt = _to_float(med.get("amount")) or max(0.0, rate * qty - d_val)
+                                tot_amt += amt
+                total_pharm_amt += tot_amt
 
-                for doc in pharm_docs:
-                    b_no = str(doc.get("bill_no") or doc.get("Bill_id") or "").strip()
-                    if b_no:
-                        bill_nos.append(b_no)
+        patient_info["medicines_amount"] = total_pharm_amt
 
-                    tot_amt = _to_float(
-                        doc.get("totalAmount") or doc.get("total_amount") or doc.get("net_amount") or doc.get("netAmount") or 0
-                    )
-                    disc_amt = _to_float(
-                        doc.get("overall_discount_amount") or doc.get("discount") or 0
-                    )
+        # ── 5. hospital_salesreturn ───────────────────────────────────────────
+        # Calculate Sales Return amount from pharmacy returns for this IP stay
+        sr_q = get_query(
+            ["inpatient_number", "ipNumber", "ip_number"],
+            {"is_deleted": {"$ne": True}}
+        )
+        total_sales_return = 0.0
+        if sr_q:
+            sr_docs = list(db["hospital_salesreturn"].find(sr_q))
+            for doc in sr_docs:
+                sr_amt = _to_float(
+                    doc.get("return_amount") or doc.get("refund_amount") or doc.get("net_amount") or doc.get("total_amount") or 0
+                )
+                total_sales_return += sr_amt
 
-                    if tot_amt == 0:
-                        meds = doc.get("medicine_particulars", [])
-                        if isinstance(meds, list) and len(meds) > 0:
-                            for med in meds:
-                                if isinstance(med, dict):
-                                    qty = int(med.get("qty") or med.get("quantity") or 1)
-                                    rate = _to_float(med.get("rate") or med.get("price") or med.get("mrp") or 0)
-                                    d_val = _to_float(med.get("discount") or 0)
-                                    amt = _to_float(med.get("amount")) or max(0.0, rate * qty - d_val)
-                                    tot_amt += amt
-                                    disc_amt += d_val
+        patient_info["sales_return"] = total_sales_return
 
-                    total_pharm_amt += tot_amt
-                    total_pharm_disc += disc_amt
-
-                combined_bill_no = ", ".join(bill_nos) if bill_nos else str(last_doc.get("_id"))
-                invest_items.append({
-                    "invest_bill_no": combined_bill_no,
-                    "bill_object_id": str(last_doc.get("_id")),
-                    "itemName":       "Medicine Charges",
-                    "price":          total_pharm_amt,
-                    "rate":           str(total_pharm_amt),
-                    "quantity":       1,
-                    "discount":       total_pharm_disc,
-                    "amount":         total_pharm_amt,
-                    "billTypeNo":     "DIS01",
-                    "bill_type":      last_doc.get("bill_type", 18),
-                    "test_id":        None,
-                    "doctor":         last_doc.get("doctor_id", ""),
-                    "payment_status": last_doc.get("billing_status", "Pending"),
-                    "package_name":   "",
-                    "source":         "hospital_pharmacybilling",
-                })
-
-        # ── 5. hospital_surgeryschedule ────────────────────────────────────────
+        # ── 6. hospital_surgeryschedule ────────────────────────────────────────
         # get if ip_number exists and status: "Confirmed"
         surgery_q = get_query(
             ["ip_number", "ipNumber", "inpatient_number"],
@@ -1154,12 +1615,11 @@ def discharge_billing_list_create(request):
             obj.bill_no         = generate_bill_number()
             obj.estimate_number = None
 
-        # discharge_id is set by model.save() via auto-increment — do not set it here
         try:
             obj.save()
             _sync_mongo_items_array(obj)
             if billing_status == "Billed":
-                _mark_admission_discharged(obj.ip_number)
+                _mark_admission_discharged(obj.ip_number, user_id=obj.created_by or obj.lastmodified_by, uhid=obj.uhid)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1208,6 +1668,8 @@ def discharge_billing_detail(request, pk):
         try:
             billing.save()
             _sync_mongo_items_array(billing)
+            if billing.status == "Billed":
+                _mark_admission_discharged(billing.ip_number, user_id=billing.lastmodified_by, uhid=billing.uhid)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1274,7 +1736,7 @@ def convert_estimate_to_bill(request, pk):
     try:
         estimate.save()
         _sync_mongo_items_array(estimate)
-        _mark_admission_discharged(estimate.ip_number)
+        _mark_admission_discharged(estimate.ip_number, user_id=estimate.lastmodified_by, uhid=estimate.uhid)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1726,3 +2188,464 @@ def Print_dialysis_dischargesummary(request):
         },
         status=status.HTTP_200_OK,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WHATSAPP DISCHARGE NEXT VISIT REMINDERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_discharge_visit_template_name():
+    from pathlib import Path
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parent.parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    return (os.getenv("BOTIFY_DISCHARGE_VISIT_TEMPLATE_NAME") or os.getenv("BOTIFY_VISIT_REMINDER_TEMPLATE_NAME") or "discharge_nextvisit_reminder").strip()
+
+
+def send_whatsapp_discharge_visit_reminder(uhid, patient_name, phone, next_visit_date_val, doctor_name="", force=False, ip_number="", bill_no="", discharge_id=None):
+    """
+    Sends WhatsApp Next Visit Reminder using Botify API.
+    Template: discharge_nextvisit_reminder
+    Variables:
+      {{1}} = Patient Name
+      {{2}} = Next Visit Date (DD/MM/YYYY)
+      {{3}} = Consulting Doctor
+    Logs outcome only in dedicated PatientNextVisitLog model.
+    """
+    clean_phone = re.sub(r'\D', '', str(phone or ''))
+    if len(clean_phone) == 10:
+        clean_phone = f"91{clean_phone}"
+
+    template_name = get_discharge_visit_template_name()
+    botify_apikey = (os.getenv("BOTIFY_API_KEY") or "").strip()
+
+    # Formatted visit date string (e.g. 30/08/2026)
+    formatted_visit_date = ""
+    iso_visit_date = ""
+    d_obj = None
+    if isinstance(next_visit_date_val, (_date, _datetime)):
+        d_obj = next_visit_date_val if isinstance(next_visit_date_val, _date) else next_visit_date_val.date()
+        formatted_visit_date = d_obj.strftime('%d/%m/%Y')
+        iso_visit_date = d_obj.strftime('%Y-%m-%d')
+    elif isinstance(next_visit_date_val, str) and next_visit_date_val.strip():
+        s = next_visit_date_val.strip()[:10]
+        try:
+            d_obj = _datetime.strptime(s, '%Y-%m-%d').date()
+            formatted_visit_date = d_obj.strftime('%d/%m/%Y')
+            iso_visit_date = d_obj.strftime('%Y-%m-%d')
+        except Exception:
+            formatted_visit_date = s
+            iso_visit_date = s
+
+    if not clean_phone or len(clean_phone) < 10:
+        err_msg = f"Invalid mobile phone number: '{phone}' for patient {patient_name} (UHID: {uhid})"
+        logger.warning(err_msg)
+        try:
+            PatientNextVisitLog.objects.create(
+                uhid=str(uhid or ''),
+                ip_number=str(ip_number or ''),
+                patient_name=str(patient_name or uhid or ''),
+                type="WhatsApp",
+                sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+                recipient=str(phone or ''),
+                status="Failed",
+                details=err_msg,
+                template_name=template_name,
+                created_by="system",
+                branch_code="SHB001",
+                hospital_code="SH001"
+            )
+        except Exception as log_ex:
+            logger.error(f"Error logging failed PatientNextVisitLog: {str(log_ex)}")
+        return {"success": False, "error": err_msg}
+
+    # Duplicate check in PatientNextVisitLog: prevent sending multiple times for the same visit date
+    if not force:
+        try:
+            already_sent = PatientNextVisitLog.objects.filter(
+                uhid=str(uhid or ''),
+                status="Success",
+                details__icontains=str(formatted_visit_date)
+            ).exists()
+
+            if not already_sent and iso_visit_date:
+                already_sent = PatientNextVisitLog.objects.filter(
+                    uhid=str(uhid or ''),
+                    status="Success",
+                    details__icontains=str(iso_visit_date)
+                ).exists()
+
+            if already_sent:
+                msg = f"Visit reminder already sent previously for patient {patient_name} ({uhid}) for visit on {formatted_visit_date}"
+                logger.info(msg)
+                return {"success": True, "skipped": True, "message": msg}
+        except Exception as dup_ex:
+            logger.warning(f"Duplicate check warning: {str(dup_ex)}")
+
+    if botify_apikey.startswith("Bearer "):
+        clean_api_key = botify_apikey[7:].strip()
+        auth_header = botify_apikey
+    else:
+        clean_api_key = botify_apikey
+        auth_header = f"Bearer {botify_apikey}"
+
+    botify_url = "https://login.botify.in/api/whatsapp/external"
+    headers = {
+        "Authorization": auth_header,
+        "Content-Type": "application/json"
+    }
+
+    p_name = str(patient_name or uhid or "Valued Patient").strip()
+    doc_name = str(doctor_name or "Consulting Doctor").strip()
+
+    # 3 parameters matching discharge_nextvisit_reminder: {{1}}=Name, {{2}}=Visit Date, {{3}}=Consulting Doctor
+    template_data = [
+        p_name,
+        str(formatted_visit_date),
+        doc_name
+    ]
+
+    components = [
+        {
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": str(p)} for p in template_data
+            ]
+        }
+    ]
+
+    body_payload = {
+        "to": clean_phone,
+        "type": "template",
+        "templateName": template_name,
+        "templateData": template_data,
+        "components": components
+    }
+
+    try:
+        r = requests.post(botify_url, json=body_payload, headers=headers, timeout=20)
+        try:
+            response_json = r.json()
+            is_success = r.status_code in [200, 201] and (
+                response_json.get("success") is True or
+                response_json.get("status") in [True, "success", "200", 200] or
+                response_json.get("result") == "success"
+            )
+        except ValueError:
+            response_json = {}
+            is_success = r.status_code in [200, 201]
+
+        # Fallback 1: 4-parameter template (legacy)
+        if not is_success and "does not match the expected number of params" in r.text:
+            alt4_template_data = [p_name, str(formatted_visit_date), doc_name, str(formatted_visit_date)]
+            alt4_components = [{"type": "body", "parameters": [{"type": "text", "text": str(p)} for p in alt4_template_data]}]
+            r_alt4 = requests.post(botify_url, json={
+                "to": clean_phone,
+                "type": "template",
+                "templateName": template_name,
+                "templateData": alt4_template_data,
+                "components": alt4_components
+            }, headers=headers, timeout=20)
+            try:
+                if r_alt4.status_code in [200, 201]:
+                    r = r_alt4
+                    response_json = r_alt4.json()
+                    is_success = True
+            except Exception:
+                pass
+
+        # Fallback 2: 2-parameter template
+        if not is_success and "does not match the expected number of params" in r.text:
+            alt2_template_data = [p_name, str(formatted_visit_date)]
+            alt2_components = [{"type": "body", "parameters": [{"type": "text", "text": str(p)} for p in alt2_template_data]}]
+            r_alt2 = requests.post(botify_url, json={
+                "to": clean_phone,
+                "type": "template",
+                "templateName": template_name,
+                "templateData": alt2_template_data,
+                "components": alt2_components
+            }, headers=headers, timeout=20)
+            try:
+                if r_alt2.status_code in [200, 201]:
+                    r = r_alt2
+                    response_json = r_alt2.json()
+                    is_success = True
+            except Exception:
+                pass
+
+        status_str = "Success" if is_success else "Failed"
+        details_text = f"Discharge Next Visit Reminder for {formatted_visit_date} (Dr: {doc_name}). Botify Response: {r.text}"
+
+        # Dedicated log entry for Discharge Next Visit
+        PatientNextVisitLog.objects.create(
+            uhid=str(uhid or ''),
+            ip_number=str(ip_number or ''),
+            patient_name=str(patient_name or uhid or ''),
+            type="WhatsApp",
+            sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+            recipient=clean_phone,
+            status=status_str,
+            details=details_text,
+            template_name=template_name,
+            created_by="system",
+            branch_code="SHB001",
+            hospital_code="SH001"
+        )
+
+        return {"success": is_success, "recipient": clean_phone, "response": response_json, "status_code": r.status_code}
+
+    except Exception as e:
+        err_text = f"Exception sending Discharge Visit Reminder WhatsApp to {clean_phone}: {str(e)}"
+        logger.error(err_text)
+        try:
+            PatientNextVisitLog.objects.create(
+                uhid=str(uhid or ''),
+                ip_number=str(ip_number or ''),
+                patient_name=str(patient_name or uhid or ''),
+                type="WhatsApp",
+                sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
+                recipient=clean_phone,
+                status="Failed",
+                details=err_text,
+                template_name=template_name,
+                created_by="system",
+                branch_code="SHB001",
+                hospital_code="SH001"
+            )
+        except Exception:
+            pass
+        return {"success": False, "error": err_text}
+
+
+
+def process_pending_discharge_visit_reminders(target_date=None, force=False):
+    """
+    Finds all DischargeBilling records where next_visit_date matches target_date (default: tomorrow, 1 day prior)
+    and sends the WhatsApp next visit reminder.
+    """
+    if not target_date:
+        tomorrow = timezone.now().date() + _dt_module.timedelta(days=1)
+        target_date_str = tomorrow.strftime("%Y-%m-%d")
+        target_date_obj = tomorrow
+    else:
+        if isinstance(target_date, str):
+            target_date_str = target_date.strip()[:10]
+            try:
+                target_date_obj = _datetime.strptime(target_date_str, "%Y-%m-%d").date()
+            except Exception:
+                target_date_obj = None
+        elif isinstance(target_date, (_date, _datetime)):
+            target_date_obj = target_date if isinstance(target_date, _date) else target_date.date()
+            target_date_str = target_date_obj.strftime("%Y-%m-%d")
+        else:
+            target_date_str = str(target_date)
+            target_date_obj = None
+
+    all_bills = DischargeBilling.objects.filter(is_cancelled=False)
+    matching_bills = []
+
+    for b in all_bills:
+        nvd = getattr(b, "next_visit_date", None)
+        if not nvd:
+            continue
+        nvd_str = ""
+        if isinstance(nvd, (_date, _datetime)):
+            nvd_str = (nvd if isinstance(nvd, _date) else nvd.date()).strftime("%Y-%m-%d")
+        elif isinstance(nvd, str):
+            nvd_str = nvd.strip()[:10]
+
+        if nvd_str == target_date_str:
+            matching_bills.append(b)
+
+    total_checked = len(matching_bills)
+    reminders_sent = 0
+    reminders_skipped = 0
+    failed_sends = 0
+    details_list = []
+
+    for bill in matching_bills:
+        uhid = bill.uhid or ""
+        ip_num = bill.ip_number or ""
+        doc_name = getattr(bill, "attending_doctor", "") or getattr(bill, "doctor_id", "") or ""
+        bill_num = bill.bill_no or bill.estimate_number or ""
+
+        # Fetch mobilePhone directly from Patient model
+        p_name = getattr(bill, "patient_name", "") or ""
+        phone = ""
+
+        if uhid:
+            try:
+                pat = Patient.objects.filter(uhid=uhid).first()
+                if pat:
+                    if not p_name:
+                        p_name = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
+                    phone = getattr(pat, "mobilePhone", "") or getattr(pat, "home_phone", "") or ""
+            except Exception as pat_ex:
+                logger.warning(f"Error fetching Patient model for uhid {uhid}: {str(pat_ex)}")
+
+        # Fallback to bill phone if still missing
+        if not phone:
+            phone = getattr(bill, "phone_number", "") or getattr(bill, "mobile_number", "") or ""
+
+        res = send_whatsapp_discharge_visit_reminder(
+            uhid=uhid,
+            patient_name=p_name,
+            phone=phone,
+            next_visit_date_val=bill.next_visit_date,
+            doctor_name=doc_name,
+            force=force,
+            ip_number=ip_num,
+            bill_no=bill_num,
+            discharge_id=bill.discharge_id
+        )
+
+        if res.get("skipped"):
+            reminders_skipped += 1
+        elif res.get("success"):
+            reminders_sent += 1
+        else:
+            failed_sends += 1
+
+        details_list.append({
+            "discharge_id": bill.discharge_id,
+            "bill_no": bill_num,
+            "uhid": uhid,
+            "patient_name": p_name,
+            "phone": phone,
+            "next_visit_date": target_date_str,
+            "result": res
+        })
+
+    return {
+        "success": True,
+        "target_date": target_date_str,
+        "total_patients_checked": total_checked,
+        "reminders_sent": reminders_sent,
+        "reminders_skipped": reminders_skipped,
+        "failed_sends": failed_sends,
+        "details": details_list
+    }
+
+
+@api_view(["POST", "GET"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def send_discharge_visit_reminders_api(request):
+    """
+    API endpoint to trigger pending next visit reminder messages for a target date (default tomorrow).
+    Body: { "date": "YYYY-MM-DD", "force": false }
+    """
+    target_date = request.data.get("date") or request.GET.get("date")
+    force = bool(request.data.get("force") or request.GET.get("force") in [True, "true", "1"])
+
+    results = process_pending_discharge_visit_reminders(target_date=target_date, force=force)
+    return Response(results, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def send_single_discharge_visit_reminder_api(request):
+    """
+    API endpoint to trigger a single next visit reminder WhatsApp message.
+    Body: { "uhid": "...", "patient_name": "...", "phone": "...", "next_visit_date": "YYYY-MM-DD", "doctor_name": "...", "force": false }
+    """
+    data = request.data
+    uhid = data.get("uhid") or ""
+    ip_num = data.get("ip_number") or ""
+    p_name = data.get("patient_name") or ""
+    phone = data.get("phone") or data.get("mobile") or data.get("phone_number") or ""
+    next_visit = data.get("next_visit_date") or data.get("date")
+    doc_name = data.get("doctor_name") or data.get("attending_doctor") or ""
+    bill_num = data.get("bill_no") or ""
+    disc_id = data.get("discharge_id")
+    force = bool(data.get("force", False))
+
+    if not next_visit:
+        return Response({"success": False, "error": "next_visit_date is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Fetch directly from Patient model
+    if uhid:
+        try:
+            pat = Patient.objects.filter(uhid=uhid).first()
+            if pat:
+                if not p_name:
+                    p_name = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
+                if not phone:
+                    phone = getattr(pat, "mobilePhone", "") or getattr(pat, "home_phone", "") or ""
+        except Exception:
+            pass
+
+    res = send_whatsapp_discharge_visit_reminder(
+        uhid=uhid,
+        patient_name=p_name,
+        phone=phone,
+        next_visit_date_val=next_visit,
+        doctor_name=doc_name,
+        force=force,
+        ip_number=ip_num,
+        bill_no=bill_num,
+        discharge_id=disc_id
+    )
+
+    return Response(res, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def patient_next_visit_logs_api(request):
+    """
+    Query log history from PatientNextVisitLog.
+    Query params: uhid, from_date, to_date, status
+    """
+    uhid_f = request.GET.get("uhid")
+    status_f = request.GET.get("status")
+    from_date_str = request.GET.get("from_date")
+    to_date_str = request.GET.get("to_date")
+
+    logs = list(PatientNextVisitLog.objects.all().order_by("-created_date"))
+    filtered = []
+
+    for l in logs:
+        if uhid_f and l.uhid != uhid_f:
+            continue
+        if status_f and l.status != status_f:
+            continue
+        if from_date_str:
+            try:
+                fd = _datetime.strptime(from_date_str[:10], "%Y-%m-%d").date()
+                ld = l.created_date.date() if isinstance(l.created_date, _datetime) else l.created_date
+                if ld < fd:
+                    continue
+            except Exception:
+                pass
+        if to_date_str:
+            try:
+                td = _datetime.strptime(to_date_str[:10], "%Y-%m-%d").date()
+                ld = l.created_date.date() if isinstance(l.created_date, _datetime) else l.created_date
+                if ld > td:
+                    continue
+            except Exception:
+                pass
+        filtered.append({
+            "id": str(getattr(l, "id", "")),
+            "uhid": l.uhid,
+            "ip_number": l.ip_number,
+            "patient_name": l.patient_name,
+            "type": l.type,
+            "recipient": l.recipient,
+            "status": l.status,
+            "details": l.details,
+            "template_name": l.template_name,
+            "created_date": l.created_date.isoformat() if hasattr(l.created_date, "isoformat") else str(l.created_date)
+        })
+
+    return Response({
+        "success": True,
+        "count": len(filtered),
+        "data": filtered
+    }, status=status.HTTP_200_OK)
+
+
+

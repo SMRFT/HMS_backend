@@ -54,6 +54,7 @@ from .Views import (
     DoctorFeeCuts,
     MHC,
     vaccination,
+    patient_inquiry,
     mrd,
     OPEMR
 )
@@ -247,10 +248,14 @@ urlpatterns = [
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),
     path("discharge-billing/<str:pk>/cancel/", discharge.cancel_discharge_billing, name="discharge-billing-cancel"),
+    path("discharge-billing/send-visit-reminders/", discharge.send_discharge_visit_reminders_api, name="discharge-billing-send-visit-reminders"),
+    path("send-discharge-visit-reminder/", discharge.send_single_discharge_visit_reminder_api, name="send-single-discharge-visit-reminder"),
+    path("patient-next-visit-logs/", discharge.patient_next_visit_logs_api, name="patient-next-visit-logs"),
     path("dialysis-discharge-summary/", discharge.create_dialysis_discharge_summary, name="dialysis-discharge-summary"),
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
 
     # Patient URLs
+    path('patient-inquiry/', patient_inquiry.patient_inquiry_view, name='patient-inquiry'),
     path('patients/register/', views.patientCreateView, name='patient-register'),
     path('create/', views.patientCreateView, name='patient-list'),
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
