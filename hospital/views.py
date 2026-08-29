@@ -881,7 +881,7 @@ def get_pending_qr_registrations(request):
             query = query.filter(is_consumed=False)
         elif status == 'consumed':
             query = query.filter(is_consumed=True)
-        # if status is 'all', no filter is applied
+        # if status is 'all', no filter is applied (reloaded Global.backend_diagnostics_Departments resolution)
             
         pending = query
         results = []

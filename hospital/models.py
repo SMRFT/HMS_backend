@@ -20,6 +20,12 @@ class AuditModel(models.Model):
         abstract = True
 
     def save(self, *args, **kwargs):
+        for field in self._meta.fields:
+            if field.get_internal_type() == 'DecimalField':
+                val = getattr(self, field.name, None)
+                if hasattr(val, 'to_decimal'):
+                    setattr(self, field.name, val.to_decimal())
+
         if not self.created_date:
             self.created_date = timezone.now()
 

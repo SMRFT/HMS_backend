@@ -402,6 +402,20 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/stores-get_stores_lab_approved_items/': 'HMS-P-SGLA',
     '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-P-SDUI',
     '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_report/?(\?.*)?$': 'HMS-P-SDUI',
+
+    # Vending Machine & Stores Reports:
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-sales/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-sales/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-sales/import-excel/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-sales/import-excel/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-report/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-report/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-grn-supplier-report/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-indent-department-report/': 'HMS-API-SINTENT',
+    r'^/_b_a_c_k_e_n_d/HMS/stores-indent-department-report/?(\?.*)?$': 'HMS-API-SINTENT',
+
+
  
 
 
