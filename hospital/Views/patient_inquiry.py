@@ -191,6 +191,9 @@ def patient_inquiry_view(request):
                 "is_cancelled": adm.is_cancelled,
                 "mlc_type": adm.mlc_type,
                 "mlc_remarks": adm.mlc_remarks,
+                "attender_name": getattr(adm, "attender_name", "") or "",
+                "attender_relationship": getattr(adm, "attender_relationship", "") or "",
+                "attender_phone": getattr(adm, "attender_phone", "") or "",
             }
 
             if is_active and not active_admission:

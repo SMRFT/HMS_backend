@@ -671,6 +671,9 @@ def admission_view(request):
                     "mlc_type":          adm.mlc_type     or "",
                     "mlc_doc":           adm.mlc_doc      or "",
                     "mlc_remarks":       adm.mlc_remarks  or "",
+                    "attender_name":         getattr(adm, "attender_name", "") or "",
+                    "attender_relationship": getattr(adm, "attender_relationship", "") or "",
+                    "attender_phone":        getattr(adm, "attender_phone", "") or "",
                     "room_details":      _safe_list(adm.room_details),
                     "roomShitingDetails":_safe_list(adm.roomShitingDetails),
                     "advance_payments":  _safe_list(adm.advance_payments),
@@ -694,7 +697,7 @@ def admission_view(request):
                 }
                 _enrich_with_patient(d, hospital_code)
                 result.append(d)
-            return JsonResponse({"success": True, "data": result})
+            return JsonResponse({"success": True, "data": result, "count": len(result)})
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"error": str(e)}, status=500)
@@ -786,6 +789,11 @@ def admission_view(request):
             elif data.get("mlc_doc") and isinstance(data.get("mlc_doc"), str):
                 mlc_doc_name = data.get("mlc_doc")
 
+            # Attender details
+            attender_name = str(data.get("attender_name") or data.get("attenderName") or "").strip() or None
+            attender_relationship = str(data.get("attender_relationship") or data.get("attenderRelationship") or data.get("relationship") or "").strip() or None
+            attender_phone = str(data.get("attender_phone") or data.get("attenderPhone") or "").strip() or None
+
             adm = Admission.objects.create(
                 uhid=uhid, ipNumber=ip_number, admissionDateTime=admission_dt,
                 hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
@@ -795,6 +803,7 @@ def admission_view(request):
                 customer_type=customer_type, company_code=company_code, insurance_company=insurance_company,
                 age=final_age, age_type=final_age_type,
                 mlc_type=mlc_type, mlc_doc=mlc_doc_name, mlc_remarks=mlc_remarks,
+                attender_name=attender_name, attender_relationship=attender_relationship, attender_phone=attender_phone,
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
@@ -813,6 +822,9 @@ def admission_view(request):
                 "mlc_type": mlc_type,
                 "mlc_doc": mlc_doc_name,
                 "mlc_remarks": mlc_remarks,
+                "attender_name": attender_name,
+                "attender_relationship": attender_relationship,
+                "attender_phone": attender_phone,
                 "edit_history": [],
                 "is_cancelled": False,
                 "cancelled_by": None,
@@ -830,6 +842,7 @@ def admission_view(request):
                 "insurance_company": insurance_company, "insuranceCompanyName": insurance_company,
                 "age": final_age, "age_type": final_age_type,
                 "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
+                "attender_name": attender_name or "", "attender_relationship": attender_relationship or "", "attender_phone": attender_phone or "",
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "edit_history": [],
@@ -935,6 +948,9 @@ def admission_detail(request, ipNumber):
                 'mlc_type':          adm.mlc_type    or "",
                 'mlc_doc':           adm.mlc_doc     or "",
                 'mlc_remarks':       adm.mlc_remarks or "",
+                'attender_name':         getattr(adm, 'attender_name', '') or "",
+                'attender_relationship': getattr(adm, 'attender_relationship', '') or "",
+                'attender_phone':        getattr(adm, 'attender_phone', '') or "",
                 'advance_payments':  ap,
                 # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
@@ -998,10 +1014,17 @@ def admission_detail(request, ipNumber):
                 if not edit_reason:
                     return JsonResponse({'success': False, 'error': 'edited_Reason is required to edit an admission.'}, status=400)
 
-                for f in ['admittingDoctor', 'consultingDoctor', 'reasonForAdmission', 'mlc_type', 'mlc_remarks']:
+                for f in ['admittingDoctor', 'consultingDoctor', 'reasonForAdmission', 'mlc_type', 'mlc_remarks', 'attender_name', 'attender_relationship', 'attender_phone']:
                     if f in data:
                         val = get_val(data.get(f))
                         setattr(adm, f, str(val) if val else "")
+                if 'attenderName' in data and not getattr(adm, 'attender_name', None):
+                    adm.attender_name = str(get_val(data.get('attenderName')) or '')
+                if 'attenderRelationship' in data and not getattr(adm, 'attender_relationship', None):
+                    adm.attender_relationship = str(get_val(data.get('attenderRelationship')) or '')
+                if 'attenderPhone' in data and not getattr(adm, 'attender_phone', None):
+                    adm.attender_phone = str(get_val(data.get('attenderPhone')) or '')
+
                 if 'packageNo' in data:
                     val = get_val(data.get('packageNo'))
                     adm.packageName = str(val) if val else ""

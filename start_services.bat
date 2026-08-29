@@ -19,5 +19,9 @@ start "Vaccination Reminders Worker" cmd /k "venv\Scripts\python manage.py send_
 echo Starting MHC Reminders Worker (Daemon)...
 start "MHC Reminders Worker" cmd /k "venv\Scripts\python manage.py send_mhc_reminders --daemon"
 
+echo Starting Discharge Visit Reminders Worker (Daemon)...
+start "Discharge Visit Reminders Worker" cmd /k "venv\Scripts\python manage.py send_discharge_visit_reminders --daemon"
+
 echo Services started. You can close this window.
 pause
+
