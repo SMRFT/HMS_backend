@@ -1447,6 +1447,14 @@ def get_dicom_study_url(request):
         {"Level": "Study", "Query": {"AccessionNumber": invest_bill_no}},
     ]
 
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    if orthanc_user and orthanc_pass:
+        auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
+        headers['Authorization'] = f"Basic {auth_header}"
+
     study_ids = []
     connection_failed = False
     for payload in queries_to_try:
@@ -1454,27 +1462,21 @@ def get_dicom_study_url(request):
             req = urllib.request.Request(
                 find_url,
                 data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
+                headers=headers
             )
-            if orthanc_user and orthanc_pass:
-                auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
-                req.add_header('Authorization', f"Basic {auth_header}")
-
-            with urllib.request.urlopen(req, timeout=3) as response:
+            with urllib.request.urlopen(req, timeout=8) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 if result and isinstance(result, list) and len(result) > 0:
                     study_ids = result
                     break
         except urllib.error.URLError as e:
-            logger.warning(f"Orthanc connection unreachable from server for {find_url}: {e}")
+            logger.warning(f"Orthanc connection error for {find_url}: {e}")
             connection_failed = True
             break
         except Exception as e:
             logger.warning(f"Orthanc /tools/find query error for {payload}: {e}")
             continue
 
-    # If backend is on Cloud and cannot directly reach hospital LAN Orthanc,
-    # generate direct client-side viewer URL for doctor's browser on the LAN:
     if connection_failed:
         fallback_viewer_url = f"{ohif_url}?PatientID={urllib.parse.quote(invest_bill_no)}"
         return JsonResponse({
@@ -1496,11 +1498,8 @@ def get_dicom_study_url(request):
     for sid in study_ids:
         try:
             study_detail_url = f"{orthanc_url}/studies/{sid}"
-            req = urllib.request.Request(study_detail_url)
-            if orthanc_user and orthanc_pass:
-                auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
-                req.add_header('Authorization', f"Basic {auth_header}")
-            with urllib.request.urlopen(req, timeout=3) as response:
+            req = urllib.request.Request(study_detail_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as response:
                 detail = json.loads(response.read().decode('utf-8'))
                 main_tags = detail.get('MainDicomTags', {})
                 siuid = main_tags.get('StudyInstanceUID')
