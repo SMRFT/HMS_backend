@@ -4,11 +4,12 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor
+from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer,
-    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer
+    Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
+    VendingMachineSaleSerializer
 )
 from django.shortcuts import get_object_or_404
 from datetime import datetime
@@ -115,6 +116,13 @@ def item_master_detail(request, pk):
         data['lastmodified_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
+
+        if data.get('unit_price') is None or data.get('unit_price') == '':
+            data['unit_price'] = 0.00
+        if data.get('ved_category') is None or data.get('ved_category') == '':
+            data['ved_category'] = 'D'
+        if 'is_VM' in data:
+            data['is_VM'] = bool(data.get('is_VM'))
         
         serializer = ItemMasterSerializer(item, data=data, partial=True)
         if serializer.is_valid():
@@ -590,32 +598,53 @@ def stores_grn_list_create(request):
         if serializer.is_valid():
             grn_instance = serializer.save()
             
-            # Update Item quantities
+            # Update Item quantities & track pre/post approval stock
+            # IMPORTANT: Stock is ONLY added to ItemMaster.total_quantity if the GRN is approved
             items = grn_instance.items
             if isinstance(items, list):
+                items_updated = False
                 for item_data in items:
-                    item_id = item_data.get('item_id')
-                    quantity = item_data.get('quantity', 0)
-                    free = item_data.get('free', 0)
-                    
-                    try:
-                        quantity = int(quantity)
-                    except ValueError:
-                        quantity = 0
+                    if isinstance(item_data, dict):
+                        item_id = item_data.get('item_id') or item_data.get('id') or item_data.get('itemId')
+                        quantity = item_data.get('quantity', 0)
+                        free = item_data.get('free', 0)
                         
-                    try:
-                        free = int(free)
-                    except ValueError:
-                        free = 0
-                        
-                    total_addition = quantity + free
-                    
-                    if item_id and total_addition > 0:
                         try:
-                            item = ItemMaster.objects.get(item_id=item_id)
-                            item.total_quantity += total_addition
-                        except ItemMaster.DoesNotExist:
-                            pass
+                            quantity = int(quantity)
+                        except (ValueError, TypeError):
+                            quantity = 0
+                            
+                        try:
+                            free = int(free)
+                        except (ValueError, TypeError):
+                            free = 0
+                            
+                        total_addition = quantity + free
+                        
+                        if item_id:
+                            try:
+                                item_obj = ItemMaster.objects.get(item_id=str(item_id))
+                                stock_before = item_obj.total_quantity or 0
+                                if grn_instance.is_approved:
+                                    stock_after = stock_before + total_addition
+                                    item_obj.total_quantity = stock_after
+                                    item_obj.save()
+                                else:
+                                    stock_after = stock_before
+                                
+                                item_data['quantity_before_approval'] = stock_before
+                                item_data['added_quantity'] = total_addition
+                                item_data['quantity_after_approval'] = stock_after
+                                items_updated = True
+                            except ItemMaster.DoesNotExist:
+                                item_data['quantity_before_approval'] = 0
+                                item_data['added_quantity'] = total_addition
+                                item_data['quantity_after_approval'] = total_addition if grn_instance.is_approved else 0
+                                items_updated = True
+
+                if items_updated:
+                    grn_instance.items = items
+                    grn_instance.save()
                             
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -705,18 +734,31 @@ def stores_grn_detail(request, pk):
                     items = []
 
                 for item in items:
-                    item_id = item.get('item_id') or item.get('id') or item.get('itemId')
-                    qty = int(item.get('quantity') or 0)
-                    free = int(item.get('free') or 0)
-                    total_addition = qty + free
-                    
-                    if item_id and total_addition > 0:
-                        try:
-                            master = ItemMaster.objects.get(item_id=str(item_id))
-                            master.total_quantity = (master.total_quantity or 0) + total_addition
-                            master.save()
-                        except ItemMaster.DoesNotExist:
-                            pass  # Item not in master — skip silently
+                    if isinstance(item, dict):
+                        item_id = item.get('item_id') or item.get('id') or item.get('itemId')
+                        qty = int(item.get('quantity') or 0)
+                        free = int(item.get('free') or 0)
+                        total_addition = qty + free
+                        
+                        if item_id:
+                            try:
+                                master = ItemMaster.objects.get(item_id=str(item_id))
+                                stock_before = master.total_quantity or 0
+                                stock_after = stock_before + total_addition
+                                master.total_quantity = stock_after
+                                master.save()
+
+                                item['quantity_before_approval'] = stock_before
+                                item['added_quantity'] = total_addition
+                                item['quantity_after_approval'] = stock_after
+                            except ItemMaster.DoesNotExist:
+                                item['quantity_before_approval'] = 0
+                                item['added_quantity'] = total_addition
+                                item['quantity_after_approval'] = total_addition
+
+                grn.items = items
+                grn.is_approved = True
+                grn.save()
             # ────────────────────────────────────────────────────────────────
             serializer.save()
             return Response(serializer.data)
@@ -741,10 +783,14 @@ def get_stores_intents(request):
     
     from_date = request.data.get('from_date')
     to_date = request.data.get('to_date')
+    department_filter = request.data.get('department')
 
     query = {
         "is_active": True
     }
+
+    if department_filter:
+        query["department"] = department_filter
 
     # Date filter
     if from_date or to_date:
@@ -762,12 +808,16 @@ def get_stores_intents(request):
     dept_collection = db["hospital_department"]
     item_collection = db["hospital_itemmaster"]
 
-    # ✅ Department mapping (from MongoDB department_collection, keyed by department_code)
-    dept_map = {
-        doc['department_code']: doc['department_name']
-        for doc in department_collection.find({'is_active': True})
-        if doc.get('department_code') and doc.get('department_name')
-    }
+    # ✅ Department mapping (from Global.backend_diagnostics_Departments and Department model)
+    dept_map = {}
+    for doc in department_collection.find({'is_active': True}):
+        code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+        name = doc.get('department_name')
+        if code and name:
+            dept_map[str(code)] = name
+    for d in Department.objects.filter(is_active__in=[True]):
+        if d.department_id and d.department_name and str(d.department_id) not in dept_map:
+            dept_map[str(d.department_id)] = d.department_name
 
     # ✅ Item stock mapping
     item_map = {
@@ -785,7 +835,7 @@ def get_stores_intents(request):
 
         # ✅ Department name
         dept_code = d.get("department")
-        d["department_name"] = dept_map.get(dept_code, None)
+        d["department_name"] = dept_map.get(dept_code) or dept_code or "General"
 
         # ✅ Add stock inside items
         for item in d.get("items", []):
@@ -1314,4 +1364,747 @@ def general_store_vendor_detail(request, pk):
     elif request.method == 'DELETE':
         vendor.is_active = False
         vendor.save()
-        return Response({"success": True, "message": "Vendor deleted successfully"}, status=status.HTTP_200_OK)
+        return Response({"success": True, "message": "Vendor deleted successfully"}, status=status.HTTP_200_OK)
+
+
+# --- Vending Machine API Views ---
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def vending_machine_sales_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+
+    if request.method == 'GET':
+        from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+        item_id = request.query_params.get('item_id') or request.GET.get('item_id')
+
+        qs = VendingMachineSale.objects.filter(is_active__in=[True]).order_by('-date', '-created_date')
+        if from_date:
+            qs = qs.filter(date__gte=from_date)
+        if to_date:
+            qs = qs.filter(date__lte=to_date)
+        if item_id:
+            qs = qs.filter(item_id=item_id)
+
+        serializer = VendingMachineSaleSerializer(qs, many=True)
+        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if isinstance(data, list):
+            saved_records = []
+            for item in data:
+                if not item.get('sale_id'):
+                    item['sale_id'] = generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8)
+                item['created_by'] = employee_id
+                item['branch_code'] = branch_code
+                item['outlet_code'] = outlet_code
+                ser = VendingMachineSaleSerializer(data=item)
+                if ser.is_valid():
+                    ser.save()
+                    saved_records.append(ser.data)
+            return Response({"success": True, "data": saved_records}, status=status.HTTP_201_CREATED)
+
+        if not data.get('sale_id'):
+            data['sale_id'] = generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8)
+
+        qty = int(data.get('quantity_sold') or 1)
+        price = float(data.get('unit_price') or 0.0)
+        data['quantity_sold'] = qty
+        data['unit_price'] = price
+        data['total_sales_amount'] = float(data.get('total_sales_amount') or (qty * price))
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = VendingMachineSaleSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_201_CREATED)
+        return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def vending_machine_sales_import_excel(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+
+    excel_file = request.FILES.get('file')
+    sales_json_list = request.data.get('items')
+
+    imported_sales = []
+    
+    # If file uploaded
+    if excel_file:
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            from datetime import datetime
+
+            z = zipfile.ZipFile(excel_file)
+            sheet_tree = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+            rows = sheet_tree.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheetData/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row')
+            
+            shared_strings = []
+            if 'xl/sharedStrings.xml' in z.namelist():
+                tree = ET.fromstring(z.read('xl/sharedStrings.xml'))
+                for elem in tree.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si'):
+                    text = ''.join([t.text for t in elem.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t') if t.text])
+                    shared_strings.append(text)
+
+            row_data_list = []
+            for r in rows:
+                row_vals = []
+                for c in r.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c'):
+                    t = c.attrib.get('t')
+                    v = c.find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v')
+                    val = v.text if v is not None else ''
+                    if t == 's' and val != '':
+                        try:
+                            val = shared_strings[int(val)]
+                        except Exception:
+                            pass
+                    row_vals.append(val)
+                row_data_list.append(row_vals)
+
+            if len(row_data_list) > 1:
+                header = [str(h).strip().lower() for h in row_data_list[0]]
+                
+                # Map column indices
+                def get_idx(candidates):
+                    for cand in candidates:
+                        for idx, h in enumerate(header):
+                            if cand in h:
+                                return idx
+                    return -1
+
+                id_idx = get_idx(['id', 'raw_id'])
+                prod_id_idx = get_idx(['product id', 'product_id', 'item_id'])
+                name_idx = get_idx(['name', 'product name', 'product_name'])
+                brand_idx = get_idx(['brand name', 'brand'])
+                cat_idx = get_idx(['category name', 'category'])
+                price_idx = get_idx(['price', 'rate', 'amount'])
+                created_idx = get_idx(['createdat', 'created_at', 'date'])
+                qty_idx = get_idx(['qty', 'quantity', 'sold'])
+
+                for row in row_data_list[1:]:
+                    if not row or not any(row):
+                        continue
+                    p_name = row[name_idx] if name_idx != -1 and name_idx < len(row) else 'Vending Item'
+                    p_id = row[prod_id_idx] if prod_id_idx != -1 and prod_id_idx < len(row) else ''
+                    p_price_str = row[price_idx] if price_idx != -1 and price_idx < len(row) else '0'
+                    p_date_str = row[created_idx] if created_idx != -1 and created_idx < len(row) else ''
+                    p_qty_str = row[qty_idx] if qty_idx != -1 and qty_idx < len(row) else '1'
+                    brand_name = row[brand_idx] if brand_idx != -1 and brand_idx < len(row) else ''
+                    cat_name = row[cat_idx] if cat_idx != -1 and cat_idx < len(row) else ''
+
+                    try:
+                        price = float(p_price_str)
+                    except Exception:
+                        price = 0.0
+
+                    try:
+                        qty = int(float(p_qty_str))
+                    except Exception:
+                        qty = 1
+
+                    sale_date = timezone.now().date()
+                    if p_date_str:
+                        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y-%m-%d"):
+                            try:
+                                sale_date = datetime.strptime(p_date_str.strip(), fmt).date()
+                                break
+                            except Exception:
+                                pass
+
+                    # Auto-match or flag ItemMaster as is_VM = True
+                    item_master_obj = None
+                    if p_name:
+                        item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip()).first()
+                        if item_master_obj:
+                            item_master_obj.is_VM = True
+                            item_master_obj.save()
+
+                    sale_rec = VendingMachineSale(
+                        sale_id=generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8),
+                        item_id=item_master_obj.item_id if item_master_obj else p_id,
+                        product_name=p_name.strip(),
+                        brand_name=brand_name.strip(),
+                        category_name=cat_name.strip(),
+                        unit_price=price,
+                        quantity_sold=qty,
+                        total_sales_amount=price * qty,
+                        date=sale_date,
+                        excel_product_id=p_id,
+                        source='EXCEL_IMPORT',
+                        created_by=employee_id,
+                        branch_code=branch_code,
+                        outlet_code=outlet_code
+                    )
+                    sale_rec.save()
+                    imported_sales.append(VendingMachineSaleSerializer(sale_rec).data)
+
+        except Exception as e:
+            return Response({"success": False, "error": f"Failed to parse Excel file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    elif sales_json_list:
+        if isinstance(sales_json_list, str):
+            sales_json_list = json.loads(sales_json_list)
+        for item in sales_json_list:
+            p_name = item.get('name') or item.get('product_name') or 'Vending Item'
+            p_id = item.get('Product Id') or item.get('product_id') or item.get('item_id') or ''
+            price = float(item.get('Price') or item.get('price') or 0.0)
+            qty = int(item.get('quantity_sold') or item.get('quantity') or 1)
+            p_date_str = item.get('createdAt') or item.get('date') or ''
+
+            sale_date = timezone.now().date()
+            if p_date_str:
+                for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y-%m-%d"):
+                    try:
+                        sale_date = datetime.strptime(str(p_date_str).strip(), fmt).date()
+                        break
+                    except Exception:
+                        pass
+
+            item_master_obj = None
+            if p_name:
+                item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip()).first()
+                if item_master_obj:
+                    item_master_obj.is_VM = True
+                    item_master_obj.save()
+
+            sale_rec = VendingMachineSale(
+                sale_id=generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8),
+                item_id=item_master_obj.item_id if item_master_obj else p_id,
+                product_name=p_name.strip(),
+                unit_price=price,
+                quantity_sold=qty,
+                total_sales_amount=price * qty,
+                date=sale_date,
+                excel_product_id=p_id,
+                source='EXCEL_IMPORT',
+                created_by=employee_id,
+                branch_code=branch_code,
+                outlet_code=outlet_code
+            )
+            sale_rec.save()
+            imported_sales.append(VendingMachineSaleSerializer(sale_rec).data)
+
+    return Response({
+        "success": True,
+        "message": f"Successfully imported {len(imported_sales)} sales records.",
+        "data": imported_sales
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def vending_machine_report(request):
+    from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
+
+    def _safe_num(v):
+        if v is None or v == '':
+            return 0.0
+        try:
+            return float(str(v))
+        except Exception:
+            return 0.0
+
+    # 1. Load Category & Department mappings
+    cat_map = {
+        c.category_id: c.category_name
+        for c in Category.objects.filter(is_active__in=[True])
+        if c.category_id and c.category_name
+    }
+    dept_map = {}
+    for doc in department_collection.find({'is_active': True}):
+        code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+        name = doc.get('department_name')
+        if code and name:
+            dept_map[str(code)] = name
+    for d in Department.objects.filter(is_active__in=[True]):
+        if d.department_id and d.department_name and str(d.department_id) not in dept_map:
+            dept_map[str(d.department_id)] = d.department_name
+
+    # 2. Get all VM items and index ItemMaster
+    vm_items = list(ItemMaster.objects.filter(is_VM__in=[True], is_active__in=[True]))
+    all_active_items = list(ItemMaster.objects.filter(is_active__in=[True]))
+    item_master_by_id = {item.item_id: item for item in all_active_items if item.item_id}
+    item_master_by_name = {item.itemName.strip().lower(): item for item in all_active_items if item.itemName}
+
+    # 3. Fetch Sales
+    sales_qs = VendingMachineSale.objects.filter(is_active__in=[True])
+    if from_date_str:
+        sales_qs = sales_qs.filter(date__gte=from_date_str)
+    if to_date_str:
+        sales_qs = sales_qs.filter(date__lte=to_date_str)
+
+    # 4. Fetch Approved GRNs
+    grn_qs = storesGRN.objects.filter(is_active__in=[True], is_approved__in=[True])
+    if from_date_str:
+        grn_qs = grn_qs.filter(date__gte=from_date_str)
+    if to_date_str:
+        grn_qs = grn_qs.filter(date__lte=to_date_str)
+
+    # 5. Process and Aggregate Sales by Canonical Product Key
+    sales_by_item = {}
+    for sale in sales_qs:
+        matched_item = None
+        if sale.item_id and sale.item_id in item_master_by_id:
+            matched_item = item_master_by_id[sale.item_id]
+        elif sale.product_name and sale.product_name.strip().lower() in item_master_by_name:
+            matched_item = item_master_by_name[sale.product_name.strip().lower()]
+
+        canonical_key = matched_item.item_id if matched_item else (sale.item_id or sale.product_name.strip())
+        prod_name = matched_item.itemName if matched_item else sale.product_name.strip()
+        
+        qty = int(sale.quantity_sold or 0)
+        u_price = _safe_num(sale.unit_price)
+        s_amt = _safe_num(sale.total_sales_amount)
+        if s_amt == 0 and qty > 0 and u_price > 0:
+            s_amt = qty * u_price
+
+        if canonical_key not in sales_by_item:
+            sales_by_item[canonical_key] = {
+                'product_name': prod_name,
+                'item_id': canonical_key,
+                'quantity_sold': 0,
+                'total_sales_amount': 0.0,
+                'unit_price': u_price,
+                'matched_item': matched_item
+            }
+        
+        sales_by_item[canonical_key]['quantity_sold'] += qty
+        sales_by_item[canonical_key]['total_sales_amount'] += s_amt
+        if u_price > 0:
+            sales_by_item[canonical_key]['unit_price'] = u_price
+
+    # 6. Process and Aggregate GRNs by Canonical Product Key
+    grn_by_item = {}
+    for grn in grn_qs:
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if not isinstance(items, list):
+            continue
+
+        for it in items:
+            it_id = str(it.get('item_id') or it.get('id') or '').strip()
+            it_name = str(it.get('itemName') or it.get('name') or '').strip()
+            qty = int(it.get('quantity') or 0)
+            free = int(it.get('free') or 0)
+            total_qty = qty + free
+            cost_amt = _safe_num(
+                it.get('purchaseCost') or 
+                it.get('total_amount') or 
+                it.get('itemValue') or 
+                it.get('baseAmount') or 
+                (total_qty * _safe_num(it.get('unitPrice')))
+            )
+
+            matched_item = None
+            if it_id and it_id in item_master_by_id:
+                matched_item = item_master_by_id[it_id]
+            elif it_name and it_name.lower() in item_master_by_name:
+                matched_item = item_master_by_name[it_name.lower()]
+
+            canonical_key = matched_item.item_id if matched_item else (it_id or it_name)
+            prod_name = matched_item.itemName if matched_item else it_name
+
+            if not canonical_key:
+                continue
+
+            if canonical_key not in grn_by_item:
+                grn_by_item[canonical_key] = {
+                    'item_id': canonical_key,
+                    'product_name': prod_name,
+                    'grn_qty': 0,
+                    'grn_value': 0.0,
+                    'matched_item': matched_item
+                }
+            grn_by_item[canonical_key]['grn_qty'] += total_qty
+            grn_by_item[canonical_key]['grn_value'] += cost_amt
+
+    # 7. Collect unique items in order
+    seen_keys = set()
+    all_keys = []
+
+    for item in vm_items:
+        if item.item_id and item.item_id not in seen_keys:
+            seen_keys.add(item.item_id)
+            all_keys.append(item.item_id)
+
+    for key in sales_by_item.keys():
+        if key not in seen_keys:
+            seen_keys.add(key)
+            all_keys.append(key)
+
+    for key, g_info in grn_by_item.items():
+        if key not in seen_keys:
+            if g_info.get('matched_item') and g_info['matched_item'].is_VM:
+                seen_keys.add(key)
+                all_keys.append(key)
+
+    report_list = []
+    total_sales_qty_sum = 0
+    total_sales_val_sum = 0.0
+    total_grn_qty_sum = 0
+    total_grn_val_sum = 0.0
+    total_margin_sum = 0.0
+
+    for key in all_keys:
+        item_master = item_master_by_id.get(key)
+        if not item_master and key in item_master_by_name:
+            item_master = item_master_by_name[key]
+
+        s_info = sales_by_item.get(key, {})
+        g_info = grn_by_item.get(key, {})
+
+        prod_name = (
+            (item_master.itemName if item_master else None) or 
+            s_info.get('product_name') or 
+            g_info.get('product_name') or 
+            key
+        )
+        item_id_val = (
+            (item_master.item_id if item_master else None) or 
+            s_info.get('item_id') or 
+            g_info.get('item_id') or 
+            key
+        )
+
+        s_qty = s_info.get('quantity_sold', 0)
+        s_val = s_info.get('total_sales_amount', 0.0)
+        
+        unit_price = s_info.get('unit_price')
+        if not unit_price or unit_price <= 0:
+            unit_price = _safe_num(item_master.unit_price if item_master else 0.0)
+
+        if s_val == 0.0 and s_qty > 0 and unit_price > 0:
+            s_val = s_qty * unit_price
+
+        g_qty = g_info.get('grn_qty', 0)
+        g_val = g_info.get('grn_value', 0.0)
+        avg_grn_unit_cost = round(g_val / g_qty, 2) if g_qty > 0 else 0.0
+
+        current_master_stock = item_master.total_quantity if item_master else 0
+        if current_master_stock > 0:
+            reconciled_stock = max(0, current_master_stock - s_qty)
+        elif g_qty > 0:
+            reconciled_stock = max(0, g_qty - s_qty)
+        else:
+            reconciled_stock = 0
+
+        cost_per_unit = avg_grn_unit_cost if avg_grn_unit_cost > 0 else 0.0
+        cogs = s_qty * cost_per_unit
+        item_margin = round(s_val - cogs, 2) if s_qty > 0 else 0.0
+
+        total_sales_qty_sum += s_qty
+        total_sales_val_sum += s_val
+        total_grn_qty_sum += g_qty
+        total_grn_val_sum += g_val
+        total_margin_sum += item_margin
+
+        cat_raw = item_master.category if item_master else '-'
+        cat_display = cat_map.get(cat_raw) or cat_raw or '-'
+
+        dept_raw = item_master.department if item_master else '-'
+        dept_display = dept_map.get(dept_raw) or dept_raw or '-'
+
+        report_list.append({
+            'item_id': item_id_val,
+            'product_name': prod_name,
+            'category': cat_display,
+            'category_code': cat_raw,
+            'department': dept_display,
+            'department_code': dept_raw,
+            'supplier': item_master.supplier if item_master else '-',
+            'unit_price': round(unit_price, 2),
+            'sales_qty': s_qty,
+            'sales_value': round(s_val, 2),
+            'grn_received_qty': g_qty,
+            'grn_total_value': round(g_val, 2),
+            'avg_grn_unit_cost': avg_grn_unit_cost,
+            'current_master_stock': current_master_stock,
+            'stock_balance': reconciled_stock,
+            'estimated_margin': item_margin,
+            'is_VM': True if item_master else False
+        })
+
+    summary = {
+        'total_vm_products': len(report_list),
+        'total_sales_quantity': total_sales_qty_sum,
+        'total_sales_value': round(total_sales_val_sum, 2),
+        'total_grn_quantity': total_grn_qty_sum,
+        'total_grn_value': round(total_grn_val_sum, 2),
+        'net_margin': round(total_margin_sum, 2)
+    }
+
+    return Response({
+        "success": True,
+        "summary": summary,
+        "data": report_list
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_grn_supplier_report(request):
+    from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+    vendor_id = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+    # Get all active vendors
+    vendors_qs = GeneralStoreVendor.objects.filter(is_active__in=[True])
+    vendor_map = {str(v.vendor_id): v.name for v in vendors_qs}
+
+    # Fetch GRNs
+    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+    if from_date:
+        grn_qs = grn_qs.filter(date__gte=from_date)
+    if to_date:
+        grn_qs = grn_qs.filter(date__lte=to_date)
+    if vendor_id:
+        grn_qs = grn_qs.filter(vendor_id=vendor_id)
+
+    # Group GRNs by Supplier
+    supplier_groups = {}
+    total_grns_count = 0
+    grand_total_amount = 0.0
+    grand_total_paid = 0.0
+    grand_pending_amount = 0.0
+    grand_tax_amount = 0.0
+
+    for grn in grn_qs:
+        v_id = str(grn.vendor_id or 'UNKNOWN')
+        v_name = vendor_map.get(v_id) or v_id
+
+        # Search filter match
+        if search_query:
+            sq = search_query.lower()
+            if sq not in v_name.lower() and sq not in v_id.lower() and sq not in str(grn.grn_number).lower() and sq not in str(grn.invoice_no).lower():
+                continue
+
+        if v_id not in supplier_groups:
+            supplier_groups[v_id] = {
+                'vendor_id': v_id,
+                'vendor_name': v_name,
+                'total_grns': 0,
+                'taxable_amount': 0.0,
+                'tax_amount': 0.0,
+                'total_amount': 0.0,
+                'total_paid': 0.0,
+                'pending_amount': 0.0,
+                'total_items_qty': 0,
+                'grns': []
+            }
+
+        # Calculate GRN items count & amounts
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if not isinstance(items, list):
+            items = []
+
+        def _safe_num(v):
+            if v is None or v == '':
+                return 0.0
+            try:
+                return float(str(v))
+            except Exception:
+                return 0.0
+
+        item_qty = 0
+        for it in items:
+            if isinstance(it, dict):
+                q = _safe_num(it.get('quantity'))
+                f = _safe_num(it.get('free'))
+                item_qty += int(q + f)
+        
+        tot_amt = _safe_num(grn.total_amount or grn.net_invoice_amount)
+        tot_paid = _safe_num(grn.total_amount_paid)
+        pend_amt = max(0.0, tot_amt - tot_paid)
+        tax_amt = _safe_num(grn.cgst) + _safe_num(grn.sgst) + _safe_num(grn.igst) + _safe_num(grn.local_tax)
+        taxable_amt = _safe_num(grn.taxable_amount) or max(0.0, tot_amt - tax_amt)
+
+        group = supplier_groups[v_id]
+        group['total_grns'] += 1
+        group['taxable_amount'] += taxable_amt
+        group['tax_amount'] += tax_amt
+        group['total_amount'] += tot_amt
+        group['total_paid'] += tot_paid
+        group['pending_amount'] += pend_amt
+        group['total_items_qty'] += item_qty
+
+        group['grns'].append({
+            'grn_number': grn.grn_number,
+            'date': grn.date,
+            'invoice_no': grn.invoice_no,
+            'invoice_date': grn.invoice_date,
+            'total_amount': round(tot_amt, 2),
+            'total_paid': round(tot_paid, 2),
+            'pending_amount': round(pend_amt, 2),
+            'items_count': len(items),
+            'items': items,
+            'is_approved': grn.is_approved
+        })
+
+        total_grns_count += 1
+        grand_total_amount += tot_amt
+        grand_total_paid += tot_paid
+        grand_pending_amount += pend_amt
+        grand_tax_amount += tax_amt
+
+    supplier_list = list(supplier_groups.values())
+    for s in supplier_list:
+        s['taxable_amount'] = round(s['taxable_amount'], 2)
+        s['tax_amount'] = round(s['tax_amount'], 2)
+        s['total_amount'] = round(s['total_amount'], 2)
+        s['total_paid'] = round(s['total_paid'], 2)
+        s['pending_amount'] = round(s['pending_amount'], 2)
+
+    summary = {
+        'total_suppliers': len(supplier_list),
+        'total_grns': total_grns_count,
+        'grand_tax_amount': round(grand_tax_amount, 2),
+        'grand_total_amount': round(grand_total_amount, 2),
+        'grand_total_paid': round(grand_total_paid, 2),
+        'grand_pending_amount': round(grand_pending_amount, 2)
+    }
+
+    return Response({
+        "success": True,
+        "summary": summary,
+        "data": supplier_list
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_indent_department_report(request):
+    from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+    department_filter = request.query_params.get('department') or request.GET.get('department')
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+    # Get department names map (from Global.backend_diagnostics_Departments and Department model)
+    dept_map = {}
+    for doc in department_collection.find({'is_active': True}):
+        code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+        name = doc.get('department_name')
+        if code and name:
+            dept_map[str(code)] = name
+    for d in Department.objects.filter(is_active__in=[True]):
+        if d.department_id and d.department_name and str(d.department_id) not in dept_map:
+            dept_map[str(d.department_id)] = d.department_name
+
+    # Fetch Indents
+    indent_qs = storesIntent.objects.filter(is_active__in=[True]).order_by('-date')
+    if from_date:
+        indent_qs = indent_qs.filter(date__gte=from_date)
+    if to_date:
+        indent_qs = indent_qs.filter(date__lte=to_date)
+    if department_filter:
+        indent_qs = indent_qs.filter(department=department_filter)
+
+    # Group Indents by Department
+    dept_groups = {}
+    total_indents_count = 0
+    total_approved_count = 0
+    total_pending_count = 0
+    total_requested_qty = 0
+
+    for indent in indent_qs:
+        d_id = str(indent.department or 'GENERAL')
+        d_name = dept_map.get(d_id) or d_id
+
+        if search_query:
+            sq = search_query.lower()
+            if sq not in d_name.lower() and sq not in d_id.lower() and sq not in str(indent.intent_id).lower():
+                continue
+
+        if d_id not in dept_groups:
+            dept_groups[d_id] = {
+                'department_id': d_id,
+                'department_name': d_name,
+                'total_indents': 0,
+                'approved_indents': 0,
+                'pending_indents': 0,
+                'total_items_count': 0,
+                'total_requested_qty': 0,
+                'intents': []
+            }
+
+        items = indent.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if not isinstance(items, list):
+            items = []
+
+        indent_item_qty = 0
+        for it in items:
+            if isinstance(it, dict):
+                try:
+                    indent_item_qty += int(float(str(it.get('quantity') or it.get('intent_qty') or 0)))
+                except Exception:
+                    pass
+        is_appr = bool(indent.is_approved)
+
+        grp = dept_groups[d_id]
+        grp['total_indents'] += 1
+        if is_appr:
+            grp['approved_indents'] += 1
+            total_approved_count += 1
+        else:
+            grp['pending_indents'] += 1
+            total_pending_count += 1
+
+        grp['total_items_count'] += len(items)
+        grp['total_requested_qty'] += indent_item_qty
+
+        grp['intents'].append({
+            'intent_id': indent.intent_id,
+            'date': indent.date,
+            'department': indent.department,
+            'department_name': d_name,
+            'is_approved': is_appr,
+            'items_count': len(items),
+            'items': items
+        })
+
+        total_indents_count += 1
+        total_requested_qty += indent_item_qty
+
+    department_list = list(dept_groups.values())
+
+    summary = {
+        'total_departments': len(department_list),
+        'total_indents': total_indents_count,
+        'total_approved': total_approved_count,
+        'total_pending': total_pending_count,
+        'total_requested_quantity': total_requested_qty
+    }
+
+    return Response({
+        "success": True,
+        "summary": summary,
+        "data": department_list
+    }, status=status.HTTP_200_OK)
+
+

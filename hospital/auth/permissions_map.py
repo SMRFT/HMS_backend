@@ -186,6 +186,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/delete(?:/[^/]+)+/$': 'HMS-API-RDD',  
     r'^/_b_a_c_k_e_n_d/HMS/scan-reports/edit(?:/[^/]+)+/$': 'HMS-API-RDE',  
     r'^/_b_a_c_k_e_n_d/HMS/employee-signature/?(\?.*)?$': 'HMS-API-RD',  
+    r'^/_b_a_c_k_e_n_d/HMS/radiology/dicom-study/?(\?.*)?$': 'HMS-API-RD',  
 
     # MHC Reports:
     r'^/_b_a_c_k_e_n_d/HMS/mhc-investigations/?(\?.*)?$': 'HMS-P-MHC',
@@ -405,6 +406,20 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/stores-get_stores_lab_approved_items/': 'HMS-P-SGLA',
     '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-P-SDUI',
     '/_b_a_c_k_e_n_d/HMS/stores-stores_daily_usage_report/?(\?.*)?$': 'HMS-P-SDUI',
+
+    # Vending Machine & Stores Reports:
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-sales/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-sales/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-sales/import-excel/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-sales/import-excel/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/vending-machine-report/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/vending-machine-report/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-grn-supplier-report/': 'HMS-P-SGRN',
+    r'^/_b_a_c_k_e_n_d/HMS/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
+    '/_b_a_c_k_e_n_d/HMS/stores-indent-department-report/': 'HMS-API-SINTENT',
+    r'^/_b_a_c_k_e_n_d/HMS/stores-indent-department-report/?(\?.*)?$': 'HMS-API-SINTENT',
+
+
  
 
 
@@ -533,10 +548,29 @@ PAGE_MAPPING = {
             r'/_b_a_c_k_e_n_d/HMS/mhc_save_details/?(\\?.*)?$': 'HMS-P-MHPSD',
             r'/_b_a_c_k_e_n_d/HMS/mhc_report/?(\\?.*)?$': 'HMS-P-MHCR',
             r'/_b_a_c_k_e_n_d/HMS/mhc_dashboard/?(\\?.*)?$': 'HMS-P-MHCD',
+            '/_b_a_c_k_e_n_d/HMS/mhc_source/': 'HMS-P-MHCS',
+
+        # MRD (Medical Records Department)
+        r'/_b_a_c_k_e_n_d/HMS/mrd/discharged-files/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/update-status/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/stats/?(\\?.*)?$': 'HMS-P-MRD',
+
+        # OP EMR
+
+        #  Nursing
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+
+        # OPDOCTOR
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_symptoms/': 'HMS-P-OPEMRGS',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
 
 
 }
 
+ 
 
 PAGE_ACTION_MAPPING = {
     'xxx': {

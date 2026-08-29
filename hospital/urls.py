@@ -22,6 +22,7 @@ from .Views import (
     dashboard,
     advanced_dashboard,
     doctor_dashboard,
+    department_dashboard,
     insurance_provider,
     summary,
     investigation_price,
@@ -38,6 +39,7 @@ from .Views import (
     Purchase_Requisition,
     front_office_reports,
     registration_updates,
+    op_emr,
     laundry,
     physicalstockentry,
     salesreturn,
@@ -53,6 +55,8 @@ from .Views import (
     MHC,
     vaccination,
     patient_inquiry,
+    mrd,
+    OPEMR
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -124,10 +128,15 @@ urlpatterns = [
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
-    path("substitute_medicine/", pharmacy.substitute_medicine),
-    path("convert_to_bill/", pharmacy.convert_to_bill),
-    path("finalize_bill/", pharmacy.finalize_bill),
-    path("cashcounter_outlet/", pharmacy.cashcounter_outlet),
+    # path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
+    # path("get_salesreturn_billdetails/",  pharmacy.get_salesreturn_billdetails),
+    # path("salesreturn_get_uhid_bills/",  pharmacy.salesreturn_get_uhid_bills),
+    # path("OP_salesreturn_billdetails/",  pharmacy.OP_salesreturn_billdetails),
+    # path("get_salesreturn_details/", pharmacy.get_salesreturn_details),
+    path("substitute_medicine/",  pharmacy.substitute_medicine),
+    path("convert_to_bill/",       pharmacy.convert_to_bill),
+    path("finalize_bill/",   pharmacy.finalize_bill),
+    path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),
 
     
@@ -277,6 +286,7 @@ urlpatterns = [
     re_path(r'^scan-reports/dispatch/(?P<investBillNo>.+)/(?P<item_id>.+)/$', radiology.dispatch_report, name='dispatch_report'),
     path('scan-reports/format/', radiology.get_radiology_format, name='get_radiology_format'),  
     path('employee-signature/', radiology.get_employee_signature_by_id, name='employee-signature'),  
+    path('radiology/dicom-study/', radiology.get_dicom_study_url, name='get_dicom_study_url'),
 
     # MHC Reports (Master Health Check-up)
     path('mhc-investigations/', mhc.get_mhc_investigations, name='get_mhc_investigations'),
@@ -343,7 +353,9 @@ urlpatterns = [
     path('delete-bill/', departmentBilling.delete_bill_view, name='delete_bill_view'),
     path('invest-refund/', departmentBilling.invest_refund_create, name='invest_refund_create'),
 
-    # Doctor Master
+    # Doctor Master & Dashboards
+    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+    path('department-dashboard/stats/', department_dashboard.department_dashboard_stats, name='department_dashboard_stats'),
     path('doctor_list_diagnostics/', doctormaster.doctor_list_from_diagnostics, name='doctor_list_diagnostics'), 
     path('doctor_schedule/', doctormaster.doctor_schedule_list, name='doctor_schedule_list'),
     path('doctor_schedule/<str:employee_id>/', doctormaster.doctor_schedule_detail, name='doctor_schedule_detail'),
@@ -449,7 +461,11 @@ urlpatterns = [
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),
     path('advanced-dashboard/stats/', advanced_dashboard.advanced_dashboard_stats, name='advanced_dashboard_stats'),
-    path('doctor-dashboard/stats/', doctor_dashboard.doctor_dashboard_stats, name='doctor_dashboard_stats'),
+    # OP EMR URLs
+    path('op-emr/queue/', op_emr.get_op_doctor_queue, name='get_op_doctor_queue'),
+    path('op-emr/patient-history/', op_emr.get_patient_emr_history, name='get_patient_emr_history'),
+    path('op-emr/save-consultation/', op_emr.save_op_consultation, name='save_op_consultation'),
+    path('op-emr/rx-templates/', op_emr.rx_templates_api, name='rx_templates_api'),
 
     # User Permissions (Dynamic Table)
     path('user-permissions/', views.get_user_permissions, name='get_user_permissions'),
@@ -488,6 +504,13 @@ urlpatterns = [
     path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
     path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
     path('stores-stores_daily_usage_report/', stores.stores_lab_used_qty_report, name='stores_lab_used_qty_report'),
+    path('vending-machine-sales/', stores.vending_machine_sales_list_create, name='vending_machine_sales_list_create'),
+    path('vending-machine-sales/import-excel/', stores.vending_machine_sales_import_excel, name='vending_machine_sales_import_excel'),
+    path('vending-machine-report/', stores.vending_machine_report, name='vending_machine_report'),
+    path('stores-grn-supplier-report/', stores.stores_grn_supplier_report, name='stores_grn_supplier_report'),
+    path('stores-indent-department-report/', stores.stores_indent_department_report, name='stores_indent_department_report'),
+
+
     
 
     # Assets Master
@@ -668,8 +691,25 @@ urlpatterns = [
     path('mhc_save_details/', MHC.mhc_save_details, name='mhc_save_details'),
     path('mhc_report/', MHC.mhc_report, name='mhc_report'),
     path('mhc_dashboard/', MHC.mhc_dashboard, name='mhc_dashboard'),
+    path('mhc_source/', MHC.mhc_source, name='mhc_source'),
 
+    # MRD (Medical Records Department)
+    path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),
+    path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
+    path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
+
+
+    # OPEMR
+
+    path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
+    path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
+    path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),
+    path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
+    path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
+    path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
 ]
+
+
 
 
 

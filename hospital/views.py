@@ -440,6 +440,8 @@ def get_all_employees(request):
                 "employeeName": 1,
                 "designation": 1,
                 "department": 1,
+                "hms_pages": 1,
+                "allowed_pages": 1,
                 "_id": 0
             }
         ))
@@ -669,6 +671,35 @@ def patient_visit_list(request):
 
         bills = Billing.objects.filter(bill_filter).select_related('patient').order_by('-billed_date')
         
+        # Build lookup map for employee IDs (doctors and edit history users)
+        all_emp_ids = set()
+        for b in bills:
+            if b.doctor_id:
+                all_emp_ids.add(str(b.doctor_id).strip())
+            for h in (b.edit_history or []):
+                if h.get('user'):
+                    all_emp_ids.add(str(h.get('user')).strip())
+                changes = h.get('changes', {})
+                if 'doctor' in changes and isinstance(changes['doctor'], dict):
+                    old_d = changes['doctor'].get('old')
+                    new_d = changes['doctor'].get('new')
+                    if old_d: all_emp_ids.add(str(old_d).strip())
+                    if new_d: all_emp_ids.add(str(new_d).strip())
+
+        emp_map = {}
+        if all_emp_ids:
+            try:
+                mongo_host = os.getenv("GLOBAL_DB_HOST")
+                if mongo_host:
+                    client = MongoClient(mongo_host)
+                    global_db = client['Global']
+                    diag_collection = global_db['backend_diagnostics_profile']
+                    for doc in diag_collection.find({"employeeId": {"$in": list(all_emp_ids)}}, {"employeeId": 1, "employeeName": 1}):
+                        if doc.get("employeeId") and doc.get("employeeName"):
+                            emp_map[str(doc.get("employeeId")).strip()] = doc.get("employeeName")
+            except Exception as ex:
+                print(f"Error fetching emp map: {ex}")
+
         data = []
         for bill in bills:
             if not hasattr(bill, 'patient') or bill.patient is None:
@@ -686,6 +717,7 @@ def patient_visit_list(request):
             
             p = bill.patient
             full_name = f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
+            resolved_doc_name = emp_map.get(str(bill.doctor_id).strip()) or p.doctorName or bill.doctor_id
             
             # Formatting address safely
             address_parts = [
@@ -712,6 +744,30 @@ def patient_visit_list(request):
                     "date": r.refund_date.strftime("%d-%m-%Y %I:%M %p") if r.refund_date else ''
                 })
 
+            formatted_history = []
+            for h in (bill.edit_history or []):
+                raw_user = str(h.get('user', '')).strip()
+                resolved_user = emp_map.get(raw_user, raw_user)
+                
+                changes = h.get('changes', {})
+                formatted_changes = {}
+                for f_key, f_val in changes.items():
+                    if f_key == 'doctor' and isinstance(f_val, dict):
+                        old_id = str(f_val.get('old', '')).strip()
+                        new_id = str(f_val.get('new', '')).strip()
+                        formatted_changes['doctor'] = {
+                            'old': emp_map.get(old_id, old_id),
+                            'new': emp_map.get(new_id, new_id)
+                        }
+                    else:
+                        formatted_changes[f_key] = f_val
+
+                formatted_history.append({
+                    'date': h.get('date'),
+                    'user': resolved_user,
+                    'changes': formatted_changes
+                })
+
             data.append({
                 "uhid": p.uhid,
                 "patientName": full_name,
@@ -719,7 +775,7 @@ def patient_visit_list(request):
                 "gender": p.gender,
                 "mobile": p.mobilePhone,
                 "doctor": bill.doctor_id, 
-                "doctorName": p.doctorName or '',
+                "doctorName": resolved_doc_name,
                 "spouseName": p.spouse_name or '',
                 "address": full_address,
                 "visitType": visit_type,
@@ -730,7 +786,7 @@ def patient_visit_list(request):
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
                 "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else '',
-                "editHistory": bill.edit_history or [],
+                "editHistory": formatted_history,
                 "refunds": refund_data,
                 "totalRefunded": str(total_refunded)
             })
@@ -825,7 +881,7 @@ def get_pending_qr_registrations(request):
             query = query.filter(is_consumed=False)
         elif status == 'consumed':
             query = query.filter(is_consumed=True)
-        # if status is 'all', no filter is applied
+        # if status is 'all', no filter is applied (reloaded Global.backend_diagnostics_Departments resolution)
             
         pending = query
         results = []
