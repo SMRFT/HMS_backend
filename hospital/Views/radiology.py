@@ -1448,6 +1448,7 @@ def get_dicom_study_url(request):
     ]
 
     study_ids = []
+    connection_failed = False
     for payload in queries_to_try:
         try:
             req = urllib.request.Request(
@@ -1459,14 +1460,30 @@ def get_dicom_study_url(request):
                 auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
                 req.add_header('Authorization', f"Basic {auth_header}")
 
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 if result and isinstance(result, list) and len(result) > 0:
                     study_ids = result
                     break
+        except urllib.error.URLError as e:
+            logger.warning(f"Orthanc connection unreachable from server for {find_url}: {e}")
+            connection_failed = True
+            break
         except Exception as e:
             logger.warning(f"Orthanc /tools/find query error for {payload}: {e}")
             continue
+
+    # If backend is on Cloud and cannot directly reach hospital LAN Orthanc,
+    # generate direct client-side viewer URL for doctor's browser on the LAN:
+    if connection_failed:
+        fallback_viewer_url = f"{ohif_url}?PatientID={urllib.parse.quote(invest_bill_no)}"
+        return JsonResponse({
+            'success': True,
+            'viewerUrl': fallback_viewer_url,
+            'studyInstanceUIDs': [],
+            'orthancStudyIds': [],
+            'isDirectLocalLink': True
+        })
 
     if not study_ids:
         return JsonResponse({
@@ -1483,7 +1500,7 @@ def get_dicom_study_url(request):
             if orthanc_user and orthanc_pass:
                 auth_header = base64.b64encode(f"{orthanc_user}:{orthanc_pass}".encode()).decode()
                 req.add_header('Authorization', f"Basic {auth_header}")
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 detail = json.loads(response.read().decode('utf-8'))
                 main_tags = detail.get('MainDicomTags', {})
                 siuid = main_tags.get('StudyInstanceUID')
