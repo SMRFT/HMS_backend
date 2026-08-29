@@ -39,16 +39,8 @@ def OPEMR_get_billing_patient(request):
     Get patient details for paid billed patients only using Django ORM Billing and Patient models.
     """
     try:
-        employee_id = request.headers.get('auth-user-id') or request.query_params.get('auth-user-id')
-        if not employee_id and hasattr(request, 'data') and isinstance(request.data, dict):
-            employee_id = request.data.get('auth-user-id')
-
-        # Query paid bills via Django ORM Billing model
+        # Query all paid bills via Django ORM Billing model (no auth-user-id filtering)
         paid_bills = Billing.objects.filter(payment_status__iexact="paid").select_related('patient').order_by('-billed_date')
-
-        if employee_id:
-            emp_str = str(employee_id).strip()
-            paid_bills = paid_bills.filter(doctor_id=emp_str)
 
         result = []
         for bill in paid_bills:
@@ -118,7 +110,7 @@ def OPEMR_VitalEntry(request):
     """
     if request.method == 'GET':
         uhid = request.query_params.get('uhid')
-        employee_id = request.headers.get('auth-user-id') or request.query_params.get('auth-user-id')
+        employee_id = request.headers.get('auth-user-id') 
         if not employee_id and hasattr(request, 'data') and isinstance(request.data, dict):
             employee_id = request.data.get('auth-user-id')
 

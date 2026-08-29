@@ -13,7 +13,7 @@ class AuditModel(models.Model):
     created_by = models.CharField(max_length=100, null=True, blank=True)
     created_date = models.DateTimeField(default=timezone.now)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
-    lastmodified_date = models.DateTimeField(auto_now = True)
+    lastmodified_date = models.DateTimeField(null=True, blank=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
     outlet_code = models.CharField(max_length=100, null=True, blank=True)
     hospital_code = models.CharField(max_length=100, null=True, blank=True)
@@ -25,7 +25,11 @@ class AuditModel(models.Model):
         if not self.created_date:
             self.created_date = timezone.now()
 
-        self.lastmodified_date = timezone.now()
+        # Only set lastmodified_date on updates, not on initial create
+        if self.pk:
+            self.lastmodified_date = timezone.now()
+        else:
+            self.lastmodified_date = None
 
         super().save(*args, **kwargs)
 
@@ -65,9 +69,12 @@ class MasterHealthcheckup(AuditModel):
     )
 
     follow_up = models.CharField(max_length=100, blank=True, null=True)
-    description = models.CharField(max_length=100, blank=True, null=True)
+    description = models.CharField(max_length=500, blank=True, null=True)
+    telecaller_id = models.CharField(max_length=100, blank=True, null=True)
+    telecaller_date = models.DateTimeField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
+        
         if not self.mhc_no:
             last_record = MasterHealthcheckup.objects.order_by("-mhc_no").first()
 
