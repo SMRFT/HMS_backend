@@ -81,10 +81,12 @@ _CACHE_EXPIRY = 0
 _CAT_MAP = {}
 _DEPT_MAP = {}
 _GROUP_MAP = {}
+_GROUP_TYPE_MAP = {}
+_VENDOR_MAP = {}
 
 def get_lookup_maps():
     import time
-    global _CACHE_EXPIRY, _CAT_MAP, _DEPT_MAP, _GROUP_MAP
+    global _CACHE_EXPIRY, _CAT_MAP, _DEPT_MAP, _GROUP_MAP, _GROUP_TYPE_MAP, _VENDOR_MAP
     now_ts = time.time()
     if now_ts > _CACHE_EXPIRY:
         try:
@@ -111,9 +113,19 @@ def get_lookup_maps():
         except Exception:
             _GROUP_MAP = {}
 
+        try:
+            _GROUP_TYPE_MAP = {gt.group_type_id: gt.group_type_name for gt in GroupType.objects.filter(is_active__in=[True]) if gt.group_type_id and gt.group_type_name}
+        except Exception:
+            _GROUP_TYPE_MAP = {}
+
+        try:
+            _VENDOR_MAP = {str(v.vendor_id): v.name for v in GeneralStoreVendor.objects.filter(is_active__in=[True]) if v.vendor_id and v.name}
+        except Exception:
+            _VENDOR_MAP = {}
+
         _CACHE_EXPIRY = now_ts + 30
 
-    return _CAT_MAP, _DEPT_MAP, _GROUP_MAP
+    return _CAT_MAP, _DEPT_MAP, _GROUP_MAP, _GROUP_TYPE_MAP, _VENDOR_MAP
 
 class ItemMasterSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -135,7 +147,7 @@ class ItemMasterSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
-        cat_map, dept_map, group_map = get_lookup_maps()
+        cat_map, dept_map, group_map, group_type_map, vendor_map = get_lookup_maps()
         
         # Category Code -> Name mapping
         cat_code = getattr(instance, 'category', None)
@@ -166,6 +178,36 @@ class ItemMasterSerializer(serializers.ModelSerializer):
             rep['group'] = group_name
         else:
             rep['group_name'] = '-'
+
+        # Group Type Code -> Name mapping
+        group_type_code = getattr(instance, 'group_type', None)
+        if group_type_code:
+            group_type_name = group_type_map.get(group_type_code) or group_type_code
+            rep['group_type_name'] = group_type_name
+            rep['group_type_code'] = group_type_code
+            rep['group_type'] = group_type_name
+        else:
+            rep['group_type_name'] = '-'
+
+        # Supplier Code -> Name mapping
+        supp_code = getattr(instance, 'supplier', None)
+        if supp_code:
+            supp_name = vendor_map.get(str(supp_code)) or supp_code
+            rep['supplier_name'] = supp_name
+            rep['supplier_code'] = supp_code
+            rep['supplier'] = supp_name
+        else:
+            rep['supplier_name'] = '-'
+
+        # Manufacturer Code -> Name mapping
+        manuf_code = getattr(instance, 'manufacturer', None)
+        if manuf_code:
+            manuf_name = vendor_map.get(str(manuf_code)) or manuf_code
+            rep['manufacturer_name'] = manuf_name
+            rep['manufacturer_code'] = manuf_code
+            rep['manufacturer'] = manuf_name
+        else:
+            rep['manufacturer_name'] = '-'
 
         return rep
 

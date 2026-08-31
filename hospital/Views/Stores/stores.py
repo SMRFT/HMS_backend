@@ -1404,7 +1404,13 @@ def vending_machine_sales_list_create(request):
                 item['outlet_code'] = outlet_code
                 ser = VendingMachineSaleSerializer(data=item)
                 if ser.is_valid():
-                    ser.save()
+                    sale_inst = ser.save()
+                    # Add quantity_sold to approved_quantity in ItemMaster
+                    if sale_inst.item_id:
+                        it_obj = ItemMaster.objects.filter(item_id=sale_inst.item_id, is_active__in=[True]).first()
+                        if it_obj:
+                            it_obj.approved_quantity = int(it_obj.approved_quantity or 0) + int(sale_inst.quantity_sold or 1)
+                            it_obj.save()
                     saved_records.append(ser.data)
             return Response({"success": True, "data": saved_records}, status=status.HTTP_201_CREATED)
 
@@ -1422,7 +1428,13 @@ def vending_machine_sales_list_create(request):
 
         serializer = VendingMachineSaleSerializer(data=data)
         if serializer.is_valid():
-            serializer.save()
+            sale_inst = serializer.save()
+            # Add quantity_sold to approved_quantity in ItemMaster
+            if sale_inst.item_id:
+                it_obj = ItemMaster.objects.filter(item_id=sale_inst.item_id, is_active__in=[True]).first()
+                if it_obj:
+                    it_obj.approved_quantity = int(it_obj.approved_quantity or 0) + int(sale_inst.quantity_sold or 1)
+                    it_obj.save()
             return Response({"success": True, "data": serializer.data}, status=status.HTTP_201_CREATED)
         return Response({"success": False, "error": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1491,6 +1503,7 @@ def vending_machine_sales_import_excel(request):
                 price_idx = get_idx(['price', 'rate', 'amount'])
                 created_idx = get_idx(['createdat', 'created_at', 'date'])
                 qty_idx = get_idx(['qty', 'quantity', 'sold'])
+                img_idx = get_idx(['imagelink', 'image_link', 'image'])
 
                 for row in row_data_list[1:]:
                     if not row or not any(row):
@@ -1502,6 +1515,7 @@ def vending_machine_sales_import_excel(request):
                     p_qty_str = row[qty_idx] if qty_idx != -1 and qty_idx < len(row) else '1'
                     brand_name = row[brand_idx] if brand_idx != -1 and brand_idx < len(row) else ''
                     cat_name = row[cat_idx] if cat_idx != -1 and cat_idx < len(row) else ''
+                    image_link = row[img_idx] if img_idx != -1 and img_idx < len(row) else None
 
                     try:
                         price = float(p_price_str)
@@ -1522,24 +1536,75 @@ def vending_machine_sales_import_excel(request):
                             except Exception:
                                 pass
 
-                    # Auto-match or flag ItemMaster as is_VM = True
+                    # Dynamic resolution for Group, GroupType, Department, Category, Vendor
+                    grp = Group.objects.filter(group_name__iexact='Vending Machine', is_active__in=[True]).first()
+                    if not grp:
+                        grp_id = generate_custom_id_without_fy(Group, 'group_id', 'GRP', 5)
+                        grp = Group.objects.create(group_id=grp_id, group_name='Vending Machine', is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+                    grpt = GroupType.objects.filter(group_type_name__iexact='Vending Machine', is_active__in=[True]).first()
+                    if not grpt:
+                        grpt_id = generate_custom_id_without_fy(GroupType, 'group_type_id', 'GRPT', 5)
+                        grpt = GroupType.objects.create(group_type_id=grpt_id, group_type_name='Vending Machine', is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+                    dept = Department.objects.filter(department_name__iexact='Vending Machine', is_active__in=[True]).first()
+                    if not dept:
+                        dept_id = generate_custom_id_without_fy(Department, 'department_id', 'DPT', 5)
+                        dept = Department.objects.create(department_id=dept_id, department_name='Vending Machine', is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+                    cat_obj = None
+                    if cat_name:
+                        cat_obj = Category.objects.filter(category_name__iexact=cat_name.strip(), is_active__in=[True]).first()
+                        if not cat_obj:
+                            cat_id = generate_custom_id_without_fy(Category, 'category_id', 'CAT', 5)
+                            cat_obj = Category.objects.create(category_id=cat_id, category_name=cat_name.strip(), is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+                    vendor_obj = None
+                    if brand_name:
+                        vendor_obj = GeneralStoreVendor.objects.filter(name__iexact=brand_name.strip(), is_active__in=[True]).first()
+                        if not vendor_obj:
+                            vendor_id = generate_custom_id(GeneralStoreVendor, 'vendor_id', 'GSV', 5)
+                            vendor_obj = GeneralStoreVendor.objects.create(vendor_id=vendor_id, name=brand_name.strip(), vendor_type='BOTH', is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+                    # Auto-match or create/update ItemMaster with proper IDs and add approved_quantity
                     item_master_obj = None
-                    if p_name:
-                        item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip()).first()
-                        if item_master_obj:
-                            item_master_obj.is_VM = True
-                            item_master_obj.save()
+                    if p_id:
+                        item_master_obj = ItemMaster.objects.filter(item_id=p_id, is_active__in=[True]).first()
+                    if not item_master_obj and p_name:
+                        item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip(), is_active__in=[True]).first()
+
+                    if not item_master_obj:
+                        item_master_obj = ItemMaster(item_id=p_id or generate_custom_id(ItemMaster, 'item_id', 'ITM', 7))
+
+                    item_master_obj.itemName = p_name.strip()
+                    item_master_obj.group = grp.group_id if grp else None
+                    item_master_obj.group_type = grpt.group_type_id if grpt else None
+                    item_master_obj.category = cat_obj.category_id if cat_obj else item_master_obj.category
+                    item_master_obj.department = dept.department_id if dept else item_master_obj.department
+                    item_master_obj.supplier = vendor_obj.vendor_id if vendor_obj else item_master_obj.supplier
+                    item_master_obj.manufacturer = vendor_obj.vendor_id if vendor_obj else item_master_obj.manufacturer
+                    item_master_obj.unit_price = price if price > 0 else (item_master_obj.unit_price or 0.00)
+                    item_master_obj.approved_quantity = int(item_master_obj.approved_quantity or 0) + qty
+                    item_master_obj.is_VM = True
+                    item_master_obj.is_active = True
+                    item_master_obj.created_by = item_master_obj.created_by or employee_id
+                    item_master_obj.branch_code = item_master_obj.branch_code or branch_code
+                    item_master_obj.outlet_code = item_master_obj.outlet_code or outlet_code
+                    item_master_obj.save()
 
                     sale_rec = VendingMachineSale(
                         sale_id=generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8),
                         item_id=item_master_obj.item_id if item_master_obj else p_id,
                         product_name=p_name.strip(),
-                        brand_name=brand_name.strip(),
-                        category_name=cat_name.strip(),
+                        brand_id=vendor_obj.vendor_id if vendor_obj else None,
+                        brand_name=vendor_obj.name if vendor_obj else brand_name.strip(),
+                        category_id=cat_obj.category_id if cat_obj else None,
+                        category_name=cat_obj.category_name if cat_obj else cat_name.strip(),
                         unit_price=price,
                         quantity_sold=qty,
                         total_sales_amount=price * qty,
                         date=sale_date,
+                        image_link=image_link,
                         excel_product_id=p_id,
                         source='EXCEL_IMPORT',
                         created_by=employee_id,
@@ -1558,9 +1623,12 @@ def vending_machine_sales_import_excel(request):
         for item in sales_json_list:
             p_name = item.get('name') or item.get('product_name') or 'Vending Item'
             p_id = item.get('Product Id') or item.get('product_id') or item.get('item_id') or ''
+            brand_name = item.get('Brand Name') or item.get('brand_name') or item.get('brand') or ''
+            cat_name = item.get('Category Name') or item.get('category_name') or item.get('category') or ''
             price = float(item.get('Price') or item.get('price') or 0.0)
             qty = int(item.get('quantity_sold') or item.get('quantity') or 1)
             p_date_str = item.get('createdAt') or item.get('date') or ''
+            image_link = item.get('imageLink') or item.get('image_link') or None
 
             sale_date = timezone.now().date()
             if p_date_str:
@@ -1571,21 +1639,63 @@ def vending_machine_sales_import_excel(request):
                     except Exception:
                         pass
 
+            # Dynamic resolution
+            grp = Group.objects.filter(group_name__iexact='Vending Machine', is_active__in=[True]).first()
+            grpt = GroupType.objects.filter(group_type_name__iexact='Vending Machine', is_active__in=[True]).first()
+            dept = Department.objects.filter(department_name__iexact='Vending Machine', is_active__in=[True]).first()
+
+            cat_obj = None
+            if cat_name:
+                cat_obj = Category.objects.filter(category_name__iexact=cat_name.strip(), is_active__in=[True]).first()
+                if not cat_obj:
+                    cat_id = generate_custom_id_without_fy(Category, 'category_id', 'CAT', 5)
+                    cat_obj = Category.objects.create(category_id=cat_id, category_name=cat_name.strip(), is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
+            vendor_obj = None
+            if brand_name:
+                vendor_obj = GeneralStoreVendor.objects.filter(name__iexact=brand_name.strip(), is_active__in=[True]).first()
+                if not vendor_obj:
+                    vendor_id = generate_custom_id(GeneralStoreVendor, 'vendor_id', 'GSV', 5)
+                    vendor_obj = GeneralStoreVendor.objects.create(vendor_id=vendor_id, name=brand_name.strip(), vendor_type='BOTH', is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
+
             item_master_obj = None
-            if p_name:
-                item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip()).first()
-                if item_master_obj:
-                    item_master_obj.is_VM = True
-                    item_master_obj.save()
+            if p_id:
+                item_master_obj = ItemMaster.objects.filter(item_id=p_id, is_active__in=[True]).first()
+            if not item_master_obj and p_name:
+                item_master_obj = ItemMaster.objects.filter(itemName__iexact=p_name.strip(), is_active__in=[True]).first()
+
+            if not item_master_obj:
+                item_master_obj = ItemMaster(item_id=p_id or generate_custom_id(ItemMaster, 'item_id', 'ITM', 7))
+
+            item_master_obj.itemName = p_name.strip()
+            item_master_obj.group = grp.group_id if grp else None
+            item_master_obj.group_type = grpt.group_type_id if grpt else None
+            item_master_obj.category = cat_obj.category_id if cat_obj else item_master_obj.category
+            item_master_obj.department = dept.department_id if dept else item_master_obj.department
+            item_master_obj.supplier = vendor_obj.vendor_id if vendor_obj else item_master_obj.supplier
+            item_master_obj.manufacturer = vendor_obj.vendor_id if vendor_obj else item_master_obj.manufacturer
+            item_master_obj.unit_price = price if price > 0 else (item_master_obj.unit_price or 0.00)
+            item_master_obj.approved_quantity = int(item_master_obj.approved_quantity or 0) + qty
+            item_master_obj.is_VM = True
+            item_master_obj.is_active = True
+            item_master_obj.created_by = item_master_obj.created_by or employee_id
+            item_master_obj.branch_code = item_master_obj.branch_code or branch_code
+            item_master_obj.outlet_code = item_master_obj.outlet_code or outlet_code
+            item_master_obj.save()
 
             sale_rec = VendingMachineSale(
                 sale_id=generate_custom_id_without_fy(VendingMachineSale, 'sale_id', 'VMS', 8),
                 item_id=item_master_obj.item_id if item_master_obj else p_id,
                 product_name=p_name.strip(),
+                brand_id=vendor_obj.vendor_id if vendor_obj else None,
+                brand_name=vendor_obj.name if vendor_obj else brand_name.strip(),
+                category_id=cat_obj.category_id if cat_obj else None,
+                category_name=cat_obj.category_name if cat_obj else cat_name.strip(),
                 unit_price=price,
                 quantity_sold=qty,
                 total_sales_amount=price * qty,
                 date=sale_date,
+                image_link=image_link,
                 excel_product_id=p_id,
                 source='EXCEL_IMPORT',
                 created_by=employee_id,
@@ -1631,6 +1741,12 @@ def vending_machine_report(request):
     for d in Department.objects.filter(is_active__in=[True]):
         if d.department_id and d.department_name and str(d.department_id) not in dept_map:
             dept_map[str(d.department_id)] = d.department_name
+
+    vendor_map = {
+        str(v.vendor_id): v.name
+        for v in GeneralStoreVendor.objects.filter(is_active__in=[True])
+        if v.vendor_id and v.name
+    }
 
     # 2. Get all VM items and index ItemMaster
     vm_items = list(ItemMaster.objects.filter(is_VM__in=[True], is_active__in=[True]))
@@ -1796,13 +1912,9 @@ def vending_machine_report(request):
         g_val = g_info.get('grn_value', 0.0)
         avg_grn_unit_cost = round(g_val / g_qty, 2) if g_qty > 0 else 0.0
 
-        current_master_stock = item_master.total_quantity if item_master else 0
-        if current_master_stock > 0:
-            reconciled_stock = max(0, current_master_stock - s_qty)
-        elif g_qty > 0:
-            reconciled_stock = max(0, g_qty - s_qty)
-        else:
-            reconciled_stock = 0
+        total_qty = int(item_master.total_quantity or 0) if item_master else 0
+        approved_qty = int(item_master.approved_quantity or 0) if item_master else 0
+        available_stock = max(0, total_qty - approved_qty)
 
         cost_per_unit = avg_grn_unit_cost if avg_grn_unit_cost > 0 else 0.0
         cogs = s_qty * cost_per_unit
@@ -1820,6 +1932,9 @@ def vending_machine_report(request):
         dept_raw = item_master.department if item_master else '-'
         dept_display = dept_map.get(dept_raw) or dept_raw or '-'
 
+        supp_raw = item_master.supplier if item_master else '-'
+        supp_display = vendor_map.get(str(supp_raw)) or supp_raw or '-'
+
         report_list.append({
             'item_id': item_id_val,
             'product_name': prod_name,
@@ -1827,15 +1942,19 @@ def vending_machine_report(request):
             'category_code': cat_raw,
             'department': dept_display,
             'department_code': dept_raw,
-            'supplier': item_master.supplier if item_master else '-',
+            'supplier': supp_display,
+            'supplier_code': supp_raw,
             'unit_price': round(unit_price, 2),
             'sales_qty': s_qty,
             'sales_value': round(s_val, 2),
             'grn_received_qty': g_qty,
             'grn_total_value': round(g_val, 2),
             'avg_grn_unit_cost': avg_grn_unit_cost,
-            'current_master_stock': current_master_stock,
-            'stock_balance': reconciled_stock,
+            'total_quantity': total_qty,
+            'approved_quantity': approved_qty,
+            'available_quantity': available_stock,
+            'current_master_stock': total_qty,
+            'stock_balance': available_stock,
             'estimated_margin': item_margin,
             'is_VM': True if item_master else False
         })
@@ -1846,6 +1965,9 @@ def vending_machine_report(request):
         'total_sales_value': round(total_sales_val_sum, 2),
         'total_grn_quantity': total_grn_qty_sum,
         'total_grn_value': round(total_grn_val_sum, 2),
+        'total_master_stock': sum(it.get('total_quantity', 0) for it in report_list),
+        'total_approved_quantity': sum(it.get('approved_quantity', 0) for it in report_list),
+        'total_available_stock': sum(it.get('available_quantity', 0) for it in report_list),
         'net_margin': round(total_margin_sum, 2)
     }
 
