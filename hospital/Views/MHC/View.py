@@ -99,8 +99,18 @@ def mhc_save_details(request):
                 return Response({'error': 'Record not found'}, status=status.HTTP_404_NOT_FOUND)
 
             data = request.data.copy()
-            employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id')
+            employee_id = data.get('auth-user-id')
             data['lastmodified_by'] = employee_id
+
+            # Store telecaller_id + telecaller_date when provided (e.g. from followup page)
+            telecaller_id = data.get('telecaller_id') or employee_id
+            if telecaller_id:
+                data['telecaller_id'] = telecaller_id
+                data['telecaller_date'] = timezone.now()
+
+            # Strip description if empty/whitespace
+            if 'description' in data and not str(data.get('description', '')).strip():
+                data.pop('description', None)
 
             serializer = MasterHealthcheckupSerializer(instance, data=data, partial=True)
             if serializer.is_valid():
@@ -132,10 +142,19 @@ def mhc_save_details(request):
     # POST - save new MHC details
     try:
         data = request.data.copy()
-        employee_id = request.headers.get('auth-user-id') 
+        employee_id = data.get("auth-user-id")
+
+        # 1. Store created_by and created_date
         data['created_by'] = employee_id
-        data['lastmodified_by'] = employee_id
         data['created_date'] = timezone.now()
+
+        # 2. Store telecaller_id same as created_by, with telecaller_date
+        data['telecaller_id'] = employee_id
+        data['telecaller_date'] = timezone.now()
+
+        # 3. Only store description if it has a value
+        if not data.get('description', '').strip():
+            data.pop('description', None)
 
         serializer = MasterHealthcheckupSerializer(data=data)
         if serializer.is_valid():
