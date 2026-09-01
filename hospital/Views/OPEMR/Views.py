@@ -6,14 +6,14 @@ from rest_framework import status
 from bson import Decimal128
 from django.utils.timezone import now
 from hospital.models import Patient, Billing
-from .models import VitalEntry, DoctorConsultation
-from .serializer import VitalEntrySerializer, DoctorConsultationSerializer
+from .models import VitalEntry,  OPDoctorConsultation
+from .serializer import VitalEntrySerializer,  OPDoctorConsultationSerializer
 
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from rest_framework.decorators import api_view, permission_classes
-from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list,medicine_package
+from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list,medicine_package, profile_collection, doctor_role_code
 
 
 
@@ -71,15 +71,22 @@ def OPEMR_get_billing_patient(request):
                 "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
             }
 
-            latest_vital = None
-            uhid_str = patient_data.get("uhid")
-            if uhid_str:
-                vital_entry_obj = VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date').first()
-                if vital_entry_obj:
-                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
-
             billed_d = getattr(bill, 'billed_date', None)
             billed_date_str = billed_d.isoformat() if billed_d else ""
+
+            latest_vital = None
+            is_completed_today = False
+            uhid_str = patient_data.get("uhid")
+            if uhid_str:
+                vital_entries = list(VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date')[:1])
+                vital_entry_obj = vital_entries[0] if vital_entries else None
+                if vital_entry_obj:
+                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
+                    
+                    if getattr(vital_entry_obj, 'created_date', None):
+                        from django.utils import timezone
+                        if vital_entry_obj.created_date.date() == timezone.now().date():
+                            is_completed_today = True
 
             result.append({
                 "bill_number": getattr(bill, 'bill_number', ''),
@@ -92,7 +99,7 @@ def OPEMR_get_billing_patient(request):
                 "doctor_id": getattr(bill, 'doctor_id', '') or '',
                 "patient": patient_data,
                 "vital_entry": latest_vital,
-                "vital_status": "Completed" if latest_vital else "Pending"
+                "vital_status": "Completed" if is_completed_today else "Pending"
             })
 
         return Response(result, status=status.HTTP_200_OK)
@@ -114,7 +121,15 @@ def OPEMR_VitalEntry(request):
         if not employee_id and hasattr(request, 'data') and isinstance(request.data, dict):
             employee_id = request.data.get('auth-user-id')
 
-        paid_bills = Billing.objects.filter(payment_status__iexact="paid").select_related('patient').order_by('-billed_date')
+        today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+        from datetime import timedelta
+        today_end = today_start + timedelta(days=1)
+        
+        paid_bills = Billing.objects.filter(
+            payment_status__iexact="paid",
+            billed_date__gte=today_start,
+            billed_date__lt=today_end
+        ).select_related('patient').order_by('-billed_date')
 
         if employee_id:
             emp_str = str(employee_id).strip()
@@ -155,14 +170,21 @@ def OPEMR_VitalEntry(request):
                 "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
             }
 
-            latest_vital = None
-            if patient_uhid:
-                vital_entry_obj = VitalEntry.objects.filter(uhid=patient_uhid).order_by('-created_date').first()
-                if vital_entry_obj:
-                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
-
             billed_d = getattr(bill, 'billed_date', None)
             billed_date_str = billed_d.isoformat() if billed_d else ""
+
+            latest_vital = None
+            is_completed_today = False
+            if patient_uhid:
+                vital_entries = list(VitalEntry.objects.filter(uhid=patient_uhid).order_by('-created_date')[:1])
+                vital_entry_obj = vital_entries[0] if vital_entries else None
+                if vital_entry_obj:
+                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
+                    
+                    if getattr(vital_entry_obj, 'created_date', None):
+                        from django.utils import timezone
+                        if vital_entry_obj.created_date.date() == timezone.now().date():
+                            is_completed_today = True
 
             seen_uhids.add(patient_uhid)
             result.append({
@@ -176,7 +198,7 @@ def OPEMR_VitalEntry(request):
                 "doctor_id": getattr(bill, 'doctor_id', '') or '',
                 "patient": patient_data,
                 "vital_entry": latest_vital,
-                "vital_status": "Completed" if latest_vital else "Pending"
+                "vital_status": "Completed" if is_completed_today else "Pending"
             })
 
         # Also include any standalone VitalEntry records
@@ -188,6 +210,12 @@ def OPEMR_VitalEntry(request):
             remaining_vitals = remaining_vitals.filter(doctor_id=emp_str)
 
         for v in remaining_vitals.order_by('-created_date'):
+            if not getattr(v, 'created_date', None):
+                continue
+            from django.utils import timezone
+            if v.created_date.date() != timezone.now().date():
+                continue
+                
             if v.uhid in seen_uhids:
                 continue
             seen_uhids.add(v.uhid)
@@ -340,7 +368,7 @@ def OPEMR_get_medicines(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_DoctorConsultation(request):
     """
     GET: Retrieve doctor consultation records using DoctorConsultation model (filtered by ?uhid=...)
@@ -350,10 +378,10 @@ def OPEMR_DoctorConsultation(request):
         if request.method == 'GET':
             uhid = request.query_params.get('uhid')
             if uhid:
-                records = DoctorConsultation.objects.filter(uhid=uhid).order_by('-created_date')
+                records = OPDoctorConsultation.objects.filter(uhid=uhid).order_by('-created_date')
             else:
-                records = DoctorConsultation.objects.all().order_by('-created_date')
-            serializer = DoctorConsultationSerializer(records, many=True)
+                records = OPDoctorConsultation.objects.all().order_by('-created_date')
+            serializer = OPDoctorConsultationSerializer(records, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         elif request.method == 'POST':
@@ -362,11 +390,12 @@ def OPEMR_DoctorConsultation(request):
             if not uhid:
                 return Response({"error": "uhid is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            employee_id = request.headers.get('auth-user-id') or data.get('auth-user-id') or data.get('created_by')
+            employee_id = data.get("auth-user-id")
 
             vitals_data = data.get("vitals", {})
             if isinstance(vitals_data, dict):
-                vitals_data = {k: v for k, v in vitals_data.items() if k != "id"}
+                vitals_data.pop('_id', None)
+                vitals_data.pop('id', None)
 
             consult_data = {
                 "uhid": uhid,
@@ -376,22 +405,29 @@ def OPEMR_DoctorConsultation(request):
                 "doctor_id": data.get("doctor_id", ""),
                 "doctor_name": data.get("doctor_name", ""),
                 "vitals": vitals_data,
+                "pain_score": data.get("pain_score", None),
+                "allergies": data.get("allergies", ""),
+                "chief_complaints": data.get("chief_complaints", ""),
+                "past_history": data.get("past_history", []),
+                "present_medications": data.get("present_medications", ""),
                 "symptoms": data.get("symptoms", []),
                 "investigation_test_ids": data.get("investigation_test_ids", []),
                 "investigation_details": data.get("investigation_details", []),
                 "prescription_item_ids": data.get("prescription_item_ids", []),
                 "prescription_details": data.get("prescription_details", []),
                 "finding": data.get("finding", ""),
+                "diet": data.get("diet", ""),
+                "refer_to_doctor": data.get("refer_to_doctor", ""),
                 "followup_date": data.get("followup_date", None)
             }
 
-            serializer = DoctorConsultationSerializer(data=consult_data)
+            serializer = OPDoctorConsultationSerializer(data=consult_data)
             if serializer.is_valid():
                 obj = serializer.save()
                 return Response(
                     {
                         "message": "Doctor consultation saved successfully.",
-                        "data": DoctorConsultationSerializer(obj).data
+                        "data": OPDoctorConsultationSerializer(obj).data
                     },
                     status=status.HTTP_201_CREATED
                 )
@@ -401,3 +437,46 @@ def OPEMR_DoctorConsultation(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_vital_history(request):
+    """
+    Get full vital history for a given patient UHID.
+    """
+    uhid = request.query_params.get('uhid')
+    if not uhid:
+        return Response({"error": "UHID is required."}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        vitals = VitalEntry.objects.filter(uhid=uhid).order_by('-created_date')
+        serializer = VitalEntrySerializer(vitals, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+# @permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_referral_doctors(request):
+    """
+    Get all employees who have 'doctor_role_code' in their primaryRole or additionalRoles.
+    """
+    try:
+        query = {
+            "$or": [
+                {"primaryRole": doctor_role_code},
+                {"additionalRoles": doctor_role_code}
+            ]
+        }
+        docs = list(profile_collection.find(query, {"employeeId": 1, "employeeName": 1, "_id": 0}))
+        
+        doctors = []
+        for d in docs:
+            if d.get("employeeId"):
+                doctors.append({
+                    "employeeId": d.get("employeeId", ""),
+                    "employeeName": d.get("employeeName", "")
+                })
+                
+        return Response({"success": True, "data": doctors}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
