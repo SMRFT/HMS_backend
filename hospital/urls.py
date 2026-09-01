@@ -703,10 +703,12 @@ urlpatterns = [
 
     path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
     path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
+    path('OPEMR_get_vital_history/', OPEMR.OPEMR_get_vital_history, name='OPEMR_get_vital_history'),
     path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),
     path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
     path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
+    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
 ]
 
 

@@ -22,3 +22,5 @@ MHC_Source= hms_db["hospital_MHC_Source"]
 HMS_Symptoms_list=hms_db["hospital_Symptoms_list"]
 medicine_package=hms_db["hospital_pharmacyitem"]
 Diagnostics_test_details = Diagnostics_db["core_testdetails"]
+
+doctor_role_code="SD-R-DOC"

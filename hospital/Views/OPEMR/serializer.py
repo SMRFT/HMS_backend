@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import VitalEntry, DoctorConsultation
+from .models import VitalEntry,  OPDoctorConsultation
 
 
 class VitalEntrySerializer(serializers.ModelSerializer):
@@ -10,9 +10,9 @@ class VitalEntrySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class DoctorConsultationSerializer(serializers.ModelSerializer):
+class  OPDoctorConsultationSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
 
     class Meta:
-        model = DoctorConsultation
+        model =  OPDoctorConsultation
         fields = '__all__'
