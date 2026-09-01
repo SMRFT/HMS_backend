@@ -1,5 +1,5 @@
 PAGE_MAPPING = {
-    r'^/_b_a_c_k_e_n_d/HMS/patient-inquiry/?(\?.*)?$': 'HMS-P-AIN',
+    r'^/_b_a_c_k_e_n_d/HMS/patient-inquiry/?(\?.*)?$': 'HMS-P-PIN',
     r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
@@ -225,9 +225,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/get-file(?:/[^/]+)+/$': 'HMS-P-SUM',
     r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
-    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/send-visit-reminders/?(\?.*)?$': 'HMS-API-WTSAP',
-    r'^/_b_a_c_k_e_n_d/HMS/send-discharge-visit-reminder/?(\?.*)?$': 'HMS-API-WTSAP',
-    r'^/_b_a_c_k_e_n_d/HMS/patient-next-visit-logs/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
 
         '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',

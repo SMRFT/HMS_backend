@@ -239,6 +239,21 @@ class RoomSerializer(serializers.ModelSerializer):
             "is_active"
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for field in ["services", "beds", "room_kits"]:
+            val = data.get(field)
+            if isinstance(val, str):
+                try:
+                    import json
+                    val = json.loads(val)
+                except Exception:
+                    val = []
+            elif val is None:
+                val = []
+            data[field] = val if isinstance(val, list) else [val]
+        return data
+
     # ── Field-level validators ────────────────────────────────────────────────
  
     def validate_room_status(self, value):

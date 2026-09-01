@@ -90,6 +90,41 @@ def _save_admission(adm, room_details, shifting_details, advance_payments):
         print(f"[_save_admission] Mongo sync failed for {adm.ipNumber}: {ex}")
 
 
+def _save_room(room, services=None, beds=None, room_kits=None):
+    """
+    Save Room model instance and force native BSON arrays in MongoDB for
+    services, beds, and room_kits.
+    """
+    import json
+    def make_serializable(data):
+        return json.loads(json.dumps(data, default=str))
+
+    svc = make_serializable(services if isinstance(services, list) else _safe_list(getattr(room, "services", [])))
+    bd  = make_serializable(beds     if isinstance(beds,     list) else _safe_list(getattr(room, "beds", [])))
+    rk  = make_serializable(room_kits if isinstance(room_kits, list) else _safe_list(getattr(room, "room_kits", [])))
+
+    room.services  = svc
+    room.beds      = bd
+    room.room_kits = rk
+    room.save()
+
+    try:
+        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
+        if MONGO_URI:
+            client = MongoClient(MONGO_URI)
+            db_name = os.getenv("HMS_DB_NAME", "HMS")
+            client[db_name]["hospital_room"].update_one(
+                {"room_number": str(room.room_number)},
+                {"$set": {
+                    "services":  svc,
+                    "beds":      bd,
+                    "room_kits": rk,
+                }}
+            )
+    except Exception as ex:
+        print(f"[_save_room] Mongo sync failed for {room.room_number}: {ex}")
+
+
 # --------------------------------------------------
 # BLOCK
 # --------------------------------------------------
@@ -883,10 +918,7 @@ def room_view(request, pk=None):
  
         # Persist nested JSON (already validated by serializer validators
         # if passed through data; here we store directly after popping above)
-        room.services  = services
-        room.beds      = _derive_bed_statuses(beds)
-        room.room_kits = room_kits
-        room.save()
+        _save_room(room, services=services, beds=_derive_bed_statuses(beds), room_kits=room_kits)
  
         return Response(RoomSerializer(room).data, status=201)
  
@@ -935,14 +967,8 @@ def room_view(request, pk=None):
         )
  
         # Only update nested lists if explicitly sent in the request
-        if services is not None:
-            room.services = services
-        if beds is not None:
-            room.beds = _derive_bed_statuses(beds)
-        if room_kits is not None:
-            room.room_kits = room_kits
- 
-        room.save()
+        final_beds = _derive_bed_statuses(beds) if beds is not None else None
+        _save_room(room, services=services, beds=final_beds, room_kits=room_kits)
         return Response(RoomSerializer(room).data)
  
     # ── DELETE ───────────────────────────────────────────────────────────────
@@ -1125,21 +1151,45 @@ def room_enquiry_view(request):
         )
 
         # ═══════════════════════════════════════════════
-        # STEP 1 — PATIENT MAP
+        # STEP 1 — PATIENT MAP & DOCTOR MAP
         # ═══════════════════════════════════════════════
         patient_map = {}
 
-        for patient in Patient.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ):
-            patient_map[str(patient.uhid)] = {
-                "uhid":        str(patient.uhid or ""),
-                "patientname": f"{patient.firstName or ''} {patient.lastName or ''}".strip(),
+        pat_qs = Patient.objects.all()
+        if hospital_code and hospital_code != "system":
+            h_qs = Patient.objects.filter(hospital_code=hospital_code)
+            if h_qs.exists():
+                pat_qs = h_qs
+
+        for patient in pat_qs:
+            k = str(patient.uhid or "").strip()
+            if not k:
+                continue
+            pname = f"{patient.firstName or ''} {patient.lastName or ''}".strip()
+            patient_map[k] = {
+                "uhid":        k,
+                "patientname": pname,
+                "name":        pname,
+                "firstName":   str(patient.firstName or ""),
+                "lastName":    str(patient.lastName or ""),
                 "age":         str(patient.age or ""),
                 "gender":      str(patient.gender or ""),
                 "mobilePhone": str(patient.mobilePhone or ""),
             }
+
+        # Build doctor map from MongoDB diagnostics profile
+        doctor_map = {}
+        try:
+            client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            global_db = client['Global']
+            diag_prof = global_db['backend_diagnostics_profile']
+            for d in diag_prof.find({}, {"employeeId": 1, "employeeName": 1, "_id": 0}):
+                emp_id = str(d.get("employeeId") or "").strip()
+                emp_name = str(d.get("employeeName") or "").strip()
+                if emp_id and emp_name:
+                    doctor_map[emp_id] = emp_name
+        except Exception as e:
+            print("doctor_map error:", e)
 
         # ═══════════════════════════════════════════════
         # STEP 2 — ADMISSION MAP
@@ -1151,16 +1201,58 @@ def room_enquiry_view(request):
         # ═══════════════════════════════════════════════
         admission_map = {}
 
-        for admission in Admission.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ):
-            uhid        = str(admission.uhid or "")
-            ip_number   = str(admission.ipNumber or "")
-            p_dict = patient_map.get(uhid, {})
-            patient_info = dict(p_dict) if isinstance(p_dict, dict) else {}
-            patient_info["admittingDoctor"] = str(getattr(admission, "admittingDoctor", "") or "")
+        adm_qs = Admission.objects.all()
+        if hospital_code and hospital_code != "system":
+            h_qs = adm_qs.filter(hospital_code=hospital_code)
+            if h_qs.exists():
+                adm_qs = h_qs
+        if branch_code and branch_code != "system":
+            b_qs = adm_qs.filter(branch_code=branch_code)
+            if b_qs.exists():
+                adm_qs = b_qs
+
+        for admission in adm_qs:
+            uhid        = str(admission.uhid or "").strip()
+            ip_number   = str(admission.ipNumber or "").strip()
+            p_dict = patient_map.get(uhid)
+            if not p_dict:
+                pat = Patient.objects.filter(uhid=uhid).first()
+                if pat:
+                    pname = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
+                    p_dict = {
+                        "uhid": uhid,
+                        "patientname": pname,
+                        "name": pname,
+                        "firstName": str(pat.firstName or ""),
+                        "lastName": str(pat.lastName or ""),
+                        "age": str(pat.age or ""),
+                        "gender": str(pat.gender or ""),
+                        "mobilePhone": str(pat.mobilePhone or ""),
+                    }
+                    patient_map[uhid] = p_dict
+            patient_info = dict(p_dict) if isinstance(p_dict, dict) else {
+                "uhid": uhid,
+                "patientname": "",
+                "name": "",
+                "age": "",
+                "gender": "",
+                "mobilePhone": "",
+            }
+
+            # Resolve Doctor Name
+            doc_id = str(getattr(admission, "admittingDoctor", "") or "").strip()
+            doc_name = doctor_map.get(doc_id) or doc_id
+            if doc_name and not doc_name.startswith("Dr.") and doc_id in doctor_map:
+                doc_name = f"Dr. {doc_name}"
+            elif doc_name and not doc_name.startswith("Dr.") and not doc_name.isdigit():
+                doc_name = f"Dr. {doc_name}"
+
+            patient_info["admittingDoctor"] = doc_name
+            patient_info["admittingDoctorId"] = doc_id
             patient_info["admissionDateTime"] = str(getattr(admission, "admissionDateTime", "") or "")
+            patient_info["is_high_risk"] = bool(getattr(admission, "is_high_risk", False))
+            patient_info["high_risk_reason"] = str(getattr(admission, "high_risk_reason", "") or "")
+            patient_info["high_risk_date"] = str(getattr(admission, "high_risk_date", "") or "")
 
             details  = parse_json_field(admission.room_details)
             shifts   = parse_json_field(admission.roomShitingDetails)
@@ -1320,10 +1412,13 @@ def room_enquiry_view(request):
                 })
 
             floor_map[floor].append({
-                "room_number": room.room_number,
-                "room_type":   room.room_category,
-                "block":       room.block,
-                "beds":        beds_data,
+                "room_number":     room.room_number,
+                "room_type":       getattr(room, "room_category", "") or "",
+                "room_category":   getattr(room, "room_category", "") or "",
+                "block":           getattr(room, "block", "") or "",
+                "nursing_station": getattr(room, "nursing_station", "") or "",
+                "floor":           floor,
+                "beds":            beds_data,
             })
 
         # ═══════════════════════════════════════════════

@@ -290,6 +290,12 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
         "mlc_type":           getattr(adm, "mlc_type", "") or "",
         "mlc_doc":            getattr(adm, "mlc_doc", "") or "",
         "mlc_remarks":        getattr(adm, "mlc_remarks", "") or "",
+        "attender_name":         getattr(adm, "attender_name", "") or "",
+        "attender_relationship": getattr(adm, "attender_relationship", "") or "",
+        "attender_phone":        getattr(adm, "attender_phone", "") or "",
+        "is_high_risk":       bool(getattr(adm, "is_high_risk", False)),
+        "high_risk_reason":   getattr(adm, "high_risk_reason", None),
+        "high_risk_date":     getattr(adm, "high_risk_date", None).isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
         "edit_history":       eh,
         "is_cancelled":       getattr(adm, "is_cancelled", False),
         "cancelled_by":       getattr(adm, "cancelled_by", None),
@@ -453,7 +459,10 @@ def search_rooms(request):
 
             uhid         = str(getattr(admission, "uhid",     "") or "").strip()
             ip_number    = str(getattr(admission, "ipNumber", "") or "")
-            patient_info = patient_map.get(uhid, {"uhid": uhid})
+            patient_info = dict(patient_map.get(uhid, {"uhid": uhid}))
+            patient_info["is_high_risk"] = bool(getattr(admission, "is_high_risk", False))
+            patient_info["high_risk_reason"] = getattr(admission, "high_risk_reason", "") or ""
+            patient_info["high_risk_date"] = getattr(admission, "high_risk_date", None).isoformat() if hasattr(getattr(admission, "high_risk_date", None), "isoformat") else str(getattr(admission, "high_risk_date", "") or "")
             active_shifts = [s for s in shifts if bool(s.get("is_roomActive", False))]
             active_shift  = None
             if active_shifts:
@@ -511,11 +520,34 @@ def search_rooms(request):
         except Exception:
             pass
 
+        req_block           = str(request.GET.get("block", "") or "").strip()
+        req_category        = str(request.GET.get("room_category", "") or request.GET.get("category", "") or "").strip()
+        req_nursing_station = str(request.GET.get("nursing_station", "") or "").strip()
+        req_floor           = str(request.GET.get("floor", "") or "").strip()
+        req_room_no         = str(request.GET.get("room_number", "") or "").strip()
+
         for room in Room.objects.filter(hospital_code=hospital_code):
             room_no       = str(getattr(room, "room_number", "") or "").strip()
             room_is_blocked = str(getattr(room, "room_status", "")).strip().lower() == "blocked"
             if not room_no:
                 continue
+
+            r_block           = str(getattr(room, "block", "") or "").strip()
+            r_category        = str(getattr(room, "room_category", "") or getattr(room, "room_type", "") or "").strip()
+            r_nursing_station = str(getattr(room, "nursing_station", "") or "").strip()
+            r_floor           = str(getattr(room, "floor", "") or "").strip()
+
+            if req_block and req_block.lower() != "all" and req_block.lower() != r_block.lower():
+                continue
+            if req_category and req_category.lower() != "all" and req_category.lower() != r_category.lower():
+                continue
+            if req_nursing_station and req_nursing_station.lower() != "all" and req_nursing_station.lower() != r_nursing_station.lower():
+                continue
+            if req_floor and req_floor.lower() != "all" and req_floor != r_floor:
+                continue
+            if req_room_no and req_room_no.lower() not in room_no.lower():
+                continue
+
             beds_data = []
             for bed in _safe_list(getattr(room, "beds", [])):
                 if not isinstance(bed, dict): continue
@@ -535,7 +567,16 @@ def search_rooms(request):
                     beds_data.append({"bed_number": bed_number, "status": "Reserved", "patient": {}, "ip_number": booking_info.get("ip_number", ""), "booking": booking_info, "is_roomActive": False, "is_roomCleaned": True})
                     continue
                 beds_data.append({"bed_number": bed_number, "status": "Available", "patient": {}, "ip_number": "", "booking": None, "is_roomActive": False, "is_roomCleaned": True})
-            result.append({"room_number": room_no, "room_type": str(getattr(room, "room_type", "") or ""), "room_category": str(getattr(room, "room_category", "") or ""), "block": str(getattr(room, "block", "") or ""), "floor": getattr(room, "floor", ""), "beds": beds_data})
+            result.append({
+                "room_number": room_no,
+                "room_type": r_category,
+                "room_category": r_category,
+                "block": r_block,
+                "nursing_station": r_nursing_station,
+                "floor": getattr(room, "floor", ""),
+                "capacity": getattr(room, "capacity", 1),
+                "beds": beds_data
+            })
 
         return Response(result, status=200)
     except Exception as exc:
@@ -674,6 +715,9 @@ def admission_view(request):
                     "attender_name":         getattr(adm, "attender_name", "") or "",
                     "attender_relationship": getattr(adm, "attender_relationship", "") or "",
                     "attender_phone":        getattr(adm, "attender_phone", "") or "",
+                    "is_high_risk":          bool(getattr(adm, "is_high_risk", False)),
+                    "high_risk_reason":      getattr(adm, "high_risk_reason", "") or "",
+                    "high_risk_date":        adm.high_risk_date.isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
                     "room_details":      _safe_list(adm.room_details),
                     "roomShitingDetails":_safe_list(adm.roomShitingDetails),
                     "advance_payments":  _safe_list(adm.advance_payments),
@@ -775,6 +819,23 @@ def admission_view(request):
                 final_age = None
                 final_age_type = _normalize_age_type(age_type_val)
 
+            # High Risk Alert handling
+            is_high_risk_raw = data.get("is_high_risk")
+            is_high_risk = is_high_risk_raw in [True, "true", "True", "1", 1]
+            high_risk_reason = str(data.get("high_risk_reason") or "").strip() or None if is_high_risk else None
+            high_risk_date_val = data.get("high_risk_date")
+            high_risk_date = None
+            if is_high_risk and high_risk_date_val:
+                try:
+                    if isinstance(high_risk_date_val, (datetime, date)):
+                        high_risk_date = high_risk_date_val.date() if isinstance(high_risk_date_val, datetime) else high_risk_date_val
+                    else:
+                        high_risk_date = datetime.strptime(str(high_risk_date_val).strip()[:10], '%Y-%m-%d').date()
+                except Exception:
+                    high_risk_date = timezone.now().date()
+            elif is_high_risk:
+                high_risk_date = timezone.now().date()
+
             # MLC handling (GridFS file upload + remarks)
             mlc_type = str(data.get("mlc_type") or "").strip() or None
             mlc_remarks = str(data.get("mlc_remarks") or "").strip() or None
@@ -804,6 +865,7 @@ def admission_view(request):
                 age=final_age, age_type=final_age_type,
                 mlc_type=mlc_type, mlc_doc=mlc_doc_name, mlc_remarks=mlc_remarks,
                 attender_name=attender_name, attender_relationship=attender_relationship, attender_phone=attender_phone,
+                is_high_risk=is_high_risk, high_risk_reason=high_risk_reason, high_risk_date=high_risk_date,
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
@@ -825,6 +887,9 @@ def admission_view(request):
                 "attender_name": attender_name,
                 "attender_relationship": attender_relationship,
                 "attender_phone": attender_phone,
+                "is_high_risk": is_high_risk,
+                "high_risk_reason": high_risk_reason,
+                "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
                 "edit_history": [],
                 "is_cancelled": False,
                 "cancelled_by": None,
@@ -843,6 +908,7 @@ def admission_view(request):
                 "age": final_age, "age_type": final_age_type,
                 "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
                 "attender_name": attender_name or "", "attender_relationship": attender_relationship or "", "attender_phone": attender_phone or "",
+                "is_high_risk": is_high_risk, "high_risk_reason": high_risk_reason or "", "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "edit_history": [],
@@ -951,6 +1017,9 @@ def admission_detail(request, ipNumber):
                 'attender_name':         getattr(adm, 'attender_name', '') or "",
                 'attender_relationship': getattr(adm, 'attender_relationship', '') or "",
                 'attender_phone':        getattr(adm, 'attender_phone', '') or "",
+                'is_high_risk':          bool(getattr(adm, 'is_high_risk', False)),
+                'high_risk_reason':      getattr(adm, 'high_risk_reason', '') or "",
+                'high_risk_date':        adm.high_risk_date.isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
                 'advance_payments':  ap,
                 # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
@@ -1024,6 +1093,29 @@ def admission_detail(request, ipNumber):
                     adm.attender_relationship = str(get_val(data.get('attenderRelationship')) or '')
                 if 'attenderPhone' in data and not getattr(adm, 'attender_phone', None):
                     adm.attender_phone = str(get_val(data.get('attenderPhone')) or '')
+
+                # Handle High Risk Alert edit
+                if 'is_high_risk' in data:
+                    ihr_val = get_val(data.get('is_high_risk'))
+                    adm.is_high_risk = ihr_val in [True, "true", "True", "1", 1]
+                    if adm.is_high_risk:
+                        adm.high_risk_reason = str(get_val(data.get('high_risk_reason')) or '').strip() or None
+                        hr_dt_val = get_val(data.get('high_risk_date'))
+                        if hr_dt_val:
+                            try:
+                                if isinstance(hr_dt_val, (datetime, date)):
+                                    adm.high_risk_date = hr_dt_val.date() if isinstance(hr_dt_val, datetime) else hr_dt_val
+                                else:
+                                    adm.high_risk_date = datetime.strptime(str(hr_dt_val).strip()[:10], '%Y-%m-%d').date()
+                            except Exception:
+                                adm.high_risk_date = timezone.now().date()
+                        else:
+                            adm.high_risk_date = timezone.now().date()
+                    else:
+                        adm.high_risk_reason = None
+                        adm.high_risk_date = None
+                elif 'high_risk_reason' in data and adm.is_high_risk:
+                    adm.high_risk_reason = str(get_val(data.get('high_risk_reason')) or '').strip() or None
 
                 if 'packageNo' in data:
                     val = get_val(data.get('packageNo'))
