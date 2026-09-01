@@ -2,9 +2,26 @@ from djongo import models
 from django.db import transaction
 from django.db.models import Max
 import re
+import json as _json
 from django.utils import timezone
 from django.utils.timezone import now
 from datetime import datetime
+import django.db.models.fields.json as _json_fields
+
+# Safe JSONField converter for Djongo / PyMongo — prevents "TypeError: must be str, bytes or bytearray, not list"
+def _safe_from_db_value(self, value, expression, connection):
+    if value is None:
+        return value
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return _json.loads(value, cls=self.decoder)
+        except Exception:
+            return value
+    return value
+
+_json_fields.JSONField.from_db_value = _safe_from_db_value
 
 # Base Audit Model
 class AuditModel(models.Model):
@@ -850,6 +867,11 @@ class Admission(AuditModel):
     attender_name        = models.CharField(max_length=150, blank=True, null=True)
     attender_relationship= models.CharField(max_length=100, blank=True, null=True)
     attender_phone       = models.CharField(max_length=20, blank=True, null=True)
+
+    # ── High Risk Alert ───────────────────────────────────────────────────────
+    is_high_risk         = models.BooleanField(default=False)
+    high_risk_reason     = models.TextField(blank=True, null=True)
+    high_risk_date       = models.DateField(blank=True, null=True)
  
     # ── Cancellation tracking ─────────────────────────────────────────────────
     is_cancelled        = models.BooleanField(default=False)

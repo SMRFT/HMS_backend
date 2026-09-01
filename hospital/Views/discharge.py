@@ -2336,6 +2336,25 @@ def send_whatsapp_discharge_visit_reminder(uhid, patient_name, phone, next_visit
             response_json = {}
             is_success = r.status_code in [200, 201]
 
+        # Fallback if language is en_US
+        if not is_success and "does not exist in en" in r.text:
+            alt_lang_payload = {
+                "to": clean_phone,
+                "type": "template",
+                "templateName": template_name,
+                "templateData": template_data,
+                "components": components,
+                "language": {"code": "en_US"}
+            }
+            r_lang = requests.post(botify_url, json=alt_lang_payload, headers=headers, timeout=20)
+            try:
+                if r_lang.status_code in [200, 201] and (r_lang.json().get("success") is True or r_lang.json().get("status") in [True, "success", "200", 200]):
+                    r = r_lang
+                    response_json = r_lang.json()
+                    is_success = True
+            except Exception:
+                pass
+
         # Fallback 1: 4-parameter template (legacy)
         if not is_success and "does not match the expected number of params" in r.text:
             alt4_template_data = [p_name, str(formatted_visit_date), doc_name, str(formatted_visit_date)]
@@ -2442,10 +2461,12 @@ def process_pending_discharge_visit_reminders(target_date=None, force=False):
             target_date_str = str(target_date)
             target_date_obj = None
 
-    all_bills = DischargeBilling.objects.filter(is_cancelled=False)
+    all_bills = list(DischargeBilling.objects.all())
     matching_bills = []
 
     for b in all_bills:
+        if getattr(b, "is_cancelled", False):
+            continue
         nvd = getattr(b, "next_visit_date", None)
         if not nvd:
             continue
@@ -2469,6 +2490,30 @@ def process_pending_discharge_visit_reminders(target_date=None, force=False):
         ip_num = bill.ip_number or ""
         doc_name = getattr(bill, "attending_doctor", "") or getattr(bill, "doctor_id", "") or ""
         bill_num = bill.bill_no or bill.estimate_number or ""
+
+        # If doc_name is empty, check bill items
+        if not doc_name:
+            items_list = getattr(bill, "items", []) or []
+            for itm in items_list:
+                if isinstance(itm, dict) and itm.get("doctor"):
+                    doc_name = itm.get("doctor")
+                    break
+
+        # If still empty, check Admission record
+        if not doc_name and ip_num:
+            try:
+                adm = Admission.objects.filter(ipNumber=ip_num).first()
+                if adm:
+                    doc_name = adm.consultingDoctor or adm.admittingDoctor or ""
+            except Exception:
+                pass
+
+        if doc_name:
+            doc_name = str(doc_name).strip()
+            if not doc_name.lower().startswith("dr.") and not doc_name.lower().startswith("dr "):
+                doc_name = f"Dr. {doc_name}"
+        else:
+            doc_name = "Consulting Doctor"
 
         # Fetch mobilePhone directly from Patient model
         p_name = getattr(bill, "patient_name", "") or ""
