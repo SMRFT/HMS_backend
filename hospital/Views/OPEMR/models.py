@@ -93,9 +93,7 @@ class VitalEntry(AuditModel):
 
 class OPDoctorConsultation(AuditModel):
     uhid = models.CharField(max_length=50, blank=True, null=True)
-    patient_name = models.CharField(max_length=255, blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
-    doctor_name = models.CharField(max_length=255, blank=True, null=True)
     vitals = RawJSONField(default=dict, blank=True, null=True)
     pain_score = models.IntegerField(blank=True, null=True)
     allergies = models.TextField(blank=True, null=True)
@@ -111,6 +109,8 @@ class OPDoctorConsultation(AuditModel):
     diet = models.TextField(blank=True, null=True)
     refer_to_doctor = models.CharField(max_length=255, blank=True, null=True)
     followup_date = models.CharField(max_length=50, blank=True, null=True)
+    consultation_start_time = models.DateTimeField(blank=True, null=True)
+    consultation_end_time = models.DateTimeField(blank=True, null=True)
     date = models.DateTimeField(default=timezone.now)
 
     def __str__(self):

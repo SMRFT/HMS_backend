@@ -709,7 +709,14 @@ urlpatterns = [
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
     path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
     path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
+    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
+    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
+    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
 ]
+
+
+
+
 
 
 

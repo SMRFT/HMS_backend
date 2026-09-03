@@ -102,15 +102,19 @@ def mhc_save_details(request):
             employee_id = data.get('auth-user-id')
             data['lastmodified_by'] = employee_id
 
-            # Store telecaller_id + telecaller_date when provided (e.g. from followup page)
-            telecaller_id = data.get('telecaller_id') or employee_id
-            if telecaller_id:
-                data['telecaller_id'] = telecaller_id
-                data['telecaller_date'] = timezone.now()
-
             # Strip description if empty/whitespace
             if 'description' in data and not str(data.get('description', '')).strip():
                 data.pop('description', None)
+
+            # Store telecaller_id + telecaller_date only when description is provided (e.g. from followup page)
+            if 'description' in data and str(data['description']).strip():
+                telecaller_id = data.get('telecaller_id') or employee_id
+                if telecaller_id:
+                    data['telecaller_id'] = telecaller_id
+                    data['telecaller_date'] = timezone.now()
+            else:
+                data.pop('telecaller_id', None)
+                data.pop('telecaller_date', None)
 
             serializer = MasterHealthcheckupSerializer(instance, data=data, partial=True)
             if serializer.is_valid():
@@ -148,13 +152,14 @@ def mhc_save_details(request):
         data['created_by'] = employee_id
         data['created_date'] = timezone.now()
 
-        # 2. Store telecaller_id same as created_by, with telecaller_date
-        data['telecaller_id'] = employee_id
-        data['telecaller_date'] = timezone.now()
-
-        # 3. Only store description if it has a value
+        # 3. Only store description if it has a value, and store telecaller info only if description exists
         if not data.get('description', '').strip():
             data.pop('description', None)
+            data.pop('telecaller_id', None)
+            data.pop('telecaller_date', None)
+        else:
+            data['telecaller_id'] = employee_id
+            data['telecaller_date'] = timezone.now()
 
         serializer = MasterHealthcheckupSerializer(data=data)
         if serializer.is_valid():
