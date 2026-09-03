@@ -4,6 +4,7 @@ from django.views.decorators.http import require_http_methods
 from django.utils.decorators import method_decorator
 from django.core.paginator import Paginator
 import json
+from django.db.models import Q
 from ..models import VelavanInvoice, VelavanVendors, VelavanItems, VelavanSalesBill, VelavanSalesReturn, VelavanPurchaseReturn, VelavanCustomers
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -1789,6 +1790,7 @@ def list_velavan_sales(request):
         bill_numbers = [obj.bill_number for obj in page_records]
         returns_by_bill = {}
         total_returned_amount_by_bill = {}
+        returns_list_by_bill = {}
         for ret in VelavanSalesReturn.objects.filter(bill_number__in=bill_numbers):
             per_stock = returns_by_bill.setdefault(ret.bill_number, {})
             for ri in normalize_items_payload(ret.items):
@@ -1798,6 +1800,12 @@ def list_velavan_sales(request):
                 total_returned_amount_by_bill.get(ret.bill_number, 0)
                 + convert_decimal128_to_float(ret.total_amount)
             )
+            returns_list_by_bill.setdefault(ret.bill_number, []).append({
+                'return_number': ret.return_number,
+                'return_date': ret.return_date.isoformat() if ret.return_date else None,
+                'total_amount': convert_decimal128_to_float(ret.total_amount),
+                'remarks': ret.remarks or '',
+            })
 
         response_data = []
         for obj in page_records:
@@ -1874,6 +1882,7 @@ def list_velavan_sales(request):
                 'total_amount':      convert_decimal128_to_float(obj.total_amount),
                 'sales_return_amount': round(sales_return_amount, 2),
                 'net_total_amount':  round(convert_decimal128_to_float(obj.total_amount) - sales_return_amount, 2),
+                'returns':           returns_list_by_bill.get(obj.bill_number, []),
                 'remarks':           obj.remarks or '',
                 'payment_mode':      getattr(obj, 'payment_mode', 'CASH') or 'CASH',
                 'payment_status':    getattr(obj, 'payment_status', 'PAID') or 'PAID',
@@ -2415,11 +2424,10 @@ def create_velavan_sales_return(request):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # ── 30-day window guard (server-side, mirrors frontend button disable) ──
-        days_since_bill = (timezone.now().date() - bill.bill_date).days
-        if days_since_bill > 30:
+        remarks = data.get('remarks') or summary.get('remarks') or ''
+        if not str(remarks).strip():
             return Response(
-                {"status": "error", "message": "Time exceeded for sales return (30-day window)"},
+                {"status": "error", "message": "Remarks is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2502,7 +2510,7 @@ def create_velavan_sales_return(request):
             sgst                = to_decimal(summary.get('sgst')),
             round_amount        = to_decimal(summary.get('roundAmount')),   # ← added
             total_amount        = to_decimal(summary.get('totalAmount')),
-            remarks             = summary.get('remarks') or '',
+            remarks             = str(remarks).strip(),
             created_by          = employee_id,
         )
         sales_return.save()
@@ -2541,28 +2549,62 @@ def list_velavan_sales_returns(request):
         from_date_str = request.GET.get('from_date', None)
         to_date_str   = request.GET.get('to_date', None)
 
-        queryset = VelavanSalesReturn.objects.all().order_by('-created_date')
+        sr_col = db["hospital_velavan_salesreturn"]
+        all_records = list(sr_col.find().sort('created_date', -1))
 
         if from_date_str:
             try:
-                from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
-                queryset = queryset.filter(return_date__gte=from_date)
+                from_d = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+                all_records = [
+                    r for r in all_records
+                    if r.get('return_date') and (
+                        (r.get('return_date').date() if isinstance(r.get('return_date'), datetime) else r.get('return_date')) >= from_d
+                    )
+                ]
             except ValueError:
                 pass
         if to_date_str:
             try:
-                to_date = datetime.strptime(to_date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-                queryset = queryset.filter(return_date__lte=to_date)
+                to_d = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+                all_records = [
+                    r for r in all_records
+                    if r.get('return_date') and (
+                        (r.get('return_date').date() if isinstance(r.get('return_date'), datetime) else r.get('return_date')) <= to_d
+                    )
+                ]
             except ValueError:
                 pass
 
-        all_records = list(queryset)
+        # Lookup bills to get bill_date and customer info
+        bill_nums = [doc.get('bill_number') for doc in all_records if doc.get('bill_number')]
+        bill_map = {}
+        cust_ids = set()
+        if bill_nums:
+            for b in VelavanSalesBill.objects.filter(bill_number__in=bill_nums):
+                bill_map[b.bill_number] = b
+                if getattr(b, 'customer_id', None):
+                    cust_ids.add(str(b.customer_id))
+
+        for doc in all_records:
+            if doc.get('customer_id'):
+                cust_ids.add(str(doc.get('customer_id')))
+
+        customer_map = {}
+        if cust_ids:
+            try:
+                for c in VelavanCustomers.objects.filter(customer_id__in=list(cust_ids)):
+                    customer_map[str(c.customer_id)] = {
+                        'name': c.name,
+                        'company_name': c.company_name,
+                    }
+            except Exception:
+                pass
 
         all_item_ids = set()
         parsed_by_return = {}
-        for obj in all_records:
-            parsed = normalize_items_payload(obj.items)
-            parsed_by_return[obj.return_number] = parsed
+        for doc in all_records:
+            parsed = normalize_items_payload(doc.get('items', []))
+            parsed_by_return[doc.get('return_number')] = parsed
             for item in parsed:
                 iid = item.get('item_id')
                 if iid not in (None, ''):
@@ -2571,8 +2613,9 @@ def list_velavan_sales_returns(request):
         name_map = resolve_item_names(all_item_ids)
 
         response_data = []
-        for obj in all_records:
-            items = parsed_by_return.get(obj.return_number, [])
+        for doc in all_records:
+            ret_num = doc.get('return_number')
+            items = parsed_by_return.get(ret_num, [])
             for item in items:
                 try:
                     iid = int(item.get('item_id')) if item.get('item_id') not in (None, '') else None
@@ -2584,22 +2627,40 @@ def list_velavan_sales_returns(request):
                     if f in item:
                         item[f] = convert_decimal128_to_float(item[f])
 
+            b_obj = bill_map.get(doc.get('bill_number'))
+            cid = str(doc.get('customer_id') or (getattr(b_obj, 'customer_id', None) if b_obj else '') or '')
+            c_info = customer_map.get(cid, {})
+            c_name = c_info.get('name', '') or getattr(b_obj, 'patient_name', '') or doc.get('patient_name', '') or ''
+            c_comp = c_info.get('company_name', '') or getattr(b_obj, 'company_name', '') or c_name or ''
+            if not c_comp and c_name:
+                c_comp = c_name
+
+            ret_dt = doc.get('return_date')
+            if isinstance(ret_dt, (datetime, date)):
+                ret_dt_str = ret_dt.isoformat()
+            else:
+                ret_dt_str = str(ret_dt) if ret_dt else None
+
             response_data.append({
-                'id':                 str(getattr(obj, '_id', None)),
-                'return_number':      obj.return_number,
-                'bill_number':        obj.bill_number,
-                'source_grn_number':  obj.source_grn_number,
-                'return_date':        obj.return_date.isoformat() if obj.return_date else None,
-                'ip_number':          obj.ip_number,
-                'patient_name':       obj.patient_name,
+                'id':                 str(doc.get('_id')),
+                'return_number':      ret_num,
+                'bill_number':        doc.get('bill_number'),
+                'bill_date':          b_obj.bill_date.isoformat() if b_obj and b_obj.bill_date else None,
+                'customer_id':        cid,
+                'customer_name':      c_name,
+                'customer_company':   c_comp,
+                'source_grn_number':  doc.get('source_grn_number'),
+                'return_date':        ret_dt_str,
+                'ip_number':          doc.get('ip_number', ''),
+                'patient_name':       doc.get('patient_name', ''),
                 'items':              items,
-                'taxable_amount':     convert_decimal128_to_float(obj.taxable_amount),
-                'cgst':               convert_decimal128_to_float(obj.cgst),
-                'sgst':               convert_decimal128_to_float(obj.sgst),
-                'round_amount':       convert_decimal128_to_float(getattr(obj, 'round_amount', 0)),   # ← added
-                'total_amount':       convert_decimal128_to_float(obj.total_amount),
-                'remarks':            obj.remarks or '',
-                'created_by':         getattr(obj, 'created_by', None),
+                'taxable_amount':     convert_decimal128_to_float(doc.get('taxable_amount', 0)),
+                'cgst':               convert_decimal128_to_float(doc.get('cgst', 0)),
+                'sgst':               convert_decimal128_to_float(doc.get('sgst', 0)),
+                'round_amount':       convert_decimal128_to_float(doc.get('round_amount', 0)),
+                'total_amount':       convert_decimal128_to_float(doc.get('total_amount', 0)),
+                'remarks':            doc.get('remarks', '') or '',
+                'created_by':         doc.get('created_by'),
             })
 
         return Response({'status': 'success', 'data': response_data}, status=status.HTTP_200_OK)
@@ -2726,6 +2787,13 @@ def create_velavan_purchase_return(request):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+        remarks = data.get('remarks') or summary.get('remarks') or ''
+        if not str(remarks).strip():
+            return Response(
+                {"status": "error", "message": "Remarks is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         purchase_return = VelavanPurchaseReturn(
             grn_number     = grn_number,
             vendor_id      = invoice_doc.get('vendor_id', ''),
@@ -2737,7 +2805,7 @@ def create_velavan_purchase_return(request):
             igst           = to_decimal(summary.get('igst')),
             round_amount   = to_decimal(summary.get('roundAmount')),
             total_amount   = to_decimal(summary.get('totalAmount')),
-            remarks        = summary.get('remarks') or '',
+            remarks        = str(remarks).strip(),
             created_by     = employee_id,
         )
         purchase_return.save()
@@ -2776,28 +2844,66 @@ def list_velavan_purchase_returns(request):
         from_date_str = request.GET.get('from_date', None)
         to_date_str   = request.GET.get('to_date', None)
 
-        queryset = VelavanPurchaseReturn.objects.all().order_by('-created_date')
+        pr_col = db["hospital_velavan_purchasereturn"]
+        all_records = list(pr_col.find().sort('created_date', -1))
 
         if from_date_str:
             try:
-                from_date = datetime.strptime(from_date_str, '%Y-%m-%d')
-                queryset = queryset.filter(return_date__gte=from_date)
+                from_d = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+                all_records = [
+                    r for r in all_records
+                    if r.get('return_date') and (
+                        (r.get('return_date').date() if isinstance(r.get('return_date'), datetime) else r.get('return_date')) >= from_d
+                    )
+                ]
             except ValueError:
                 pass
         if to_date_str:
             try:
-                to_date = datetime.strptime(to_date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-                queryset = queryset.filter(return_date__lte=to_date)
+                to_d = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+                all_records = [
+                    r for r in all_records
+                    if r.get('return_date') and (
+                        (r.get('return_date').date() if isinstance(r.get('return_date'), datetime) else r.get('return_date')) <= to_d
+                    )
+                ]
             except ValueError:
                 pass
 
-        all_records = list(queryset)
+        # Lookup invoices to get invoice_no, invoice_date, date, vendor_id, vendor_name
+        grn_nums = [doc.get('grn_number') for doc in all_records if doc.get('grn_number')]
+        invoice_map = {}
+        vendor_ids = set()
+        if grn_nums:
+            inv_col = db["hospital_velavaninvoice"]
+            for inv in inv_col.find({'grn_number': {'$in': grn_nums}}):
+                invoice_map[inv.get('grn_number')] = inv
+                if inv.get('vendor_id'):
+                    vendor_ids.add(str(inv.get('vendor_id')))
+
+        for doc in all_records:
+            if doc.get('vendor_id'):
+                vendor_ids.add(str(doc.get('vendor_id')))
+
+        vendor_map = {}
+        if vendor_ids:
+            try:
+                v_col = db["hospital_velavan_vendors"]
+                v_query_ids = list(vendor_ids) + [int(x) for x in vendor_ids if x.isdigit()]
+                for v in v_col.find({'vendor_id': {'$in': v_query_ids}}):
+                    vid = str(v.get('vendor_id'))
+                    vendor_map[vid] = {
+                        'name': v.get('name', ''),
+                        'company_name': v.get('company_name', '') or v.get('name', ''),
+                    }
+            except Exception:
+                pass
 
         all_item_ids = set()
         parsed_by_return = {}
-        for obj in all_records:
-            parsed = normalize_items_payload(obj.items)
-            parsed_by_return[obj.return_number] = parsed
+        for doc in all_records:
+            parsed = normalize_items_payload(doc.get('items', []))
+            parsed_by_return[doc.get('return_number')] = parsed
             for item in parsed:
                 iid = item.get('item_id')
                 if iid not in (None, ''):
@@ -2806,8 +2912,9 @@ def list_velavan_purchase_returns(request):
         name_map = resolve_item_names(all_item_ids)
 
         response_data = []
-        for obj in all_records:
-            items = parsed_by_return.get(obj.return_number, [])
+        for doc in all_records:
+            ret_num = doc.get('return_number')
+            items = parsed_by_return.get(ret_num, [])
             for item in items:
                 try:
                     iid = int(item.get('item_id')) if item.get('item_id') not in (None, '') else None
@@ -2818,21 +2925,50 @@ def list_velavan_purchase_returns(request):
                     if f in item:
                         item[f] = convert_decimal128_to_float(item[f])
 
+            inv_obj = invoice_map.get(doc.get('grn_number'), {})
+            vid = str(doc.get('vendor_id') or inv_obj.get('vendor_id') or '')
+            v_info = vendor_map.get(vid, {})
+            v_name = v_info.get('name', '') or inv_obj.get('vendor', '') or ''
+            v_comp = v_info.get('company_name', '') or inv_obj.get('vendor', '') or v_name or ''
+
+            inv_dt = inv_obj.get('invoice_date')
+            if isinstance(inv_dt, (datetime, date)):
+                inv_dt_str = inv_dt.isoformat()
+            else:
+                inv_dt_str = str(inv_dt) if inv_dt else None
+
+            grn_dt = inv_obj.get('date')
+            if isinstance(grn_dt, (datetime, date)):
+                grn_dt_str = grn_dt.isoformat()
+            else:
+                grn_dt_str = str(grn_dt) if grn_dt else None
+
+            ret_dt = doc.get('return_date')
+            if isinstance(ret_dt, (datetime, date)):
+                ret_dt_str = ret_dt.isoformat()
+            else:
+                ret_dt_str = str(ret_dt) if ret_dt else None
+
             response_data.append({
-                'id':             str(getattr(obj, '_id', None)),
-                'return_number':  obj.return_number,
-                'grn_number':     obj.grn_number,
-                'vendor_id':      obj.vendor_id,
-                'return_date':    obj.return_date.isoformat() if obj.return_date else None,
+                'id':             str(doc.get('_id')),
+                'return_number':  ret_num,
+                'grn_number':     doc.get('grn_number', ''),
+                'invoice_no':     inv_obj.get('invoice_no', ''),
+                'invoice_date':   inv_dt_str,
+                'grn_date':       grn_dt_str,
+                'vendor_id':      vid,
+                'vendor_name':    v_name,
+                'vendor_company': v_comp,
+                'return_date':    ret_dt_str,
                 'items':          items,
-                'taxable_amount': convert_decimal128_to_float(obj.taxable_amount),
-                'cgst':           convert_decimal128_to_float(obj.cgst),
-                'sgst':           convert_decimal128_to_float(obj.sgst),
-                'igst':           convert_decimal128_to_float(getattr(obj, 'igst', 0)),
-                'round_amount':   convert_decimal128_to_float(getattr(obj, 'round_amount', 0)),
-                'total_amount':   convert_decimal128_to_float(obj.total_amount),
-                'remarks':        obj.remarks or '',
-                'created_by':     getattr(obj, 'created_by', None),
+                'taxable_amount': convert_decimal128_to_float(doc.get('taxable_amount', 0)),
+                'cgst':           convert_decimal128_to_float(doc.get('cgst', 0)),
+                'sgst':           convert_decimal128_to_float(doc.get('sgst', 0)),
+                'igst':           convert_decimal128_to_float(doc.get('igst', 0)),
+                'round_amount':   convert_decimal128_to_float(doc.get('round_amount', 0)),
+                'total_amount':   convert_decimal128_to_float(doc.get('total_amount', 0)),
+                'remarks':        doc.get('remarks', '') or '',
+                'created_by':     doc.get('created_by'),
             })
 
         return Response({'status': 'success', 'data': response_data}, status=status.HTTP_200_OK)
