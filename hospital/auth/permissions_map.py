@@ -566,6 +566,45 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_referral_doctors': 'HMS-P-OPEMRD',
 
+        # ==================== VELAVAN ====================
+        # Items
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_items/list/?(\?.*)?$': 'HMS-P-VIT',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_get_items/?(\?.*)?$': 'HMS-P-VIT',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_create_item/?(\?.*)?$': 'HMS-P-VIT',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_update_item/[^/]+/?(\?.*)?$': 'HMS-P-VIE',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_item/[^/]+/?(\?.*)?$': 'HMS-P-VID',
+
+        # Vendors
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_vendors/list/?(\?.*)?$': 'HMS-P-VVN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_get_vendors/?(\?.*)?$': 'HMS-P-VVN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_create_vendor/?(\?.*)?$': 'HMS-P-VVN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_update_vendor/[^/]+/?(\?.*)?$': 'HMS-P-VVE',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_vendor/[^/]+/?(\?.*)?$': 'HMS-P-VVD',
+
+        # Invoices & Purchase Returns
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/?(\?.*)?$': 'HMS-P-VIN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VIN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VIN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update/.+/?(\?.*)?$': 'HMS-P-VINE',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve/.+/?(\?.*)?$': 'HMS-P-VINA',
+        r'^/_b_a_c_k_e_n_d/HMS/vel-ip-patient/.+/?(\?.*)?$': 'HMS-P-VIN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/?(\?.*)?$': 'HMS-P-VIN',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/list/?(\?.*)?$': 'HMS-P-VIN',
+
+        # Sales, Stock & Sales Returns
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/sales/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/sales/list/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/list/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/search/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/stock/by-grn/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/sales-return/?(\?.*)?$': 'HMS-P-VS',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan/sales-return/list/?(\?.*)?$': 'HMS-P-VS',
+
+        # Customers
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_customers/list/?(\?.*)?$': 'HMS-P-VCU',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_create_customer/?(\?.*)?$': 'HMS-P-VCU',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_update_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCE',
+        r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCD',
 
 }
 
