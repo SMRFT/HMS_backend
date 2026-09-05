@@ -702,6 +702,7 @@ urlpatterns = [
     # OPEMR
 
     path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
+    path('OPEMR_get_Doctor_patient/', OPEMR.OPEMR_get_Doctor_patient, name='OPEMR_get_Doctor_patient'),
     path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
     path('OPEMR_get_vital_history/', OPEMR.OPEMR_get_vital_history, name='OPEMR_get_vital_history'),
     path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),

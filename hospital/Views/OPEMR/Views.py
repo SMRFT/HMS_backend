@@ -39,8 +39,11 @@ def OPEMR_get_billing_patient(request):
     Get patient details for paid billed patients only using Django ORM Billing and Patient models.
     """
     try:
-        # Query all paid bills via Django ORM Billing model (no doctor filter)
-        paid_bills = Billing.objects.filter(payment_status__iexact="paid").select_related('patient').order_by('-billed_date')
+
+        data = request.data
+        employee_id = data.get("auth-user-id")
+        # Query all bills (Paid and Pending) via Django ORM Billing model (no doctor filter)
+        paid_bills = Billing.objects.filter(payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid']).select_related('patient').order_by('-billed_date')
 
 
         result = []
@@ -131,7 +134,7 @@ def OPEMR_VitalEntry(request):
         today_end = today_start + timedelta(days=1)
         
         paid_bills = Billing.objects.filter(
-            payment_status__iexact="paid",
+            payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid'],
             billed_date__gte=today_start,
             billed_date__lt=today_end
         ).select_related('patient').order_by('-billed_date')
@@ -947,3 +950,102 @@ def OPEMR_docotordashboard(request):
         import traceback
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_Doctor_patient(request):
+    """
+    Get patient details for paid billed patients only using Django ORM Billing and Patient models.
+    Filters billing records where doctor_id matches the logged-in doctor's employee_id.
+    """
+    try:
+        from django.db.models import Q
+
+        data = request.data
+        employee_id = data.get("auth-user-id")
+        print("employee_id:", employee_id)
+
+        paid_bills = Billing.objects.filter(payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid']).select_related('patient').order_by('-billed_date')
+
+        if employee_id:
+            emp_str = str(employee_id).strip()
+            doctor_queries = Q(doctor_id__iexact=emp_str) | Q(doctor_id=emp_str)
+            if emp_str.isdigit():
+                doctor_queries |= Q(doctor_id=str(int(emp_str)))
+            paid_bills = paid_bills.filter(doctor_queries)
+        else:
+            return Response([], status=status.HTTP_200_OK)
+
+
+        result = []
+        for bill in paid_bills:
+            patient_obj = getattr(bill, 'patient', None)
+            if not patient_obj:
+                continue
+
+            salutation = getattr(patient_obj, 'salutation', '') or ''
+            first_name = getattr(patient_obj, 'firstName', '') or ''
+            last_name = getattr(patient_obj, 'lastName', '') or ''
+            full_name = f"{salutation} {first_name} {last_name}".strip()
+
+            doctor_id = getattr(bill, 'doctor_id', '') or ''
+            from hospital.Views.dbcollection import get_employee_name_by_id
+            doctor_name = get_employee_name_by_id(doctor_id)
+
+            patient_data = {
+                "id": getattr(patient_obj, 'id', None),
+                "uhid": getattr(patient_obj, 'uhid', '') or '',
+                "salutation": salutation,
+                "firstName": first_name,
+                "lastName": last_name,
+                "patient_name": full_name or f"Patient ({getattr(patient_obj, 'uhid', '')})",
+                "age": getattr(patient_obj, 'age', None),
+                "gender": getattr(patient_obj, 'gender', '') or '',
+                "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
+                "mobilePhone": getattr(patient_obj, 'mobilePhone', '') or '',
+                "blood_group": getattr(patient_obj, 'blood_group', '') or '',
+                "city": getattr(patient_obj, 'city', '') or '',
+                "permanent_address": getattr(patient_obj, 'permanent_address', '') or '',
+                "doctorName": doctor_name,
+                "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
+            }
+
+            billed_d = getattr(bill, 'billed_date', None)
+            billed_date_str = billed_d.isoformat() if billed_d else ""
+
+            latest_vital = None
+            is_completed_today = False
+            uhid_str = patient_data.get("uhid")
+            if uhid_str:
+                vital_entries = list(VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date')[:1])
+                vital_entry_obj = vital_entries[0] if vital_entries else None
+                if vital_entry_obj:
+                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
+                    
+                    if getattr(vital_entry_obj, 'created_date', None):
+                        from django.utils import timezone
+                        if vital_entry_obj.created_date.date() == timezone.now().date():
+                            is_completed_today = True
+
+            result.append({
+                "bill_number": getattr(bill, 'bill_number', ''),
+                "billed_date": billed_date_str,
+                "payment_status": getattr(bill, 'payment_status', 'Paid'),
+                "total_fees": safe_float(getattr(bill, 'total_fees', None)),
+                "registration_fee": safe_float(getattr(bill, 'registration_fee', None)),
+                "consulting_fee": safe_float(getattr(bill, 'consulting_fee', None)),
+                "payment_method": getattr(bill, 'payment_method', '') or '',
+                "doctor_id": getattr(bill, 'doctor_id', '') or '',
+                "patient": patient_data,
+                "vital_entry": latest_vital,
+                "vital_status": "Completed" if is_completed_today else "Pending"
+            })
+
+        return Response(result, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
