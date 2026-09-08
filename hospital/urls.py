@@ -56,7 +56,8 @@ from .Views import (
     vaccination,
     patient_inquiry,
     mrd,
-    OPEMR
+    OPEMR,
+    IPEMR
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -700,7 +701,6 @@ urlpatterns = [
 
 
     # OPEMR
-
     path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
     path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
     path('OPEMR_get_vital_history/', OPEMR.OPEMR_get_vital_history, name='OPEMR_get_vital_history'),
@@ -708,6 +708,16 @@ urlpatterns = [
     path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
     path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
+
+    # IPEMR
+    path('IPEMR_get_admitted_patients/', IPEMR.IPEMR_get_admitted_patients, name='IPEMR_get_admitted_patients'),
+    path('IPEMR_DoctorNotes/', IPEMR.IPEMR_DoctorNotes, name='IPEMR_DoctorNotes'),
+    path('IPEMR_DoctorNotes/<str:note_id>/', IPEMR.IPEMR_DoctorNotes_detail, name='IPEMR_DoctorNotes_detail'),
+    path('IPEMR_NursingNotes/', IPEMR.IPEMR_NursingNotes, name='IPEMR_NursingNotes'),
+    path('IPEMR_NursingNotes/<str:note_id>/', IPEMR.IPEMR_NursingNotes_detail, name='IPEMR_NursingNotes_detail'),
+    path('IPEMR_get_patient_summary/', IPEMR.IPEMR_get_patient_summary, name='IPEMR_get_patient_summary'),
+    path('IPEMR_patient_history/', IPEMR.IPEMR_patient_history, name='IPEMR_patient_history'),
+    path('IPEMR_doctor_dashboard_analytics/', IPEMR.IPEMR_doctor_dashboard_analytics, name='IPEMR_doctor_dashboard_analytics'),
     path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
     path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
     path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),

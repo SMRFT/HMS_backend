@@ -564,6 +564,16 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
+
+        # IP EMR
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_get_admitted_patients/?(\?.*)?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_DoctorNotes/?(\?.*)?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_DoctorNotes/(?P<note_id>[^/]+)/?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_NursingNotes/?(\?.*)?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_NursingNotes/(?P<note_id>[^/]+)/?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_get_patient_summary/?(\?.*)?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_patient_history/?(\?.*)?$': 'HMS-P-IPEMR',
+        r'^/_b_a_c_k_e_n_d/HMS/IPEMR_doctor_dashboard_analytics/?(\?.*)?$': 'HMS-P-IPEMR',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_referral_doctors': 'HMS-P-OPEMRD',
 
         # ==================== VELAVAN ====================
