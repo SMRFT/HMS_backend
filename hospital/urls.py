@@ -703,6 +703,7 @@ urlpatterns = [
     # OPEMR
     path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
     path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
+    path('OPEMR_get_vital_history/', OPEMR.OPEMR_get_vital_history, name='OPEMR_get_vital_history'),
     path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),
     path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
@@ -717,7 +718,15 @@ urlpatterns = [
     path('IPEMR_get_patient_summary/', IPEMR.IPEMR_get_patient_summary, name='IPEMR_get_patient_summary'),
     path('IPEMR_patient_history/', IPEMR.IPEMR_patient_history, name='IPEMR_patient_history'),
     path('IPEMR_doctor_dashboard_analytics/', IPEMR.IPEMR_doctor_dashboard_analytics, name='IPEMR_doctor_dashboard_analytics'),
+    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
+    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
+    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
+    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
 ]
+
+
+
+
 
 
 

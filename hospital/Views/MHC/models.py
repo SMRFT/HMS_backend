@@ -40,6 +40,7 @@ class MasterHealthcheckup(AuditModel):
 
     mhc_no = models.PositiveIntegerField(unique=True, blank=True, null=True)
 
+    registration_date = models.CharField(max_length=100, blank=True, null=True)
     patient_name = models.CharField(max_length=100, blank=True, null=True)
     age = models.IntegerField(blank=True, null=True)
     gender = models.CharField(max_length=20, blank=True, null=True)
