@@ -2646,6 +2646,14 @@ class MRD(AuditModel):
     error_resolved_by   = models.CharField(max_length=100, null=True, blank=True)
     error_resolved_date = models.DateTimeField(null=True, blank=True)
 
+    # Scanned PDF Document storage
+    pdf_file_id         = models.CharField(max_length=100, null=True, blank=True)
+    pdf_filename        = models.CharField(max_length=255, null=True, blank=True)
+    pdf_uploaded_by     = models.CharField(max_length=100, null=True, blank=True)
+    pdf_uploaded_date   = models.DateTimeField(null=True, blank=True)
+    pdf_deleted_by      = models.CharField(max_length=100, null=True, blank=True)
+    pdf_deleted_date    = models.DateTimeField(null=True, blank=True)
+
     is_active     = models.BooleanField(default=True)
 
 

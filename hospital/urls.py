@@ -698,6 +698,9 @@ urlpatterns = [
     path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),
     path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
     path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
+    path('mrd/upload-pdf/', mrd.mrd_upload_pdf, name='mrd-upload-pdf'),
+    re_path(r'^mrd/file/(?P<file_id>[^/]+)/$', mrd.mrd_get_pdf, name='mrd-get-pdf'),
+    path('mrd/delete-pdf/', mrd.mrd_delete_pdf, name='mrd-delete-pdf'),
 
 
     # OPEMR
