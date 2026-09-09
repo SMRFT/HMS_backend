@@ -12,9 +12,11 @@ from .serializer import VitalEntrySerializer,  OPDoctorConsultationSerializer
 
 
 # Auth/permissions
+import json
+import re
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from rest_framework.decorators import api_view, permission_classes
-from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list,medicine_package, profile_collection, doctor_role_code
+from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list, medicine_package, profile_collection, doctor_role_code, Diagnostics_db, hms_db
 
 
 
@@ -268,9 +270,10 @@ def OPEMR_VitalEntry(request):
     elif request.method == 'POST':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         employee_id = data.get("auth-user-id") or data.get("created_by")
-        if employee_id:
-            data['created_by'] = employee_id
-            data['lastmodified_by'] = employee_id
+        data['created_by'] = employee_id
+        data['created_date'] = now()
+        data['lastmodified_by'] = None
+        data['lastmodified_date'] = None
 
         serializer = VitalEntrySerializer(data=data)
         if serializer.is_valid():
@@ -292,7 +295,7 @@ def OPEMR_VitalEntry(request):
 
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_symptoms(request):
     """
     Get symptoms list from HMS_Symptoms_list dbcollection.py.
@@ -319,7 +322,7 @@ def OPEMR_get_symptoms(request):
 
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_diagnostics_tests(request):
     """
     Get diagnostics test details from Diagnostics_test_details dbcollection.py.
@@ -352,7 +355,7 @@ def OPEMR_get_diagnostics_tests(request):
 
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_medicines(request):
     """
     Get medicines list from medicine_package (hospital_pharmacyitem) dbcollection.py.
@@ -383,7 +386,7 @@ def OPEMR_get_medicines(request):
 
 
 @api_view(['GET', 'POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_DoctorConsultation(request):
     """
     GET: Retrieve doctor consultation records using DoctorConsultation model (filtered by ?uhid=...)
@@ -415,7 +418,9 @@ def OPEMR_DoctorConsultation(request):
             consult_data = {
                 "uhid": uhid,
                 "created_by": employee_id,
-                "lastmodified_by": employee_id,
+                "created_date": now(),
+                "lastmodified_by": None,
+                "lastmodified_date": None,
                 "doctor_id": data.get("doctor_id", ""),
                 "vitals": vitals_data,
                 "pain_score": data.get("pain_score", None),
@@ -461,8 +466,18 @@ def OPEMR_DoctorConsultation(request):
             existing_consult = OPDoctorConsultation.objects.filter(existing_filter).order_by('-created_date').first()
 
             if existing_consult:
+                # On update: store lastmodified_by and lastmodified_date
+                consult_data["lastmodified_by"] = employee_id
+                consult_data["lastmodified_date"] = now()
+                consult_data.pop("created_by", None)
+                consult_data.pop("created_date", None)
                 serializer = OPDoctorConsultationSerializer(existing_consult, data=consult_data, partial=True)
             else:
+                # On new create (POST): store created_by as employee_id and created_date, do NOT store lastmodified
+                consult_data["created_by"] = employee_id
+                consult_data["created_date"] = now()
+                consult_data["lastmodified_by"] = None
+                consult_data["lastmodified_date"] = None
                 serializer = OPDoctorConsultationSerializer(data=consult_data)
 
             if serializer.is_valid():
@@ -486,7 +501,7 @@ def OPEMR_DoctorConsultation(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_vital_history(request):
     """
     Get full vital history for a given patient UHID.
@@ -503,7 +518,7 @@ def OPEMR_get_vital_history(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_referral_doctors(request):
     """
     Get all employees who have 'doctor_role_code' in their primaryRole or additionalRoles.
@@ -530,7 +545,7 @@ def OPEMR_get_referral_doctors(request):
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_Vitaldashboard(request):
     """
     Get vital analytics and wait times for a specific date (defaults to today).
@@ -674,7 +689,7 @@ def OPEMR_Vitaldashboard(request):
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_patientlivetracking(request):
     """
     Get live tracking of all patients for today.
@@ -772,7 +787,7 @@ def OPEMR_patientlivetracking(request):
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_docotordashboard(request):
     """
     Aggregated Analytics for the Doctor Dashboard.
@@ -984,7 +999,7 @@ def OPEMR_docotordashboard(request):
 
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_Doctor_patient(request):
     """
     Get patient details for paid billed patients only using Django ORM Billing and Patient models.
@@ -993,14 +1008,8 @@ def OPEMR_get_Doctor_patient(request):
     try:
         from django.db.models import Q
 
-        data = request.data if hasattr(request, 'data') and isinstance(request.data, dict) else {}
-        employee_id = (
-            data.get("auth-user-id")
-            or request.headers.get("auth-user-id")
-            or request.headers.get("Auth-User-Id")
-            or request.query_params.get("doctor_id")
-            or request.query_params.get("auth-user-id")
-        )
+        data = request.data 
+        employee_id = data.get("auth-user-id")
         print("employee_id in OPEMR_get_Doctor_patient:", employee_id)
 
         if not employee_id:
@@ -1235,4 +1244,190 @@ def OPEMR_get_Doctor_patient(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_patient_lab_results(request):
+    """
+    Retrieve diagnostic test results for a patient from Diagnostics.core_testvalue & core_mbtestvalue (same as discharge summary).
+    Query parameter: ?uhid=...
+    """
+    try:
+        uhid = (request.query_params.get('uhid') or request.GET.get('uhid') or '').strip()
+        if not uhid:
+            return Response([], status=status.HTTP_200_OK)
+
+        if Diagnostics_db is None:
+            return Response([], status=status.HTTP_200_OK)
+
+        core_hmsbarcode = Diagnostics_db["core_hmsbarcode"]
+        core_testvalue = Diagnostics_db["core_testvalue"]
+        core_mbtestvalue = Diagnostics_db["core_mbtestvalue"]
+        core_testdetails = Diagnostics_db["core_testdetails"]
+        invest_coll = hms_db["hospital_investbilling"] if hms_db is not None else None
+
+        # 1. Match barcodes by UHID in core_hmsbarcode and invest bills
+        barcode_query = [
+            {"patient_id": uhid},
+            {"patient_id": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}}
+        ]
+
+        if invest_coll is not None:
+            invest_bills = list(invest_coll.find(
+                {"$or": [{"uhid": uhid}, {"uhid": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}}]},
+                {"investBillNo": 1, "billNumber": 1, "_id": 0}
+            ))
+            bill_numbers = [b.get("investBillNo") or b.get("billNumber") for b in invest_bills if b.get("investBillNo") or b.get("billNumber")]
+            if bill_numbers:
+                barcode_query.append({"billnumber": {"$in": bill_numbers}})
+
+        barcode_records = list(core_hmsbarcode.find({"$or": barcode_query}))
+        found_barcodes = list(set([b.get("barcode") for b in barcode_records if b.get("barcode")]))
+
+        # Helper: get parameter definition from core_testdetails
+        def get_parameter_from_core(core_test, device_id, test_code=None, param_index=None):
+            if not core_test:
+                return None
+            core_parameters = core_test.get("parameters", {})
+            params_list = []
+            if isinstance(core_parameters, dict):
+                if device_id and device_id != "N/A" and device_id in core_parameters:
+                    params_list = core_parameters[device_id]
+                elif core_parameters:
+                    params_list = list(core_parameters.values())[0]
+            elif isinstance(core_parameters, list):
+                params_list = core_parameters
+
+            if not isinstance(params_list, list):
+                return None
+            if param_index is not None and 0 <= param_index < len(params_list):
+                return params_list[param_index]
+            if test_code:
+                for p in params_list:
+                    if isinstance(p, dict) and p.get("test_code") == test_code:
+                        return p
+            return None
+
+        lab_results = []
+
+        # 2. Fetch from core_testvalue
+        for bc in found_barcodes:
+            tv_records = list(core_testvalue.find({"barcode": bc}))
+            for tv in tv_records:
+                raw = tv.get("testdetails", "[]")
+                details = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                if not isinstance(details, list):
+                    continue
+
+                for test in details:
+                    test_id = test.get("test_id")
+                    device_id = test.get("device_id", "N/A")
+                    parameters = test.get("parameters", [])
+                    approve_by = test.get("approve_by", "")
+                    approve_time = test.get("approve_time", "N/A")
+                    verified_by = test.get("verified_by", "N/A")
+                    dispatch_time = test.get("dispatch_time", "")
+                    comment = test.get("comment", "")
+                    remarks = test.get("remarks", "")
+                    is_approved = bool(test.get("approve") is True)
+
+                    core_test = core_testdetails.find_one({"test_id": test_id}) if test_id else None
+                    testname = core_test.get("test_name") if core_test else test.get("testname", "Diagnostic Test")
+                    department = core_test.get("department") if core_test else test.get("department", "Diagnostics")
+                    specimen_type = core_test.get("specimen_type") if core_test else test.get("specimen_type", "")
+                    nabl = bool(core_test.get("NABL", False)) if core_test else False
+
+                    parsed_params = []
+                    if parameters and len(parameters) > 0 and core_test:
+                        for param_index, param_value in enumerate(parameters):
+                            t_code = param_value.get("test_code")
+                            val = param_value.get("value", "")
+                            p_def = get_parameter_from_core(core_test, device_id, test_code=t_code, param_index=param_index)
+                            if p_def:
+                                parsed_params.append({
+                                    "name": p_def.get("test_name", param_value.get("name", "")),
+                                    "test_code": t_code,
+                                    "value": val,
+                                    "unit": p_def.get("unit", ""),
+                                    "reference_range": p_def.get("reference_range", ""),
+                                    "method": p_def.get("method", ""),
+                                    "comment": param_value.get("comment", "")
+                                })
+                            else:
+                                parsed_params.append({
+                                    "name": param_value.get("name", t_code or "Parameter"),
+                                    "test_code": t_code,
+                                    "value": val,
+                                    "unit": param_value.get("unit", ""),
+                                    "reference_range": param_value.get("reference_range", ""),
+                                    "method": param_value.get("method", ""),
+                                    "comment": param_value.get("comment", "")
+                                })
+                    elif parameters and len(parameters) > 0:
+                        for param_value in parameters:
+                            parsed_params.append({
+                                "name": param_value.get("name", "Parameter"),
+                                "test_code": param_value.get("test_code", ""),
+                                "value": param_value.get("value", ""),
+                                "unit": param_value.get("unit", ""),
+                                "reference_range": param_value.get("reference_range", ""),
+                                "method": param_value.get("method", ""),
+                                "comment": param_value.get("comment", "")
+                            })
+
+                    lab_results.append({
+                        "barcode": bc,
+                        "test_id": test_id,
+                        "testname": testname,
+                        "department": department,
+                        "specimen_type": specimen_type,
+                        "NABL": nabl,
+                        "parameters": parsed_params,
+                        "approve_by": approve_by,
+                        "approve_time": approve_time,
+                        "dispatch_time": dispatch_time,
+                        "verified_by": verified_by,
+                        "is_approved": is_approved,
+                        "comment": comment,
+                        "remarks": remarks,
+                        "is_microbiology": False
+                    })
+
+        # 3. Fetch from core_mbtestvalue (microbiology)
+        if core_mbtestvalue is not None:
+            for bc in found_barcodes:
+                mb_records = list(core_mbtestvalue.find({"barcode": bc}))
+                for mb in mb_records:
+                    raw = mb.get("testdetails", "[]")
+                    details = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                    if not isinstance(details, list):
+                        continue
+                    for test in details:
+                        test_id = test.get("test_id")
+                        core_test = core_testdetails.find_one({"test_id": test_id}) if test_id else None
+                        testname = core_test.get("test_name") if core_test else test.get("testname", "Microbiology Test")
+                        department = core_test.get("department") if core_test else "Microbiology"
+                        lab_results.append({
+                            "barcode": bc,
+                            "test_id": test_id,
+                            "testname": testname,
+                            "department": department,
+                            "specimen_type": test.get("specimen_type", "Specimen"),
+                            "parameters": test.get("parameters", []),
+                            "approve_by": test.get("approve_by", ""),
+                            "approve_time": test.get("approve_time", "N/A"),
+                            "is_approved": bool(test.get("approve") is True),
+                            "comment": test.get("comment", ""),
+                            "remarks": test.get("remarks", ""),
+                            "is_microbiology": True
+                        })
+
+        # Sort with most recent approve_time first
+        lab_results.sort(key=lambda x: str(x.get("approve_time") or ""), reverse=True)
+        return Response(lab_results, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 

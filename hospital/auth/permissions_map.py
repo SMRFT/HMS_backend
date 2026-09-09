@@ -567,6 +567,7 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_patient_lab_results/?(\\?.*)?$': 'HMS-P-OPEMRDC',
 
         # IP EMR
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_get_admitted_patients/?(\?.*)?$': 'HMS-P-IPEMR',
@@ -619,6 +620,15 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/velavan_create_customer/?(\?.*)?$': 'HMS-P-VCU',
         r'^/_b_a_c_k_e_n_d/HMS/velavan_update_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCE',
         r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCD',
+
+
+         # shanmuga360
+        '/_b_a_c_k_e_n_d/HMS/360_registration/'     : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_medicinelist/' : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_doctorlist/'   : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_testlist/'     : 'HMS-P-S360',
+        r'^/_b_a_c_k_e_n_d/HMS/360_report/?(\?.*)?$' : 'HMS-P-S360',
+    
 
 }
 
