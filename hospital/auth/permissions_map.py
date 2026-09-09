@@ -575,6 +575,7 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_patient_history/?(\?.*)?$': 'HMS-P-IPEMR',
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_doctor_dashboard_analytics/?(\?.*)?$': 'HMS-P-IPEMR',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_referral_doctors': 'HMS-P-OPEMRD',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_Doctor_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
 
         # ==================== VELAVAN ====================
         # Items

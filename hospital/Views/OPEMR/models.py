@@ -86,6 +86,7 @@ class VitalEntry(AuditModel):
         auto_now=True
     )
     date = models.DateTimeField(default=timezone.now)
+    status = models.CharField(max_length=50, default='Completed', blank=True, null=True)
 
     def __str__(self):
         return self.uhid or "Vital Entry"
@@ -100,6 +101,15 @@ class OPDoctorConsultation(AuditModel):
     chief_complaints = models.TextField(blank=True, null=True)
     past_history = RawJSONField(default=list, blank=True, null=True)
     present_medications = models.TextField(blank=True, null=True)
+    social_history = RawJSONField(default=list, blank=True, null=True)
+    social_history_notes = models.TextField(blank=True, null=True)
+    menstrual_history = RawJSONField(default=dict, blank=True, null=True)
+    vaccination_history = models.TextField(blank=True, null=True)
+    obstetrics_history = models.TextField(blank=True, null=True)
+    investigation_done = models.TextField(blank=True, null=True)
+    physical_examination = models.TextField(blank=True, null=True)
+    provisional_diagnosis = models.TextField(blank=True, null=True)
+    plan_of_care = models.TextField(blank=True, null=True)
     symptoms = RawJSONField(default=list, blank=True, null=True)
     investigation_test_ids = RawJSONField(default=list, blank=True, null=True)
     investigation_details = RawJSONField(default=list, blank=True, null=True)
@@ -111,6 +121,7 @@ class OPDoctorConsultation(AuditModel):
     followup_date = models.CharField(max_length=50, blank=True, null=True)
     consultation_start_time = models.DateTimeField(blank=True, null=True)
     consultation_end_time = models.DateTimeField(blank=True, null=True)
+    status = models.CharField(max_length=50, default='Completed', blank=True, null=True)
     date = models.DateTimeField(default=timezone.now)
 
     def __str__(self):

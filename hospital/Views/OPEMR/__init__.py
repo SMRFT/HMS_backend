@@ -9,7 +9,8 @@ from .Views import (
     OPEMR_get_referral_doctors,
     OPEMR_Vitaldashboard,
     OPEMR_patientlivetracking,
-    OPEMR_docotordashboard
+    OPEMR_docotordashboard,
+    OPEMR_get_Doctor_patient
 )
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     'OPEMR_get_referral_doctors',
     'OPEMR_Vitaldashboard',
     'OPEMR_patientlivetracking',
-    'OPEMR_docotordashboard'
+    'OPEMR_docotordashboard',
+    'OPEMR_get_Doctor_patient'
 ]
 
