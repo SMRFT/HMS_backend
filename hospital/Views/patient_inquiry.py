@@ -32,33 +32,356 @@ def serialize_data(val):
         return str(val)
     elif isinstance(val, datetime):
         return val.isoformat()
-    return val
+import pytz
+from django.utils import timezone
+
+def get_daily_summary_data(client, from_date_str=None, to_date_str=None):
+    tz = pytz.timezone('Asia/Kolkata')
+    now = timezone.now().astimezone(tz)
+    
+    # Parse from_date
+    if from_date_str:
+        try:
+            from_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+        except ValueError:
+            from_date = now.date()
+    else:
+        from_date = now.date()
+
+    # Parse to_date
+    if to_date_str:
+        try:
+            to_date = datetime.strptime(to_date_str, "%Y-%m-%d")
+        except ValueError:
+            to_date = from_date
+    else:
+        to_date = from_date
+        
+    from_str = from_date.strftime("%Y-%m-%d")
+    to_str   = to_date.strftime("%Y-%m-%d")
+    
+    # Date range in IST
+    start_ist = datetime(from_date.year, from_date.month, from_date.day, 0, 0, 0)
+    end_ist   = datetime(to_date.year, to_date.month, to_date.day, 23, 59, 59, 999999)
+    
+    # Date range in UTC
+    start_utc = tz.localize(start_ist).astimezone(pytz.UTC)
+    end_utc   = tz.localize(end_ist).astimezone(pytz.UTC)
+    
+    global_db = client["Global"]
+    hms_db    = client["HMS"]
+    
+    patient_coll        = hms_db["hospital_patient"]
+    doctor_profile_coll = global_db["backend_diagnostics_profile"]
+    admission_coll      = hms_db["hospital_admission"]
+    discharge_coll      = hms_db["hospital_dischargebilling"]
+    
+    # 1. Cache Doctors
+    doctor_cache = {}
+    for doc in doctor_profile_coll.find({}, {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1, "department": 1}):
+        emp_id = str(doc.get("employeeId", ""))
+        name = doc.get("employeeName") or f"{doc.get('firstName', '')} {doc.get('lastName', '')}".strip()
+        doctor_cache[emp_id] = {
+            "name": name,
+            "department": doc.get("department", "")
+        }
+        
+    def resolve_doctor(doc_id):
+        if not doc_id:
+            return "—"
+        doc_str = str(doc_id)
+        if doc_str in doctor_cache:
+            return doctor_cache[doc_str]["name"]
+        return doc_str
+
+    # 2. Registered Patients in date range
+    reg_docs = list(patient_coll.find({
+        "$or": [
+            {"created_date": {"$gte": start_utc, "$lte": end_utc}},
+            {"created_date": {"$gte": start_ist, "$lte": end_ist}},
+            {"registration_date": {"$gte": from_str, "$lte": to_str}},
+        ]
+    }).sort("created_date", -1))
+    
+    registered_list = []
+    seen_uhids = set()
+    for p in reg_docs:
+        uhid = p.get("uhid")
+        if not uhid or uhid in seen_uhids:
+            continue
+        seen_uhids.add(uhid)
+        
+        full_name = f"{p.get('salutation', '') or ''} {p.get('firstName', '') or ''} {p.get('lastName', '') or ''}".strip() or p.get("name") or uhid
+        c_date = p.get("created_date")
+        c_date_iso = c_date.isoformat() if isinstance(c_date, datetime) else str(c_date) if c_date else None
+        
+        registered_list.append({
+            "uhid": uhid,
+            "name": full_name,
+            "age": p.get("age"),
+            "age_type": p.get("age_type") or "Y",
+            "gender": p.get("gender") or "—",
+            "mobilePhone": p.get("mobilePhone") or p.get("home_phone") or "—",
+            "bloodGroup": p.get("blood_group") or p.get("bloodGroup") or "—",
+            "doctorName": resolve_doctor(p.get("doctorName") or p.get("referredBy")),
+            "customerType": p.get("customer_type") or p.get("customerType") or "General",
+            "insuranceCompany": p.get("insurance_company") or p.get("insuranceCompany") or "—",
+            "registration_date": p.get("registration_date") or from_str,
+            "created_date": c_date_iso,
+            "city": p.get("city") or "—",
+            "area": p.get("area") or "",
+        })
+
+    # 3. Admissions in date range
+    adm_docs = list(admission_coll.find({
+        "is_cancelled": {"$ne": True},
+        "$or": [
+            {"admissionDateTime": {"$gte": start_utc, "$lte": end_utc}},
+            {"admissionDateTime": {"$gte": start_ist, "$lte": end_ist}},
+            {"admissionDateTime": {"$gte": from_str, "$lte": to_str + "T23:59:59"}},
+        ]
+    }).sort("admissionDateTime", -1))
+    
+    adm_uhids = [a.get("uhid") for a in adm_docs if a.get("uhid")]
+    pt_map = {}
+    if adm_uhids:
+        for pt in patient_coll.find({"uhid": {"$in": adm_uhids}}):
+            u = pt.get("uhid")
+            pt_name = f"{pt.get('salutation', '') or ''} {pt.get('firstName', '') or ''} {pt.get('lastName', '') or ''}".strip()
+            pt_map[u] = {
+                "name": pt_name or u,
+                "age": pt.get("age"),
+                "age_type": pt.get("age_type") or "Y",
+                "gender": pt.get("gender") or "—",
+                "mobilePhone": pt.get("mobilePhone") or pt.get("home_phone") or "—",
+                "bloodGroup": pt.get("blood_group") or pt.get("bloodGroup") or "—",
+            }
+            
+    admissions_list = []
+    seen_ips = set()
+    for a in adm_docs:
+        ip = a.get("ipNumber")
+        if not ip or ip in seen_ips:
+            continue
+        seen_ips.add(ip)
+        
+        uhid = a.get("uhid")
+        pt_info = pt_map.get(uhid, {})
+        
+        adm_dt = a.get("admissionDateTime")
+        adm_dt_iso = adm_dt.isoformat() if isinstance(adm_dt, datetime) else str(adm_dt) if adm_dt else None
+        
+        room_list = a.get("room_details") or []
+        room_info = room_list[-1] if isinstance(room_list, list) and room_list else {}
+        room_no = room_info.get("roomNo") or room_info.get("roomNumber") or room_info.get("room_number") or "—"
+        bed_no  = room_info.get("bedNo") or room_info.get("bedNumber") or room_info.get("bed_number") or "—"
+        room_cat= room_info.get("roomCategory") or room_info.get("category") or "General"
+        
+        adv_list = a.get("advance_payments") or []
+        adv_total = sum(safe_float(adv.get("amount") or adv.get("advance_amount")) for adv in adv_list if isinstance(adv, dict))
+        
+        admissions_list.append({
+            "ipNumber": ip,
+            "uhid": uhid,
+            "name": pt_info.get("name") or a.get("patient_name") or uhid,
+            "age": pt_info.get("age") or a.get("age"),
+            "age_type": pt_info.get("age_type") or a.get("age_type") or "Y",
+            "gender": pt_info.get("gender") or a.get("gender") or "—",
+            "mobilePhone": pt_info.get("mobilePhone") or a.get("mobilePhone") or "—",
+            "admissionDateTime": adm_dt_iso,
+            "admittingDoctorName": resolve_doctor(a.get("admittingDoctor")),
+            "consultingDoctorName": resolve_doctor(a.get("consultingDoctor")),
+            "roomNo": room_no,
+            "bedNo": bed_no,
+            "roomCategory": room_cat,
+            "customerType": a.get("customer_type") or "General",
+            "insuranceCompany": a.get("insurance_company") or "—",
+            "advance_paid": adv_total,
+            "reasonForAdmission": a.get("reasonForAdmission") or "",
+            "is_admitted": a.get("is_admitted", True),
+            "is_discharged": a.get("is_discharged", False),
+            "ward_status": a.get("ward_status") or "Admitted",
+        })
+
+    # 4. Discharges in date range
+    dis_docs = list(discharge_coll.find({
+        "is_cancelled": {"$ne": True},
+        "$or": [
+            {"bill_date": {"$gte": from_str, "$lte": to_str}},
+            {"bill_date": {"$gte": start_utc, "$lte": end_utc}},
+            {"bill_date": {"$gte": start_ist, "$lte": end_ist}},
+            {"lastmodified_date": {"$gte": start_utc, "$lte": end_utc}},
+            {"created_date": {"$gte": start_utc, "$lte": end_utc}},
+        ]
+    }).sort("discharge_id", -1))
+    
+    adm_dis_docs = list(admission_coll.find({
+        "is_discharged": True,
+        "is_cancelled": {"$ne": True},
+        "$or": [
+            {"lastmodified_date": {"$gte": start_utc, "$lte": end_utc}},
+            {"lastmodified_date": {"$gte": start_ist, "$lte": end_ist}},
+        ]
+    }))
+    
+    dis_uhids = [d.get("uhid") for d in dis_docs if d.get("uhid")] + [d.get("uhid") for d in adm_dis_docs if d.get("uhid")]
+    if dis_uhids:
+        for pt in patient_coll.find({"uhid": {"$in": dis_uhids}}):
+            u = pt.get("uhid")
+            pt_name = f"{pt.get('salutation', '') or ''} {pt.get('firstName', '') or ''} {pt.get('lastName', '') or ''}".strip()
+            pt_map[u] = {
+                "name": pt_name or u,
+                "age": pt.get("age"),
+                "age_type": pt.get("age_type") or "Y",
+                "gender": pt.get("gender") or "—",
+                "mobilePhone": pt.get("mobilePhone") or pt.get("home_phone") or "—",
+            }
+            
+    discharges_list = []
+    seen_dis_ips = set()
+    for d in dis_docs:
+        ip = d.get("ip_number") or d.get("ipNumber")
+        if not ip or ip in seen_dis_ips:
+            continue
+        seen_dis_ips.add(ip)
+        
+        uhid = d.get("uhid")
+        pt_info = pt_map.get(uhid, {})
+        
+        b_date = d.get("bill_date") or d.get("lastmodified_date") or d.get("created_date")
+        b_date_iso = b_date.isoformat() if isinstance(b_date, datetime) else str(b_date) if b_date else from_str
+        
+        discharges_list.append({
+            "discharge_id": d.get("discharge_id"),
+            "ipNumber": ip,
+            "uhid": uhid,
+            "name": pt_info.get("name") or uhid,
+            "age": pt_info.get("age"),
+            "gender": pt_info.get("gender") or "—",
+            "mobilePhone": pt_info.get("mobilePhone") or "—",
+            "bill_no": d.get("bill_no") or d.get("estimate_number") or f"DIS-{d.get('discharge_id')}",
+            "bill_date": b_date_iso,
+            "status": d.get("status") or "Billed",
+            "total_amount": safe_float(d.get("total_amount")),
+            "discount_amount": safe_float(d.get("discount_amount")),
+            "advance_amount": safe_float(d.get("advance_amount")),
+            "net_amount": safe_float(d.get("net_amount")),
+            "discharged_by": d.get("created_by") or d.get("lastmodified_by") or "Staff",
+        })
+        
+    for a in adm_dis_docs:
+        ip = a.get("ipNumber")
+        if not ip or ip in seen_dis_ips:
+            continue
+        seen_dis_ips.add(ip)
+        uhid = a.get("uhid")
+        pt_info = pt_map.get(uhid, {})
+        
+        discharges_list.append({
+            "discharge_id": None,
+            "ipNumber": ip,
+            "uhid": uhid,
+            "name": pt_info.get("name") or uhid,
+            "age": pt_info.get("age"),
+            "gender": pt_info.get("gender") or "—",
+            "mobilePhone": pt_info.get("mobilePhone") or "—",
+            "bill_no": "—",
+            "bill_date": from_str,
+            "status": "Discharged",
+            "total_amount": 0,
+            "discount_amount": 0,
+            "advance_amount": 0,
+            "net_amount": 0,
+            "discharged_by": a.get("lastmodified_by") or resolve_doctor(a.get("admittingDoctor")) or "Staff",
+        })
+
+    # Recent previews (10 most recent of each for quick reference)
+    recent_reg = []
+    for p in patient_coll.find({}).sort("created_date", -1).limit(10):
+        u = p.get("uhid")
+        if not u: continue
+        full_name = f"{p.get('salutation', '') or ''} {p.get('firstName', '') or ''} {p.get('lastName', '') or ''}".strip() or p.get("name") or u
+        c_date = p.get("created_date")
+        recent_reg.append({
+            "uhid": u,
+            "name": full_name,
+            "age": p.get("age"),
+            "gender": p.get("gender") or "—",
+            "mobilePhone": p.get("mobilePhone") or p.get("home_phone") or "—",
+            "registration_date": p.get("registration_date") or (c_date.strftime("%Y-%m-%d") if isinstance(c_date, datetime) else "—"),
+            "doctorName": resolve_doctor(p.get("doctorName") or p.get("referredBy")),
+        })
+
+    recent_adm = []
+    for a in admission_coll.find({"is_cancelled": {"$ne": True}}).sort("admissionDateTime", -1).limit(10):
+        ip = a.get("ipNumber")
+        if not ip: continue
+        u = a.get("uhid")
+        pt_info = pt_map.get(u, {})
+        adm_dt = a.get("admissionDateTime")
+        room_list = a.get("room_details") or []
+        room_info = room_list[-1] if isinstance(room_list, list) and room_list else {}
+        recent_adm.append({
+            "ipNumber": ip,
+            "uhid": u,
+            "name": pt_info.get("name") or a.get("patient_name") or u,
+            "admissionDateTime": adm_dt.isoformat() if isinstance(adm_dt, datetime) else str(adm_dt) if adm_dt else None,
+            "admittingDoctorName": resolve_doctor(a.get("admittingDoctor")),
+            "roomNo": room_info.get("roomNo") or room_info.get("roomNumber") or "—",
+            "bedNo": room_info.get("bedNo") or room_info.get("bedNumber") or "—",
+            "ward_status": a.get("ward_status") or "Admitted",
+            "is_discharged": a.get("is_discharged", False),
+        })
+
+    return {
+        "success": True,
+        "is_summary": True,
+        "from_date": from_str,
+        "to_date": to_str,
+        "date": from_str,
+        "counts": {
+            "registered": len(registered_list),
+            "admissions": len(admissions_list),
+            "discharges": len(discharges_list),
+            "total_activity": len(registered_list) + len(admissions_list) + len(discharges_list),
+        },
+        "today_registered": registered_list,
+        "today_admissions": admissions_list,
+        "today_discharges": discharges_list,
+        "recent_registered": recent_reg,
+        "recent_admissions": recent_adm,
+    }
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def patient_inquiry_view(request):
     """
     Comprehensive Patient Inquiry:
-    Fetches unified patient profile, OP registration visits, IP Admissions,
-    Investigation / Lab / Radiology bills with detailed test lists,
-    and Pharmacy bills with detailed medicine items.
+    If search parameter is provided:
+      Fetches unified patient profile, OP registration visits, IP Admissions,
+      Investigation / Lab / Radiology bills with detailed test lists,
+      and Pharmacy bills with detailed medicine items.
+    If no search parameter is provided (initial load / overview):
+      Returns registered patients, admitted patients,
+      and discharged patients summary and activity lists within from_date & to_date range.
     """
     try:
         search_query = request.GET.get('search', '').strip()
         uhid_param   = request.GET.get('uhid', '').strip()
         ip_param     = request.GET.get('ip_number', '').strip()
         mobile_param = request.GET.get('mobile', '').strip()
+        from_date_param = request.GET.get('from_date', '').strip() or request.GET.get('date', '').strip()
+        to_date_param   = request.GET.get('to_date', '').strip() or from_date_param
 
         raw_query = search_query or uhid_param or ip_param or mobile_param
 
-        if not raw_query:
-            return Response({
-                "success": False,
-                "message": "Please enter a UHID, IP Number, or Mobile Number to search."
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         # Connect to MongoDB for Profiles & Collections
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+
+        if not raw_query:
+            summary_data = get_daily_summary_data(client, from_date_str=from_date_param, to_date_str=to_date_param)
+            return Response(summary_data, status=status.HTTP_200_OK)
+
         global_db = client["Global"]
         hms_db    = client["HMS"]
 
