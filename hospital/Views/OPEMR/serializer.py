@@ -32,6 +32,10 @@ class  OPDoctorConsultationSerializer(serializers.ModelSerializer):
         return "Unknown"
 
     def get_doctor_name(self, obj):
-        if obj.doctor_id:
-            return get_employee_name_by_id(obj.doctor_id)
-        return "Unknown"
+        doc_id = getattr(obj, 'doctor_id', None) or getattr(obj, 'created_by', None)
+        if doc_id:
+            name = get_employee_name_by_id(str(doc_id))
+            if name and name.strip():
+                return name
+            return f"Dr. ({doc_id})"
+        return "Doctor"

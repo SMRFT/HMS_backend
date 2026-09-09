@@ -200,6 +200,7 @@ class Billing(AuditModel):
     paid_date = models.DateTimeField(null=True, blank=True)
     shiftno = models.CharField(max_length=100, blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
+    consultation_status = models.CharField(max_length=50, default='Waiting', blank=True, null=True)
     edit_history = models.JSONField(default=list, blank=True)
 
     def save(self, *args, **kwargs):

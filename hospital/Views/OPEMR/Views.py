@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from bson import Decimal128
 from django.utils.timezone import now
+from django.db.models import Q
 from hospital.models import Patient, Billing
 from .models import VitalEntry,  OPDoctorConsultation
 from .serializer import VitalEntrySerializer,  OPDoctorConsultationSerializer
@@ -42,8 +43,8 @@ def OPEMR_get_billing_patient(request):
 
         data = request.data
         employee_id = data.get("auth-user-id")
-        # Query all bills (Paid and Pending) via Django ORM Billing model (no doctor filter)
-        paid_bills = Billing.objects.filter(payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid']).select_related('patient').order_by('-billed_date')
+        # Query only paid bills via Django ORM Billing model (no doctor filter)
+        paid_bills = Billing.objects.filter(payment_status__in=['Paid', 'paid', 'PAID']).select_related('patient').order_by('-billed_date')
 
 
         result = []
@@ -134,7 +135,7 @@ def OPEMR_VitalEntry(request):
         today_end = today_start + timedelta(days=1)
         
         paid_bills = Billing.objects.filter(
-            payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid'],
+            payment_status__in=['Paid', 'paid', 'PAID'],
             billed_date__gte=today_start,
             billed_date__lt=today_end
         ).select_related('patient').order_by('-billed_date')
@@ -274,6 +275,12 @@ def OPEMR_VitalEntry(request):
         serializer = VitalEntrySerializer(data=data)
         if serializer.is_valid():
             serializer.save()
+            uhid_val = data.get("uhid")
+            if uhid_val:
+                try:
+                    Billing.objects.filter(patient__uhid=uhid_val).update(consultation_status='Ready')
+                except Exception as b_err:
+                    print("Error updating Billing status:", b_err)
             return Response(
                 {
                     "message": "Vital entry saved successfully.",
@@ -285,7 +292,7 @@ def OPEMR_VitalEntry(request):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_symptoms(request):
     """
     Get symptoms list from HMS_Symptoms_list dbcollection.py.
@@ -312,7 +319,7 @@ def OPEMR_get_symptoms(request):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_diagnostics_tests(request):
     """
     Get diagnostics test details from Diagnostics_test_details dbcollection.py.
@@ -345,7 +352,7 @@ def OPEMR_get_diagnostics_tests(request):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_medicines(request):
     """
     Get medicines list from medicine_package (hospital_pharmacyitem) dbcollection.py.
@@ -376,7 +383,7 @@ def OPEMR_get_medicines(request):
 
 
 @api_view(['GET', 'POST'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_DoctorConsultation(request):
     """
     GET: Retrieve doctor consultation records using DoctorConsultation model (filtered by ?uhid=...)
@@ -416,6 +423,15 @@ def OPEMR_DoctorConsultation(request):
                 "chief_complaints": data.get("chief_complaints", ""),
                 "past_history": data.get("past_history", []),
                 "present_medications": data.get("present_medications", ""),
+                "social_history": data.get("social_history", []),
+                "social_history_notes": data.get("social_history_notes", ""),
+                "menstrual_history": data.get("menstrual_history", {}),
+                "vaccination_history": data.get("vaccination_history", ""),
+                "obstetrics_history": data.get("obstetrics_history", ""),
+                "investigation_done": data.get("investigation_done", ""),
+                "physical_examination": data.get("physical_examination", ""),
+                "provisional_diagnosis": data.get("provisional_diagnosis", ""),
+                "plan_of_care": data.get("plan_of_care", ""),
                 "symptoms": data.get("symptoms", []),
                 "investigation_test_ids": data.get("investigation_test_ids", []),
                 "investigation_details": data.get("investigation_details", []),
@@ -426,23 +442,36 @@ def OPEMR_DoctorConsultation(request):
                 "refer_to_doctor": data.get("refer_to_doctor", ""),
                 "followup_date": data.get("followup_date", None),
                 "consultation_start_time": data.get("consultation_start_time", None),
-                "consultation_end_time": data.get("consultation_end_time", None)
+                "consultation_end_time": data.get("consultation_end_time", None),
+                "status": "Completed" if data.get("consultation_end_time") else "In Progress"
             }
 
             today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
-            ongoing_consult = OPDoctorConsultation.objects.filter(
-                uhid=uhid,
-                created_date__gte=today_start,
-                consultation_end_time__isnull=True
-            ).first()
+            doc_id_val = str(data.get("doctor_id") or employee_id or "").strip()
+            
+            existing_filter = Q(uhid=uhid) & Q(created_date__gte=today_start)
+            if doc_id_val or employee_id:
+                doc_q = Q()
+                if doc_id_val:
+                    doc_q |= Q(doctor_id=doc_id_val) | Q(created_by=doc_id_val)
+                if employee_id:
+                    doc_q |= Q(doctor_id=str(employee_id)) | Q(created_by=str(employee_id))
+                existing_filter &= doc_q
 
-            if ongoing_consult:
-                serializer = OPDoctorConsultationSerializer(ongoing_consult, data=consult_data, partial=True)
+            existing_consult = OPDoctorConsultation.objects.filter(existing_filter).order_by('-created_date').first()
+
+            if existing_consult:
+                serializer = OPDoctorConsultationSerializer(existing_consult, data=consult_data, partial=True)
             else:
                 serializer = OPDoctorConsultationSerializer(data=consult_data)
 
             if serializer.is_valid():
                 obj = serializer.save()
+                if uhid and data.get("consultation_end_time"):
+                    try:
+                        Billing.objects.filter(patient__uhid=uhid).update(consultation_status='Completed')
+                    except Exception as b_err:
+                        print("Error updating Billing status:", b_err)
                 return Response(
                     {
                         "message": "Doctor consultation saved successfully.",
@@ -457,7 +486,7 @@ def OPEMR_DoctorConsultation(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_vital_history(request):
     """
     Get full vital history for a given patient UHID.
@@ -955,7 +984,7 @@ def OPEMR_docotordashboard(request):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_Doctor_patient(request):
     """
     Get patient details for paid billed patients only using Django ORM Billing and Patient models.
@@ -964,44 +993,84 @@ def OPEMR_get_Doctor_patient(request):
     try:
         from django.db.models import Q
 
-        data = request.data
-        employee_id = data.get("auth-user-id")
-        print("employee_id:", employee_id)
+        data = request.data if hasattr(request, 'data') and isinstance(request.data, dict) else {}
+        employee_id = (
+            data.get("auth-user-id")
+            or request.headers.get("auth-user-id")
+            or request.headers.get("Auth-User-Id")
+            or request.query_params.get("doctor_id")
+            or request.query_params.get("auth-user-id")
+        )
+        print("employee_id in OPEMR_get_Doctor_patient:", employee_id)
 
-        paid_bills = Billing.objects.filter(payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid']).select_related('patient').order_by('-billed_date')
-
-        if employee_id:
-            emp_str = str(employee_id).strip()
-            doctor_queries = Q(doctor_id__iexact=emp_str) | Q(doctor_id=emp_str)
-            if emp_str.isdigit():
-                doctor_queries |= Q(doctor_id=str(int(emp_str)))
-            paid_bills = paid_bills.filter(doctor_queries)
-        else:
+        if not employee_id:
             return Response([], status=status.HTTP_200_OK)
 
+        emp_str = str(employee_id).strip()
+        possible_ids = {emp_str}
+        if emp_str.isdigit():
+            num = int(emp_str)
+            possible_ids.add(str(num))
+            possible_ids.add(f"{num:04d}")
+            possible_ids.add(f"{num:05d}")
+            possible_ids.add(f"{num:06d}")
+
+        doctor_queries = Q(doctor_id__in=list(possible_ids))
+
+        # Check for patients referred to this doctor in OPDoctorConsultation (refer_to_doctor)
+        referral_queries = Q(refer_to_doctor__in=list(possible_ids))
+        referred_consults = OPDoctorConsultation.objects.filter(referral_queries).order_by('-created_date')
+
+        referred_uhid_map = {}
+        for rc in referred_consults:
+            u = getattr(rc, 'uhid', '')
+            if u:
+                u_str = str(u).strip()
+                if u_str not in referred_uhid_map:
+                    referred_uhid_map[u_str] = rc
+
+        bill_filter = doctor_queries
+        if referred_uhid_map:
+            bill_filter |= Q(patient__uhid__in=list(referred_uhid_map.keys()))
+
+        paid_bills = Billing.objects.filter(
+            payment_status__in=['Paid', 'paid', 'Pending', 'pending', 'Unpaid', 'unpaid']
+        ).filter(bill_filter).select_related('patient').order_by('-billed_date')
 
         result = []
+        seen_uhids = set()
+        from hospital.Views.dbcollection import get_employee_name_by_id
+
         for bill in paid_bills:
             patient_obj = getattr(bill, 'patient', None)
             if not patient_obj:
                 continue
+
+            uhid_str = getattr(patient_obj, 'uhid', '') or ''
+            if uhid_str and uhid_str in seen_uhids:
+                continue
+            if uhid_str:
+                seen_uhids.add(uhid_str)
 
             salutation = getattr(patient_obj, 'salutation', '') or ''
             first_name = getattr(patient_obj, 'firstName', '') or ''
             last_name = getattr(patient_obj, 'lastName', '') or ''
             full_name = f"{salutation} {first_name} {last_name}".strip()
 
-            doctor_id = getattr(bill, 'doctor_id', '') or ''
-            from hospital.Views.dbcollection import get_employee_name_by_id
-            doctor_name = get_employee_name_by_id(doctor_id)
+            bill_doctor_id = getattr(bill, 'doctor_id', '') or ''
+            bill_doctor_name = get_employee_name_by_id(bill_doctor_id)
+
+            is_referred = uhid_str in referred_uhid_map
+            ref_consult = referred_uhid_map.get(uhid_str)
+            referred_from_name = get_employee_name_by_id(getattr(ref_consult, 'doctor_id', '')) if ref_consult else ""
 
             patient_data = {
                 "id": getattr(patient_obj, 'id', None),
-                "uhid": getattr(patient_obj, 'uhid', '') or '',
+                "uhid": uhid_str,
                 "salutation": salutation,
                 "firstName": first_name,
                 "lastName": last_name,
-                "patient_name": full_name or f"Patient ({getattr(patient_obj, 'uhid', '')})",
+                "patient_name": full_name or f"Patient ({uhid_str})",
                 "age": getattr(patient_obj, 'age', None),
                 "gender": getattr(patient_obj, 'gender', '') or '',
                 "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
@@ -1009,7 +1078,7 @@ def OPEMR_get_Doctor_patient(request):
                 "blood_group": getattr(patient_obj, 'blood_group', '') or '',
                 "city": getattr(patient_obj, 'city', '') or '',
                 "permanent_address": getattr(patient_obj, 'permanent_address', '') or '',
-                "doctorName": doctor_name,
+                "doctorName": get_employee_name_by_id(emp_str) if is_referred else bill_doctor_name,
                 "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
             }
 
@@ -1018,17 +1087,39 @@ def OPEMR_get_Doctor_patient(request):
 
             latest_vital = None
             is_completed_today = False
-            uhid_str = patient_data.get("uhid")
             if uhid_str:
                 vital_entries = list(VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date')[:1])
                 vital_entry_obj = vital_entries[0] if vital_entries else None
                 if vital_entry_obj:
                     latest_vital = VitalEntrySerializer(vital_entry_obj).data
-                    
                     if getattr(vital_entry_obj, 'created_date', None):
                         from django.utils import timezone
                         if vital_entry_obj.created_date.date() == timezone.now().date():
                             is_completed_today = True
+
+            latest_consult = None
+            is_consultation_completed_today = False
+            consult_time_str = None
+            if uhid_str:
+                doc_consult_filter = Q(uhid=uhid_str) & (Q(doctor_id__in=list(possible_ids)) | Q(created_by__in=list(possible_ids)))
+                consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter).order_by('-created_date')[:1])
+                consult_obj = consult_entries[0] if consult_entries else None
+                if consult_obj:
+                    latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                    c_date = getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
+                    if c_date:
+                        from django.utils import timezone
+                        if c_date.date() == timezone.now().date():
+                            if getattr(consult_obj, 'consultation_end_time', None) or getattr(consult_obj, 'status', '') == 'Completed':
+                                is_consultation_completed_today = True
+                            consult_time_str = c_date.isoformat()
+
+            if is_consultation_completed_today:
+                overall_status = "Completed"
+            elif is_completed_today:
+                overall_status = "Ready"
+            else:
+                overall_status = "Waiting"
 
             result.append({
                 "bill_number": getattr(bill, 'bill_number', ''),
@@ -1038,10 +1129,106 @@ def OPEMR_get_Doctor_patient(request):
                 "registration_fee": safe_float(getattr(bill, 'registration_fee', None)),
                 "consulting_fee": safe_float(getattr(bill, 'consulting_fee', None)),
                 "payment_method": getattr(bill, 'payment_method', '') or '',
-                "doctor_id": getattr(bill, 'doctor_id', '') or '',
+                "doctor_id": emp_str if is_referred else bill_doctor_id,
                 "patient": patient_data,
                 "vital_entry": latest_vital,
-                "vital_status": "Completed" if is_completed_today else "Pending"
+                "vital_status": "Completed" if is_completed_today else "Pending",
+                "consultation": latest_consult,
+                "consultation_status": overall_status,
+                "is_consultation_completed": is_consultation_completed_today,
+                "consultation_time": consult_time_str,
+                "is_referred": is_referred,
+                "referred_from": referred_from_name or bill_doctor_name if is_referred else None
+            })
+
+        # Add any referred patients who do not have an active billing record
+        for ref_u, ref_c in referred_uhid_map.items():
+            if ref_u in seen_uhids:
+                continue
+            patient_obj = Patient.objects.filter(uhid=ref_u).first()
+            if not patient_obj:
+                continue
+            seen_uhids.add(ref_u)
+
+            salutation = getattr(patient_obj, 'salutation', '') or ''
+            first_name = getattr(patient_obj, 'firstName', '') or ''
+            last_name = getattr(patient_obj, 'lastName', '') or ''
+            full_name = f"{salutation} {first_name} {last_name}".strip()
+
+            referred_from_name = get_employee_name_by_id(getattr(ref_c, 'doctor_id', ''))
+
+            patient_data = {
+                "id": getattr(patient_obj, 'id', None),
+                "uhid": ref_u,
+                "salutation": salutation,
+                "firstName": first_name,
+                "lastName": last_name,
+                "patient_name": full_name or f"Patient ({ref_u})",
+                "age": getattr(patient_obj, 'age', None),
+                "gender": getattr(patient_obj, 'gender', '') or '',
+                "dob": str(patient_obj.dob) if getattr(patient_obj, 'dob', None) else '',
+                "mobilePhone": getattr(patient_obj, 'mobilePhone', '') or '',
+                "blood_group": getattr(patient_obj, 'blood_group', '') or '',
+                "city": getattr(patient_obj, 'city', '') or '',
+                "permanent_address": getattr(patient_obj, 'permanent_address', '') or '',
+                "doctorName": get_employee_name_by_id(emp_str),
+                "emergency_contact": getattr(patient_obj, 'emergency_contact', '') or '',
+            }
+
+            ref_date = getattr(ref_c, 'created_date', None) or getattr(ref_c, 'date', None)
+
+            latest_vital = None
+            is_completed_today = False
+            vital_entries = list(VitalEntry.objects.filter(uhid=ref_u).order_by('-created_date')[:1])
+            vital_entry_obj = vital_entries[0] if vital_entries else None
+            if vital_entry_obj:
+                latest_vital = VitalEntrySerializer(vital_entry_obj).data
+                if getattr(vital_entry_obj, 'created_date', None):
+                    from django.utils import timezone
+                    if vital_entry_obj.created_date.date() == timezone.now().date():
+                        is_completed_today = True
+
+            latest_consult = None
+            is_consultation_completed_today = False
+            consult_time_str = None
+            doc_consult_filter = Q(uhid=ref_u) & (Q(doctor_id__in=list(possible_ids)) | Q(created_by__in=list(possible_ids)))
+            consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter).order_by('-created_date')[:1])
+            consult_obj = consult_entries[0] if consult_entries else None
+            if consult_obj:
+                latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                c_date = getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
+                if c_date:
+                    from django.utils import timezone
+                    if c_date.date() == timezone.now().date():
+                        if getattr(consult_obj, 'consultation_end_time', None) or getattr(consult_obj, 'status', '') == 'Completed':
+                            is_consultation_completed_today = True
+                        consult_time_str = c_date.isoformat()
+
+            if is_consultation_completed_today:
+                overall_status = "Completed"
+            elif is_completed_today:
+                overall_status = "Ready"
+            else:
+                overall_status = "Waiting"
+
+            result.append({
+                "bill_number": "REFERRED",
+                "billed_date": ref_date.isoformat() if ref_date else "",
+                "payment_status": "Paid",
+                "total_fees": 0.0,
+                "registration_fee": 0.0,
+                "consulting_fee": 0.0,
+                "payment_method": "Referral",
+                "doctor_id": emp_str,
+                "patient": patient_data,
+                "vital_entry": latest_vital,
+                "vital_status": "Completed" if is_completed_today else "Pending",
+                "consultation": latest_consult,
+                "consultation_status": overall_status,
+                "is_consultation_completed": is_consultation_completed_today,
+                "consultation_time": consult_time_str,
+                "is_referred": True,
+                "referred_from": referred_from_name
             })
 
         return Response(result, status=status.HTTP_200_OK)
