@@ -1,5 +1,10 @@
 import os
+import re
 import datetime
+import gridfs
+from bson.objectid import ObjectId
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -223,6 +228,14 @@ def mrd_discharged_files(request):
                 item["error_reported_date"] = _format_datetime(mrd.get("error_reported_date"))
                 item["error_resolved_by"]   = mrd.get("error_resolved_by") or ""
                 item["error_resolved_date"] = _format_datetime(mrd.get("error_resolved_date"))
+
+                # Scanned PDF file fields
+                item["pdf_file_id"]         = mrd.get("pdf_file_id") or ""
+                item["pdf_filename"]        = mrd.get("pdf_filename") or ""
+                item["pdf_uploaded_by"]     = mrd.get("pdf_uploaded_by") or ""
+                item["pdf_uploaded_date"]   = _format_datetime(mrd.get("pdf_uploaded_date"))
+                item["pdf_deleted_by"]      = mrd.get("pdf_deleted_by") or ""
+                item["pdf_deleted_date"]    = _format_datetime(mrd.get("pdf_deleted_date"))
             else:
                 item["mrd_id"]             = ""
                 item["status"]             = "Pending"
@@ -240,6 +253,13 @@ def mrd_discharged_files(request):
                 item["error_reported_date"] = ""
                 item["error_resolved_by"]   = ""
                 item["error_resolved_date"] = ""
+
+                item["pdf_file_id"]         = ""
+                item["pdf_filename"]        = ""
+                item["pdf_uploaded_by"]     = ""
+                item["pdf_uploaded_date"]   = ""
+                item["pdf_deleted_by"]      = ""
+                item["pdf_deleted_date"]    = ""
 
 
             counts["total"] += 1
@@ -461,6 +481,10 @@ def mrd_update_status(request):
                 "error_reported_date": _format_datetime(mrd_obj.error_reported_date),
                 "error_resolved_by": mrd_obj.error_resolved_by or "",
                 "error_resolved_date": _format_datetime(mrd_obj.error_resolved_date),
+                "pdf_file_id": mrd_obj.pdf_file_id or "",
+                "pdf_filename": mrd_obj.pdf_filename or "",
+                "pdf_uploaded_by": mrd_obj.pdf_uploaded_by or "",
+                "pdf_uploaded_date": _format_datetime(mrd_obj.pdf_uploaded_date),
                 "lastmodified_date": _format_datetime(mrd_obj.lastmodified_date),
             }
         }, status=status.HTTP_200_OK)
@@ -475,8 +499,216 @@ def mrd_update_status(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(["GET"])
+@api_view(["POST"])
+@csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
+def mrd_upload_pdf(request):
+    """
+    Upload scanned PDF document for an MRD file (stored via GridFS in HMS database).
+    Expects multipart/form-data:
+      - 'file': PDF file
+      - 'ip_no': IP number
+      - (optional) 'uhid': UHID
+    """
+    client = None
+    try:
+        if not request.FILES.get("file"):
+            return Response({"success": False, "error": "No PDF file provided."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        file_obj = request.FILES["file"]
+        ip_no = str(request.POST.get("ip_no") or request.data.get("ip_no") or "").strip()
+        
+        if not ip_no:
+            return Response({"success": False, "error": "IP Number (ip_no) is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate file type
+        filename = file_obj.name or "document.pdf"
+        if not (filename.lower().endswith(".pdf") or file_obj.content_type == "application/pdf"):
+            return Response({"success": False, "error": "Only PDF files are allowed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Size check (max 30MB)
+        if file_obj.size > 30 * 1024 * 1024:
+            return Response({"success": False, "error": "File size exceeds 30 MB limit."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Connect to MongoDB GridFS
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        fs = gridfs.GridFS(hms_db)
+
+        # Sanitize filename
+        safe_name = re.sub(r'[^a-zA-Z0-9_\.\-]', '_', filename)
+        
+        user_id = (
+            request.data.get("auth-user-id")
+            or "system"
+        )
+        now = timezone.now()
+
+        # Find or create MRD record
+        mrd_obj = MRD.objects.filter(ip_no=ip_no).first()
+        if not mrd_obj:
+            uhid = request.POST.get("uhid") or request.data.get("uhid") or ""
+            if not uhid:
+                adm = Admission.objects.filter(ipNumber=ip_no).first()
+                if adm:
+                    uhid = adm.uhid
+            mrd_obj = MRD(
+                ip_no=ip_no,
+                uhid=uhid or "",
+                status="Pending",
+                created_by=user_id,
+                created_date=now,
+                lastmodified_by=user_id,
+                lastmodified_date=now,
+            )
+
+        # If previous file exists, delete old GridFS file
+        if mrd_obj.pdf_file_id:
+            try:
+                fs.delete(ObjectId(mrd_obj.pdf_file_id))
+            except Exception:
+                pass
+
+        # Save new file to GridFS
+        file_id = fs.put(file_obj, filename=safe_name, content_type="application/pdf", ip_no=ip_no)
+
+        mrd_obj.pdf_file_id = str(file_id)
+        mrd_obj.pdf_filename = safe_name
+        mrd_obj.pdf_uploaded_by = user_id
+        mrd_obj.pdf_uploaded_date = now
+        mrd_obj.pdf_deleted_by = None
+        mrd_obj.pdf_deleted_date = None
+        mrd_obj.lastmodified_by = user_id
+        mrd_obj.lastmodified_date = now
+        mrd_obj.save()
+
+        return Response({
+            "success": True,
+            "message": "PDF document uploaded successfully!",
+            "data": {
+                "ip_no": ip_no,
+                "pdf_file_id": str(file_id),
+                "pdf_filename": safe_name,
+                "pdf_uploaded_by": user_id,
+                "pdf_uploaded_date": _format_datetime(now),
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": f"Failed to upload PDF: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(["GET"])
+@csrf_exempt
+def mrd_get_pdf(request, file_id):
+    """
+    Serves MRD PDF file for viewing/previewing or downloading from GridFS.
+    Pass ?download=1 to force attachment download instead of inline preview.
+    """
+    client = None
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        fs = gridfs.GridFS(hms_db)
+
+        file_obj = None
+        try:
+            file_obj = fs.get(ObjectId(file_id))
+        except Exception:
+            # Fallback search by filename or string id
+            file_obj = fs.find_one({"filename": file_id})
+
+        if not file_obj:
+            return JsonResponse({"error": "File not found"}, status=404)
+
+        download_mode = request.GET.get("download", "").lower() in ["1", "true", "yes"]
+        filename = getattr(file_obj, "filename", "mrd_document.pdf") or "mrd_document.pdf"
+        response = HttpResponse(file_obj.read(), content_type="application/pdf")
+        if download_mode:
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        else:
+            response["Content-Disposition"] = f'inline; filename="{filename}"'
+
+        # Allow embedding and cross-origin fetch
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "*"
+        return response
+
+    except Exception as e:
+        return JsonResponse({"error": f"Error retrieving file: {str(e)}"}, status=404)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(["POST", "DELETE"])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
+def mrd_delete_pdf(request):
+    """
+    Remove an uploaded PDF from an MRD record and delete from GridFS.
+    """
+    client = None
+    try:
+        ip_no = str(request.data.get("ip_no") or request.GET.get("ip_no") or "").strip()
+        if not ip_no:
+            return Response({"success": False, "error": "ip_no is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        mrd_obj = MRD.objects.filter(ip_no=ip_no).first()
+        if not mrd_obj:
+            return Response({"success": False, "error": "MRD record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if mrd_obj.pdf_file_id:
+            try:
+                client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                hms_db = client[os.getenv("HMS_DB_NAME", "HMS")]
+                fs = gridfs.GridFS(hms_db)
+                fs.delete(ObjectId(mrd_obj.pdf_file_id))
+            except Exception as ex:
+                print(f"[MRD] Error deleting GridFS file: {ex}")
+
+        user_id = (
+            request.data.get("auth-user-id")
+            or "system"
+        )
+        now = timezone.now()
+
+        mrd_obj.pdf_file_id = None
+        mrd_obj.pdf_filename = None
+        mrd_obj.pdf_uploaded_by = None
+        mrd_obj.pdf_uploaded_date = None
+        mrd_obj.pdf_deleted_by = user_id
+        mrd_obj.pdf_deleted_date = now
+        mrd_obj.lastmodified_by = user_id
+        mrd_obj.lastmodified_date = now
+        mrd_obj.save()
+
+        return Response({
+            "success": True,
+            "message": "PDF deleted successfully!",
+            "data": {
+                "ip_no": ip_no,
+                "pdf_file_id": "",
+                "pdf_filename": "",
+                "pdf_deleted_by": user_id,
+                "pdf_deleted_date": _format_datetime(now),
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
+@api_view(["GET"])
 def mrd_stats(request):
     """
     Get quick statistics for MRD tracking strictly from hospital_admission.

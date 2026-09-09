@@ -551,6 +551,9 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/mrd/discharged-files/?(\\?.*)?$': 'HMS-P-MRD',
         r'/_b_a_c_k_e_n_d/HMS/mrd/update-status/?(\\?.*)?$': 'HMS-P-MRD',
         r'/_b_a_c_k_e_n_d/HMS/mrd/stats/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/upload-pdf/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/delete-pdf/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/file/[^/]+/?(\\?.*)?$': 'HMS-P-MRD',
 
         # OP EMR
 
