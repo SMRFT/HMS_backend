@@ -28,7 +28,7 @@ class AuditModel(models.Model):
     created_by = models.CharField(max_length=100, null=True, blank=True)
     created_date = models.DateTimeField(default=timezone.now)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
-    lastmodified_date = models.DateTimeField(auto_now = True)
+    lastmodified_date = models.DateTimeField(null=True, blank=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
     outlet_code = models.CharField(max_length=100, null=True, blank=True)
     hospital_code = models.CharField(max_length=100, null=True, blank=True)
@@ -46,7 +46,9 @@ class AuditModel(models.Model):
         if not self.created_date:
             self.created_date = timezone.now()
 
-        self.lastmodified_date = timezone.now()
+        # Only set lastmodified_date on updates, not on initial create (POST)
+        if self.pk and self.lastmodified_by:
+            self.lastmodified_date = timezone.now()
 
         super().save(*args, **kwargs)
 class ABHAProfile(AuditModel):

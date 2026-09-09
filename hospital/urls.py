@@ -57,7 +57,8 @@ from .Views import (
     patient_inquiry,
     mrd,
     OPEMR,
-    IPEMR
+    IPEMR,
+    Shanmuga360
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -709,6 +710,11 @@ urlpatterns = [
     path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
     path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
+    path('OPEMR_get_patient_lab_results/', OPEMR.OPEMR_get_patient_lab_results, name='OPEMR_get_patient_lab_results'),
+    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
+    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
+    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
+    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
 
     # IPEMR
     path('IPEMR_get_admitted_patients/', IPEMR.IPEMR_get_admitted_patients, name='IPEMR_get_admitted_patients'),
@@ -719,13 +725,17 @@ urlpatterns = [
     path('IPEMR_get_patient_summary/', IPEMR.IPEMR_get_patient_summary, name='IPEMR_get_patient_summary'),
     path('IPEMR_patient_history/', IPEMR.IPEMR_patient_history, name='IPEMR_patient_history'),
     path('IPEMR_doctor_dashboard_analytics/', IPEMR.IPEMR_doctor_dashboard_analytics, name='IPEMR_doctor_dashboard_analytics'),
-    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
-    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
-    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
-    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
+    
+
+
+    # Shanmuga360
+    path('360_registration/', Shanmuga360.shanmuga360_registration, name='360_registration'),
+    path('get_360_medicinelist/', Shanmuga360.get_360_medicinelist, name='get_360_medicinelist'),
+    path('get_360_doctorlist/', Shanmuga360.get_360_doctorlist, name='get_360_doctorlist'),
+    path('get_360_testlist/', Shanmuga360.get_360_testlist, name='get_360_testlist'),
+    path('360_report/', Shanmuga360.shanmuga360_report, name='360_report'),
+
 ]
-
-
 
 
 
