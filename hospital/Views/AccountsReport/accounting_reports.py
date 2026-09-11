@@ -517,10 +517,13 @@ def get_shift_summary_report(request):
 def discharge_bills_report(request):
     """
     Dedicated reporting API for discharge bills.
-    Queries hospital_cashcountercollection first.
+    Queries hospital_dischargebilling directly.
 
     Extra query params:
-    - payment_mode: 'Cash' | 'Card' | 'Cheque' | 'Multiple Payment' (omit = all)
+    - status: 'Billed' (default) | 'Estimate' | 'all'
+    - from_date: YYYY-MM-DD
+    - to_date: YYYY-MM-DD
+    - payment_mode: 'Cash' | 'Card' | 'Cheque' | 'Multiple Payment' (omit or 'all' = all)
     - insurance: 'true' -> only insurance-linked patients, 'false' -> only non-insurance
     - discount_only: 'true' -> only bills where a discount was actually applied
     """
@@ -532,72 +535,50 @@ def discharge_bills_report(request):
         insurance_f    = request.GET.get("insurance")
         discount_only  = request.GET.get("discount_only") == "true"
 
-        hospital_code = (
-            request.GET.get("auth-hospital-code") or
-            request.META.get("HTTP_AUTH_HOSPITAL_CODE") or
-            request.META.get("HTTP_HOSPITAL_CODE") or
-            (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-        )
-        branch_code = (
-            request.GET.get("auth-branch-code") or
-            request.META.get("HTTP_AUTH_BRANCH_CODE") or
-            request.META.get("HTTP_BRANCH_CODE") or
-            (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-        )
+        hospital_code, branch_code = _auth_scope(request)
 
-        # Connect MongoDB to query hospital_cashcountercollection first
+        # Connect MongoDB
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
 
-        q = {"billing_category": {"$in": ["Discharge", "DischargeBills", "discharge"]}}
-        if hospital_code: q["hospital_code"] = hospital_code
-        if branch_code: q["branch_code"] = branch_code
-        if from_f:
-            f_date = _parse_date(from_f)
-            if f_date:
-                f_dt = datetime.combine(f_date, datetime.min.time())
-                q.setdefault("created_date", {})["$gte"] = f_dt
-        if to_f:
-            t_date = _parse_date(to_f)
-            if t_date:
-                t_dt = datetime.combine(t_date, datetime.max.time())
-                q.setdefault("created_date", {})["$lte"] = t_dt
-
-        ccc_docs = list(db["hospital_cashcountercollection"].find(q))
-        bill_numbers = list(set([doc["bill_number"] for doc in ccc_docs if doc.get("bill_number")]))
-
-        if bill_numbers:
-            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
-                {"bill_no": {"$in": bill_numbers}},
-                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
-            ))
-            all_records = list(DischargeBilling.objects.filter(bill_no__in=bill_numbers))
-        else:
-            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
-                {},
-                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
-            ))
-            all_records = list(DischargeBilling.objects.all())
-            if from_f:
-                f_d = _parse_date(from_f)
-                if f_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) >= f_d]
-            if to_f:
-                t_d = _parse_date(to_f)
-                if t_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) <= t_d]
-
-        payment_mode_map = {
-            d.get("bill_no"): (d.get("payment_details") or {}).get("method", "Cash")
-            for d in raw_discharge_docs if d.get("bill_no")
+        mongo_q = {
+            "is_cancelled": {"$ne": True}
         }
-        cashier_map = {
-            d.get("bill_no"): d.get("CashierID")
-            for d in raw_discharge_docs if d.get("bill_no")
-        }
+        if status_f and status_f.lower() != "all":
+            mongo_q["status"] = status_f
+        if hospital_code:
+            mongo_q["hospital_code"] = hospital_code
+        if branch_code:
+            mongo_q["branch_code"] = branch_code
 
-        # Admission lookup for insurance detection, room, and admission date.
-        # insuranceCompanyName is a raw Mongo field not declared on the Admission
-        # model, so this is read via pymongo rather than the ORM.
-        ip_numbers = list({r.ip_number for r in all_records if r.ip_number})
+        discharge_docs = list(db["hospital_dischargebilling"].find(mongo_q))
+
+        # Date range filtering
+        f_d = _parse_date(from_f) if from_f else None
+        t_d = _parse_date(to_f) if to_f else None
+
+        records = []
+        for doc in discharge_docs:
+            b_date = _parse_date(doc.get("bill_date")) or _parse_date(doc.get("created_date"))
+            if f_d and b_date and b_date < f_d:
+                continue
+            if t_d and b_date and b_date > t_d:
+                continue
+            records.append(doc)
+
+        bill_nos = [d.get("bill_no") for d in records if d.get("bill_no")]
+        ccc_map = {}
+        if bill_nos:
+            ccc_docs = list(db["hospital_cashcountercollection"].find({
+                "bill_number": {"$in": bill_nos}
+            }))
+            for c in ccc_docs:
+                b_num = c.get("bill_number")
+                if b_num and b_num not in ccc_map:
+                    ccc_map[b_num] = c
+
+        # Admission lookup for room, admission date, insurance
+        ip_numbers = list(set([d.get("ip_number") for d in records if d.get("ip_number")]))
         admission_map = {}
         if ip_numbers:
             for a in db["hospital_admission"].find({"$or": [{"ipNumber": {"$in": ip_numbers}}, {"ip_number": {"$in": ip_numbers}}]}):
@@ -605,38 +586,59 @@ def discharge_bills_report(request):
                 if ip_k:
                     admission_map[ip_k] = a
 
+        # Patient lookup
+        uhids = list(set([d.get("uhid") for d in records if d.get("uhid")]))
+        patient_map = {}
+        if uhids:
+            try:
+                for p in Patient.objects.filter(uhid__in=uhids):
+                    patient_map[p.uhid] = p
+            except Exception as e:
+                print("Patient lookup error:", e)
+
         client.close()
 
         filtered = []
 
-        for obj in all_records:
-            if not obj.is_active: continue
-            if status_f and obj.status != status_f: continue
+        for doc in records:
+            bill_no = doc.get("bill_no")
+            uhid = doc.get("uhid")
+            ip_number = doc.get("ip_number")
 
-            payment_mode = payment_mode_map.get(obj.bill_no, "Cash")
-            if payment_mode_f and payment_mode.lower() != payment_mode_f.lower():
+            payment_mode = (
+                (doc.get("payment_details") or {}).get("method")
+                or ccc_map.get(bill_no, {}).get("payment_mode")
+                or doc.get("payment_mode")
+                or "Cash"
+            )
+            if payment_mode_f and payment_mode_f.lower() != "all" and payment_mode.lower() != payment_mode_f.lower():
                 continue
 
-            has_discount = _to_float(obj.total_disc) > 0
+            disc_amt = _to_float(doc.get("discount_amount") or doc.get("total_disc") or 0)
+            has_discount = disc_amt > 0
             if discount_only and not has_discount:
                 continue
 
-            admission = admission_map.get(obj.ip_number, {})
-            insurance_company = admission.get("insuranceCompanyName")
+            adm = admission_map.get(ip_number, {})
+            insurance_company = adm.get("insuranceCompanyName")
+            p = patient_map.get(uhid)
 
             # Build patient details
-            patient_details = {}
-            p = None
-            if obj.uhid:
-                try:
-                    p = Patient.objects.get(uhid=obj.uhid)
-                    patient_details = {
-                        "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                        "age": p.age,
-                        "gender": p.gender,
-                    }
-                except Patient.DoesNotExist:
-                    pass
+            p_name = ""
+            if p:
+                p_name = f"{p.firstName or ''} {p.lastName or ''}".strip()
+                patient_details = {
+                    "patient_name": p_name,
+                    "age": p.age,
+                    "gender": p.gender,
+                }
+            else:
+                p_name = adm.get("patient_name") or adm.get("patientname") or doc.get("patient_name") or "N/A"
+                patient_details = {
+                    "patient_name": p_name,
+                    "age": adm.get("age"),
+                    "gender": adm.get("gender"),
+                }
 
             has_insurance = bool(
                 insurance_company or
@@ -648,36 +650,50 @@ def discharge_bills_report(request):
             if insurance_f == "false" and has_insurance:
                 continue
 
-            room_details = admission.get("room_details") or []
+            room_details = adm.get("room_details") or []
             active_rooms = [rm for rm in room_details if rm.get("is_roomActive") in (True, "True", "true", 1, "1")]
-            room_no = (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNo")
+            room_no = (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNo") or (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNumber") or "N/A"
             patient_details["room_no"] = room_no
-            patient_details["admission_date"] = _format_dt(admission.get("admissionDateTime"))
+            patient_details["admission_date"] = _format_dt(adm.get("admissionDateTime") or adm.get("created_date"))
 
-            # Department-wise drill-down from the bill's own line items
-            items = obj.items if isinstance(obj.items, list) else []
+            # Department-wise drill-down from line items
+            items = doc.get("items") or []
+            if isinstance(items, str):
+                items = _parse_json(items)
             dept_totals = {}
             for it in items:
                 if not isinstance(it, dict): continue
-                cat = it.get("category") or "Other"
+                cat = it.get("category") or it.get("package_name") or it.get("item_description") or "Other"
                 dept_totals[cat] = dept_totals.get(cat, 0) + _to_float(it.get("amount"))
             department_breakdown = [{"category": k, "amount": v} for k, v in dept_totals.items()]
 
+            b_date_val = doc.get("bill_date") or doc.get("created_date")
+            b_date_str = None
+            if isinstance(b_date_val, (datetime, date)):
+                b_date_str = b_date_val.isoformat()
+            elif isinstance(b_date_val, str):
+                b_date_str = b_date_val
+
+            cashier_id = ccc_map.get(bill_no, {}).get("created_by") or doc.get("CashierID") or doc.get("created_by") or ""
+
             filtered.append({
-                "id": obj.discharge_id,
-                "bill_no": obj.bill_no,
-                "estimate_number": obj.estimate_number,
-                "uhid": obj.uhid,
-                "ip_number": obj.ip_number,
-                "branch_code": obj.branch_code,
-                "bill_date": obj.bill_date.isoformat() if obj.bill_date else None,
-                "total_amount": _to_float(obj.total_amount),
-                "advance_amount": _to_float(obj.advance_amount),
-                "net_amount": _to_float(obj.net_amount),
-                "total_disc": _to_float(obj.total_disc),
+                "id": doc.get("discharge_id"),
+                "bill_no": bill_no,
+                "estimate_number": doc.get("estimate_number"),
+                "uhid": uhid,
+                "ip_number": ip_number,
+                "branch_code": doc.get("branch_code"),
+                "hospital_code": doc.get("hospital_code"),
+                "bill_date": b_date_str,
+                "total_amount": _to_float(doc.get("total_amount")),
+                "advance_amount": _to_float(doc.get("advance_amount")),
+                "net_amount": _to_float(doc.get("net_amount")),
+                "total_disc": disc_amt,
+                "discount_amount": disc_amt,
+                "discount_percent": _to_float(doc.get("discount_percent") or 0),
                 "has_discount": has_discount,
-                "cashier_id": cashier_map.get(obj.bill_no),
-                "status": obj.status,
+                "cashier_id": cashier_id,
+                "status": doc.get("status"),
                 "patient_details": patient_details,
                 "payment_mode": payment_mode,
                 "has_insurance": has_insurance,
