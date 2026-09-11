@@ -306,8 +306,16 @@ def get_user_permissions(request):
         # 1. Fetch Roles from Global DB
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
+
+        query_ids = [employee_id, str(employee_id)]
+        try:
+            query_ids.append(int(employee_id))
+        except (ValueError, TypeError):
+            pass
+        emp_query = {"employeeId": {"$in": query_ids}}
+
         user_profile = diag_collection.find_one(
-            {"employeeId": employee_id},
+            emp_query,
             {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "hms_outlets": 1, "_id": 0}
         )
         
@@ -380,9 +388,16 @@ def update_user_permissions(request):
         if isinstance(hms_outlets, list):
             update_fields["hms_outlets"] = hms_outlets
 
+        query_ids = [employee_id, str(employee_id)]
+        try:
+            query_ids.append(int(employee_id))
+        except (ValueError, TypeError):
+            pass
+        emp_query = {"employeeId": {"$in": query_ids}}
+
         # Upsert the permission record into the Global database
         result = diag_collection.update_one(
-            {"employeeId": employee_id},
+            emp_query,
             {"$set": update_fields},
             upsert=True
         )
@@ -964,9 +979,16 @@ def get_sidebar_mapping(request):
         global_db = client['Global']
         diag_collection = global_db['backend_diagnostics_profile']
 
+        query_ids = [employee_id, str(employee_id)]
+        try:
+            query_ids.append(int(employee_id))
+        except (ValueError, TypeError):
+            pass
+        emp_query = {"employeeId": {"$in": query_ids}}
+
         user_profile = diag_collection.find_one(
-            {"employeeId": employee_id},
-            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "_id": 0}
+            emp_query,
+            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "hms_pages": 1, "_id": 0}
         )
 
         roles = []
@@ -975,22 +997,23 @@ def get_sidebar_mapping(request):
                 roles.append(user_profile["primaryRole"])
             roles.extend(user_profile.get("additionalRoles", []))
 
-        print("ROLES:", roles)  # 🔍 debug
+        hms_pages = set(user_profile.get("hms_pages") or []) if user_profile else set()
 
         # 🔹 Extra permissions (optional)
         extra_permissions = []
-        if any(r.startswith("HMS-P") for r in roles) and user_profile:
-            extra_permissions = user_profile.get("allowed_pages", [])
+        if user_profile and "allowed_pages" in user_profile:
+            raw_allowed = user_profile.get("allowed_pages")
+            if isinstance(raw_allowed, dict):
+                extra_permissions = list(raw_allowed.values())
+            elif isinstance(raw_allowed, list):
+                extra_permissions = raw_allowed
 
         allowed_actions = extra_permissions if extra_permissions else roles
 
-        print("ALLOWED:", allowed_actions)  # 🔍 debug
-
         # ============================================================
-        # 🔥 PERMISSION EXPANSION (FIXED)
+        # 🔥 PERMISSION EXPANSION & FILTERING
         # ============================================================
 
-        # Step 1: Collect all permissions
         all_permissions = set()
         for group in all_groups:
             for page in group.get('pages', []):
@@ -1000,21 +1023,14 @@ def get_sidebar_mapping(request):
                 else:
                     all_permissions.update(perms)
 
-        # Step 2: Check HMS access
-        has_hms_access = any(role.startswith("HMS") for role in allowed_actions)
+        is_super_admin = any(role in ["HMS-ADMIN", "HMS-SUPERADMIN", "SUPERADMIN"] for role in roles)
 
         expanded_permissions = set()
-
-        if has_hms_access:
-            # ✅ FULL HMS ACCESS
-            for perm in all_permissions:
-                if perm.startswith("HMS"):
-                    expanded_permissions.add(perm)
+        if is_super_admin:
+            expanded_permissions = all_permissions
         else:
-            # ✅ Normal role logic
             for action in allowed_actions:
                 expanded_permissions.add(action)
-
                 for perm in all_permissions:
                     if perm.startswith(action + "-"):
                         expanded_permissions.add(perm)
@@ -1037,21 +1053,25 @@ def get_sidebar_mapping(request):
                 if page_outlet and page_outlet != request_outlet:
                     continue
 
+                p_id = page.get('page_id')
                 page_perms = page.get('permissions', [])
                 
-                # No permission → allow
-                if not page_perms:
-                    allowed_pages.append(page)
-                    continue
-
-                # Match
                 if isinstance(page_perms, dict):
                     perm_values = set(page_perms.values())
-                else:
+                elif isinstance(page_perms, list):
                     perm_values = set(page_perms)
+                else:
+                    perm_values = set()
 
-                if not perm_values or (perm_values & expanded_permissions):
+                # Allowed if super admin OR (hms_pages is configured and p_id in hms_pages) OR (no hms_pages and perm_values match expanded_permissions)
+                if is_super_admin:
                     allowed_pages.append(page)
+                elif len(hms_pages) > 0:
+                    if p_id is not None and p_id in hms_pages:
+                        allowed_pages.append(page)
+                else:
+                    if (perm_values & expanded_permissions) or not perm_values:
+                        allowed_pages.append(page)
 
             if allowed_pages:
                 new_group = group.copy()
