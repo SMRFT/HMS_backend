@@ -4,6 +4,8 @@ from .Views import (
     get_360_doctorlist,
     get_360_testlist,
     shanmuga360_report,
+    get_sample_collector,
+    sample_collector,
 )
 
 __all__ = [
@@ -12,6 +14,8 @@ __all__ = [
     'get_360_doctorlist',
     'get_360_testlist',
     'shanmuga360_report',
+    'get_sample_collector',
+    'sample_collector',
 ]
 
 import sys

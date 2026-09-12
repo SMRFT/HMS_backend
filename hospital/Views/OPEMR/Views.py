@@ -518,7 +518,7 @@ def OPEMR_get_vital_history(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_referral_doctors(request):
     """
     Get all employees who have 'doctor_role_code' in their primaryRole or additionalRoles.

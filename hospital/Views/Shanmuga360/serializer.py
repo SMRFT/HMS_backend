@@ -22,6 +22,12 @@ class registration360Serializer(serializers.ModelSerializer):
             if not data_copy.get('test_name'):
                 data_copy['test_name'] = test_val
 
+        # Support both labtestbillnumber and lab_test_bill_number
+        if 'labtestbillnumber' in data_copy and not data_copy.get('lab_test_bill_number'):
+            data_copy['lab_test_bill_number'] = data_copy['labtestbillnumber']
+        if 'lab_test_bill_number' in data_copy and not data_copy.get('labtestbillnumber'):
+            data_copy['labtestbillnumber'] = data_copy['lab_test_bill_number']
+
         # Ensure array fields are stored as lists
         array_fields = ['doctor_name', 'medicine_name', 'test_name', 'service_list']
         for field in array_fields:
