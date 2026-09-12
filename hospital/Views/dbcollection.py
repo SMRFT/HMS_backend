@@ -27,7 +27,8 @@ Diagnostics_test_details          = Diagnostics_db["core_testdetails"]
 doctor_list                       = ER_db["er_doctors"]
 
 
-doctor_role_code="SD-R-DOC"
+doctor_role_code = "SD-R-DOC"
+sample_collector = "SD-R-SMC"
 
 def get_employee_name_by_id(employee_id):
     if not employee_id:

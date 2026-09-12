@@ -737,6 +737,7 @@ urlpatterns = [
     path('get_360_doctorlist/', Shanmuga360.get_360_doctorlist, name='get_360_doctorlist'),
     path('get_360_testlist/', Shanmuga360.get_360_testlist, name='get_360_testlist'),
     path('360_report/', Shanmuga360.shanmuga360_report, name='360_report'),
+    path('sample_collector/', Shanmuga360.get_sample_collector, name='sample_collector'),
 
 ]
 

@@ -4,7 +4,13 @@ from rest_framework import status
 from django.utils import timezone
 from .models import registration360
 from .serializer import registration360Serializer
-from ..dbcollection import shanmuga360_collection, doctor_list, Diagnostics_test_details
+from ..dbcollection import (
+    shanmuga360_collection,
+    doctor_list,
+    Diagnostics_test_details,
+    profile_collection,
+    sample_collector as SAMPLE_COLLECTOR_ROLE,
+)
 
 
 
@@ -90,12 +96,12 @@ def get_360_doctorlist(request):
 def get_360_testlist(request):
     """
     GET - Returns all active tests from Diagnostics_test_details (is_active: True).
-    Returns: test_name list
+    Returns: list of dicts with test_name and amount
     """
     try:
         tests = Diagnostics_test_details.find(
             {"is_active": True},
-            {"_id": 0, "test_name": 1}
+            {"_id": 0, "test_name": 1, "SH_Rate": 1, "MRP": 1, "Credit_Rate": 1, "price": 1, "amount": 1, "rate": 1}
         )
         seen = set()
         result = []
@@ -103,8 +109,16 @@ def get_360_testlist(request):
             name = t.get("test_name")
             if name and isinstance(name, str) and name.strip() and name.strip() not in seen:
                 seen.add(name.strip())
-                result.append(name.strip())
-        result.sort()
+                raw_amt = t.get("SH_Rate") or t.get("MRP") or t.get("Credit_Rate") or t.get("price") or t.get("amount") or t.get("rate") or 0
+                try:
+                    amt = float(str(raw_amt).replace(",", "").strip())
+                except (ValueError, TypeError):
+                    amt = 0.0
+                result.append({
+                    "test_name": name.strip(),
+                    "amount": amt
+                })
+        result.sort(key=lambda x: x["test_name"])
         return Response(result, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -142,7 +156,11 @@ def shanmuga360_report(request):
                 Q(patient_name__icontains=s) |
                 Q(mobile_number__icontains=s) |
                 Q(bill_number__icontains=s) |
+                Q(medicine_bill_number__icontains=s) |
+                Q(lab_test_bill_number__icontains=s) |
+                Q(labtestbillnumber__icontains=s) |
                 Q(staff_name__icontains=s) |
+                Q(home_care_type__icontains=s) |
                 Q(reference_id__icontains=s) |
                 Q(order_id__icontains=s)
             )
@@ -152,3 +170,39 @@ def shanmuga360_report(request):
         return Response(serializer.data, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_sample_collector(request):
+    """
+    GET - Returns names of employees having sample_collector role
+    in primaryRole or additionalRoles from profile_collection.
+    """
+    try:
+        query = {
+            "$or": [
+                {"primaryRole": SAMPLE_COLLECTOR_ROLE},
+                {"additionalRoles": SAMPLE_COLLECTOR_ROLE}
+            ]
+        }
+        profiles = profile_collection.find(
+            query,
+            {"_id": 0, "employeeName": 1, "employeeId": 1}
+        )
+        seen = set()
+        result = []
+        for p in profiles:
+            name = p.get("employeeName")
+            if name and isinstance(name, str) and name.strip() and name.strip() not in seen:
+                seen.add(name.strip())
+                result.append(name.strip())
+        result.sort()
+        return Response(result, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+sample_collector = get_sample_collector
+
+
