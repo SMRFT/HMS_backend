@@ -126,6 +126,7 @@ CORS_ALLOW_HEADERS = [
     "x-session-token"
 
 ]
+CORS_ALLOW_ALL_ORIGINS = True
 # Internationalization
 # https://docs.djangoproject.com/en/3.2/topics/i18n/
 
