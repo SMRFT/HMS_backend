@@ -497,12 +497,20 @@ urlpatterns = [
     path('category-master/<str:pk>/', stores.category_detail, name='category_detail'),
     path('group-type-master/', stores.group_type_list_create, name='group_type_list_create'),
     path('group-type-master/<str:pk>/', stores.group_type_detail, name='group_type_detail'),
+    path('rack-master/', stores.rack_master_list_create, name='rack_master_list_create'),
+    path('rack-master/<str:pk>/', stores.rack_master_detail, name='rack_master_detail'),
+    path('shelf-master/', stores.shelf_master_list_create, name='shelf_master_list_create'),
+    path('shelf-master/<str:pk>/', stores.shelf_master_detail, name='shelf_master_detail'),
     path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
     path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
     path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    path('stores-indent-returns/', stores.stores_indent_return_list_create, name='stores_indent_return_list_create'),
+    path('stores-indent-returns/approve/<str:pk>/', stores.stores_indent_return_approve, name='stores_indent_return_approve'),
+    path('stores-indent-returns/reject/<str:pk>/', stores.stores_indent_return_reject, name='stores_indent_return_reject'),
+    path('stores-indent-returns/delete/<str:pk>/', stores.stores_indent_return_delete, name='stores_indent_return_delete'),
     path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
     path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
     path('stores-stores_daily_usage_report/', stores.stores_lab_used_qty_report, name='stores_lab_used_qty_report'),
@@ -511,6 +519,24 @@ urlpatterns = [
     path('vending-machine-report/', stores.vending_machine_report, name='vending_machine_report'),
     path('stores-grn-supplier-report/', stores.stores_grn_supplier_report, name='stores_grn_supplier_report'),
     path('stores-indent-department-report/', stores.stores_indent_department_report, name='stores_indent_department_report'),
+    
+    # Stores Purchase Orders
+    path('stores-purchase-orders/', stores.stores_purchase_order_list_create, name='stores_purchase_order_list_create'),
+    path('stores-purchase-orders/<str:pk>/', stores.stores_purchase_order_detail, name='stores_purchase_order_detail'),
+
+    # Stores Purchase Returns & Debit Notes
+    path('stores-purchase-returns/', stores.stores_purchase_return_list_create, name='stores_purchase_return_list_create'),
+    path('stores-purchase-returns/<str:pk>/', stores.stores_purchase_return_detail, name='stores_purchase_return_detail'),
+
+    # Stores Advanced Reports
+    path('stores-purchase-analysis-report/', stores.stores_purchase_analysis_report, name='stores_purchase_analysis_report'),
+    path('stores-previous-day-stock-report/', stores.stores_previous_day_stock_report, name='stores_previous_day_stock_report'),
+    path('stores-supplier-wise-report/', stores.stores_supplier_wise_list_report, name='stores_supplier_wise_list_report'),
+    path('stores-non-moving-items-report/', stores.stores_non_moving_items_report, name='stores_non_moving_items_report'),
+    path('stores-short-expiry-report/', stores.stores_short_expiry_report, name='stores_short_expiry_report'),
+    path('stores-reorder-level-report/', stores.stores_reorder_level_report, name='stores_reorder_level_report'),
+    path('stores-rack-classification/', stores.stores_item_rack_update, name='stores_item_rack_update'),
+
 
 
     
