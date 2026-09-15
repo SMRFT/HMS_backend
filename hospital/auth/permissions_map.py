@@ -135,6 +135,69 @@ PAGE_MAPPING = {
 
     r"^/_b_a_c_k_e_n_d/HMS/medicine-tracking/?$":          "HMS-P-MT",
 
+    # ==================== STORES & INVENTORY ====================
+    # Item Master & Masters
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/price-history/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/department-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/department-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/category-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-type-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/rack-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/rack-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/shelf-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/shelf-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores GRN
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/[^/]+/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
+
+    # Stores Intent
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/create/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/update/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/delete/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/approve/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/reject/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/delete/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-department-report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores Lab Usage
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-get_stores_lab_approved_items/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-stores_daily_usage_report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Vending Machine
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-sales/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-sales/import-excel/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores Purchase Orders
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-orders/?(\?.*)?$': 'HMS-P-PO',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-orders/[^/]+/?(\?.*)?$': 'HMS-P-PO',
+
+    # Stores Purchase Returns & Debit Notes
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/?(\?.*)?$': 'HMS-P-GPR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/[^/]+/?(\?.*)?$': 'HMS-P-GPR',
+
+    # Stores Advanced Reports
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-analysis-report/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-previous-day-stock-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-supplier-wise-report/?(\?.*)?$': 'HMS-P-VND',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-non-moving-items-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-short-expiry-report/?(\?.*)?$': 'HMS-P-PER',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-reorder-level-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-rack-classification/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-rack-update/?(\?.*)?$': 'HMS-API-IT',
+
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
@@ -390,6 +453,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
     r'^/_b_a_c_k_e_n_d/HMS/group-type-master/?(\?.*)?$': 'HMS-API-IT',
     r'^/_b_a_c_k_e_n_d/HMS/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/rack-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/rack-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/shelf-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/shelf-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
 
     # Stores GRN:
     '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',

@@ -22,8 +22,18 @@ class ItemMaster(AuditModel):
         ('E', 'Essential'),
         ('D', 'Desirable'),
     ]
+    ABC_CHOICES = [
+        ('A', 'A - High Value'),
+        ('B', 'B - Medium Value'),
+        ('C', 'C - Low Value'),
+    ]
+    rack_no = models.CharField(max_length=50, null=True, blank=True)
+    shelf_no = models.CharField(max_length=50, null=True, blank=True)
+    bin_no = models.CharField(max_length=50, null=True, blank=True)
+    barcode = models.CharField(max_length=100, null=True, blank=True)
     unit_price = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
     ved_category = models.CharField(max_length=10, choices=VED_CHOICES, default='D')
+    abc_category = models.CharField(max_length=10, choices=ABC_CHOICES, default='C', null=True, blank=True)
     is_VM = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
 
@@ -71,6 +81,25 @@ class GroupType(AuditModel):
 
     def __str__(self):
         return self.group_type_name
+
+class Rack(AuditModel):
+    rack_id = models.CharField(max_length=50, primary_key=True)
+    rack_name = models.CharField(max_length=255)
+    description = models.CharField(max_length=255, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.rack_name} ({self.rack_id})"
+
+class Shelf(AuditModel):
+    shelf_id = models.CharField(max_length=50, primary_key=True)
+    shelf_name = models.CharField(max_length=255)
+    rack_id = models.CharField(max_length=50, null=True, blank=True)
+    description = models.CharField(max_length=255, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.shelf_name} ({self.shelf_id})"
 
 from djongo import models as djongo_models
 
@@ -216,6 +245,69 @@ class VendingMachineSale(AuditModel):
 
     def __str__(self):
         return f"{self.product_name} - Qty: {self.quantity_sold} - {self.date}"
+
+
+class StoresPurchaseOrder(AuditModel):
+    po_number = models.CharField(max_length=50, unique=True, primary_key=True)
+    vendor_id = models.CharField(max_length=255, blank=True, null=True)
+    vendor_name = models.CharField(max_length=255, blank=True, null=True)
+    po_date = models.DateField(default=now)
+    expected_delivery_date = models.DateField(blank=True, null=True)
+    payment_terms = models.CharField(max_length=100, blank=True, null=True)
+    shipping_address = models.TextField(blank=True, null=True)
+    terms_and_conditions = models.TextField(blank=True, null=True)
+    items = djongo_models.JSONField(default=list, blank=True)
+    subtotal = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    tax_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    discount_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    status = models.CharField(max_length=50, default='APPROVED') # DRAFT, APPROVED, SENT, RECEIVED, CANCELLED
+    remarks = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"PO: {self.po_number} - {self.vendor_name or self.vendor_id}"
+
+
+class StoresPurchaseReturn(AuditModel):
+    return_id = models.CharField(max_length=50, unique=True, primary_key=True)
+    grn_number = models.CharField(max_length=50, blank=True, null=True)
+    vendor_id = models.CharField(max_length=255, blank=True, null=True)
+    vendor_name = models.CharField(max_length=255, blank=True, null=True)
+    return_date = models.DateField(default=now)
+    return_reason = models.CharField(max_length=100, default='DAMAGED') # DAMAGED, EXPIRED, EXCESS, QUALITY_REJECTED, OTHER
+    debit_note_no = models.CharField(max_length=50, blank=True, null=True)
+    items = djongo_models.JSONField(default=list, blank=True)
+    total_return_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    status = models.CharField(max_length=50, default='COMPLETED') # PENDING, APPROVED, COMPLETED
+    remarks = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"Return: {self.return_id} (GRN: {self.grn_number})"
+
+
+class StoresIndentReturn(AuditModel):
+    return_id = models.CharField(max_length=50, unique=True, primary_key=True)
+    intent_id = models.CharField(max_length=50, blank=True, null=True)
+    department = models.CharField(max_length=50, blank=True, null=True)
+    department_name = models.CharField(max_length=255, blank=True, null=True)
+    return_date = models.DateField(default=now)
+    return_reason = models.CharField(max_length=100, default='EXCESS') # EXCESS, DAMAGED, EXPIRED, NOT_REQUIRED, OTHER
+    items = djongo_models.JSONField(default=list, blank=True)
+    total_returned_qty = models.IntegerField(default=0)
+    total_returned_value = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    status = models.CharField(max_length=50, default='Pending') # Pending, Approved, Rejected
+    approved_by = models.CharField(max_length=255, blank=True, null=True)
+    approved_date = models.DateTimeField(blank=True, null=True)
+    rejection_reason = models.TextField(blank=True, null=True)
+    remarks = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"IndentReturn: {self.return_id} (Intent: {self.intent_id})"
+
+
 
 
 
