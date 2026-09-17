@@ -1901,6 +1901,179 @@ def sales_tax_register(request):
 
         all_lines = sorted(sales_lines + consolidated_return_lines, key=lambda x: x["date"] or "", reverse=True)
 
+        def build_daywise_register(lines, is_return=False):
+            day_groups = {}
+            for l in lines:
+                if not l.get("date"):
+                    continue
+                try:
+                    dt_str = str(l["date"])
+                    if "T" in dt_str:
+                        dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    elif " " in dt_str:
+                        dt_obj = datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S")
+                    else:
+                        dt_obj = datetime.strptime(dt_str[:10], "%Y-%m-%d")
+                    d_key = dt_obj.strftime("%Y-%m-%d")
+                    d_display = dt_obj.strftime("%d/%m/%Y")
+                except Exception:
+                    d_key = str(l["date"])[:10]
+                    d_display = d_key
+
+                ptype = (l.get("patient_type") or "OP").upper()
+                group_key = (d_key, ptype)
+
+                if group_key not in day_groups:
+                    bill_prefix = "RETURN " if is_return else ""
+                    bill_name = f"PHARMACY {bill_prefix}{ptype} BILL (SH)"
+                    day_groups[group_key] = {
+                        "raw_date": d_key,
+                        "bill_date": d_display,
+                        "bill_name": bill_name,
+                        "patient_type": ptype,
+                        "bill_numbers": set(),
+                        "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                    }
+
+                entry = day_groups[group_key]
+                if l.get("bill_no"):
+                    entry["bill_numbers"].add(str(l["bill_no"]))
+
+                rate = round(float(l.get("rate") or 0.0), 2)
+                taxable = float(l.get("taxable_value") or 0.0)
+                cgst = float(l.get("cgst_amount") or 0.0)
+                sgst = float(l.get("sgst_amount") or 0.0)
+                gross = float(l.get("gross_amount") or 0.0)
+
+                # Assign to corresponding rate bucket
+                if rate == 0 or rate < 2:
+                    b = entry["exempted"]
+                elif rate <= 6:
+                    b = entry["rate_5"]
+                elif rate <= 14:
+                    b = entry["rate_12"]
+                elif rate <= 20:
+                    b = entry["rate_18"]
+                else:
+                    b = entry["rate_28"]
+
+                b["taxable"] += taxable
+                b["cgst"] += cgst
+                b["sgst"] += sgst
+                b["total"] += gross
+
+                entry["total"]["taxable"] += taxable
+                entry["total"]["cgst"] += cgst
+                entry["total"]["sgst"] += sgst
+                entry["total"]["total"] += gross
+
+            result = []
+            grand_total = {
+                "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            }
+
+            for k in sorted(day_groups.keys(), key=lambda x: (x[0], x[1])):
+                item = day_groups[k]
+                b_list = sorted(list(item["bill_numbers"]))
+                if len(b_list) == 0:
+                    bills_range = "—"
+                elif len(b_list) == 1:
+                    bills_range = b_list[0]
+                else:
+                    bills_range = f"{b_list[0]} - {b_list[-1]}"
+
+                item["bills"] = bills_range
+                item["bills_count"] = len(b_list)
+                del item["bill_numbers"]
+
+                for bucket in ["exempted", "rate_5", "rate_12", "rate_18", "rate_28", "total"]:
+                    grand_total[bucket]["taxable"] += item[bucket]["taxable"]
+                    grand_total[bucket]["cgst"] += item[bucket]["cgst"]
+                    grand_total[bucket]["sgst"] += item[bucket]["sgst"]
+                    grand_total[bucket]["total"] += item[bucket]["total"]
+
+                result.append(item)
+
+            return result, grand_total
+
+        day_wise_sales, day_wise_sales_gt = build_daywise_register(sales_lines, is_return=False)
+        day_wise_returns, day_wise_returns_gt = build_daywise_register(return_lines, is_return=True)
+
+        # Build Day-wise Net Consolidated Register
+        sales_day_map = {(row["raw_date"], row["patient_type"]): row for row in day_wise_sales}
+        return_day_map = {(row["raw_date"], row["patient_type"]): row for row in day_wise_returns}
+        all_day_keys = sorted(set(sales_day_map.keys()) | set(return_day_map.keys()), key=lambda x: (x[0], x[1]))
+
+        day_wise_net = []
+        day_wise_net_gt = {
+            "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+        }
+
+        for (d_key, ptype) in all_day_keys:
+            s_row = sales_day_map.get((d_key, ptype))
+            r_row = return_day_map.get((d_key, ptype))
+            
+            d_display = s_row["bill_date"] if s_row else (r_row["bill_date"] if r_row else d_key)
+            bill_name = f"PHARMACY {ptype} BILL (SH)"
+            bills_parts = []
+            if s_row and s_row["bills"] != "—":
+                bills_parts.append(s_row["bills"])
+            if r_row and r_row["bills"] != "—":
+                bills_parts.append(f"Ret: {r_row['bills']}")
+            bills_range = " | ".join(bills_parts) if bills_parts else "—"
+
+            net_row = {
+                "raw_date": d_key,
+                "bill_date": d_display,
+                "bill_name": bill_name,
+                "patient_type": ptype,
+                "bills": bills_range,
+                "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            }
+
+            for bucket in ["exempted", "rate_5", "rate_12", "rate_18", "rate_28", "total"]:
+                s_taxable = s_row[bucket]["taxable"] if s_row else 0.0
+                s_cgst = s_row[bucket]["cgst"] if s_row else 0.0
+                s_sgst = s_row[bucket]["sgst"] if s_row else 0.0
+                s_tot = s_row[bucket]["total"] if s_row else 0.0
+
+                r_taxable = r_row[bucket]["taxable"] if r_row else 0.0
+                r_cgst = r_row[bucket]["cgst"] if r_row else 0.0
+                r_sgst = r_row[bucket]["sgst"] if r_row else 0.0
+                r_tot = r_row[bucket]["total"] if r_row else 0.0
+
+                net_row[bucket]["taxable"] = s_taxable - r_taxable
+                net_row[bucket]["cgst"] = s_cgst - r_cgst
+                net_row[bucket]["sgst"] = s_sgst - r_sgst
+                net_row[bucket]["total"] = s_tot - r_tot
+
+                day_wise_net_gt[bucket]["taxable"] += (s_taxable - r_taxable)
+                day_wise_net_gt[bucket]["cgst"] += (s_cgst - r_cgst)
+                day_wise_net_gt[bucket]["sgst"] += (s_sgst - r_sgst)
+                day_wise_net_gt[bucket]["total"] += (s_tot - r_tot)
+
+            day_wise_net.append(net_row)
+
         if report_type in ("returns", "return"):
             active_data = sorted(return_lines, key=lambda x: x["date"] or "", reverse=True)
             active_summary = return_summary
@@ -1921,6 +2094,12 @@ def sales_tax_register(request):
             "sales_summary": sales_summary,
             "return_summary": return_summary,
             "net_summary": net_summary,
+            "day_wise_sales": day_wise_sales,
+            "day_wise_sales_grand_total": day_wise_sales_gt,
+            "day_wise_returns": day_wise_returns,
+            "day_wise_returns_grand_total": day_wise_returns_gt,
+            "day_wise_net": day_wise_net,
+            "day_wise_net_grand_total": day_wise_net_gt,
             "is_approximate": True
         })
     except Exception as e:
