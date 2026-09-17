@@ -14,7 +14,12 @@ from .serializer import VitalEntrySerializer,  OPDoctorConsultationSerializer
 # Auth/permissions
 import json
 import re
+import mimetypes
+import gridfs
+from bson.objectid import ObjectId
+from django.http import HttpResponse
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
+from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes
 from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list, medicine_package, profile_collection, doctor_role_code, Diagnostics_db, hms_db
 
@@ -33,6 +38,14 @@ def safe_float(val):
         return float(val)
     except (ValueError, TypeError):
         return 0.0
+
+
+def safe_isoformat(val):
+    if not val:
+        return None
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
 
 
 @api_view(['GET'])
@@ -91,13 +104,11 @@ def OPEMR_get_billing_patient(request):
             if uhid_str:
                 vital_entries = list(VitalEntry.objects.filter(uhid=uhid_str).order_by('-created_date')[:1])
                 vital_entry_obj = vital_entries[0] if vital_entries else None
-                if vital_entry_obj:
-                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
-                    
-                    if getattr(vital_entry_obj, 'created_date', None):
-                        from django.utils import timezone
-                        if vital_entry_obj.created_date.date() == timezone.now().date():
-                            is_completed_today = True
+                if vital_entry_obj and getattr(vital_entry_obj, 'created_date', None):
+                    from django.utils import timezone
+                    if vital_entry_obj.created_date.date() == timezone.now().date():
+                        is_completed_today = True
+                        latest_vital = VitalEntrySerializer(vital_entry_obj).data
 
             result.append({
                 "bill_number": getattr(bill, 'bill_number', ''),
@@ -189,13 +200,11 @@ def OPEMR_VitalEntry(request):
             if patient_uhid:
                 vital_entries = list(VitalEntry.objects.filter(uhid=patient_uhid).order_by('-created_date')[:1])
                 vital_entry_obj = vital_entries[0] if vital_entries else None
-                if vital_entry_obj:
-                    latest_vital = VitalEntrySerializer(vital_entry_obj).data
-                    
-                    if getattr(vital_entry_obj, 'created_date', None):
-                        from django.utils import timezone
-                        if vital_entry_obj.created_date.date() == timezone.now().date():
-                            is_completed_today = True
+                if vital_entry_obj and getattr(vital_entry_obj, 'created_date', None):
+                    from django.utils import timezone
+                    if vital_entry_obj.created_date.date() == timezone.now().date():
+                        is_completed_today = True
+                        latest_vital = VitalEntrySerializer(vital_entry_obj).data
 
             seen_uhids.add(patient_uhid)
             result.append({
@@ -270,15 +279,65 @@ def OPEMR_VitalEntry(request):
     elif request.method == 'POST':
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         employee_id = data.get("auth-user-id") or data.get("created_by")
+        uhid_val = data.get("uhid")
         data['created_by'] = employee_id
         data['created_date'] = now()
         data['lastmodified_by'] = None
         data['lastmodified_date'] = None
 
-        serializer = VitalEntrySerializer(data=data)
+        # Parse existing attachments list if provided
+        attachments_data = data.get("attachments")
+        if isinstance(attachments_data, str):
+            try:
+                attachments_data = json.loads(attachments_data)
+            except Exception:
+                attachments_data = []
+        elif not isinstance(attachments_data, list):
+            attachments_data = []
+
+        # Handle any files uploaded directly in this request
+        direct_files = request.FILES.getlist('files') or ([request.FILES['file']] if request.FILES.get('file') else [])
+        if direct_files:
+            try:
+                fs = gridfs.GridFS(hms_db)
+                for f_obj in direct_files:
+                    safe_name = re.sub(r'[^a-zA-Z0-9_\.\-]', '_', getattr(f_obj, 'name', 'vital_doc'))
+                    c_type = getattr(f_obj, 'content_type', None) or mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+                    fid = fs.put(f_obj, filename=safe_name, content_type=c_type)
+                    relative_url = f"/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_file/{str(fid)}/"
+                    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+                    f_url = f"{public_base_url.rstrip('/')}{relative_url}" if public_base_url else request.build_absolute_uri(relative_url)
+                    attachments_data.append({
+                        "file_id": str(fid),
+                        "file_name": safe_name,
+                        "file_type": c_type,
+                        "file_size": getattr(f_obj, 'size', 0),
+                        "category": data.get("category") or "Old Hospital File",
+                        "title": data.get("title") or "",
+                        "url": f_url,
+                        "uploaded_at": now().isoformat()
+                    })
+            except Exception as f_err:
+                print("Error saving direct files to GridFS:", f_err)
+
+        data['attachments'] = attachments_data
+
+        # Check if record already exists for today or by provided id
+        vital_id = data.get("id") or data.get("vital_entry_id")
+        existing_vital = None
+        if vital_id:
+            existing_vital = VitalEntry.objects.filter(id=vital_id).first()
+        elif uhid_val:
+            today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+            existing_vital = VitalEntry.objects.filter(uhid=uhid_val, created_date__gte=today_start).order_by('-created_date').first()
+
+        if existing_vital:
+            serializer = VitalEntrySerializer(existing_vital, data=data, partial=True)
+        else:
+            serializer = VitalEntrySerializer(data=data)
+
         if serializer.is_valid():
             serializer.save()
-            uhid_val = data.get("uhid")
             if uhid_val:
                 try:
                     Billing.objects.filter(patient__uhid=uhid_val).update(consultation_status='Ready')
@@ -289,9 +348,120 @@ def OPEMR_VitalEntry(request):
                     "message": "Vital entry saved successfully.",
                     "data": serializer.data
                 },
-                status=status.HTTP_201_CREATED
+                status=status.HTTP_200_OK if existing_vital else status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+# @permission_classes([HasRoleAndDataPermission])
+def OPEMR_upload_vital_file(request):
+    """
+    Upload one or multiple vital room patient documents (old hospital files, reports, images, etc.)
+    to MongoDB GridFS in 'HMS' database and return metadata with preview URL.
+    Directly uses hms_db from dbcollection.py.
+    """
+    try:
+        files = request.FILES.getlist('files')
+        if not files and request.FILES.get('file'):
+            files = [request.FILES['file']]
+
+        if not files:
+            return Response({"success": False, "error": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        fs = gridfs.GridFS(hms_db)
+
+        uploaded_records = []
+        category = request.data.get('category') or request.POST.get('category') or 'Old Hospital File'
+        title = request.data.get('title') or request.POST.get('title') or ''
+
+        for file_obj in files:
+            safe_name = re.sub(r'[^a-zA-Z0-9_\.\-]', '_', getattr(file_obj, 'name', 'vital_doc'))
+            content_type = getattr(file_obj, 'content_type', None) or mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+            file_id = fs.put(
+                file_obj,
+                filename=safe_name,
+                content_type=content_type,
+                metadata={
+                    "category": category,
+                    "title": title,
+                    "uploaded_at": now().isoformat()
+                }
+            )
+
+            relative_url = f"/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_file/{str(file_id)}/"
+            public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+            if public_base_url:
+                file_url = f"{public_base_url.rstrip('/')}{relative_url}"
+            else:
+                file_url = request.build_absolute_uri(relative_url)
+
+            uploaded_records.append({
+                "file_id": str(file_id),
+                "file_name": safe_name,
+                "file_type": content_type,
+                "file_size": getattr(file_obj, 'size', 0),
+                "category": category,
+                "title": title,
+                "url": file_url,
+                "uploaded_at": now().isoformat()
+            })
+
+        return Response({
+            "success": True,
+            "message": f"{len(uploaded_records)} file(s) uploaded successfully.",
+            "data": uploaded_records if len(uploaded_records) > 1 else uploaded_records[0],
+            "files": uploaded_records
+        }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+# @permission_classes([AllowAny])
+def OPEMR_get_vital_file(request, file_id):
+    """
+    Serves vital room documents directly from MongoDB GridFS with inline preview support.
+    Directly uses hms_db from dbcollection.py.
+    """
+    try:
+        raw_id = str(file_id or "").strip()
+        if not ObjectId.is_valid(raw_id):
+            return HttpResponse("Invalid file ID", status=400)
+
+        fs = gridfs.GridFS(hms_db)
+        grid_file = fs.get(ObjectId(raw_id))
+        if not grid_file:
+            return HttpResponse("File not found", status=404)
+
+        content_type = getattr(grid_file, 'content_type', None) or mimetypes.guess_type(grid_file.filename)[0] or 'application/octet-stream'
+        response = HttpResponse(grid_file.read(), content_type=content_type)
+        response["Content-Disposition"] = f'inline; filename="{grid_file.filename}"'
+        return response
+    except Exception as e:
+        return HttpResponse(f"Error retrieving file: {str(e)}", status=500)
+
+
+@api_view(['DELETE', 'POST'])
+def OPEMR_delete_vital_file(request, file_id):
+    """
+    Deletes a document from MongoDB GridFS in 'HMS' database by file_id.
+    """
+    try:
+        raw_id = str(file_id or "").strip()
+        if not ObjectId.is_valid(raw_id):
+            return Response({"success": False, "error": "Invalid file ID."}, status=status.HTTP_400_BAD_REQUEST)
+
+        fs = gridfs.GridFS(hms_db)
+        oid = ObjectId(raw_id)
+        if fs.exists(oid):
+            fs.delete(oid)
+            return Response({"success": True, "message": "File deleted successfully from storage."}, status=status.HTTP_200_OK)
+        else:
+            return Response({"success": True, "message": "File already removed from storage."}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -356,6 +526,183 @@ def OPEMR_get_diagnostics_tests(request):
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_radiology_items(request):
+    """
+    Get CT, MRI, and X-Ray investigation items for OPEMR consultation.
+    Sources from hospital_investigationprice in hms_db, Diagnostics_test_details in Diagnostics_db,
+    and enriches with standard medical imaging catalogs.
+    """
+    try:
+        ct_items = []
+        mri_items = []
+        xray_items = []
+
+        seen_ct = set()
+        seen_mri = set()
+        seen_xray = set()
+
+        # 1. From hospital_investigationprice in hms_db
+        if hms_db is not None:
+            invest_price_coll = hms_db['hospital_investigationprice']
+            rad_docs = list(invest_price_coll.find({
+                "$or": [
+                    {"billTypeNo": {"$regex": "^(CT|MRI|XRAY|X-RAY)", "$options": "i"}},
+                    {"BillType": {"$regex": "(CT|MRI|XRAY|X-RAY)", "$options": "i"}}
+                ]
+            }))
+
+            for doc in rad_docs:
+                btn = str(doc.get("billTypeNo", "")).strip().upper()
+                bt = str(doc.get("BillType", "")).strip().upper()
+                target = "CT" if (btn.startswith("CT") or "CT" in bt) else ("MRI" if (btn.startswith("MRI") or "MRI" in bt) else ("XRAY" if ("XRAY" in btn or "X-RAY" in btn) else None))
+                
+                for itm in doc.get("Items", []):
+                    if not isinstance(itm, dict):
+                        continue
+                    name = str(itm.get("itemName") or "").strip()
+                    if not name:
+                        continue
+                    i_id = itm.get("item_id") or itm.get("id") or name
+                    item_obj = {
+                        "id": f"{target}_{i_id}",
+                        "item_id": i_id,
+                        "name": name,
+                        "category": target,
+                        "price": safe_float(itm.get("price", 0))
+                    }
+                    if target == "CT" and name.lower() not in seen_ct:
+                        seen_ct.add(name.lower())
+                        ct_items.append(item_obj)
+                    elif target == "MRI" and name.lower() not in seen_mri:
+                        seen_mri.add(name.lower())
+                        mri_items.append(item_obj)
+                    elif target == "XRAY" and name.lower() not in seen_xray:
+                        seen_xray.add(name.lower())
+                        xray_items.append(item_obj)
+
+        # 2. From Diagnostics_test_details in Diagnostics_db
+        if Diagnostics_test_details is not None:
+            diag_docs = list(Diagnostics_test_details.find({
+                "$or": [
+                    {"department": {"$regex": "CT|Computed|MRI|Magnetic|X[-_]?RAY|Radiology", "$options": "i"}},
+                    {"test_name": {"$regex": "\\b(CT|MRI|X[-_]?RAY)\\b", "$options": "i"}}
+                ]
+            }))
+            for d in diag_docs:
+                t_name = str(d.get("test_name") or "").strip()
+                dept = str(d.get("department") or "").strip().upper()
+                t_id = d.get("test_id") or t_name
+                name_upper = t_name.upper()
+
+                if "CT" in dept or re.search(r'\bCT\b', name_upper):
+                    if t_name.lower() not in seen_ct:
+                        seen_ct.add(t_name.lower())
+                        ct_items.append({
+                            "id": f"CT_{t_id}",
+                            "item_id": t_id,
+                            "name": t_name,
+                            "category": "CT",
+                            "shortcut": d.get("shortcut", ""),
+                            "department": d.get("department", "CT")
+                        })
+                elif "MRI" in dept or re.search(r'\bMRI\b', name_upper):
+                    if t_name.lower() not in seen_mri:
+                        seen_mri.add(t_name.lower())
+                        mri_items.append({
+                            "id": f"MRI_{t_id}",
+                            "item_id": t_id,
+                            "name": t_name,
+                            "category": "MRI",
+                            "shortcut": d.get("shortcut", ""),
+                            "department": d.get("department", "MRI")
+                        })
+                elif "XRAY" in dept or "X-RAY" in dept or re.search(r'\bX[-_]?RAY\b', name_upper) or "RADIOLOGY" in dept:
+                    if t_name.lower() not in seen_xray:
+                        seen_xray.add(t_name.lower())
+                        xray_items.append({
+                            "id": f"XRAY_{t_id}",
+                            "item_id": t_id,
+                            "name": t_name,
+                            "category": "X-Ray",
+                            "shortcut": d.get("shortcut", ""),
+                            "department": d.get("department", "X-Ray")
+                        })
+
+        # 3. Standard Medical Catalogs as fallback/enhancement
+        default_ct = [
+            "CT Brain Plain", "CT Brain with Contrast", "CT PNS (Coronal & Axial)",
+            "CT Chest Plain", "CT Chest HRCT", "CT Chest with Contrast",
+            "CT Abdomen Plain", "CT Abdomen & Pelvis (Triple Phase)", "CT KUB",
+            "CT Cervical Spine", "CT Lumbar Spine", "CT Thoracic Spine",
+            "CT Angiography Brain & Neck", "CT Angiography Pulmonary", "CT Temporal Bone (HRCT)",
+            "CT Neck Soft Tissue", "CT Facial 3D Reconstruction", "CT Extremity / Joints"
+        ]
+        for name in default_ct:
+            if name.lower() not in seen_ct:
+                seen_ct.add(name.lower())
+                ct_items.append({
+                    "id": f"CT_{len(ct_items)+1}",
+                    "item_id": f"CT_{len(ct_items)+1}",
+                    "name": name,
+                    "category": "CT"
+                })
+
+        default_mri = [
+            "MRI Brain Plain", "MRI Brain with Contrast", "MRI Brain Stroke Protocol (DWI/FLAIR)",
+            "MRI Brain with MR Angio (MRA/MRV)", "MRI Cervical Spine Plain", "MRI Cervical Spine with Contrast",
+            "MRI Lumbar Spine (LS Spine)", "MRI Lumbar Spine with Contrast", "MRI Thoracic Spine Plain",
+            "MRI Knee Joint (Right)", "MRI Knee Joint (Left)", "MRI Shoulder Joint",
+            "MRI Hip Joint Bilateral", "MRI Ankle Joint", "MRI Whole Spine Screening",
+            "MRI Abdomen & MRCP", "MRI Pelvis", "MRI Fistulogram"
+        ]
+        for name in default_mri:
+            if name.lower() not in seen_mri:
+                seen_mri.add(name.lower())
+                mri_items.append({
+                    "id": f"MRI_{len(mri_items)+1}",
+                    "item_id": f"MRI_{len(mri_items)+1}",
+                    "name": name,
+                    "category": "MRI"
+                })
+
+        default_xray = [
+            "Chest X-Ray PA View", "Chest X-Ray AP View (Bedside)", "Chest X-Ray Lateral View",
+            "X-Ray KUB", "X-Ray Abdomen Erect & Supine",
+            "X-Ray Cervical Spine AP & Lateral", "X-Ray Lumbar Spine AP & Lateral", "X-Ray Thoracic Spine AP & Lateral",
+            "X-Ray Pelvis AP View", "X-Ray Knee Joint AP & Lateral", "X-Ray Shoulder Joint AP View",
+            "X-Ray Foot AP & Oblique", "X-Ray Hand AP & Oblique", "X-Ray Wrist Joint AP & Lateral",
+            "X-Ray Elbow Joint AP & Lateral", "X-Ray Skull AP & Lateral", "X-Ray PNS (Water's View)"
+        ]
+        for name in default_xray:
+            if name.lower() not in seen_xray:
+                seen_xray.add(name.lower())
+                xray_items.append({
+                    "id": f"XRAY_{len(xray_items)+1}",
+                    "item_id": f"XRAY_{len(xray_items)+1}",
+                    "name": name,
+                    "category": "X-Ray"
+                })
+
+        ct_items.sort(key=lambda x: x["name"])
+        mri_items.sort(key=lambda x: x["name"])
+        xray_items.sort(key=lambda x: x["name"])
+
+        return Response({
+            "success": True,
+            "ct": ct_items,
+            "mri": mri_items,
+            "xray": xray_items
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_medicines(request):
     """
     Get medicines list from medicine_package (hospital_pharmacyitem) dbcollection.py.
@@ -385,114 +732,153 @@ def OPEMR_get_medicines(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def OPEMR_DoctorConsultation(request):
     """
-    GET: Retrieve doctor consultation records using DoctorConsultation model (filtered by ?uhid=...)
-    POST: Save doctor consultation record using DoctorConsultation model and DoctorConsultationSerializer.
+    GET: Retrieve doctor consultation records using OPDoctorConsultation model and OPDoctorConsultationSerializer.
+    POST: Save or update doctor consultation record using OPDoctorConsultation model and OPDoctorConsultationSerializer.
     """
     try:
         if request.method == 'GET':
             uhid = request.query_params.get('uhid')
+            consult_id = request.query_params.get('id') or request.query_params.get('_id') or request.query_params.get('consultation_id')
+
+            qs = OPDoctorConsultation.objects.all()
             if uhid:
-                records = OPDoctorConsultation.objects.filter(uhid=uhid).order_by('-created_date')
-            else:
-                records = OPDoctorConsultation.objects.all().order_by('-created_date')
-            serializer = OPDoctorConsultationSerializer(records, many=True)
+                qs = qs.filter(uhid=uhid)
+            if consult_id:
+                try:
+                    qs = qs.filter(Q(_id=ObjectId(str(consult_id))) | Q(pk=ObjectId(str(consult_id))))
+                except Exception:
+                    qs = qs.filter(Q(_id=str(consult_id)) | Q(pk=str(consult_id)))
+
+            qs = qs.order_by('-created_date', '-date')
+            serializer = OPDoctorConsultationSerializer(qs, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         elif request.method == 'POST':
-            data = request.data
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
             uhid = data.get("uhid")
             if not uhid:
                 return Response({"error": "uhid is required"}, status=status.HTTP_400_BAD_REQUEST)
 
             employee_id = data.get("auth-user-id")
+            consult_id = data.get("id") or data.get("_id") or data.get("consultation_id")
 
+            # Clean and prepare vitals
             vitals_data = data.get("vitals", {})
             if isinstance(vitals_data, dict):
                 vitals_data.pop('_id', None)
                 vitals_data.pop('id', None)
+                vitals_data.pop('created_by_name', None)  # Do NOT store created_by name in vitals
+                if not vitals_data.get("created_by"):
+                    try:
+                        v_obj = VitalEntry.objects.filter(uhid=uhid).order_by('-created_date').first()
+                        if v_obj and v_obj.created_by:
+                            vitals_data["created_by"] = str(v_obj.created_by)
+                    except Exception:
+                        pass
+                if not vitals_data.get("created_by") and employee_id:
+                    vitals_data["created_by"] = str(employee_id)
+                data["vitals"] = vitals_data
 
-            consult_data = {
-                "uhid": uhid,
-                "created_by": employee_id,
-                "created_date": now(),
-                "lastmodified_by": None,
-                "lastmodified_date": None,
-                "doctor_id": data.get("doctor_id", ""),
-                "vitals": vitals_data,
-                "pain_score": data.get("pain_score", None),
-                "allergies": data.get("allergies", ""),
-                "chief_complaints": data.get("chief_complaints", ""),
-                "past_history": data.get("past_history", []),
-                "present_medications": data.get("present_medications", ""),
-                "social_history": data.get("social_history", []),
-                "social_history_notes": data.get("social_history_notes", ""),
-                "menstrual_history": data.get("menstrual_history", {}),
-                "vaccination_history": data.get("vaccination_history", ""),
-                "obstetrics_history": data.get("obstetrics_history", ""),
-                "investigation_done": data.get("investigation_done", ""),
-                "physical_examination": data.get("physical_examination", ""),
-                "provisional_diagnosis": data.get("provisional_diagnosis", ""),
-                "plan_of_care": data.get("plan_of_care", ""),
-                "symptoms": data.get("symptoms", []),
-                "investigation_test_ids": data.get("investigation_test_ids", []),
-                "investigation_details": data.get("investigation_details", []),
-                "prescription_item_ids": data.get("prescription_item_ids", []),
-                "prescription_details": data.get("prescription_details", []),
-                "finding": data.get("finding", ""),
-                "diet": data.get("diet", ""),
-                "refer_to_doctor": data.get("refer_to_doctor", ""),
-                "followup_date": data.get("followup_date", None),
-                "consultation_start_time": data.get("consultation_start_time", None),
-                "consultation_end_time": data.get("consultation_end_time", None),
-                "status": "Completed" if data.get("consultation_end_time") else "In Progress"
-            }
+            # Determine status
+            new_status = data.get("status")
+            if not new_status:
+                new_status = "Completed" if data.get("consultation_end_time") else "In Progress"
+            data["status"] = new_status
+
+            # Handle start and end times
+            consult_start = data.get("consultation_start_time")
+            if consult_start in ["", "null"]:
+                data["consultation_start_time"] = None
+
+            consult_end = data.get("consultation_end_time")
+            if consult_end in ["", "null"]:
+                data["consultation_end_time"] = None
 
             today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
             doc_id_val = str(data.get("doctor_id") or employee_id or "").strip()
-            
-            existing_filter = Q(uhid=uhid) & Q(created_date__gte=today_start)
-            if doc_id_val or employee_id:
-                doc_q = Q()
-                if doc_id_val:
-                    doc_q |= Q(doctor_id=doc_id_val) | Q(created_by=doc_id_val)
-                if employee_id:
-                    doc_q |= Q(doctor_id=str(employee_id)) | Q(created_by=str(employee_id))
-                existing_filter &= doc_q
 
-            existing_consult = OPDoctorConsultation.objects.filter(existing_filter).order_by('-created_date').first()
+            # 1. Try finding existing consultation document by id
+            existing_consult = None
+            if consult_id:
+                try:
+                    existing_consult = OPDoctorConsultation.objects.filter(
+                        Q(_id=ObjectId(str(consult_id))) | Q(pk=ObjectId(str(consult_id)))
+                    ).first()
+                except Exception:
+                    existing_consult = OPDoctorConsultation.objects.filter(
+                        Q(_id=str(consult_id)) | Q(pk=str(consult_id))
+                    ).first()
+
+            # 2. If not found by id, find consultation for this patient created today for this doctor
+            if not existing_consult and uhid:
+                doc_query = Q(uhid=uhid, created_date__gte=today_start)
+                if doc_id_val:
+                    doc_query &= (Q(doctor_id=doc_id_val) | Q(created_by=doc_id_val))
+                existing_consult = OPDoctorConsultation.objects.filter(doc_query).order_by('-created_date').first()
+
+            # 3. Fallback: find any consultation for this patient created today
+            if not existing_consult and uhid:
+                existing_consult = OPDoctorConsultation.objects.filter(
+                    uhid=uhid, created_date__gte=today_start
+                ).order_by('-created_date').first()
 
             if existing_consult:
-                # On update: store lastmodified_by and lastmodified_date
-                consult_data["lastmodified_by"] = employee_id
-                consult_data["lastmodified_date"] = now()
-                consult_data.pop("created_by", None)
-                consult_data.pop("created_date", None)
-                serializer = OPDoctorConsultationSerializer(existing_consult, data=consult_data, partial=True)
+                # Update existing consultation document
+                data["lastmodified_by"] = employee_id
+                data["lastmodified_date"] = now()
+                if not data.get("doctor_id") and existing_consult.doctor_id:
+                    data["doctor_id"] = existing_consult.doctor_id
+
+                if not data.get("consultation_start_time"):
+                    data["consultation_start_time"] = existing_consult.consultation_start_time or existing_consult.created_date or now()
+
+                if not data.get("consultation_end_time"):
+                    if new_status == "Completed":
+                        data["consultation_end_time"] = existing_consult.consultation_end_time or now()
+
+                serializer = OPDoctorConsultationSerializer(existing_consult, data=data, partial=True)
+                is_update = True
             else:
-                # On new create (POST): store created_by as employee_id and created_date, do NOT store lastmodified
-                consult_data["created_by"] = employee_id
-                consult_data["created_date"] = now()
-                consult_data["lastmodified_by"] = None
-                consult_data["lastmodified_date"] = None
-                serializer = OPDoctorConsultationSerializer(data=consult_data)
+                # Create new consultation document
+                data["created_by"] = employee_id
+                data["created_date"] = now()
+                data["lastmodified_by"] = None
+                data["lastmodified_date"] = None
+                if not data.get("doctor_id"):
+                    data["doctor_id"] = doc_id_val
+                if not data.get("consultation_start_time"):
+                    data["consultation_start_time"] = now()
+                if new_status == "Completed" and not data.get("consultation_end_time"):
+                    data["consultation_end_time"] = now()
+
+                serializer = OPDoctorConsultationSerializer(data=data)
+                is_update = False
 
             if serializer.is_valid():
-                obj = serializer.save()
-                if uhid and data.get("consultation_end_time"):
+                saved_consult = serializer.save()
+
+                # Sync Billing consultation_status if completed
+                if uhid and (new_status == "Completed" or data.get("consultation_end_time")):
                     try:
-                        Billing.objects.filter(patient__uhid=uhid).update(consultation_status='Completed')
+                        p_obj = Patient.objects.filter(uhid=uhid).first()
+                        if p_obj:
+                            for b in Billing.objects.filter(patient=p_obj):
+                                b.consultation_status = 'Completed'
+                                b.save(update_fields=['consultation_status'])
                     except Exception as b_err:
                         print("Error updating Billing status:", b_err)
+
                 return Response(
                     {
                         "message": "Doctor consultation saved successfully.",
-                        "data": OPDoctorConsultationSerializer(obj).data
+                        "data": OPDoctorConsultationSerializer(saved_consult).data
                     },
-                    status=status.HTTP_201_CREATED
+                    status=status.HTTP_200_OK if is_update else status.HTTP_201_CREATED
                 )
             else:
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -1008,8 +1394,14 @@ def OPEMR_get_Doctor_patient(request):
     try:
         from django.db.models import Q
 
-        data = request.data 
-        employee_id = data.get("auth-user-id")
+        data = request.data or {}
+        employee_id = (
+            data.get("auth-user-id")
+            or request.query_params.get("doctor_id")
+            or request.query_params.get("doctor")
+            or request.headers.get("auth-user-id")
+            or request.headers.get("doctor_id")
+        )
         print("employee_id in OPEMR_get_Doctor_patient:", employee_id)
 
         if not employee_id:
@@ -1092,7 +1484,7 @@ def OPEMR_get_Doctor_patient(request):
             }
 
             billed_d = getattr(bill, 'billed_date', None)
-            billed_date_str = billed_d.isoformat() if billed_d else ""
+            billed_date_str = safe_isoformat(billed_d) or ""
 
             latest_vital = None
             is_completed_today = False
@@ -1111,20 +1503,63 @@ def OPEMR_get_Doctor_patient(request):
             consult_time_str = None
             if uhid_str:
                 doc_consult_filter = Q(uhid=uhid_str) & (Q(doctor_id__in=list(possible_ids)) | Q(created_by__in=list(possible_ids)))
-                consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter).order_by('-created_date')[:1])
-                consult_obj = consult_entries[0] if consult_entries else None
-                if consult_obj:
-                    latest_consult = OPDoctorConsultationSerializer(consult_obj).data
-                    c_date = getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
-                    if c_date:
-                        from django.utils import timezone
-                        if c_date.date() == timezone.now().date():
-                            if getattr(consult_obj, 'consultation_end_time', None) or getattr(consult_obj, 'status', '') == 'Completed':
-                                is_consultation_completed_today = True
-                            consult_time_str = c_date.isoformat()
+                consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter))
+                if consult_entries:
+                    from django.utils import timezone
+                    today_d = timezone.localdate()
+
+                    def is_consult_today(c):
+                        for f in ['created_date', 'date', 'lastmodified_date', 'consultation_end_time', 'consultation_start_time']:
+                            dt = getattr(c, f, None)
+                            if not dt:
+                                continue
+                            if hasattr(dt, 'date'):
+                                try:
+                                    c_d = timezone.localdate(dt) if timezone.is_aware(dt) else dt.date()
+                                    if c_d == today_d:
+                                        return True
+                                except Exception:
+                                    if dt.date() == today_d:
+                                        return True
+                            elif isinstance(dt, str):
+                                if str(today_d) in dt[:10]:
+                                    return True
+                        return False
+
+                    def consult_rank(c):
+                        is_done = 1 if (getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') else 0
+                        is_tod = 1 if is_consult_today(c) else 0
+                        ts = getattr(c, 'lastmodified_date', None) or getattr(c, 'consultation_end_time', None) or getattr(c, 'created_date', None) or getattr(c, 'date', None)
+                        ts_val = ts.timestamp() if (ts and hasattr(ts, 'timestamp')) else 0
+                        return (is_tod, is_done, ts_val)
+
+                    consult_entries.sort(key=consult_rank, reverse=True)
+                    consult_obj = consult_entries[0]
+                    c_start = getattr(consult_obj, 'consultation_start_time', None) or getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
+
+                    if is_consult_today(consult_obj):
+                        latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                        consult_time_str = safe_isoformat(c_start)
+
+                    if any((getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') for c in consult_entries if is_consult_today(c)):
+                        is_consultation_completed_today = True
+
+            if getattr(bill, 'consultation_status', '') == 'Completed':
+                if not consult_entries or not is_consultation_completed_today:
+                    # No active completed consultation document exists in hospital_opdoctorconsultation; sync bill status
+                    new_bill_status = 'Ready' if is_completed_today else 'Waiting'
+                    try:
+                        bill.consultation_status = new_bill_status
+                        bill.save(update_fields=['consultation_status'])
+                    except Exception:
+                        pass
+                else:
+                    is_consultation_completed_today = True
 
             if is_consultation_completed_today:
                 overall_status = "Completed"
+            elif latest_consult and getattr(consult_obj, 'consultation_start_time', None):
+                overall_status = "In Consultation"
             elif is_completed_today:
                 overall_status = "Ready"
             else:
@@ -1201,20 +1636,51 @@ def OPEMR_get_Doctor_patient(request):
             is_consultation_completed_today = False
             consult_time_str = None
             doc_consult_filter = Q(uhid=ref_u) & (Q(doctor_id__in=list(possible_ids)) | Q(created_by__in=list(possible_ids)))
-            consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter).order_by('-created_date')[:1])
-            consult_obj = consult_entries[0] if consult_entries else None
-            if consult_obj:
-                latest_consult = OPDoctorConsultationSerializer(consult_obj).data
-                c_date = getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
-                if c_date:
-                    from django.utils import timezone
-                    if c_date.date() == timezone.now().date():
-                        if getattr(consult_obj, 'consultation_end_time', None) or getattr(consult_obj, 'status', '') == 'Completed':
-                            is_consultation_completed_today = True
-                        consult_time_str = c_date.isoformat()
+            consult_entries = list(OPDoctorConsultation.objects.filter(doc_consult_filter))
+            if consult_entries:
+                from django.utils import timezone
+                today_d = timezone.localdate()
+
+                def is_consult_today_ref(c):
+                    for f in ['created_date', 'date', 'lastmodified_date', 'consultation_end_time', 'consultation_start_time']:
+                        dt = getattr(c, f, None)
+                        if not dt:
+                            continue
+                        if hasattr(dt, 'date'):
+                            try:
+                                c_d = timezone.localdate(dt) if timezone.is_aware(dt) else dt.date()
+                                if c_d == today_d:
+                                    return True
+                            except Exception:
+                                if dt.date() == today_d:
+                                    return True
+                        elif isinstance(dt, str):
+                            if str(today_d) in dt[:10]:
+                                return True
+                    return False
+
+                def consult_rank_ref(c):
+                    is_done = 1 if (getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') else 0
+                    is_tod = 1 if is_consult_today_ref(c) else 0
+                    ts = getattr(c, 'lastmodified_date', None) or getattr(c, 'consultation_end_time', None) or getattr(c, 'created_date', None) or getattr(c, 'date', None)
+                    ts_val = ts.timestamp() if (ts and hasattr(ts, 'timestamp')) else 0
+                    return (is_tod, is_done, ts_val)
+
+                consult_entries.sort(key=consult_rank_ref, reverse=True)
+                consult_obj = consult_entries[0]
+                c_start = getattr(consult_obj, 'consultation_start_time', None) or getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
+
+                if is_consult_today_ref(consult_obj):
+                    latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                    consult_time_str = safe_isoformat(c_start)
+
+                if any((getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') for c in consult_entries if is_consult_today_ref(c)):
+                    is_consultation_completed_today = True
 
             if is_consultation_completed_today:
                 overall_status = "Completed"
+            elif latest_consult and getattr(consult_obj, 'consultation_start_time', None):
+                overall_status = "In Consultation"
             elif is_completed_today:
                 overall_status = "Ready"
             else:
@@ -1222,7 +1688,7 @@ def OPEMR_get_Doctor_patient(request):
 
             result.append({
                 "bill_number": "REFERRED",
-                "billed_date": ref_date.isoformat() if ref_date else "",
+                "billed_date": safe_isoformat(ref_date) or "",
                 "payment_status": "Paid",
                 "total_fees": 0.0,
                 "registration_fee": 0.0,

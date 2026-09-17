@@ -33,7 +33,19 @@ sample_collector = "SD-R-SMC"
 def get_employee_name_by_id(employee_id):
     if not employee_id:
         return "Unknown"
-    emp = profile_collection.find_one({"employeeId": str(employee_id)})
+    emp_str = str(employee_id).strip()
+    emp = profile_collection.find_one({"employeeId": emp_str})
+    if not emp and emp_str.isdigit():
+        num_val = int(emp_str)
+        emp = profile_collection.find_one({
+            "$or": [
+                {"employeeId": num_val},
+                {"employeeId": str(num_val)},
+                {"employeeId": f"{num_val:04d}"},
+                {"employeeId": f"{num_val:05d}"},
+                {"employeeId": f"{num_val:06d}"}
+            ]
+        })
     if emp and "employeeName" in emp:
         return emp["employeeName"]
     return "Unknown"
