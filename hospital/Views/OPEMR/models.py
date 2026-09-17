@@ -1,10 +1,11 @@
-from django.db import models
+from djongo import models
 from django.utils.timezone import now
 from django.utils import timezone
 from ...models import AuditModel, RawJSONField
 
 
 class VitalEntry(AuditModel):
+    _id = models.ObjectIdField()
 
     uhid = models.CharField(
         max_length=50,
@@ -87,12 +88,14 @@ class VitalEntry(AuditModel):
     )
     date = models.DateTimeField(default=timezone.now)
     status = models.CharField(max_length=50, default='Completed', blank=True, null=True)
+    attachments = RawJSONField(default=list, blank=True, null=True)
 
     def __str__(self):
         return self.uhid or "Vital Entry"
 
 
 class OPDoctorConsultation(AuditModel):
+    _id = models.ObjectIdField()
     uhid = models.CharField(max_length=50, blank=True, null=True)
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     vitals = RawJSONField(default=dict, blank=True, null=True)
@@ -101,6 +104,7 @@ class OPDoctorConsultation(AuditModel):
     chief_complaints = models.TextField(blank=True, null=True)
     past_history = RawJSONField(default=list, blank=True, null=True)
     present_medications = models.TextField(blank=True, null=True)
+    present_medications_attachments = RawJSONField(default=list, blank=True, null=True)
     social_history = RawJSONField(default=list, blank=True, null=True)
     social_history_notes = models.TextField(blank=True, null=True)
     menstrual_history = RawJSONField(default=dict, blank=True, null=True)
@@ -113,6 +117,9 @@ class OPDoctorConsultation(AuditModel):
     symptoms = RawJSONField(default=list, blank=True, null=True)
     investigation_test_ids = RawJSONField(default=list, blank=True, null=True)
     investigation_details = RawJSONField(default=list, blank=True, null=True)
+    ct_scan_details = RawJSONField(default=list, blank=True, null=True)
+    mri_scan_details = RawJSONField(default=list, blank=True, null=True)
+    xray_details = RawJSONField(default=list, blank=True, null=True)
     prescription_item_ids = RawJSONField(default=list, blank=True, null=True)
     prescription_details = RawJSONField(default=list, blank=True, null=True)
     finding = models.TextField(blank=True, null=True)

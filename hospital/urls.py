@@ -128,6 +128,7 @@ urlpatterns = [
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     path('pharmacy_deletebill/', pharmacy.pharmacy_deletebill, name='pharmacy_deletebill'),
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('get_doctor_prescriptions/', pharmacy.get_doctor_prescriptions, name='get_doctor_prescriptions'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
     # path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
@@ -744,6 +745,10 @@ urlpatterns = [
     path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
     path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
     path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
+    path('OPEMR_upload_vital_file/', OPEMR.OPEMR_upload_vital_file, name='OPEMR_upload_vital_file'),
+    path('OPEMR_get_vital_file/<str:file_id>/', OPEMR.OPEMR_get_vital_file, name='OPEMR_get_vital_file'),
+    path('OPEMR_delete_vital_file/<str:file_id>/', OPEMR.OPEMR_delete_vital_file, name='OPEMR_delete_vital_file'),
+    # path('OPEMR_get_radiology_items/', OPEMR.OPEMR_get_radiology_items, name='OPEMR_get_radiology_items'),
 
     # IPEMR
     path('IPEMR_get_admitted_patients/', IPEMR.IPEMR_get_admitted_patients, name='IPEMR_get_admitted_patients'),

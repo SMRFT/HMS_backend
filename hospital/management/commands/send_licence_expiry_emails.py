@@ -16,6 +16,7 @@ _hms_db = _client["HMS"]
 profile_collection = _global_db["backend_diagnostics_profile"]
 department_collection = _global_db["backend_diagnostics_Departments"]
 company_secretary_collection = _hms_db["hospital_licencemasterdetails"]
+licence_email_logs_collection = _hms_db["hospital_licence_email_logs"]
 
 
 
@@ -164,17 +165,38 @@ def run_licence_expiry_check():
                 print("CC Emails:", cc_emails)
 
                 if not incharge_emails:
+                    now_dt = timezone.now()
+                    skip_reason = "No incharge email"
                     skipped.append({
                         "licence": record.get("licence_name"),
-                        "reason": "No incharge email",
+                        "reason": skip_reason,
                         "threshold": days_before
                     })
                     print("❌ Skipped: No email")
+
+                    # ✅ Log skipped to DB
+                    licence_email_logs_collection.insert_one({
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "to_emails": [],
+                        "cc_emails": cc_emails,
+                        "status": "Skipped",
+                        "error_message": skip_reason,
+                        "created_date": now_dt,
+                    })
                     continue
 
 
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
+                    email_body = build_email_body(record, days_before)
 
                     cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'cs@smrft.org')
                     cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
@@ -191,7 +213,7 @@ def run_licence_expiry_check():
 
                     email = EmailMessage(
                         subject=subject,
-                        body=build_email_body(record, days_before),
+                        body=email_body,
                         from_email=cs_email,
                         to=incharge_emails,
                         cc=cc_emails,
@@ -205,6 +227,52 @@ def run_licence_expiry_check():
                     # ✅ Mark as sent
                     updates[flag_field] = True
 
+                    now_dt = timezone.now()
+                    log_doc = {
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "renewal_date": format_date(record.get("renewal_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "from_email": cs_email,
+                        "to_emails": incharge_emails,
+                        "cc_emails": cc_emails,
+                        "subject": subject,
+                        "body": email_body,
+                        "status": "Sent",
+                        "error_message": None,
+                        "sent_at": now_dt,
+                        "created_date": now_dt,
+                    }
+
+                    # ✅ 1. Insert into dedicated log collection
+                    licence_email_logs_collection.insert_one(log_doc)
+
+                    # ✅ 2. Append to licence document history/email_logs
+                    company_secretary_collection.update_one(
+                        {"_id": record["_id"]},
+                        {
+                            "$push": {
+                                "email_logs": {
+                                    "threshold_days": days_before,
+                                    "threshold_flag": flag_field,
+                                    "days_left": diff_days,
+                                    "from_email": cs_email,
+                                    "to_emails": incharge_emails,
+                                    "cc_emails": cc_emails,
+                                    "subject": subject,
+                                    "status": "Sent",
+                                    "sent_at": now_dt
+                                }
+                            }
+                        }
+                    )
+
                     sent.append({
                         "licence": record.get("licence_name"),
                         "threshold": days_before,
@@ -215,10 +283,49 @@ def run_licence_expiry_check():
 
                 except Exception as e:
                     print("❌ EMAIL ERROR:", str(e))
+                    err_msg = str(e)
+                    now_dt = timezone.now()
+
+                    # ✅ Log failure to DB
+                    licence_email_logs_collection.insert_one({
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "from_email": cs_email if 'cs_email' in locals() else None,
+                        "to_emails": incharge_emails,
+                        "cc_emails": cc_emails,
+                        "subject": subject if 'subject' in locals() else f"Licence Expiry Reminder - {record.get('licence_name')}",
+                        "status": "Failed",
+                        "error_message": err_msg,
+                        "sent_at": now_dt,
+                        "created_date": now_dt,
+                    })
+
+                    company_secretary_collection.update_one(
+                        {"_id": record["_id"]},
+                        {
+                            "$push": {
+                                "email_logs": {
+                                    "threshold_days": days_before,
+                                    "threshold_flag": flag_field,
+                                    "days_left": diff_days,
+                                    "status": "Failed",
+                                    "error_message": err_msg,
+                                    "sent_at": now_dt
+                                }
+                            }
+                        }
+                    )
 
                     skipped.append({
                         "licence": record.get("licence_name"),
-                        "reason": str(e),
+                        "reason": err_msg,
                         "threshold": days_before
                     })
 

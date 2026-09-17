@@ -523,7 +523,9 @@ PAGE_MAPPING = {
 
         
          '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-PDB',
-         '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+          '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+         '/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/': 'HMS-P-PMC',
+         r'^/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/?(\?.*)?$': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
          '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
@@ -628,6 +630,9 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/?(\\?.*)?$': 'HMS-P-OPEMRVE',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_history/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_upload_vital_file/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_file/[^/]+/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_delete_vital_file/[^/]+/?(\\?.*)?$': 'HMS-P-OPEMRVE',
 
         # OPDOCTOR
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_symptoms/': 'HMS-P-OPEMRGS',
