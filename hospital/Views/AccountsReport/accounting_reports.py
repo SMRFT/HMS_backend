@@ -1708,12 +1708,15 @@ def sales_tax_register(request):
     CURRENT CGST_Percentage/SGST_Percentage to estimate the rate-wise split.
     Older bills whose batch's tax rate has since changed will be inaccurate.
 
-    Query params: patient_type = 'op' | 'ip' (default: all)
+    Query params:
+    - patient_type = 'all' | 'op' | 'ip' (default: all)
+    - report_type  = 'all' | 'sales' | 'returns' (default: all)
     """
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
         patient_type = (request.GET.get("patient_type") or "all").lower()
+        report_type = (request.GET.get("report_type") or "all").lower()
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
@@ -1722,10 +1725,10 @@ def sales_tax_register(request):
             if t_date and d and d > t_date: return False
             return True
 
-        sale_bills = list(PharmacyBilling.objects.filter(billing_status="Paid"))
-        returns = list(SalesReturn.objects.all())
+        sale_bills = list(PharmacyBilling.objects.filter(billing_status="Paid")) if report_type in ("all", "sales", "sale") else []
+        returns = list(SalesReturn.objects.all()) if report_type in ("all", "returns", "return") else []
         return_bill_nos = {r.bill_no for r in returns if r.bill_no}
-        orig_bill_map = {b.bill_no: b for b in PharmacyBilling.objects.filter(bill_no__in=return_bill_nos)}
+        orig_bill_map = {b.bill_no: b for b in PharmacyBilling.objects.filter(bill_no__in=return_bill_nos)} if return_bill_nos else {}
 
         item_ids = set()
         for b in sale_bills:
@@ -1740,12 +1743,13 @@ def sales_tax_register(request):
                     except (TypeError, ValueError): pass
 
         rate_map = {}
-        for s in PharmacyStock.objects.filter(item_id__in=item_ids):
-            key = (str(s.item_id), str(s.batch_number))
-            if key not in rate_map:
-                rate_map[key] = (_to_float(s.CGST_Percentage), _to_float(s.SGST_Percentage))
+        if item_ids:
+            for s in PharmacyStock.objects.filter(item_id__in=item_ids):
+                key = (str(s.item_id), str(s.batch_number))
+                if key not in rate_map:
+                    rate_map[key] = (_to_float(s.CGST_Percentage), _to_float(s.SGST_Percentage))
 
-        item_name_map = {i.item_id: i.item_name for i in PharmacyItem.objects.filter(item_id__in=item_ids)}
+        item_name_map = {i.item_id: i.item_name for i in PharmacyItem.objects.filter(item_id__in=item_ids)} if item_ids else {}
 
         def tax_split(amount, cgst_pct, sgst_pct):
             total_rate = cgst_pct + sgst_pct
@@ -1754,8 +1758,7 @@ def sales_tax_register(request):
             taxable = amount / (1 + total_rate / 100)
             return taxable, taxable * cgst_pct / 100, taxable * sgst_pct / 100
 
-        lines = []
-
+        sales_lines = []
         for b in sale_bills:
             d = _parse_date(b.bill_date)
             if not in_range(d): continue
@@ -1770,15 +1773,17 @@ def sales_tax_register(request):
                 except (TypeError, ValueError): iid = None
                 cgst_pct, sgst_pct = rate_map.get((str(med.get("item_id")), str(med.get("batch_number") or "")), (0.0, 0.0))
                 taxable, cgst_amt, sgst_amt = tax_split(amount, cgst_pct, sgst_pct)
-                lines.append({
+                sales_lines.append({
                     "type": "Sale", "patient_type": category, "bill_no": b.bill_no,
                     "date": b.bill_date.isoformat() if b.bill_date else None,
                     "item_name": med.get("item_name") or item_name_map.get(iid, ""),
+                    "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
                     "taxable_value": taxable, "cgst_amount": cgst_amt, "sgst_amount": sgst_amt,
                     "total_tax": cgst_amt + sgst_amt, "gross_amount": amount,
                 })
 
+        return_lines = []
         for r in returns:
             orig = orig_bill_map.get(r.bill_no)
             category = "IP" if (orig and orig.inpatient_number) else "OP"
@@ -1794,34 +1799,130 @@ def sales_tax_register(request):
                 except (TypeError, ValueError): iid = None
                 cgst_pct, sgst_pct = rate_map.get((str(med.get("item_id")), str(med.get("batch_number") or "")), (0.0, 0.0))
                 taxable, cgst_amt, sgst_amt = tax_split(amount, cgst_pct, sgst_pct)
-                lines.append({
-                    "type": "Return", "patient_type": category, "bill_no": r.return_bill_no,
+                return_lines.append({
+                    "type": "Return", "patient_type": category,
+                    "bill_no": r.return_bill_no,
+                    "orig_bill_no": r.bill_no or "—",
                     "date": r.return_bill_date.isoformat() if r.return_bill_date else None,
-                    "item_name": item_name_map.get(iid, ""),
+                    "item_name": item_name_map.get(iid, "") or med.get("item_name", ""),
+                    "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
-                    "taxable_value": -taxable, "cgst_amount": -cgst_amt, "sgst_amount": -sgst_amt,
-                    "total_tax": -(cgst_amt + sgst_amt), "gross_amount": -amount,
+                    "taxable_value": taxable, "cgst_amount": cgst_amt, "sgst_amount": sgst_amt,
+                    "total_tax": cgst_amt + sgst_amt, "gross_amount": amount,
                 })
 
-        rate_summary = {}
-        for l in lines:
+        # Calculate Sales Summary
+        sales_rate_summary = {}
+        for l in sales_lines:
             key = l["rate"]
-            b = rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0})
+            b = sales_rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
             b["taxable_value"] += l["taxable_value"]
             b["cgst_amount"] += l["cgst_amount"]
             b["sgst_amount"] += l["sgst_amount"]
             b["total_tax"] += l["total_tax"]
             b["gross_amount"] += l["gross_amount"]
+            b["count"] += 1
 
-        lines.sort(key=lambda x: x["date"] or "", reverse=True)
-        summary = {
-            "total_taxable_value": sum(l["taxable_value"] for l in lines),
-            "total_tax": sum(l["total_tax"] for l in lines),
-            "total_gross": sum(l["gross_amount"] for l in lines),
-            "rate_wise": sorted(rate_summary.values(), key=lambda x: x["rate"]),
+        sales_summary = {
+            "count": len(sales_lines),
+            "total_taxable_value": sum(l["taxable_value"] for l in sales_lines),
+            "total_cgst": sum(l["cgst_amount"] for l in sales_lines),
+            "total_sgst": sum(l["sgst_amount"] for l in sales_lines),
+            "total_tax": sum(l["total_tax"] for l in sales_lines),
+            "total_gross": sum(l["gross_amount"] for l in sales_lines),
+            "rate_wise": sorted(sales_rate_summary.values(), key=lambda x: x["rate"]),
         }
 
-        return Response({"success": True, "data": lines, "summary": summary, "is_approximate": True})
+        # Calculate Return Summary (positive magnitudes for Return Report)
+        return_rate_summary = {}
+        for l in return_lines:
+            key = l["rate"]
+            b = return_rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            b["taxable_value"] += l["taxable_value"]
+            b["cgst_amount"] += l["cgst_amount"]
+            b["sgst_amount"] += l["sgst_amount"]
+            b["total_tax"] += l["total_tax"]
+            b["gross_amount"] += l["gross_amount"]
+            b["count"] += 1
+
+        return_summary = {
+            "count": len(return_lines),
+            "total_taxable_value": sum(l["taxable_value"] for l in return_lines),
+            "total_cgst": sum(l["cgst_amount"] for l in return_lines),
+            "total_sgst": sum(l["sgst_amount"] for l in return_lines),
+            "total_tax": sum(l["total_tax"] for l in return_lines),
+            "total_gross": sum(l["gross_amount"] for l in return_lines),
+            "rate_wise": sorted(return_rate_summary.values(), key=lambda x: x["rate"]),
+        }
+
+        # Calculate Net Consolidated Rate-wise & Summary
+        all_rates = set(sales_rate_summary.keys()) | set(return_rate_summary.keys())
+        net_rate_wise = []
+        for rate in sorted(all_rates):
+            s_data = sales_rate_summary.get(rate, {"taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            r_data = return_rate_summary.get(rate, {"taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            net_rate_wise.append({
+                "rate": rate,
+                "sales_taxable": s_data["taxable_value"],
+                "sales_gross": s_data["gross_amount"],
+                "return_taxable": r_data["taxable_value"],
+                "return_gross": r_data["gross_amount"],
+                "taxable_value": s_data["taxable_value"] - r_data["taxable_value"],
+                "cgst_amount": s_data["cgst_amount"] - r_data["cgst_amount"],
+                "sgst_amount": s_data["sgst_amount"] - r_data["sgst_amount"],
+                "total_tax": s_data["total_tax"] - r_data["total_tax"],
+                "gross_amount": s_data["gross_amount"] - r_data["gross_amount"],
+            })
+
+        net_summary = {
+            "total_sales_taxable": sales_summary["total_taxable_value"],
+            "total_sales_gross": sales_summary["total_gross"],
+            "total_return_taxable": return_summary["total_taxable_value"],
+            "total_return_gross": return_summary["total_gross"],
+            "total_taxable_value": sales_summary["total_taxable_value"] - return_summary["total_taxable_value"],
+            "total_cgst": sales_summary["total_cgst"] - return_summary["total_cgst"],
+            "total_sgst": sales_summary["total_sgst"] - return_summary["total_sgst"],
+            "total_tax": sales_summary["total_tax"] - return_summary["total_tax"],
+            "total_gross": sales_summary["total_gross"] - return_summary["total_gross"],
+            "rate_wise": net_rate_wise,
+        }
+
+        # Consolidated Lines with negative return amounts for consolidated table
+        consolidated_return_lines = []
+        for l in return_lines:
+            consolidated_return_lines.append({
+                **l,
+                "taxable_value": -l["taxable_value"],
+                "cgst_amount": -l["cgst_amount"],
+                "sgst_amount": -l["sgst_amount"],
+                "total_tax": -l["total_tax"],
+                "gross_amount": -l["gross_amount"],
+            })
+
+        all_lines = sorted(sales_lines + consolidated_return_lines, key=lambda x: x["date"] or "", reverse=True)
+
+        if report_type in ("returns", "return"):
+            active_data = sorted(return_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_summary = return_summary
+        elif report_type in ("sales", "sale"):
+            active_data = sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_summary = sales_summary
+        else:
+            active_data = all_lines
+            active_summary = net_summary
+
+        return Response({
+            "success": True,
+            "data": active_data,
+            "summary": active_summary,
+            "sales_data": sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True),
+            "return_data": sorted(return_lines, key=lambda x: x["date"] or "", reverse=True),
+            "consolidated_data": all_lines,
+            "sales_summary": sales_summary,
+            "return_summary": return_summary,
+            "net_summary": net_summary,
+            "is_approximate": True
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
