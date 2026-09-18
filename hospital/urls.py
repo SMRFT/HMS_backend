@@ -621,6 +621,7 @@ urlpatterns = [
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
     path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
+    path('cash-bills-report/', accounting_reports.cash_bills_report, name='cash_bills_report'),
     path('datewise-collection-summary/', accounting_reports.datewise_collection_summary, name='datewise_collection_summary'),
     path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
     path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),

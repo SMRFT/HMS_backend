@@ -268,13 +268,16 @@ def fetch_detailed_billing_data(db, ccc_records):
         # Override with detailed information depending on category
         if cat in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"] and bill_no in pharmacy_map:
             d = pharmacy_map[bill_no]
+            is_ip = bool(d.get("inpatient_number") or d.get("ip_no") or d.get("admission_id"))
+            p_mode = d.get("payment_mode") or d.get("payment_method") or "Cash"
             detail.update({
                 "type": "Pharmacy",
-                "type_name": "PHARMACY OP BILL (SH)",
+                "type_name": "PHARMACY IP BILL (SH)" if is_ip else "PHARMACY OP BILL (SH)",
                 "uhid": d.get("uhid"),
                 "net_amount": _to_float(d.get("net_amount")),
                 "display_amount": _to_float(d.get("net_amount")),
-                "payment_mode": d.get("payment_mode") or d.get("payment_method") or "Cash",
+                "payment_mode": p_mode,
+                "payment_details": d.get("payment_details") or {},
                 "items": d.get("items") or d.get("medicine_particulars") or []
             })
             
@@ -290,6 +293,8 @@ def fetch_detailed_billing_data(db, ccc_records):
                 bt_name = billtype_map.get(bt_no) if bt_no else None
             
             display_type = bt_name or "Investigation"
+            if "(SH)" not in display_type:
+                display_type = f"{display_type} (SH)"
             
             detail.update({
                 "type": "Investigation",
@@ -298,6 +303,7 @@ def fetch_detailed_billing_data(db, ccc_records):
                 "net_amount": _to_float(d.get("finalPrice") or d.get("total")),
                 "display_amount": _to_float(d.get("finalPrice") or d.get("total")),
                 "payment_mode": d.get("paymentMethod") or d.get("payment_method") or "Cash",
+                "payment_details": d.get("payment_details") or {},
                 "items": d.get("item") or []
             })
             
@@ -309,33 +315,40 @@ def fetch_detailed_billing_data(db, ccc_records):
                 "uhid": d.get("uhid"),
                 "net_amount": _to_float(d.get("total_fees")),
                 "display_amount": _to_float(d.get("total_fees")),
-                "payment_mode": d.get("payment_mode") or "Cash",
+                "payment_mode": d.get("payment_mode") or d.get("payment_method") or "Cash",
+                "payment_details": d.get("payment_details") or {},
                 "items": d.get("items") or []
             })
             
         elif cat in ["Discharge", "DischargeBills"] and bill_no in discharge_map:
             d = discharge_map[bill_no]
+            pd = d.get("payment_details") or {}
+            p_mode = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or "Cash"
             detail.update({
                 "type": "Discharge",
                 "type_name": "DISCHARGE",
                 "uhid": d.get("uhid"),
-                "net_amount": _to_float(d.get("net_amount")),
-                "display_amount": _to_float(d.get("net_amount")),
-                "payment_mode": d.get("payment_mode") or "Cash",
+                "net_amount": _to_float(d.get("net_amount") or d.get("paid_amount")),
+                "display_amount": _to_float(d.get("net_amount") or d.get("paid_amount")),
+                "payment_mode": p_mode,
+                "payment_details": pd,
                 "items": d.get("items") or []
             })
             
-        elif cat in ["IPAdvance", "IPAdvanceBills"] and bill_no in advance_map:
+        elif cat in ["IPAdvance", "IPAdvanceBills", "Advance"] and bill_no in advance_map:
             d = advance_map[bill_no]
             adm = d["admission"]
             pay = d["payment"]
+            pd = pay.get("payment_details") or {}
+            p_mode = pd.get("method") or pay.get("payment_mode") or "Cash"
             detail.update({
                 "type": "IPAdvance",
                 "type_name": "ADVANCE",
                 "uhid": adm.get("uhid"),
                 "net_amount": _to_float(pay.get("amount")),
                 "display_amount": _to_float(pay.get("amount")),
-                "payment_mode": pay.get("payment_details", {}).get("method", "Cash"),
+                "payment_mode": p_mode,
+                "payment_details": pd,
                 "items": []
             })
             
@@ -992,23 +1005,32 @@ def bill_cancel_report(request):
         print(traceback.format_exc())
         return Response({"success": False, "message": str(e)}, status=500)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Credit Card Report
 # ─────────────────────────────────────────────────────────────────────────────
 
-@api_view(["GET"])
+@api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 def credit_card_report(request):
     """
-    Lists every Card-mode collection across Registration (OP), Pharmacy,
-    and Discharge billing for a date range. A 'Multiple Payment' discharge
-    bill only contributes its card-only slice, not the full bill amount.
+    Lists every Card-mode collection grouped by Date and Category/Department
+    (e.g., PHARMACY OP BILL (SH), PHARMACY IP BILL (SH), ADVANCE, DISCHARGE,
+    CT SCAN (SH), ECG (SH), LAB BILL (SH), PET_CT(SH), PROCEDURE BILL (SH),
+    REGISTRATION(SH), SCANNING (SH), X - RAY (SH), XEROX (SH), etc.).
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        data = request.data if request.method == "POST" else request.query_params
+        from_date_str = data.get("from_date")
+        to_date_str = data.get("to_date")
         hospital_code, branch_code = _auth_scope(request)
+
+        if not from_date_str:
+            from_date_str = datetime.now().strftime("%Y-%m-%d")
+        if not to_date_str:
+            to_date_str = datetime.now().strftime("%Y-%m-%d")
+
+        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+        to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
@@ -1018,151 +1040,427 @@ def credit_card_report(request):
             if isinstance(val, dict):
                 val = val.get("method") or val.get("payment_mode") or ""
             s = str(val).strip().lower()
-            return any(k in s for k in ["card", "credit", "debit", "pos", "swipe"])
+            return any(k in s for k in ["card", "credit", "debit", "pos", "swipe", "paytm", "pinelabs"])
 
-        f_date = _parse_date(from_f) if from_f else None
-        t_date = _parse_date(to_f) if to_f else None
+        def _get_card_details(pd, mode_str=""):
+            if isinstance(pd, str):
+                try: pd = _json.loads(pd)
+                except: pd = {}
+            if not isinstance(pd, dict): pd = {}
+            mode_upper = str(mode_str or "").upper()
+            c_type = pd.get("card_type") or pd.get("cardType") or pd.get("card_name") or ""
+            if not c_type:
+                if "RUPAY" in mode_upper: c_type = "RUPAY CARD"
+                elif "VISA" in mode_upper: c_type = "VISA CARD"
+                elif "MASTER" in mode_upper: c_type = "MASTER CARD"
+                elif "AMEX" in mode_upper or "AMERICAN" in mode_upper: c_type = "AMEX CARD"
+                elif "DEBIT" in mode_upper: c_type = "DEBIT CARD"
+                elif "CREDIT" in mode_upper: c_type = "CREDIT CARD"
+                else: c_type = "CARD"
+            else:
+                c_type = str(c_type).upper()
+                if not ("CARD" in c_type): c_type = f"{c_type} CARD"
 
-        def in_date_range(d_val):
-            d = _parse_date(d_val)
-            if not d: return True
-            if f_date and d < f_date: return False
-            if t_date and d > t_date: return False
-            return True
+            c_num = pd.get("card_number") or pd.get("cardNumber") or pd.get("card_no") or pd.get("pos_machine") or pd.get("machine") or pd.get("pos") or pd.get("transaction_id") or ""
+            if not c_num:
+                if "PAYTM" in mode_upper: c_num = "PAYTM"
+                elif "PINE" in mode_upper: c_num = "PINELABS"
+                elif "HDFC" in mode_upper: c_num = "HDFC POS"
+                elif "SBI" in mode_upper: c_num = "SBI POS"
+                else: c_num = "POS"
+            else:
+                c_num = str(c_num).upper()
+            return c_type, c_num
 
-        # 1. Query hospital_cashcountercollection for any card payments
-        q_ccc = {"$or": [
-            {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
-            {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
-        ]}
-        if hospital_code: q_ccc["hospital_code"] = hospital_code
-        if branch_code: q_ccc["branch_code"] = branch_code
-        q_ccc.update(_date_range_query(from_f, to_f))
+        mongo_query = {}
+        if hospital_code: mongo_query["hospital_code"] = hospital_code
+        if branch_code: mongo_query["branch_code"] = branch_code
+        mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
-        ccc_docs = list(db["hospital_cashcountercollection"].find(q_ccc))
+        ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
+        enriched_data = fetch_detailed_billing_data(db, ccc_docs)
 
-        # 2. Query billing, pharmacybilling, and dischargebilling directly for card transactions
-        billing_docs = list(db["hospital_billing"].find({
-            "$or": [
-                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
-                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
-            ]
-        }))
-        pharmacy_docs = list(db["hospital_pharmacybilling"].find({
-            "$or": [
-                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
-                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
-            ]
-        }))
-        discharge_docs = list(db["hospital_dischargebilling"].find({
-            "$or": [
-                {"payment_details.method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
-                {"payment_mode": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}},
-                {"payment_method": {"$regex": "card|credit|debit|pos|swipe", "$options": "i"}}
-            ]
-        }))
-
+        raw_rows = []
         seen_bills = set()
-        uhids = set()
-        rows = []
 
-        for d in billing_docs:
-            b_date = d.get("billed_date") or d.get("created_date")
-            if not in_date_range(b_date): continue
-            b_num = d.get("bill_number") or d.get("bill_no")
-            if b_num and b_num in seen_bills: continue
-            if b_num: seen_bills.add(b_num)
+        for r in enriched_data:
+            if r.get("type") == "Sales Return":
+                continue
 
-            amt = _to_float(d.get("total_fees") or d.get("amount") or d.get("paid_amount"))
-            if amt <= 0: continue
-            uhid = d.get("uhid")
-            if uhid: uhids.add(uhid)
-            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name")
-            rows.append({
-                "type": "Registration (OP)", "bill_no": b_num or "N/A", "uhid": uhid or "",
-                "patient_name": p_name,
-                "bill_date": _format_dt(b_date), "amount": amt, "is_partial": False,
+            b_no = r.get("bill_no")
+            if b_no and b_no in seen_bills: continue
+            if b_no: seen_bills.add(b_no)
+
+            p_mode = str(r.get("payment_mode") or "").strip()
+            pd = r.get("payment_details") or {}
+            
+            card_amt = 0.0
+            if _is_card(p_mode):
+                card_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
+            elif "multiple" in p_mode.lower():
+                breakdown = pd.get("breakdown") or []
+                card_amt = sum(
+                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
+                    for b in breakdown if isinstance(b, dict) and _is_card(b.get("method") or b.get("payment_mode"))
+                )
+
+            if card_amt <= 0:
+                continue
+
+            cat_title = r.get("type_name") or r.get("type") or "OTHER"
+            c_type, c_num = _get_card_details(pd, p_mode)
+            b_date_str = str(r.get("bill_date") or from_date_str)[:10]
+
+            raw_rows.append({
+                "date_raw": r.get("bill_date") or from_date_str,
+                "date": b_date_str,
+                "category": cat_title,
+                "bill_no": b_no or "N/A",
+                "uhid": str(r.get("uhid") or ""),
+                "mr_no": str(r.get("uhid") or ""),
+                "patient_name": "",
+                "cashier_id": r.get("cashier_id") or "",
+                "card_type": c_type,
+                "card_number": c_num,
+                "amount": card_amt,
+                "user": str(r.get("cashier_id") or "STAFF").upper()
             })
 
-        for d in pharmacy_docs:
-            b_date = d.get("bill_date") or d.get("created_date")
-            if not in_date_range(b_date): continue
-            b_num = d.get("bill_no") or d.get("bill_number")
-            if b_num and b_num in seen_bills: continue
-            if b_num: seen_bills.add(b_num)
+        # Fetch Patient Names
+        uhids = list(set([r["uhid"] for r in raw_rows if r.get("uhid")]))
+        patients = list(db["hospital_patient"].find({"uhid": {"$in": uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1}))
+        patient_map = {p["uhid"]: f"{p['firstName']} {p['lastName']}".strip() for p in patients}
 
-            amt = _to_float(d.get("net_amount") or d.get("total_amount") or d.get("paid_amount"))
-            if amt <= 0: continue
-            uhid = d.get("uhid")
-            if uhid: uhids.add(uhid)
-            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name") or d.get("medicine_particulars", [{}])[0].get("patient_name")
-            rows.append({
-                "type": "Pharmacy", "bill_no": b_num or "N/A", "uhid": uhid or "",
-                "patient_name": p_name,
-                "bill_date": _format_dt(b_date), "amount": amt, "is_partial": False,
-            })
+        # Fetch Cashier Names (Global DB)
+        cashier_ids = list(set([r["cashier_id"] for r in raw_rows if r.get("cashier_id")]))
+        cashier_name_map = {}
+        try:
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            g_db = g_client['Global']
+            profiles = list(g_db['backend_diagnostics_profile'].find(
+                {"employeeId": {"$in": cashier_ids}},
+                {"employeeId": 1, "employeeName": 1, "_id": 0}
+            ))
+            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
+            g_client.close()
+        except: pass
 
-        for d in discharge_docs:
-            b_date = d.get("bill_date") or d.get("created_date")
-            if not in_date_range(b_date): continue
-            b_num = d.get("bill_no") or d.get("estimate_number")
-            if b_num and b_num in seen_bills: continue
-            if b_num: seen_bills.add(b_num)
+        for r in raw_rows:
+            r["patient_name"] = patient_map.get(r["uhid"]) or (f"Patient #{r['uhid']}" if r["uhid"] else "General / Cash Patient")
+            if r.get("cashier_id") and r["cashier_id"] in cashier_name_map:
+                r["user"] = cashier_name_map[r["cashier_id"]].upper()
 
-            payment_details = d.get("payment_details") or {}
-            card_amt = _card_amount(payment_details.get("method"), payment_details) or _to_float(d.get("paid_amount") or d.get("net_amount"))
-            if card_amt <= 0: continue
-            uhid = d.get("uhid")
-            if uhid: uhids.add(uhid)
-            p_name = d.get("patient_name") or d.get("patientname") or d.get("Patient_Name")
-            rows.append({
-                "type": "Discharge", "bill_no": b_num or "N/A", "uhid": uhid or "",
-                "patient_name": p_name,
-                "bill_date": _format_dt(b_date), "amount": card_amt,
-                "is_partial": (payment_details.get("method") or "").strip().lower() == "multiple payment",
-            })
-
-        # Include remaining cashcountercollection card docs not captured above
-        for d in ccc_docs:
-            b_num = d.get("bill_number") or d.get("bill_no")
-            if b_num and b_num in seen_bills: continue
-            if b_num: seen_bills.add(b_num)
-
-            mode = d.get("payment_method") or d.get("payment_mode")
-            if not _is_card(mode): continue
-            amt = _to_float(d.get("total_amount") or d.get("amount") or d.get("received_amount"))
-            if amt <= 0: continue
-            uhid = d.get("uhid") or d.get("patient_id")
-            if uhid: uhids.add(uhid)
-            rows.append({
-                "type": d.get("billing_category") or "General",
-                "bill_no": b_num or "N/A", "uhid": uhid or "",
-                "patient_name": d.get("patient_name") or d.get("patientname"),
-                "bill_date": _format_dt(d.get("created_date") or d.get("bill_date")),
-                "amount": amt, "is_partial": False,
-            })
-
-        clean_uhids = [str(u) for u in uhids if u]
-        patients = list(Patient.objects.filter(uhid__in=clean_uhids))
-        patient_map = {str(p.uhid): f"{p.firstName} {p.lastName}".strip() for p in patients}
-
-        for r in rows:
-            if not r.get("patient_name"):
-                u_str = str(r.get("uhid") or "")
-                r["patient_name"] = patient_map.get(u_str) or (f"Patient #{u_str}" if u_str else "General / Cash Patient")
+            dt_obj = _parse_date(r["date_raw"])
+            if dt_obj:
+                r["date"] = dt_obj.strftime("%Y-%m-%d")
+                r["date_display"] = dt_obj.strftime("%d/%m/%Y")
+            else:
+                r["date"] = str(r["date_raw"])[:10]
+                r["date_display"] = str(r["date_raw"])[:10]
+            if "date_raw" in r: del r["date_raw"]
+            if "cashier_id" in r: del r["cashier_id"]
 
         client.close()
 
-        rows.sort(key=lambda x: x["bill_date"] or "", reverse=True)
-        summary = {
-            "total_transactions": len(rows),
-            "total_amount": sum(r["amount"] for r in rows),
-            "by_type": {},
-        }
-        for r in rows:
-            summary["by_type"][r["type"]] = summary["by_type"].get(r["type"], 0) + r["amount"]
+        # Sort all rows by date asc, category asc, bill_no asc
+        raw_rows.sort(key=lambda x: (x["date"], x["category"], x["bill_no"]))
 
-        return Response({"success": True, "data": rows, "summary": summary})
+        # Build Grouped Data structure matching hospital PDF report
+        # Date -> Sections (Categories) -> Transactions
+        date_groups = {}
+        for r in raw_rows:
+            d_key = r["date"]
+            d_disp = r["date_display"]
+            cat = r["category"]
+
+            if d_key not in date_groups:
+                date_groups[d_key] = {
+                    "date": d_key,
+                    "date_display": d_disp,
+                    "sections": {},
+                    "date_total": 0.0,
+                    "count": 0
+                }
+
+            dg = date_groups[d_key]
+            if cat not in dg["sections"]:
+                dg["sections"][cat] = {
+                    "category": cat,
+                    "items": [],
+                    "total": 0.0,
+                    "count": 0
+                }
+
+            sec = dg["sections"][cat]
+            sec["items"].append(r)
+            sec["total"] += r["amount"]
+            sec["count"] += 1
+            dg["date_total"] += r["amount"]
+            dg["count"] += 1
+
+        grouped_result = []
+        flat_rows_with_slno = []
+        global_slno = 1
+
+        for d_key in sorted(date_groups.keys()):
+            dg = date_groups[d_key]
+            sec_list = []
+            for cat_name in sorted(dg["sections"].keys()):
+                sec_obj = dg["sections"][cat_name]
+                for item in sec_obj["items"]:
+                    item["slno"] = global_slno
+                    global_slno += 1
+                    flat_rows_with_slno.append(item)
+                sec_list.append({
+                    "category": sec_obj["category"],
+                    "items": sec_obj["items"],
+                    "total": sec_obj["total"],
+                    "count": sec_obj["count"]
+                })
+            grouped_result.append({
+                "date": dg["date"],
+                "date_display": dg["date_display"],
+                "sections": sec_list,
+                "date_total": dg["date_total"],
+                "count": dg["count"]
+            })
+
+        grand_total = sum(r["amount"] for r in flat_rows_with_slno)
+        by_category_summary = {}
+        for r in flat_rows_with_slno:
+            by_category_summary[r["category"]] = by_category_summary.get(r["category"], 0.0) + r["amount"]
+
+        summary = {
+            "total_transactions": len(flat_rows_with_slno),
+            "total_amount": grand_total,
+            "by_type": by_category_summary,
+            "by_category": by_category_summary
+        }
+
+        return Response({
+            "success": True,
+            "data": flat_rows_with_slno,
+            "grouped_data": grouped_result,
+            "summary": summary,
+            "grand_total": grand_total
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=500)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cash Bills Report
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def cash_bills_report(request):
+    """
+    Lists every Cash-mode collection grouped by Date and Category/Department
+    (e.g., PHARMACY OP BILL (SH), PHARMACY IP BILL (SH), ADVANCE, DISCHARGE,
+    CT SCAN (SH), ECG (SH), LAB BILL (SH), PET_CT(SH), PROCEDURE BILL (SH),
+    REGISTRATION(SH), SCANNING (SH), X - RAY (SH), XEROX (SH), etc.).
+    """
+    try:
+        data = request.data if request.method == "POST" else request.query_params
+        from_date_str = data.get("from_date")
+        to_date_str = data.get("to_date")
+        hospital_code, branch_code = _auth_scope(request)
+
+        if not from_date_str:
+            from_date_str = datetime.now().strftime("%Y-%m-%d")
+        if not to_date_str:
+            to_date_str = datetime.now().strftime("%Y-%m-%d")
+
+        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+        to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+
+        mongo_query = {}
+        if hospital_code: mongo_query["hospital_code"] = hospital_code
+        if branch_code: mongo_query["branch_code"] = branch_code
+        mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
+
+        ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
+        enriched_data = fetch_detailed_billing_data(db, ccc_docs)
+
+        raw_rows = []
+        seen_bills = set()
+
+        for r in enriched_data:
+            if r.get("type") == "Sales Return":
+                continue
+
+            b_no = r.get("bill_no")
+            if b_no and b_no in seen_bills: continue
+            if b_no: seen_bills.add(b_no)
+
+            p_mode = str(r.get("payment_mode") or "Cash").strip()
+            pd = r.get("payment_details") or {}
+            
+            cash_amt = 0.0
+            is_cash = False
+
+            if p_mode.lower() == "cash" or not p_mode:
+                is_cash = True
+                cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
+            elif "multiple" in p_mode.lower():
+                breakdown = pd.get("breakdown") or []
+                cash_total = sum(
+                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
+                    for b in breakdown if isinstance(b, dict) and "cash" in str(b.get("method") or b.get("payment_mode") or "").lower()
+                )
+                if cash_total > 0:
+                    is_cash = True
+                    cash_amt = cash_total
+                elif not breakdown:
+                    is_cash = True
+                    cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
+            elif "cash" in p_mode.lower():
+                is_cash = True
+                cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
+
+            if not is_cash or cash_amt <= 0:
+                continue
+
+            cat_title = r.get("type_name") or r.get("type") or "OTHER"
+            b_date_str = str(r.get("bill_date") or from_date_str)[:10]
+
+            raw_rows.append({
+                "date_raw": r.get("bill_date") or from_date_str,
+                "date": b_date_str,
+                "category": cat_title,
+                "bill_no": b_no or "N/A",
+                "uhid": str(r.get("uhid") or ""),
+                "mr_no": str(r.get("uhid") or ""),
+                "patient_name": "",
+                "cashier_id": r.get("cashier_id") or "",
+                "payment_mode": "CASH",
+                "amount": cash_amt,
+                "user": str(r.get("cashier_id") or "STAFF").upper()
+            })
+
+        # Fetch Patient Names
+        uhids = list(set([r["uhid"] for r in raw_rows if r.get("uhid")]))
+        patients = list(db["hospital_patient"].find({"uhid": {"$in": uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1}))
+        patient_map = {p["uhid"]: f"{p['firstName']} {p['lastName']}".strip() for p in patients}
+
+        # Fetch Cashier Names (Global DB)
+        cashier_ids = list(set([r["cashier_id"] for r in raw_rows if r.get("cashier_id")]))
+        cashier_name_map = {}
+        try:
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            g_db = g_client['Global']
+            profiles = list(g_db['backend_diagnostics_profile'].find(
+                {"employeeId": {"$in": cashier_ids}},
+                {"employeeId": 1, "employeeName": 1, "_id": 0}
+            ))
+            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
+            g_client.close()
+        except: pass
+
+        for r in raw_rows:
+            r["patient_name"] = patient_map.get(r["uhid"]) or (f"Patient #{r['uhid']}" if r["uhid"] else "General / Cash Patient")
+            if r.get("cashier_id") and r["cashier_id"] in cashier_name_map:
+                r["user"] = cashier_name_map[r["cashier_id"]].upper()
+
+            dt_obj = _parse_date(r["date_raw"])
+            if dt_obj:
+                r["date"] = dt_obj.strftime("%Y-%m-%d")
+                r["date_display"] = dt_obj.strftime("%d/%m/%Y")
+            else:
+                r["date"] = str(r["date_raw"])[:10]
+                r["date_display"] = str(r["date_raw"])[:10]
+            if "date_raw" in r: del r["date_raw"]
+            if "cashier_id" in r: del r["cashier_id"]
+
+        client.close()
+
+        # Sort all rows by date asc, category asc, bill_no asc
+        raw_rows.sort(key=lambda x: (x["date"], x["category"], x["bill_no"]))
+
+        # Build Grouped Data structure matching hospital PDF report
+        # Date -> Sections (Categories) -> Transactions
+        date_groups = {}
+        for r in raw_rows:
+            d_key = r["date"]
+            d_disp = r["date_display"]
+            cat = r["category"]
+
+            if d_key not in date_groups:
+                date_groups[d_key] = {
+                    "date": d_key,
+                    "date_display": d_disp,
+                    "sections": {},
+                    "date_total": 0.0,
+                    "count": 0
+                }
+
+            dg = date_groups[d_key]
+            if cat not in dg["sections"]:
+                dg["sections"][cat] = {
+                    "category": cat,
+                    "items": [],
+                    "total": 0.0,
+                    "count": 0
+                }
+
+            sec = dg["sections"][cat]
+            sec["items"].append(r)
+            sec["total"] += r["amount"]
+            sec["count"] += 1
+            dg["date_total"] += r["amount"]
+            dg["count"] += 1
+
+        grouped_result = []
+        flat_rows_with_slno = []
+        global_slno = 1
+
+        for d_key in sorted(date_groups.keys()):
+            dg = date_groups[d_key]
+            sec_list = []
+            for cat_name in sorted(dg["sections"].keys()):
+                sec_obj = dg["sections"][cat_name]
+                for item in sec_obj["items"]:
+                    item["slno"] = global_slno
+                    global_slno += 1
+                    flat_rows_with_slno.append(item)
+                sec_list.append({
+                    "category": sec_obj["category"],
+                    "items": sec_obj["items"],
+                    "total": sec_obj["total"],
+                    "count": sec_obj["count"]
+                })
+            grouped_result.append({
+                "date": dg["date"],
+                "date_display": dg["date_display"],
+                "sections": sec_list,
+                "date_total": dg["date_total"],
+                "count": dg["count"]
+            })
+
+        grand_total = sum(r["amount"] for r in flat_rows_with_slno)
+        by_category_summary = {}
+        for r in flat_rows_with_slno:
+            by_category_summary[r["category"]] = by_category_summary.get(r["category"], 0.0) + r["amount"]
+
+        summary = {
+            "total_transactions": len(flat_rows_with_slno),
+            "total_amount": grand_total,
+            "by_type": by_category_summary,
+            "by_category": by_category_summary
+        }
+
+        return Response({
+            "success": True,
+            "data": flat_rows_with_slno,
+            "grouped_data": grouped_result,
+            "summary": summary,
+            "grand_total": grand_total
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
