@@ -569,6 +569,7 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/get_shift_summary_report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/bill-cancel-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/credit-card-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/cash-bills-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/datewise-collection-summary/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/miscellaneous-payment-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/daily-cash-report/?(\?.*)?$': 'HMS-P-CCC',
