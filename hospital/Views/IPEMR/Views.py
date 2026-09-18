@@ -1215,18 +1215,32 @@ def IPEMR_patient_history(request):
         }))
         discharge_summaries = []
         for sm in summary_cursor:
-            discharge_summaries.append({
-                "id": str(sm.get("_id")),
-                "ip_number": sm.get("ipNo", ""),
-                "summary_type": sm.get("summaryType", "Discharge Summary"),
-                "heading": sm.get("heading", "Hospital Discharge Summary"),
-                "created_date": serialize_value(sm.get("created_date")),
-                "primary_diagnosis": sm.get("primaryDiagnosis") or sm.get("diagnosis") or "",
-                "condition_at_discharge": sm.get("conditionAtDischarge") or "",
-                "discharge_advice": sm.get("dischargeAdvice") or "",
-                "hospital_course": sm.get("hospitalCourse") or sm.get("courseInHospital") or "",
-                "fields_data": to_plain_json(sm.get("fieldsData", []))
-            })
+            p_rec = patient_coll.find_one({"$or": [{"uhid": sm.get("uhid")}, {"ip_number": sm.get("ipNo")}]}) or {}
+            p_name = ' '.join(filter(None, [(p_rec.get('salutation') or '').strip(), (p_rec.get('firstName') or '').strip(), (p_rec.get('lastName') or '').strip()]))
+
+            clean_sm = serialize_dict(sm)
+            clean_sm["id"] = str(sm.get("_id"))
+            clean_sm["ip_number"] = sm.get("ipNo", "")
+            clean_sm["ipNo"] = sm.get("ipNo", "")
+            clean_sm["uhid"] = sm.get("uhid", "")
+            clean_sm["patient"] = sm.get("patient") or p_name or ""
+            clean_sm["doctor"] = sm.get("doctor") or ""
+            clean_sm["roomNo"] = sm.get("roomNo") or p_rec.get("room_no") or ""
+            clean_sm["age"] = sm.get("age") or p_rec.get("age") or ""
+            clean_sm["gender"] = sm.get("gender") or p_rec.get("gender") or ""
+            clean_sm["summary_type"] = sm.get("summaryType", "Hospital Discharge Summary")
+            clean_sm["summaryType"] = sm.get("summaryType", "Hospital Discharge Summary")
+            clean_sm["heading"] = sm.get("heading", "Hospital Discharge Summary")
+            clean_sm["diseaseCode"] = sm.get("diseaseCode", "")
+            clean_sm["disease"] = sm.get("disease", "")
+            clean_sm["primary_diagnosis"] = sm.get("primaryDiagnosis") or sm.get("disease") or sm.get("diagnosis") or ""
+            clean_sm["condition_at_discharge"] = sm.get("conditionAtDischarge") or ""
+            clean_sm["discharge_advice"] = sm.get("dischargeAdvice") or ""
+            clean_sm["hospital_course"] = sm.get("hospitalCourse") or sm.get("courseInHospital") or ""
+            clean_sm["fields_data"] = clean_sm.get("fieldsData") or []
+            clean_sm["fieldsData"] = clean_sm.get("fieldsData") or []
+            clean_sm["created_date"] = serialize_value(sm.get("created_date"))
+            discharge_summaries.append(clean_sm)
         discharge_summaries.sort(key=lambda x: str(x.get("created_date") or ""), reverse=True)
 
         # ── 8. Prescribed Medications History (Without Prices/Costs) ──

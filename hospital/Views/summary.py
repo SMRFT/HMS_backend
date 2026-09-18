@@ -1059,6 +1059,19 @@ def update_summary_fields(request, ip_no):
     finally:
         client.close()
 
+def serialize_mongo(val):
+    if isinstance(val, (datetime,)):
+        return val.isoformat()
+    if isinstance(val, ObjectId):
+        return str(val)
+    if isinstance(val, Decimal128):
+        return float(val.to_decimal())
+    if isinstance(val, list):
+        return [serialize_mongo(x) for x in val]
+    if isinstance(val, dict):
+        return {k: serialize_mongo(v) for k, v in val.items()}
+    return val
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_printsummary(request, ip_no):
@@ -1178,7 +1191,7 @@ def get_printsummary(request, ip_no):
 
         if not barcode_record:
             client.close()
-            return JsonResponse(summary, safe=False)
+            return JsonResponse(serialize_mongo(summary), safe=False)
 
         barcode                 = barcode_record.get('barcode')
         summary['barcode']      = barcode
@@ -1186,7 +1199,7 @@ def get_printsummary(request, ip_no):
 
         if not barcode:
             client.close()
-            return JsonResponse(summary, safe=False)
+            return JsonResponse(serialize_mongo(summary), safe=False)
 
         # ── STEP 4: Fetch standard test result documents from core_testvalue ──
         test_value_records = list(
@@ -1531,7 +1544,7 @@ def get_printsummary(request, ip_no):
         summary['micro_signatures'] = micro_signatures  # for microbiology section
 
         client.close()
-        return JsonResponse(summary, safe=False)
+        return JsonResponse(serialize_mongo(summary), safe=False)
 
     except Exception as e:
         import traceback
