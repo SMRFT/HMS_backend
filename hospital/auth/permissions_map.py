@@ -637,9 +637,19 @@ PAGE_MAPPING = {
         # OPDOCTOR
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_symptoms/': 'HMS-P-OPEMRGS',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_radiology_items/': 'HMS-P-OPEMRGD',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_radiology_items/?(\\?.*)?$': 'HMS-P-OPEMRGD',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_patient_lab_results/?(\\?.*)?$': 'HMS-P-OPEMRDC',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_patient_discharge_summaries/?(\\?.*)?$': 'HMS-P-OPEMRDC',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_upload_vital_file/': 'HMS-P-OPEMRGS',
+        '/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_file/': 'HMS-P-OPEMRGS',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_delete_vital_file/[^/]+/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+         '/_b_a_c_k_e_n_d/HMS/ OPEMR_get_referral_doctors/': 'HMS-P-OPEMRGS',
+             '/_b_a_c_k_e_n_d/HMS/ OPEMR_Vitaldashboard/': 'HMS-P-OPEMRGS',
+             '/_b_a_c_k_e_n_d/HMS/ OPEMR_patientlivetracking/': 'HMS-P-OPEMRPT',
+             '/_b_a_c_k_e_n_d/HMS/ OPEMR_docotordashboard/': 'HMS-P-OPEMDD',
 
         # IP EMR
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_get_admitted_patients/?(\?.*)?$': 'HMS-P-IPEMR',

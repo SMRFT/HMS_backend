@@ -748,7 +748,8 @@ urlpatterns = [
     path('OPEMR_upload_vital_file/', OPEMR.OPEMR_upload_vital_file, name='OPEMR_upload_vital_file'),
     path('OPEMR_get_vital_file/<str:file_id>/', OPEMR.OPEMR_get_vital_file, name='OPEMR_get_vital_file'),
     path('OPEMR_delete_vital_file/<str:file_id>/', OPEMR.OPEMR_delete_vital_file, name='OPEMR_delete_vital_file'),
-    # path('OPEMR_get_radiology_items/', OPEMR.OPEMR_get_radiology_items, name='OPEMR_get_radiology_items'),
+    path('OPEMR_get_radiology_items/', OPEMR.OPEMR_get_radiology_items, name='OPEMR_get_radiology_items'),
+    path('OPEMR_get_patient_discharge_summaries/', OPEMR.OPEMR_get_patient_discharge_summaries, name='OPEMR_get_patient_discharge_summaries'),
 
     # IPEMR
     path('IPEMR_get_admitted_patients/', IPEMR.IPEMR_get_admitted_patients, name='IPEMR_get_admitted_patients'),

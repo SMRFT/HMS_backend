@@ -335,13 +335,45 @@ import os
 def sanitize_medicines(medicines):
     clean = []
 
+    # Fallback map for batch numbers if missing
+    fallback_batch_map = {}
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        for s in db["hospital_pharmacystock"].find():
+            iid = s.get("item_id")
+            bn = s.get("batch_number")
+            if iid is not None and bn and iid not in fallback_batch_map:
+                fallback_batch_map[iid] = str(bn).strip()
+                try:
+                    fallback_batch_map[int(iid)] = str(bn).strip()
+                except Exception:
+                    pass
+        for v in db["hospital_velavan_stock"].find():
+            iid = v.get("item_id")
+            bn = v.get("batch_no")
+            if iid is not None and bn and iid not in fallback_batch_map:
+                fallback_batch_map[iid] = str(bn).strip()
+                try:
+                    fallback_batch_map[int(iid)] = str(bn).strip()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     for med in medicines:
         if not med:
             continue
 
+        item_id_val = int(med.get("item_id"))
+        bn_val = str(med.get("batch_number") or med.get("batch_no") or "").strip()
+        if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
+            bn_val = fallback_batch_map.get(item_id_val, "") or fallback_batch_map.get(str(item_id_val), "")
+
         clean.append({
-            "item_id": int(med.get("item_id")),
-            "batch_number": str(med.get("batch_number")),
+            "item_id": item_id_val,
+            "item_name": med.get("item_name") or med.get("name") or "",
+            "batch_number": bn_val,
             "qty": int(med.get("qty", 0)),
             "price": float(med.get("price", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
@@ -2798,10 +2830,19 @@ def finalize_bill(request):
                         "edited_by":      employee_id,
                     })
 
+            bn_val = str(med.get("batch_number") or med.get("batch_no") or "").strip()
+            if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
+                try:
+                    stk = bill_collection.database["hospital_pharmacystock"].find_one({"item_id": item_id})
+                    if stk and stk.get("batch_number"):
+                        bn_val = str(stk["batch_number"]).strip()
+                except Exception:
+                    pass
+
             med_entry = {
                 "item_id":          item_id,
                 "item_name":        med.get("item_name") or med.get("name"),
-                "batch_number":     med.get("batch_number"),
+                "batch_number":     bn_val,
                 "quantity":         qty,
                 "price":            price,
                 "calculated_price": calculated_price,
@@ -3896,11 +3937,48 @@ def get_doctor_prescriptions(request):
 
         consultations = list(qs.order_by("-created_date", "-date"))
 
+        # Batch lookup map for prescription details enrichment
+        batch_stock_map = {}
+        try:
+            for s in hms_mongo["hospital_pharmacystock"].find():
+                iid = s.get("item_id")
+                bn = s.get("batch_number")
+                if iid is not None and bn and iid not in batch_stock_map:
+                    batch_stock_map[iid] = str(bn).strip()
+                    try:
+                        batch_stock_map[int(iid)] = str(bn).strip()
+                    except Exception:
+                        pass
+            for v in hms_mongo["hospital_velavan_stock"].find():
+                iid = v.get("item_id")
+                bn = v.get("batch_no")
+                if iid is not None and bn and iid not in batch_stock_map:
+                    batch_stock_map[iid] = str(bn).strip()
+                    try:
+                        batch_stock_map[int(iid)] = str(bn).strip()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         results = []
         for c in consultations:
-            presc_items = getattr(c, "prescription_details", []) or []
-            if not isinstance(presc_items, list) or len(presc_items) == 0:
+            raw_presc_items = getattr(c, "prescription_details", []) or []
+            if not isinstance(raw_presc_items, list) or len(raw_presc_items) == 0:
                 continue
+
+            presc_items = []
+            for it in raw_presc_items:
+                if not isinstance(it, dict):
+                    continue
+                it_copy = dict(it)
+                it_id = it_copy.get("item_id")
+                it_bn = str(it_copy.get("batch_number") or it_copy.get("batch_no") or "").strip()
+                if not it_bn or it_bn.lower() == "none" or it_bn.lower() == "null" or it_bn == "N/A":
+                    it_bn = batch_stock_map.get(it_id, "") or batch_stock_map.get(str(it_id), "")
+                it_copy["batch_number"] = it_bn
+                it_copy["batch_no"] = it_bn
+                presc_items.append(it_copy)
 
             c_uhid = getattr(c, "uhid", "") or ""
             c_created = getattr(c, "created_date", None) or getattr(c, "date", None)
