@@ -28,7 +28,7 @@ class AuditModel(models.Model):
     created_by = models.CharField(max_length=100, null=True, blank=True)
     created_date = models.DateTimeField(default=timezone.now)
     lastmodified_by = models.CharField(max_length=100, null=True, blank=True)
-    lastmodified_date = models.DateTimeField(auto_now = True)
+    lastmodified_date = models.DateTimeField(null=True, blank=True)
     branch_code = models.CharField(max_length=100, null=True, blank=True)
     outlet_code = models.CharField(max_length=100, null=True, blank=True)
     hospital_code = models.CharField(max_length=100, null=True, blank=True)
@@ -46,7 +46,9 @@ class AuditModel(models.Model):
         if not self.created_date:
             self.created_date = timezone.now()
 
-        self.lastmodified_date = timezone.now()
+        # Only set lastmodified_date on updates, not on initial create (POST)
+        if self.pk and self.lastmodified_by:
+            self.lastmodified_date = timezone.now()
 
         super().save(*args, **kwargs)
 class ABHAProfile(AuditModel):
@@ -200,6 +202,7 @@ class Billing(AuditModel):
     paid_date = models.DateTimeField(null=True, blank=True)
     shiftno = models.CharField(max_length=100, blank=True, null=True)
     bill_type = models.IntegerField(blank=True, null=True)
+    consultation_status = models.CharField(max_length=50, default='Waiting', blank=True, null=True)
     edit_history = models.JSONField(default=list, blank=True)
 
     def save(self, *args, **kwargs):
@@ -2644,6 +2647,14 @@ class MRD(AuditModel):
     error_reported_date = models.DateTimeField(null=True, blank=True)
     error_resolved_by   = models.CharField(max_length=100, null=True, blank=True)
     error_resolved_date = models.DateTimeField(null=True, blank=True)
+
+    # Scanned PDF Document storage
+    pdf_file_id         = models.CharField(max_length=100, null=True, blank=True)
+    pdf_filename        = models.CharField(max_length=255, null=True, blank=True)
+    pdf_uploaded_by     = models.CharField(max_length=100, null=True, blank=True)
+    pdf_uploaded_date   = models.DateTimeField(null=True, blank=True)
+    pdf_deleted_by      = models.CharField(max_length=100, null=True, blank=True)
+    pdf_deleted_date    = models.DateTimeField(null=True, blank=True)
 
     is_active     = models.BooleanField(default=True)
 

@@ -136,6 +136,69 @@ PAGE_MAPPING = {
 
     r"^/_b_a_c_k_e_n_d/HMS/medicine-tracking/?$":          "HMS-P-MT",
 
+    # ==================== STORES & INVENTORY ====================
+    # Item Master & Masters
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/price-history/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/department-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/department-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/category-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-type-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/rack-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/rack-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/shelf-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/shelf-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores GRN
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/[^/]+/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
+
+    # Stores Intent
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/create/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/update/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/delete/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/approve/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/reject/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/delete/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-department-report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores Lab Usage
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-get_stores_lab_approved_items/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-stores_daily_usage_items/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-stores_daily_usage_report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Vending Machine
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-sales/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-sales/import-excel/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/vending-machine-report/?(\?.*)?$': 'HMS-API-IT',
+
+    # Stores Purchase Orders
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-orders/?(\?.*)?$': 'HMS-P-PO',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-orders/[^/]+/?(\?.*)?$': 'HMS-P-PO',
+
+    # Stores Purchase Returns & Debit Notes
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/?(\?.*)?$': 'HMS-P-GPR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/[^/]+/?(\?.*)?$': 'HMS-P-GPR',
+
+    # Stores Advanced Reports
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-analysis-report/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-previous-day-stock-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-supplier-wise-report/?(\?.*)?$': 'HMS-P-VND',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-non-moving-items-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-short-expiry-report/?(\?.*)?$': 'HMS-P-PER',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-reorder-level-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-rack-classification/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-rack-update/?(\?.*)?$': 'HMS-API-IT',
+
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
@@ -391,6 +454,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/category-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
     r'^/_b_a_c_k_e_n_d/HMS/group-type-master/?(\?.*)?$': 'HMS-API-IT',
     r'^/_b_a_c_k_e_n_d/HMS/group-type-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/rack-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/rack-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/shelf-master/?(\?.*)?$': 'HMS-API-IT',
+    r'^/_b_a_c_k_e_n_d/HMS/shelf-master/[^/]+/?(\?.*)?$': 'HMS-API-IT',
 
     # Stores GRN:
     '/_b_a_c_k_e_n_d/HMS/stores-grn/': 'HMS-P-SGRN',
@@ -457,7 +524,9 @@ PAGE_MAPPING = {
 
         
          '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-PDB',
-         '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+          '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
+         '/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/': 'HMS-P-PMC',
+         r'^/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/?(\?.*)?$': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
          '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
@@ -552,6 +621,9 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/mrd/discharged-files/?(\\?.*)?$': 'HMS-P-MRD',
         r'/_b_a_c_k_e_n_d/HMS/mrd/update-status/?(\\?.*)?$': 'HMS-P-MRD',
         r'/_b_a_c_k_e_n_d/HMS/mrd/stats/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/upload-pdf/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/delete-pdf/?(\\?.*)?$': 'HMS-P-MRD',
+        r'/_b_a_c_k_e_n_d/HMS/mrd/file/[^/]+/?(\\?.*)?$': 'HMS-P-MRD',
 
         # OP EMR
 
@@ -559,12 +631,16 @@ PAGE_MAPPING = {
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_billing_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_VitalEntry/?(\\?.*)?$': 'HMS-P-OPEMRVE',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_history/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_upload_vital_file/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_vital_file/[^/]+/?(\\?.*)?$': 'HMS-P-OPEMRVE',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_delete_vital_file/[^/]+/?(\\?.*)?$': 'HMS-P-OPEMRVE',
 
         # OPDOCTOR
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_symptoms/': 'HMS-P-OPEMRGS',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_diagnostics_tests/': 'HMS-P-OPEMRGD',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_medicines/': 'HMS-P-OPEMRGM',
         r'/_b_a_c_k_e_n_d/HMS/OPEMR_DoctorConsultation/?(\\?.*)?$': 'HMS-P-OPEMRDC',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_patient_lab_results/?(\\?.*)?$': 'HMS-P-OPEMRDC',
 
         # IP EMR
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_get_admitted_patients/?(\?.*)?$': 'HMS-P-IPEMR',
@@ -576,6 +652,7 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_patient_history/?(\?.*)?$': 'HMS-P-IPEMR',
         r'^/_b_a_c_k_e_n_d/HMS/IPEMR_doctor_dashboard_analytics/?(\?.*)?$': 'HMS-P-IPEMR',
         '/_b_a_c_k_e_n_d/HMS/OPEMR_get_referral_doctors': 'HMS-P-OPEMRD',
+        r'/_b_a_c_k_e_n_d/HMS/OPEMR_get_Doctor_patient/?(\\?.*)?$': 'HMS-P-OPEMRGP',
 
         # ==================== VELAVAN ====================
         # Items
@@ -616,6 +693,16 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/velavan_create_customer/?(\?.*)?$': 'HMS-P-VCU',
         r'^/_b_a_c_k_e_n_d/HMS/velavan_update_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCE',
         r'^/_b_a_c_k_e_n_d/HMS/velavan_delete_customer/[^/]+/?(\?.*)?$': 'HMS-P-VCD',
+
+
+         # shanmuga360
+        '/_b_a_c_k_e_n_d/HMS/360_registration/'     : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_medicinelist/' : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_doctorlist/'   : 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/get_360_testlist/'     : 'HMS-P-S360',
+        r'^/_b_a_c_k_e_n_d/HMS/360_report/?(\?.*)?$': 'HMS-P-S360',
+        '/_b_a_c_k_e_n_d/HMS/sample_collector/'     : 'HMS-P-S360',
+    
 
 }
 

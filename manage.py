@@ -11,7 +11,7 @@ def main():
     from dotenv import load_dotenv
     load_dotenv()
     
-    environment = os.getenv('ENV_CLASSIFICATION', 'local')
+    environment = os.getenv('ENV_CLASSIFICATION', 'test')
 
     print(f"Initializing environment: {environment}" )
 

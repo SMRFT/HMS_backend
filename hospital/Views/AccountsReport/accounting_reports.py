@@ -517,10 +517,13 @@ def get_shift_summary_report(request):
 def discharge_bills_report(request):
     """
     Dedicated reporting API for discharge bills.
-    Queries hospital_cashcountercollection first.
+    Queries hospital_dischargebilling directly.
 
     Extra query params:
-    - payment_mode: 'Cash' | 'Card' | 'Cheque' | 'Multiple Payment' (omit = all)
+    - status: 'Billed' (default) | 'Estimate' | 'all'
+    - from_date: YYYY-MM-DD
+    - to_date: YYYY-MM-DD
+    - payment_mode: 'Cash' | 'Card' | 'Cheque' | 'Multiple Payment' (omit or 'all' = all)
     - insurance: 'true' -> only insurance-linked patients, 'false' -> only non-insurance
     - discount_only: 'true' -> only bills where a discount was actually applied
     """
@@ -532,72 +535,50 @@ def discharge_bills_report(request):
         insurance_f    = request.GET.get("insurance")
         discount_only  = request.GET.get("discount_only") == "true"
 
-        hospital_code = (
-            request.GET.get("auth-hospital-code") or
-            request.META.get("HTTP_AUTH_HOSPITAL_CODE") or
-            request.META.get("HTTP_HOSPITAL_CODE") or
-            (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-        )
-        branch_code = (
-            request.GET.get("auth-branch-code") or
-            request.META.get("HTTP_AUTH_BRANCH_CODE") or
-            request.META.get("HTTP_BRANCH_CODE") or
-            (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-        )
+        hospital_code, branch_code = _auth_scope(request)
 
-        # Connect MongoDB to query hospital_cashcountercollection first
+        # Connect MongoDB
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
 
-        q = {"billing_category": {"$in": ["Discharge", "DischargeBills", "discharge"]}}
-        if hospital_code: q["hospital_code"] = hospital_code
-        if branch_code: q["branch_code"] = branch_code
-        if from_f:
-            f_date = _parse_date(from_f)
-            if f_date:
-                f_dt = datetime.combine(f_date, datetime.min.time())
-                q.setdefault("created_date", {})["$gte"] = f_dt
-        if to_f:
-            t_date = _parse_date(to_f)
-            if t_date:
-                t_dt = datetime.combine(t_date, datetime.max.time())
-                q.setdefault("created_date", {})["$lte"] = t_dt
-
-        ccc_docs = list(db["hospital_cashcountercollection"].find(q))
-        bill_numbers = list(set([doc["bill_number"] for doc in ccc_docs if doc.get("bill_number")]))
-
-        if bill_numbers:
-            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
-                {"bill_no": {"$in": bill_numbers}},
-                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
-            ))
-            all_records = list(DischargeBilling.objects.filter(bill_no__in=bill_numbers))
-        else:
-            raw_discharge_docs = list(db["hospital_dischargebilling"].find(
-                {},
-                {"bill_no": 1, "payment_details": 1, "CashierID": 1}
-            ))
-            all_records = list(DischargeBilling.objects.all())
-            if from_f:
-                f_d = _parse_date(from_f)
-                if f_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) >= f_d]
-            if to_f:
-                t_d = _parse_date(to_f)
-                if t_d: all_records = [r for r in all_records if r.bill_date and _parse_date(r.bill_date) <= t_d]
-
-        payment_mode_map = {
-            d.get("bill_no"): (d.get("payment_details") or {}).get("method", "Cash")
-            for d in raw_discharge_docs if d.get("bill_no")
+        mongo_q = {
+            "is_cancelled": {"$ne": True}
         }
-        cashier_map = {
-            d.get("bill_no"): d.get("CashierID")
-            for d in raw_discharge_docs if d.get("bill_no")
-        }
+        if status_f and status_f.lower() != "all":
+            mongo_q["status"] = status_f
+        if hospital_code:
+            mongo_q["hospital_code"] = hospital_code
+        if branch_code:
+            mongo_q["branch_code"] = branch_code
 
-        # Admission lookup for insurance detection, room, and admission date.
-        # insuranceCompanyName is a raw Mongo field not declared on the Admission
-        # model, so this is read via pymongo rather than the ORM.
-        ip_numbers = list({r.ip_number for r in all_records if r.ip_number})
+        discharge_docs = list(db["hospital_dischargebilling"].find(mongo_q))
+
+        # Date range filtering
+        f_d = _parse_date(from_f) if from_f else None
+        t_d = _parse_date(to_f) if to_f else None
+
+        records = []
+        for doc in discharge_docs:
+            b_date = _parse_date(doc.get("bill_date")) or _parse_date(doc.get("created_date"))
+            if f_d and b_date and b_date < f_d:
+                continue
+            if t_d and b_date and b_date > t_d:
+                continue
+            records.append(doc)
+
+        bill_nos = [d.get("bill_no") for d in records if d.get("bill_no")]
+        ccc_map = {}
+        if bill_nos:
+            ccc_docs = list(db["hospital_cashcountercollection"].find({
+                "bill_number": {"$in": bill_nos}
+            }))
+            for c in ccc_docs:
+                b_num = c.get("bill_number")
+                if b_num and b_num not in ccc_map:
+                    ccc_map[b_num] = c
+
+        # Admission lookup for room, admission date, insurance
+        ip_numbers = list(set([d.get("ip_number") for d in records if d.get("ip_number")]))
         admission_map = {}
         if ip_numbers:
             for a in db["hospital_admission"].find({"$or": [{"ipNumber": {"$in": ip_numbers}}, {"ip_number": {"$in": ip_numbers}}]}):
@@ -605,38 +586,59 @@ def discharge_bills_report(request):
                 if ip_k:
                     admission_map[ip_k] = a
 
+        # Patient lookup
+        uhids = list(set([d.get("uhid") for d in records if d.get("uhid")]))
+        patient_map = {}
+        if uhids:
+            try:
+                for p in Patient.objects.filter(uhid__in=uhids):
+                    patient_map[p.uhid] = p
+            except Exception as e:
+                print("Patient lookup error:", e)
+
         client.close()
 
         filtered = []
 
-        for obj in all_records:
-            if not obj.is_active: continue
-            if status_f and obj.status != status_f: continue
+        for doc in records:
+            bill_no = doc.get("bill_no")
+            uhid = doc.get("uhid")
+            ip_number = doc.get("ip_number")
 
-            payment_mode = payment_mode_map.get(obj.bill_no, "Cash")
-            if payment_mode_f and payment_mode.lower() != payment_mode_f.lower():
+            payment_mode = (
+                (doc.get("payment_details") or {}).get("method")
+                or ccc_map.get(bill_no, {}).get("payment_mode")
+                or doc.get("payment_mode")
+                or "Cash"
+            )
+            if payment_mode_f and payment_mode_f.lower() != "all" and payment_mode.lower() != payment_mode_f.lower():
                 continue
 
-            has_discount = _to_float(obj.total_disc) > 0
+            disc_amt = _to_float(doc.get("discount_amount") or doc.get("total_disc") or 0)
+            has_discount = disc_amt > 0
             if discount_only and not has_discount:
                 continue
 
-            admission = admission_map.get(obj.ip_number, {})
-            insurance_company = admission.get("insuranceCompanyName")
+            adm = admission_map.get(ip_number, {})
+            insurance_company = adm.get("insuranceCompanyName")
+            p = patient_map.get(uhid)
 
             # Build patient details
-            patient_details = {}
-            p = None
-            if obj.uhid:
-                try:
-                    p = Patient.objects.get(uhid=obj.uhid)
-                    patient_details = {
-                        "patient_name": f"{p.firstName} {p.lastName}".strip(),
-                        "age": p.age,
-                        "gender": p.gender,
-                    }
-                except Patient.DoesNotExist:
-                    pass
+            p_name = ""
+            if p:
+                p_name = f"{p.firstName or ''} {p.lastName or ''}".strip()
+                patient_details = {
+                    "patient_name": p_name,
+                    "age": p.age,
+                    "gender": p.gender,
+                }
+            else:
+                p_name = adm.get("patient_name") or adm.get("patientname") or doc.get("patient_name") or "N/A"
+                patient_details = {
+                    "patient_name": p_name,
+                    "age": adm.get("age"),
+                    "gender": adm.get("gender"),
+                }
 
             has_insurance = bool(
                 insurance_company or
@@ -648,36 +650,50 @@ def discharge_bills_report(request):
             if insurance_f == "false" and has_insurance:
                 continue
 
-            room_details = admission.get("room_details") or []
+            room_details = adm.get("room_details") or []
             active_rooms = [rm for rm in room_details if rm.get("is_roomActive") in (True, "True", "true", 1, "1")]
-            room_no = (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNo")
+            room_no = (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNo") or (active_rooms[-1] if active_rooms else (room_details[-1] if room_details else {})).get("roomNumber") or "N/A"
             patient_details["room_no"] = room_no
-            patient_details["admission_date"] = _format_dt(admission.get("admissionDateTime"))
+            patient_details["admission_date"] = _format_dt(adm.get("admissionDateTime") or adm.get("created_date"))
 
-            # Department-wise drill-down from the bill's own line items
-            items = obj.items if isinstance(obj.items, list) else []
+            # Department-wise drill-down from line items
+            items = doc.get("items") or []
+            if isinstance(items, str):
+                items = _parse_json(items)
             dept_totals = {}
             for it in items:
                 if not isinstance(it, dict): continue
-                cat = it.get("category") or "Other"
+                cat = it.get("category") or it.get("package_name") or it.get("item_description") or "Other"
                 dept_totals[cat] = dept_totals.get(cat, 0) + _to_float(it.get("amount"))
             department_breakdown = [{"category": k, "amount": v} for k, v in dept_totals.items()]
 
+            b_date_val = doc.get("bill_date") or doc.get("created_date")
+            b_date_str = None
+            if isinstance(b_date_val, (datetime, date)):
+                b_date_str = b_date_val.isoformat()
+            elif isinstance(b_date_val, str):
+                b_date_str = b_date_val
+
+            cashier_id = ccc_map.get(bill_no, {}).get("created_by") or doc.get("CashierID") or doc.get("created_by") or ""
+
             filtered.append({
-                "id": obj.discharge_id,
-                "bill_no": obj.bill_no,
-                "estimate_number": obj.estimate_number,
-                "uhid": obj.uhid,
-                "ip_number": obj.ip_number,
-                "branch_code": obj.branch_code,
-                "bill_date": obj.bill_date.isoformat() if obj.bill_date else None,
-                "total_amount": _to_float(obj.total_amount),
-                "advance_amount": _to_float(obj.advance_amount),
-                "net_amount": _to_float(obj.net_amount),
-                "total_disc": _to_float(obj.total_disc),
+                "id": doc.get("discharge_id"),
+                "bill_no": bill_no,
+                "estimate_number": doc.get("estimate_number"),
+                "uhid": uhid,
+                "ip_number": ip_number,
+                "branch_code": doc.get("branch_code"),
+                "hospital_code": doc.get("hospital_code"),
+                "bill_date": b_date_str,
+                "total_amount": _to_float(doc.get("total_amount")),
+                "advance_amount": _to_float(doc.get("advance_amount")),
+                "net_amount": _to_float(doc.get("net_amount")),
+                "total_disc": disc_amt,
+                "discount_amount": disc_amt,
+                "discount_percent": _to_float(doc.get("discount_percent") or 0),
                 "has_discount": has_discount,
-                "cashier_id": cashier_map.get(obj.bill_no),
-                "status": obj.status,
+                "cashier_id": cashier_id,
+                "status": doc.get("status"),
                 "patient_details": patient_details,
                 "payment_mode": payment_mode,
                 "has_insurance": has_insurance,
@@ -1692,12 +1708,15 @@ def sales_tax_register(request):
     CURRENT CGST_Percentage/SGST_Percentage to estimate the rate-wise split.
     Older bills whose batch's tax rate has since changed will be inaccurate.
 
-    Query params: patient_type = 'op' | 'ip' (default: all)
+    Query params:
+    - patient_type = 'all' | 'op' | 'ip' (default: all)
+    - report_type  = 'all' | 'sales' | 'returns' (default: all)
     """
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
         patient_type = (request.GET.get("patient_type") or "all").lower()
+        report_type = (request.GET.get("report_type") or "all").lower()
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
@@ -1706,10 +1725,10 @@ def sales_tax_register(request):
             if t_date and d and d > t_date: return False
             return True
 
-        sale_bills = list(PharmacyBilling.objects.filter(billing_status="Paid"))
-        returns = list(SalesReturn.objects.all())
+        sale_bills = list(PharmacyBilling.objects.filter(billing_status="Paid")) if report_type in ("all", "sales", "sale") else []
+        returns = list(SalesReturn.objects.all()) if report_type in ("all", "returns", "return") else []
         return_bill_nos = {r.bill_no for r in returns if r.bill_no}
-        orig_bill_map = {b.bill_no: b for b in PharmacyBilling.objects.filter(bill_no__in=return_bill_nos)}
+        orig_bill_map = {b.bill_no: b for b in PharmacyBilling.objects.filter(bill_no__in=return_bill_nos)} if return_bill_nos else {}
 
         item_ids = set()
         for b in sale_bills:
@@ -1724,12 +1743,13 @@ def sales_tax_register(request):
                     except (TypeError, ValueError): pass
 
         rate_map = {}
-        for s in PharmacyStock.objects.filter(item_id__in=item_ids):
-            key = (str(s.item_id), str(s.batch_number))
-            if key not in rate_map:
-                rate_map[key] = (_to_float(s.CGST_Percentage), _to_float(s.SGST_Percentage))
+        if item_ids:
+            for s in PharmacyStock.objects.filter(item_id__in=item_ids):
+                key = (str(s.item_id), str(s.batch_number))
+                if key not in rate_map:
+                    rate_map[key] = (_to_float(s.CGST_Percentage), _to_float(s.SGST_Percentage))
 
-        item_name_map = {i.item_id: i.item_name for i in PharmacyItem.objects.filter(item_id__in=item_ids)}
+        item_name_map = {i.item_id: i.item_name for i in PharmacyItem.objects.filter(item_id__in=item_ids)} if item_ids else {}
 
         def tax_split(amount, cgst_pct, sgst_pct):
             total_rate = cgst_pct + sgst_pct
@@ -1738,8 +1758,7 @@ def sales_tax_register(request):
             taxable = amount / (1 + total_rate / 100)
             return taxable, taxable * cgst_pct / 100, taxable * sgst_pct / 100
 
-        lines = []
-
+        sales_lines = []
         for b in sale_bills:
             d = _parse_date(b.bill_date)
             if not in_range(d): continue
@@ -1754,15 +1773,17 @@ def sales_tax_register(request):
                 except (TypeError, ValueError): iid = None
                 cgst_pct, sgst_pct = rate_map.get((str(med.get("item_id")), str(med.get("batch_number") or "")), (0.0, 0.0))
                 taxable, cgst_amt, sgst_amt = tax_split(amount, cgst_pct, sgst_pct)
-                lines.append({
+                sales_lines.append({
                     "type": "Sale", "patient_type": category, "bill_no": b.bill_no,
                     "date": b.bill_date.isoformat() if b.bill_date else None,
                     "item_name": med.get("item_name") or item_name_map.get(iid, ""),
+                    "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
                     "taxable_value": taxable, "cgst_amount": cgst_amt, "sgst_amount": sgst_amt,
                     "total_tax": cgst_amt + sgst_amt, "gross_amount": amount,
                 })
 
+        return_lines = []
         for r in returns:
             orig = orig_bill_map.get(r.bill_no)
             category = "IP" if (orig and orig.inpatient_number) else "OP"
@@ -1778,34 +1799,309 @@ def sales_tax_register(request):
                 except (TypeError, ValueError): iid = None
                 cgst_pct, sgst_pct = rate_map.get((str(med.get("item_id")), str(med.get("batch_number") or "")), (0.0, 0.0))
                 taxable, cgst_amt, sgst_amt = tax_split(amount, cgst_pct, sgst_pct)
-                lines.append({
-                    "type": "Return", "patient_type": category, "bill_no": r.return_bill_no,
+                return_lines.append({
+                    "type": "Return", "patient_type": category,
+                    "bill_no": r.return_bill_no,
+                    "orig_bill_no": r.bill_no or "—",
                     "date": r.return_bill_date.isoformat() if r.return_bill_date else None,
-                    "item_name": item_name_map.get(iid, ""),
+                    "item_name": item_name_map.get(iid, "") or med.get("item_name", ""),
+                    "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
-                    "taxable_value": -taxable, "cgst_amount": -cgst_amt, "sgst_amount": -sgst_amt,
-                    "total_tax": -(cgst_amt + sgst_amt), "gross_amount": -amount,
+                    "taxable_value": taxable, "cgst_amount": cgst_amt, "sgst_amount": sgst_amt,
+                    "total_tax": cgst_amt + sgst_amt, "gross_amount": amount,
                 })
 
-        rate_summary = {}
-        for l in lines:
+        # Calculate Sales Summary
+        sales_rate_summary = {}
+        for l in sales_lines:
             key = l["rate"]
-            b = rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0})
+            b = sales_rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
             b["taxable_value"] += l["taxable_value"]
             b["cgst_amount"] += l["cgst_amount"]
             b["sgst_amount"] += l["sgst_amount"]
             b["total_tax"] += l["total_tax"]
             b["gross_amount"] += l["gross_amount"]
+            b["count"] += 1
 
-        lines.sort(key=lambda x: x["date"] or "", reverse=True)
-        summary = {
-            "total_taxable_value": sum(l["taxable_value"] for l in lines),
-            "total_tax": sum(l["total_tax"] for l in lines),
-            "total_gross": sum(l["gross_amount"] for l in lines),
-            "rate_wise": sorted(rate_summary.values(), key=lambda x: x["rate"]),
+        sales_summary = {
+            "count": len(sales_lines),
+            "total_taxable_value": sum(l["taxable_value"] for l in sales_lines),
+            "total_cgst": sum(l["cgst_amount"] for l in sales_lines),
+            "total_sgst": sum(l["sgst_amount"] for l in sales_lines),
+            "total_tax": sum(l["total_tax"] for l in sales_lines),
+            "total_gross": sum(l["gross_amount"] for l in sales_lines),
+            "rate_wise": sorted(sales_rate_summary.values(), key=lambda x: x["rate"]),
         }
 
-        return Response({"success": True, "data": lines, "summary": summary, "is_approximate": True})
+        # Calculate Return Summary (positive magnitudes for Return Report)
+        return_rate_summary = {}
+        for l in return_lines:
+            key = l["rate"]
+            b = return_rate_summary.setdefault(key, {"rate": key, "taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            b["taxable_value"] += l["taxable_value"]
+            b["cgst_amount"] += l["cgst_amount"]
+            b["sgst_amount"] += l["sgst_amount"]
+            b["total_tax"] += l["total_tax"]
+            b["gross_amount"] += l["gross_amount"]
+            b["count"] += 1
+
+        return_summary = {
+            "count": len(return_lines),
+            "total_taxable_value": sum(l["taxable_value"] for l in return_lines),
+            "total_cgst": sum(l["cgst_amount"] for l in return_lines),
+            "total_sgst": sum(l["sgst_amount"] for l in return_lines),
+            "total_tax": sum(l["total_tax"] for l in return_lines),
+            "total_gross": sum(l["gross_amount"] for l in return_lines),
+            "rate_wise": sorted(return_rate_summary.values(), key=lambda x: x["rate"]),
+        }
+
+        # Calculate Net Consolidated Rate-wise & Summary
+        all_rates = set(sales_rate_summary.keys()) | set(return_rate_summary.keys())
+        net_rate_wise = []
+        for rate in sorted(all_rates):
+            s_data = sales_rate_summary.get(rate, {"taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            r_data = return_rate_summary.get(rate, {"taxable_value": 0.0, "cgst_amount": 0.0, "sgst_amount": 0.0, "total_tax": 0.0, "gross_amount": 0.0, "count": 0})
+            net_rate_wise.append({
+                "rate": rate,
+                "sales_taxable": s_data["taxable_value"],
+                "sales_gross": s_data["gross_amount"],
+                "return_taxable": r_data["taxable_value"],
+                "return_gross": r_data["gross_amount"],
+                "taxable_value": s_data["taxable_value"] - r_data["taxable_value"],
+                "cgst_amount": s_data["cgst_amount"] - r_data["cgst_amount"],
+                "sgst_amount": s_data["sgst_amount"] - r_data["sgst_amount"],
+                "total_tax": s_data["total_tax"] - r_data["total_tax"],
+                "gross_amount": s_data["gross_amount"] - r_data["gross_amount"],
+            })
+
+        net_summary = {
+            "total_sales_taxable": sales_summary["total_taxable_value"],
+            "total_sales_gross": sales_summary["total_gross"],
+            "total_return_taxable": return_summary["total_taxable_value"],
+            "total_return_gross": return_summary["total_gross"],
+            "total_taxable_value": sales_summary["total_taxable_value"] - return_summary["total_taxable_value"],
+            "total_cgst": sales_summary["total_cgst"] - return_summary["total_cgst"],
+            "total_sgst": sales_summary["total_sgst"] - return_summary["total_sgst"],
+            "total_tax": sales_summary["total_tax"] - return_summary["total_tax"],
+            "total_gross": sales_summary["total_gross"] - return_summary["total_gross"],
+            "rate_wise": net_rate_wise,
+        }
+
+        # Consolidated Lines with negative return amounts for consolidated table
+        consolidated_return_lines = []
+        for l in return_lines:
+            consolidated_return_lines.append({
+                **l,
+                "taxable_value": -l["taxable_value"],
+                "cgst_amount": -l["cgst_amount"],
+                "sgst_amount": -l["sgst_amount"],
+                "total_tax": -l["total_tax"],
+                "gross_amount": -l["gross_amount"],
+            })
+
+        all_lines = sorted(sales_lines + consolidated_return_lines, key=lambda x: x["date"] or "", reverse=True)
+
+        def build_daywise_register(lines, is_return=False):
+            day_groups = {}
+            for l in lines:
+                if not l.get("date"):
+                    continue
+                try:
+                    dt_str = str(l["date"])
+                    if "T" in dt_str:
+                        dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    elif " " in dt_str:
+                        dt_obj = datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S")
+                    else:
+                        dt_obj = datetime.strptime(dt_str[:10], "%Y-%m-%d")
+                    d_key = dt_obj.strftime("%Y-%m-%d")
+                    d_display = dt_obj.strftime("%d/%m/%Y")
+                except Exception:
+                    d_key = str(l["date"])[:10]
+                    d_display = d_key
+
+                ptype = (l.get("patient_type") or "OP").upper()
+                group_key = (d_key, ptype)
+
+                if group_key not in day_groups:
+                    bill_prefix = "RETURN " if is_return else ""
+                    bill_name = f"PHARMACY {bill_prefix}{ptype} BILL (SH)"
+                    day_groups[group_key] = {
+                        "raw_date": d_key,
+                        "bill_date": d_display,
+                        "bill_name": bill_name,
+                        "patient_type": ptype,
+                        "bill_numbers": set(),
+                        "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                        "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                    }
+
+                entry = day_groups[group_key]
+                if l.get("bill_no"):
+                    entry["bill_numbers"].add(str(l["bill_no"]))
+
+                rate = round(float(l.get("rate") or 0.0), 2)
+                taxable = float(l.get("taxable_value") or 0.0)
+                cgst = float(l.get("cgst_amount") or 0.0)
+                sgst = float(l.get("sgst_amount") or 0.0)
+                gross = float(l.get("gross_amount") or 0.0)
+
+                # Assign to corresponding rate bucket
+                if rate == 0 or rate < 2:
+                    b = entry["exempted"]
+                elif rate <= 6:
+                    b = entry["rate_5"]
+                elif rate <= 14:
+                    b = entry["rate_12"]
+                elif rate <= 20:
+                    b = entry["rate_18"]
+                else:
+                    b = entry["rate_28"]
+
+                b["taxable"] += taxable
+                b["cgst"] += cgst
+                b["sgst"] += sgst
+                b["total"] += gross
+
+                entry["total"]["taxable"] += taxable
+                entry["total"]["cgst"] += cgst
+                entry["total"]["sgst"] += sgst
+                entry["total"]["total"] += gross
+
+            result = []
+            grand_total = {
+                "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            }
+
+            for k in sorted(day_groups.keys(), key=lambda x: (x[0], x[1])):
+                item = day_groups[k]
+                b_list = sorted(list(item["bill_numbers"]))
+                if len(b_list) == 0:
+                    bills_range = "—"
+                elif len(b_list) == 1:
+                    bills_range = b_list[0]
+                else:
+                    bills_range = f"{b_list[0]} - {b_list[-1]}"
+
+                item["bills"] = bills_range
+                item["bills_count"] = len(b_list)
+                del item["bill_numbers"]
+
+                for bucket in ["exempted", "rate_5", "rate_12", "rate_18", "rate_28", "total"]:
+                    grand_total[bucket]["taxable"] += item[bucket]["taxable"]
+                    grand_total[bucket]["cgst"] += item[bucket]["cgst"]
+                    grand_total[bucket]["sgst"] += item[bucket]["sgst"]
+                    grand_total[bucket]["total"] += item[bucket]["total"]
+
+                result.append(item)
+
+            return result, grand_total
+
+        day_wise_sales, day_wise_sales_gt = build_daywise_register(sales_lines, is_return=False)
+        day_wise_returns, day_wise_returns_gt = build_daywise_register(return_lines, is_return=True)
+
+        # Build Day-wise Net Consolidated Register
+        sales_day_map = {(row["raw_date"], row["patient_type"]): row for row in day_wise_sales}
+        return_day_map = {(row["raw_date"], row["patient_type"]): row for row in day_wise_returns}
+        all_day_keys = sorted(set(sales_day_map.keys()) | set(return_day_map.keys()), key=lambda x: (x[0], x[1]))
+
+        day_wise_net = []
+        day_wise_net_gt = {
+            "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+        }
+
+        for (d_key, ptype) in all_day_keys:
+            s_row = sales_day_map.get((d_key, ptype))
+            r_row = return_day_map.get((d_key, ptype))
+            
+            d_display = s_row["bill_date"] if s_row else (r_row["bill_date"] if r_row else d_key)
+            bill_name = f"PHARMACY {ptype} BILL (SH)"
+            bills_parts = []
+            if s_row and s_row["bills"] != "—":
+                bills_parts.append(s_row["bills"])
+            if r_row and r_row["bills"] != "—":
+                bills_parts.append(f"Ret: {r_row['bills']}")
+            bills_range = " | ".join(bills_parts) if bills_parts else "—"
+
+            net_row = {
+                "raw_date": d_key,
+                "bill_date": d_display,
+                "bill_name": bill_name,
+                "patient_type": ptype,
+                "bills": bills_range,
+                "exempted": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_5": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_12": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_18": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "rate_28": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+                "total": {"taxable": 0.0, "sgst": 0.0, "cgst": 0.0, "total": 0.0},
+            }
+
+            for bucket in ["exempted", "rate_5", "rate_12", "rate_18", "rate_28", "total"]:
+                s_taxable = s_row[bucket]["taxable"] if s_row else 0.0
+                s_cgst = s_row[bucket]["cgst"] if s_row else 0.0
+                s_sgst = s_row[bucket]["sgst"] if s_row else 0.0
+                s_tot = s_row[bucket]["total"] if s_row else 0.0
+
+                r_taxable = r_row[bucket]["taxable"] if r_row else 0.0
+                r_cgst = r_row[bucket]["cgst"] if r_row else 0.0
+                r_sgst = r_row[bucket]["sgst"] if r_row else 0.0
+                r_tot = r_row[bucket]["total"] if r_row else 0.0
+
+                net_row[bucket]["taxable"] = s_taxable - r_taxable
+                net_row[bucket]["cgst"] = s_cgst - r_cgst
+                net_row[bucket]["sgst"] = s_sgst - r_sgst
+                net_row[bucket]["total"] = s_tot - r_tot
+
+                day_wise_net_gt[bucket]["taxable"] += (s_taxable - r_taxable)
+                day_wise_net_gt[bucket]["cgst"] += (s_cgst - r_cgst)
+                day_wise_net_gt[bucket]["sgst"] += (s_sgst - r_sgst)
+                day_wise_net_gt[bucket]["total"] += (s_tot - r_tot)
+
+            day_wise_net.append(net_row)
+
+        if report_type in ("returns", "return"):
+            active_data = sorted(return_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_summary = return_summary
+        elif report_type in ("sales", "sale"):
+            active_data = sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_summary = sales_summary
+        else:
+            active_data = all_lines
+            active_summary = net_summary
+
+        return Response({
+            "success": True,
+            "data": active_data,
+            "summary": active_summary,
+            "sales_data": sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True),
+            "return_data": sorted(return_lines, key=lambda x: x["date"] or "", reverse=True),
+            "consolidated_data": all_lines,
+            "sales_summary": sales_summary,
+            "return_summary": return_summary,
+            "net_summary": net_summary,
+            "day_wise_sales": day_wise_sales,
+            "day_wise_sales_grand_total": day_wise_sales_gt,
+            "day_wise_returns": day_wise_returns,
+            "day_wise_returns_grand_total": day_wise_returns_gt,
+            "day_wise_net": day_wise_net,
+            "day_wise_net_grand_total": day_wise_net_gt,
+            "is_approximate": True
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()

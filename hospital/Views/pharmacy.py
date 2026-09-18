@@ -3865,3 +3865,140 @@ def pharmacy_expiry_report(request):
             "success": False,
             "message": f"Internal server error: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def get_doctor_prescriptions(request):
+    """
+    Retrieve doctor consultation records with prescription_details for pharmacy billing.
+    Returns patient demographics, doctor name, prescribed medicines list, and pharmacy billing status.
+    """
+    try:
+        uhid_filter = request.query_params.get("uhid")
+        search_filter = (request.query_params.get("search") or "").strip().lower()
+        from_date_str = request.query_params.get("from_date")
+        to_date_str = request.query_params.get("to_date")
+
+        from hospital.Views.OPEMR.models import OPDoctorConsultation
+        from hospital.models import Patient
+        from hospital.Views.dbcollection import get_employee_name_by_id
+        from pymongo import MongoClient
+        from django.utils import timezone
+
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_mongo = client["HMS"]
+        pb_col = hms_mongo["hospital_pharmacybilling"]
+
+        qs = OPDoctorConsultation.objects.all()
+        if uhid_filter:
+            qs = qs.filter(uhid=uhid_filter)
+
+        consultations = list(qs.order_by("-created_date", "-date"))
+
+        results = []
+        for c in consultations:
+            presc_items = getattr(c, "prescription_details", []) or []
+            if not isinstance(presc_items, list) or len(presc_items) == 0:
+                continue
+
+            c_uhid = getattr(c, "uhid", "") or ""
+            c_created = getattr(c, "created_date", None) or getattr(c, "date", None)
+
+            # Date filtering if provided
+            if c_created:
+                c_date_val = c_created.date() if hasattr(c_created, "date") else None
+                if from_date_str and c_date_val:
+                    try:
+                        from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+                        if c_date_val < from_d:
+                            continue
+                    except Exception:
+                        pass
+                if to_date_str and c_date_val:
+                    try:
+                        to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
+                        if c_date_val > to_d:
+                            continue
+                    except Exception:
+                        pass
+
+            # Patient details
+            p_obj = Patient.objects.filter(uhid=c_uhid).first() if c_uhid else None
+            if p_obj:
+                p_name = f"{p_obj.salutation or ''} {p_obj.firstName or ''} {p_obj.lastName or ''}".strip()
+                p_age = p_obj.age or ""
+                p_gender = p_obj.gender or ""
+                p_mobile = p_obj.mobilePhone or ""
+                p_address = p_obj.permanent_address or p_obj.city or ""
+            else:
+                p_name = f"Patient ({c_uhid})"
+                p_age = ""
+                p_gender = ""
+                p_mobile = ""
+                p_address = ""
+
+            # Search filter matching
+            if search_filter:
+                match_uhid = search_filter in c_uhid.lower()
+                match_name = search_filter in p_name.lower()
+                if not (match_uhid or match_name):
+                    continue
+
+            # Doctor name
+            doc_id = getattr(c, "doctor_id", "") or getattr(c, "created_by", "") or ""
+            doc_name = get_employee_name_by_id(doc_id)
+            if not doc_name or doc_name == "Unknown":
+                doc_name = f"Dr. ({doc_id})" if doc_id else "Doctor"
+            elif not doc_name.lower().startswith("dr"):
+                doc_name = f"Dr. {doc_name}"
+
+            # Check if matching bill exists in pharmacy billing
+            billing_status = "Pending"
+            bill_no = None
+            bill_id = None
+            if c_uhid:
+                matching_bill = pb_col.find_one({"uhid": c_uhid}, sort=[("created_date", -1)])
+                if matching_bill:
+                    billing_status = matching_bill.get("billing_status") or "Billed"
+                    bill_no = matching_bill.get("bill_no")
+                    bill_id = matching_bill.get("Bill_id")
+
+            # Localize timestamp to Asia/Kolkata
+            created_str = ""
+            if c_created:
+                try:
+                    if timezone.is_naive(c_created):
+                        c_created = timezone.make_aware(c_created, timezone.utc)
+                    created_str = timezone.localtime(c_created).isoformat()
+                except Exception:
+                    created_str = c_created.isoformat() if hasattr(c_created, "isoformat") else str(c_created)
+
+            results.append({
+                "id": str(getattr(c, "_id", "") or getattr(c, "pk", "") or ""),
+                "_id": str(getattr(c, "_id", "") or getattr(c, "pk", "") or ""),
+                "uhid": c_uhid,
+                "patient_name": p_name,
+                "age": p_age,
+                "gender": p_gender,
+                "mobile": p_mobile,
+                "address": p_address,
+                "doctor_id": doc_id,
+                "doctor_name": doc_name,
+                "created_date": created_str,
+                "status": getattr(c, "status", "Completed") or "Completed",
+                "finding": getattr(c, "finding", "") or "",
+                "prescription_details": presc_items,
+                "items_count": len(presc_items),
+                "billing_status": billing_status,
+                "bill_no": bill_no,
+                "Bill_id": bill_id
+            })
+
+        return Response({"success": True, "data": results}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
