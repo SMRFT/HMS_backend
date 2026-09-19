@@ -144,11 +144,19 @@ def _parse_date(val):
         try:
             return date.fromisoformat(val[:10])
         except:
-            try:
-                # Handle "2026-05-11 10:00:00"
-                return datetime.strptime(val.split(' ')[0], "%Y-%m-%d").date()
-            except:
-                return None
+            pass
+        try:
+            return datetime.strptime(val.split(' ')[0], "%Y-%m-%d").date()
+        except:
+            pass
+        try:
+            return datetime.strptime(val.split(' ')[0], "%d/%m/%Y").date()
+        except:
+            pass
+        try:
+            return datetime.strptime(val.split(' ')[0], "%d-%m-%Y").date()
+        except:
+            pass
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -547,6 +555,7 @@ def discharge_bills_report(request):
         payment_mode_f = (request.GET.get("payment_mode") or "").strip()
         insurance_f    = request.GET.get("insurance")
         discount_only  = request.GET.get("discount_only") == "true"
+        outlet_f       = request.GET.get("outlet_code") or request.GET.get("outlet")
 
         hospital_code, branch_code = _auth_scope(request)
 
@@ -563,6 +572,8 @@ def discharge_bills_report(request):
             mongo_q["hospital_code"] = hospital_code
         if branch_code:
             mongo_q["branch_code"] = branch_code
+        if outlet_f and str(outlet_f).strip().lower() != "all":
+            mongo_q["outlet_code"] = outlet_f
 
         discharge_docs = list(db["hospital_dischargebilling"].find(mongo_q))
 
@@ -692,25 +703,48 @@ def discharge_bills_report(request):
             filtered.append({
                 "id": doc.get("discharge_id"),
                 "bill_no": bill_no,
+                "bill_id": bill_no,
+                "sh_bill_no": doc.get("sh_bill_no") or doc.get("estimate_number") or doc.get("sh_bill_number") or bill_no,
                 "estimate_number": doc.get("estimate_number"),
                 "uhid": uhid,
                 "ip_number": ip_number,
                 "branch_code": doc.get("branch_code"),
                 "hospital_code": doc.get("hospital_code"),
                 "bill_date": b_date_str,
+                "admitting_date": patient_details.get("admission_date"),
+                "discharge_date": b_date_str,
                 "total_amount": _to_float(doc.get("total_amount")),
+                "bill_amount": _to_float(doc.get("total_amount") or doc.get("net_amount")),
                 "advance_amount": _to_float(doc.get("advance_amount")),
+                "advance": _to_float(doc.get("advance_amount")),
                 "net_amount": _to_float(doc.get("net_amount")),
+                "card_number": adm.get("policy_no") or adm.get("insurance_card_no") or adm.get("card_number") or doc.get("card_number") or "",
+                "service_no": adm.get("service_no") or adm.get("serviceNo") or doc.get("service_no") or "",
+                "claim_reference": adm.get("claim_reference") or adm.get("claim_id") or doc.get("claim_reference") or "",
+                "place": adm.get("place") or doc.get("place") or "",
+                "despatch_date": doc.get("despatch_date") or "",
+                "settlement_date": doc.get("settlement_date") or "",
+                "settled_amount": _to_float(doc.get("settled_amount")),
+                "tds": _to_float(doc.get("tds")),
+                "bank": doc.get("bank") or "",
+                "paid_by_patient": _to_float(doc.get("paid_by_patient") or doc.get("paid_amount")),
+                "disallowed_amount": _to_float(doc.get("disallowed_amount")),
+                "due": _to_float(doc.get("due") or doc.get("due_amount") or doc.get("net_amount")),
+                "settlement_duration": doc.get("settlement_duration") or "",
+                "old_billno": doc.get("old_billno") or "",
                 "total_disc": disc_amt,
                 "discount_amount": disc_amt,
                 "discount_percent": _to_float(doc.get("discount_percent") or 0),
                 "has_discount": has_discount,
                 "cashier_id": cashier_id,
-                "status": doc.get("status"),
+                "user": str(cashier_id).upper(),
+                "status": doc.get("status") or "NOT BILLED",
                 "patient_details": patient_details,
+                "patient_name": p_name,
                 "payment_mode": payment_mode,
                 "has_insurance": has_insurance,
-                "insurance_company": insurance_company or (p.company_code if p else None) or "",
+                "insurance_company": insurance_company or (p.company_code if p else None) or "GENERAL / PRIVATE",
+                "company_name": insurance_company or (p.company_code if p else None) or "GENERAL / PRIVATE",
                 "department_breakdown": department_breakdown,
             })
 
@@ -723,116 +757,201 @@ def discharge_bills_report(request):
         return Response({"success": False, "message": str(e)}, status=500)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Advance Registration Report
-# ─────────────────────────────────────────────────────────────────────────────
-
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def advance_registration_report(request):
     """
     Dedicated reporting API for IP advance payments.
-    Queries hospital_cashcountercollection first.
+    Queries all active admissions directly and matches all advance payment records.
     """
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
+        outlet_f = request.GET.get("outlet_code") or request.GET.get("outlet")
         is_insurance = request.GET.get("insurance") == "true"
         
-        hospital_code = (
-            request.GET.get("auth-hospital-code") or 
-            request.META.get("HTTP_AUTH_HOSPITAL_CODE") or 
-            request.META.get("HTTP_HOSPITAL_CODE") or 
-            (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-        )
-        branch_code = (
-            request.GET.get("auth-branch-code") or 
-            request.META.get("HTTP_AUTH_BRANCH_CODE") or 
-            request.META.get("HTTP_BRANCH_CODE") or 
-            (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-        )
+        hospital_code, branch_code = _auth_scope(request)
         
-        # Connect MongoDB to query hospital_cashcountercollection first
+        # Connect MongoDB
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
         
-        q = {"billing_category": {"$in": ["IPAdvance", "IPAdvanceBills", "advance"]}}
-        if hospital_code: q["hospital_code"] = hospital_code
-        if branch_code: q["branch_code"] = branch_code
-        if from_f:
-            f_date = _parse_date(from_f)
-            if f_date:
-                f_dt = datetime.combine(f_date, datetime.min.time())
-                q.setdefault("created_date", {})["$gte"] = f_dt
-        if to_f:
-            t_date = _parse_date(to_f)
-            if t_date:
-                t_dt = datetime.combine(t_date, datetime.max.time())
-                q.setdefault("created_date", {})["$lte"] = t_dt
-                
-        ccc_docs = list(db["hospital_cashcountercollection"].find(q))
-        bill_numbers = list(set([doc["bill_number"] for doc in ccc_docs if doc.get("bill_number")]))
+        adm_query = {
+            "is_cancelled": {"$ne": True},
+            "advance_payments": {"$exists": True, "$ne": []}
+        }
+        if hospital_code:
+            adm_query["hospital_code"] = hospital_code
+        if branch_code:
+            adm_query["branch_code"] = branch_code
+            
+        admissions = list(db["hospital_admission"].find(adm_query))
         
-        if bill_numbers:
-            admissions = list(db["hospital_admission"].find({"advance_payments.bill_no": {"$in": bill_numbers}}))
-        else:
-            admissions = list(db["hospital_admission"].find({"advance_payments": {"$exists": True, "$ne": []}}))
+        # Also query cashcountercollection for cashier / outlet mapping if available
+        ccc_map = {}
+        try:
+            ccc_docs = list(db["hospital_cashcountercollection"].find({
+                "billing_category": {"$in": ["IPAdvance", "IPAdvanceBills", "advance", "Advance", "CentralCashCounter"]}
+            }))
+            for c in ccc_docs:
+                b_num = c.get("bill_number")
+                if b_num and b_num not in ccc_map:
+                    ccc_map[b_num] = c
+        except Exception:
+            pass
+
+        # Cashier names lookup from Global DB
+        cashier_name_map = {}
+        try:
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            g_db = g_client['Global']
+            profiles = list(g_db['backend_diagnostics_profile'].find(
+                {},
+                {"employeeId": 1, "employeeName": 1, "_id": 0}
+            ))
+            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles if p.get('employeeId')}
+            g_client.close()
+        except Exception:
+            pass
+
         client.close()
         
-        uhids = list(set(a.get("uhid") for a in admissions if a.get('is_admissionActive', True) and a.get("uhid")))
+        # UHID to Patient Mapping
+        uhids = list(set(str(a.get("uhid")).strip() for a in admissions if a.get("uhid")))
         patients = Patient.objects.filter(uhid__in=uhids)
-        patient_map = {p.uhid: p for p in patients}
+        patient_map = {}
+        for p in patients:
+            k = str(p.uhid).strip().upper()
+            patient_map[k] = p
         
         report_data = []
         f_d = _parse_date(from_f) if from_f else None
         t_d = _parse_date(to_f) if to_f else None
 
         for adm in admissions:
-            if not adm.get('is_admissionActive', True): continue
-            
-            uhid = adm.get("uhid")
-            p = patient_map.get(uhid)
-            if not p: continue
+            uhid_raw = adm.get("uhid")
+            uhid_key = str(uhid_raw).strip().upper() if uhid_raw else ""
+            p = patient_map.get(uhid_key)
             
             if is_insurance:
                 has_insurance = (
-                    p.company_code or 
+                    (p and p.company_code) or 
                     adm.get('insuranceCompanyName') or 
-                    getattr(p, 'customer_type', '').lower() == 'insurance'
+                    adm.get('insurance_company') or 
+                    (p and getattr(p, 'customer_type', '').lower() == 'insurance')
                 )
-                if not has_insurance: continue
+                if not has_insurance:
+                    continue
                 
             payments = _parse_json(adm.get("advance_payments"))
-            for pay in payments:
-                if not isinstance(pay, dict) or pay.get('status') == 'Edited': continue
-                
-                bill_no = pay.get('bill_no') or pay.get('receipt_no') or pay.get('advance_id')
-                if bill_numbers and bill_no and bill_no not in bill_numbers:
-                    continue
+            if not isinstance(payments, list):
+                continue
 
-                paid_dt_str = pay.get('paid_datetime') or pay.get('created_date') or pay.get('date')
-                paid_d = _parse_date(paid_dt_str)
-                if f_d and paid_d and paid_d < f_d: continue
-                if t_d and paid_d and paid_d > t_d: continue
+            for pay in payments:
+                if not isinstance(pay, dict):
+                    continue
+                if str(pay.get('status', '')).upper() in ['EDITED', 'CANCELLED']:
+                    continue
                 
-                paid_dt = pay.get('paid_datetime') or pay.get('created_date') or pay.get('date')
-                ip_val = adm.get("ipNumber") or adm.get("ip_number") or adm.get("ip_no") or adm.get("inpatient_number") or ""
-                p_name = f"{p.firstName} {p.lastName}".strip() if p else (adm.get("patient_name") or adm.get("patientname") or "Patient")
+                bill_no = pay.get('bill_no') or pay.get('receipt_no') or pay.get('advance_id') or ""
+
+                # Date parsing
+                paid_dt_val = (
+                    pay.get('paid_datetime') or 
+                    pay.get('created_date') or 
+                    pay.get('bill_date') or 
+                    pay.get('date') or 
+                    adm.get('admissionDateTime') or 
+                    adm.get('created_date')
+                )
+                paid_d = _parse_date(paid_dt_val)
+                if f_d and paid_d and paid_d < f_d:
+                    continue
+                if t_d and paid_d and paid_d > t_d:
+                    continue
+                
+                # Outlet filtering
+                pay_outlet = (
+                    pay.get('outlet_code') or 
+                    adm.get('outlet_code') or 
+                    ccc_map.get(bill_no, {}).get('outlet_code') or 
+                    ""
+                )
+                if outlet_f and str(outlet_f).strip().lower() != "all" and pay_outlet:
+                    if str(pay_outlet).strip().lower() != str(outlet_f).strip().lower():
+                        continue
+
+                ip_val = (
+                    adm.get("ipNumber") or 
+                    adm.get("ip_number") or 
+                    adm.get("ip_no") or 
+                    adm.get("inpatient_number") or 
+                    pay.get("ip_number") or 
+                    ""
+                )
+                
+                # Patient Name lookup
+                if p:
+                    p_name = " ".join(filter(None, [getattr(p, 'salutation', ''), p.firstName, p.lastName])).strip()
+                else:
+                    p_name = adm.get("patient_name") or adm.get("patientname") or pay.get("patient_name") or "Patient"
+                
+                # Payment Mode
+                p_details = pay.get('payment_details')
+                if isinstance(p_details, dict):
+                    p_mode = p_details.get('method') or p_details.get('payment_mode')
+                else:
+                    p_mode = None
+                if not p_mode:
+                    p_mode = pay.get('payment_mode') or pay.get('mode') or ccc_map.get(bill_no, {}).get('payment_mode') or 'Cash'
+                
+                # Amount extraction (handles total_advance_amount, amount, paid_amount, etc.)
+                amt = _to_float(
+                    pay.get('total_advance_amount') or 
+                    pay.get('amount') or 
+                    pay.get('paid_amount') or 
+                    pay.get('advance_amount') or 
+                    pay.get('ip_advance_amount') or 
+                    pay.get('billing_advance_amount') or 
+                    ccc_map.get(bill_no, {}).get('collected_amount')
+                )
+                
+                # Split Cash vs Credit
+                cash_amt = 0.0
+                credit_amt = 0.0
+                if str(p_mode).strip().lower() == "cash":
+                    cash_amt = amt
+                else:
+                    credit_amt = amt
+                
+                cid = pay.get('created_by') or pay.get('cashier_id') or ccc_map.get(bill_no, {}).get('created_by') or adm.get('created_by') or ""
+                user_label = cashier_name_map.get(cid) or str(cid).upper() or "STAFF"
+
                 report_data.append({
                     "ipNumber": ip_val,
                     "ip_number": ip_val,
-                    "uhid": uhid,
+                    "uhid": uhid_raw or getattr(p, "uhid", ""),
                     "patient_name": p_name,
+                    "patientname": p_name,
                     "age": getattr(p, "age", None) or adm.get("age"),
                     "gender": getattr(p, "gender", None) or adm.get("gender"),
-                    "amount": _to_float(pay.get('amount') or pay.get('paid_amount') or pay.get('advance_amount')),
-                    "paid_date": _format_dt(paid_dt),
-                    "payment_mode": (pay.get('payment_details') or {}).get('method') or pay.get('payment_mode') or 'Cash',
+                    "amount": amt,
+                    "cash_amount": cash_amt,
+                    "credit_amount": credit_amt,
+                    "paid_date": _format_dt(paid_dt_val),
+                    "date": _format_dt(paid_dt_val)[:10] if paid_dt_val else "",
+                    "payment_mode": p_mode,
+                    "status": pay.get('status') or "PAID",
                     "bill_no": bill_no,
-                    "insurance_company": adm.get('insuranceCompanyName') or getattr(p, 'company_code', '') or 'N/A',
+                    "billnumber": bill_no,
+                    "cashier_id": cid,
+                    "user": user_label,
+                    "outlet_code": pay_outlet,
+                    "insurance_company": adm.get('insuranceCompanyName') or adm.get('insurance_company') or getattr(p, 'company_code', '') or 'N/A',
                     "admission_date": _format_dt(adm.get("admissionDateTime") or adm.get("created_date")),
                 })
                 
-        report_data.sort(key=lambda x: x["paid_date"], reverse=True)
+        report_data.sort(key=lambda x: x["paid_date"] or "", reverse=True)
         return Response({"success": True, "data": report_data})
     except Exception as e:
         import traceback
@@ -1022,6 +1141,7 @@ def credit_card_report(request):
         data = request.data if request.method == "POST" else request.query_params
         from_date_str = data.get("from_date")
         to_date_str = data.get("to_date")
+        outlet_code = data.get("outlet_code") or data.get("outlet")
         hospital_code, branch_code = _auth_scope(request)
 
         if not from_date_str:
@@ -1075,6 +1195,8 @@ def credit_card_report(request):
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            mongo_query["outlet_code"] = outlet_code
         mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
@@ -1266,6 +1388,7 @@ def cash_bills_report(request):
         data = request.data if request.method == "POST" else request.query_params
         from_date_str = data.get("from_date")
         to_date_str = data.get("to_date")
+        outlet_code = data.get("outlet_code") or data.get("outlet")
         hospital_code, branch_code = _auth_scope(request)
 
         if not from_date_str:
@@ -1282,6 +1405,8 @@ def cash_bills_report(request):
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            mongo_query["outlet_code"] = outlet_code
         mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
@@ -1481,6 +1606,7 @@ def datewise_collection_summary(request):
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
+        outlet_f = request.GET.get("outlet_code") or request.GET.get("outlet")
         hospital_code, branch_code = _auth_scope(request)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1489,6 +1615,8 @@ def datewise_collection_summary(request):
         q = {}
         if hospital_code: q["hospital_code"] = hospital_code
         if branch_code: q["branch_code"] = branch_code
+        if outlet_f and str(outlet_f).strip().lower() != "all":
+            q["outlet_code"] = outlet_f
         q.update(_date_range_query(from_f, to_f))
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(q))

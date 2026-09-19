@@ -20,6 +20,7 @@ def bill_wise_report(request):
         to_date_str = data.get("to_date")
         type_filter = data.get("bill_type") # "All", "Pharmacy", "Investigation", etc.
         patient_filter = data.get("uhid")
+        outlet_code_filter = data.get("outlet_code") or data.get("outlet")
         
         # AUTH CODES
         hospital_code = (
@@ -52,6 +53,8 @@ def bill_wise_report(request):
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
+        if outlet_code_filter and str(outlet_code_filter).strip().lower() != "all":
+            mongo_query["outlet_code"] = outlet_code_filter
         mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
