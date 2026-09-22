@@ -622,13 +622,16 @@ urlpatterns = [
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
     path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
     path('cash-bills-report/', accounting_reports.cash_bills_report, name='cash_bills_report'),
-    path('datewise-collection-summary/', accounting_reports.datewise_collection_summary, name='datewise_collection_summary'),
+    path('date_wise_collection_summary_report/', accounting_reports.date_wise_collection_summary_report, name='date_wise_collection_summary_report'),
     path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
     path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),
     path('debit-bills-report/', accounting_reports.debit_bills_report, name='debit_bills_report'),
     path('audit-report/', accounting_reports.audit_report, name='audit_report'),
     path('sales-tax-register/', accounting_reports.sales_tax_register, name='sales_tax_register'),
     path('stock-report-ip-op/', accounting_reports.stock_report_ip_op, name='stock_report_ip_op'),
+    path('patient-advance-report/', accounting_reports.patient_advance_details_report, name='patient_advance_details_report'),
+    path('ip-advance-report/', accounting_reports.patient_advance_details_report, name='ip_advance_report'),
+    path('discount-bills-report/', accounting_reports.discount_bills_report, name='discount_bills_report'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),

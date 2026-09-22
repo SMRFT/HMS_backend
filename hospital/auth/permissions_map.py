@@ -571,7 +571,7 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/bill-cancel-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/credit-card-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/cash-bills-report/?(\?.*)?$': 'HMS-P-CCC',
-        r'^/_b_a_c_k_e_n_d/HMS/datewise-collection-summary/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/date_wise_collection_summary_report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/miscellaneous-payment-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/daily-cash-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/debit-bills-report/?(\?.*)?$': 'HMS-P-CCC',
@@ -579,6 +579,9 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/sales-tax-register/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/stock-report-ip-op/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/SalesReturnReport/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/patient-advance-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
 
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
