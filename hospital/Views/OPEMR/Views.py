@@ -1,6 +1,6 @@
 import os
 from pymongo import MongoClient
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 from bson import Decimal128
@@ -20,8 +20,7 @@ from bson.objectid import ObjectId
 from django.http import HttpResponse
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from rest_framework.permissions import AllowAny
-from rest_framework.decorators import api_view, permission_classes
-from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list, medicine_package, profile_collection, doctor_role_code, Diagnostics_db, hms_db
+from ..dbcollection import Diagnostics_test_details, HMS_Symptoms_list, medicine_package, profile_collection, doctor_role_code, Diagnostics_db, hms_db, hms_billtype, hospital_investigationprice
 
 
 
@@ -354,7 +353,7 @@ def OPEMR_VitalEntry(request):
 
 
 @api_view(['POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_upload_vital_file(request):
     """
     Upload one or multiple vital room patient documents (old hospital files, reports, images, etc.)
@@ -419,7 +418,7 @@ def OPEMR_upload_vital_file(request):
 
 
 @api_view(['GET'])
-# @permission_classes([AllowAny])
+@permission_classes([AllowAny])
 def OPEMR_get_vital_file(request, file_id):
     """
     Serves vital room documents directly from MongoDB GridFS with inline preview support.
@@ -444,6 +443,7 @@ def OPEMR_get_vital_file(request, file_id):
 
 
 @api_view(['DELETE', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_delete_vital_file(request, file_id):
     """
     Deletes a document from MongoDB GridFS in 'HMS' database by file_id.
@@ -528,170 +528,153 @@ def OPEMR_get_diagnostics_tests(request):
 @permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_radiology_items(request):
     """
-    Get CT, MRI, and X-Ray investigation items for OPEMR consultation.
-    Sources from hospital_investigationprice in hms_db, Diagnostics_test_details in Diagnostics_db,
-    and enriches with standard medical imaging catalogs.
+    Retrieve radiology items (X-Ray, MRI, CT, USG) for OPEMR consultation dropdowns.
+    Matches billTypeNo from hms_billtype into hospital_investigationprice to get all investigation items,
+    and groups them into relevant radiology categories (CT, MRI, X-Ray, USG).
     """
     try:
+        # 1. Fetch active bill types from hms_billtype
+        bill_type_docs = list(hms_billtype.find({"is_active": True})) if hms_billtype is not None else []
+        if not bill_type_docs and hms_billtype is not None:
+            bill_type_docs = list(hms_billtype.find({}))
+
+        billtype_map = {}
+        for bt in bill_type_docs:
+            bno = str(bt.get("billTypeNo") or "").strip()
+            if bno:
+                if bno not in billtype_map:
+                    billtype_map[bno] = []
+                billtype_map[bno].append(bt)
+
+        # 2. Match billTypeNo into hospital_investigationprice
+        matched_inv_docs = []
+        if hospital_investigationprice is not None:
+            if billtype_map:
+                matched_inv_docs = list(hospital_investigationprice.find({
+                    "billTypeNo": {"$in": list(billtype_map.keys())},
+                    "is_active": True
+                }))
+                if not matched_inv_docs:
+                    matched_inv_docs = list(hospital_investigationprice.find({
+                        "billTypeNo": {"$in": list(billtype_map.keys())}
+                    }))
+
+            # Ensure any other active investigation price documents are also considered
+            all_active = list(hospital_investigationprice.find({"is_active": True}))
+            seen_ids = set(str(d.get("_id")) for d in matched_inv_docs)
+            for d in all_active:
+                if str(d.get("_id")) not in seen_ids:
+                    matched_inv_docs.append(d)
+
+        # 3. Categorize items for CT, MRI, X-Ray, and USG dropdowns
         ct_items = []
         mri_items = []
         xray_items = []
+        usg_items = []
+        all_items = []
 
         seen_ct = set()
         seen_mri = set()
         seen_xray = set()
+        seen_usg = set()
 
-        # 1. From hospital_investigationprice in hms_db
-        if hms_db is not None:
-            invest_price_coll = hms_db['hospital_investigationprice']
-            rad_docs = list(invest_price_coll.find({
-                "$or": [
-                    {"billTypeNo": {"$regex": "^(CT|MRI|XRAY|X-RAY)", "$options": "i"}},
-                    {"BillType": {"$regex": "(CT|MRI|XRAY|X-RAY)", "$options": "i"}}
-                ]
-            }))
+        for doc in matched_inv_docs:
+            btn = str(doc.get("billTypeNo") or "").strip().upper()
+            bt = str(doc.get("BillType") or "").strip()
+            bt_upper = bt.upper()
 
-            for doc in rad_docs:
-                btn = str(doc.get("billTypeNo", "")).strip().upper()
-                bt = str(doc.get("BillType", "")).strip().upper()
-                target = "CT" if (btn.startswith("CT") or "CT" in bt) else ("MRI" if (btn.startswith("MRI") or "MRI" in bt) else ("XRAY" if ("XRAY" in btn or "X-RAY" in btn) else None))
-                
-                for itm in doc.get("Items", []):
-                    if not isinstance(itm, dict):
-                        continue
-                    name = str(itm.get("itemName") or "").strip()
-                    if not name:
-                        continue
-                    i_id = itm.get("item_id") or itm.get("id") or name
-                    item_obj = {
-                        "id": f"{target}_{i_id}",
-                        "item_id": i_id,
-                        "name": name,
-                        "category": target,
-                        "price": safe_float(itm.get("price", 0))
-                    }
-                    if target == "CT" and name.lower() not in seen_ct:
-                        seen_ct.add(name.lower())
-                        ct_items.append(item_obj)
-                    elif target == "MRI" and name.lower() not in seen_mri:
-                        seen_mri.add(name.lower())
-                        mri_items.append(item_obj)
-                    elif target == "XRAY" and name.lower() not in seen_xray:
-                        seen_xray.add(name.lower())
-                        xray_items.append(item_obj)
+            is_ct = btn.startswith("CT") or "CT" in bt_upper or "CT" in btn
+            is_mri = btn.startswith("MRI") or "MRI" in bt_upper or "MRI" in btn
+            is_xray = "XRAY" in btn or "X-RAY" in btn or "XRAY" in bt_upper or "X-RAY" in bt_upper
+            is_usg = "USG" in btn or "USG" in bt_upper or "ULTRASOUND" in bt_upper or ("SCAN" in bt_upper and not is_ct and not is_mri)
 
-        # 2. From Diagnostics_test_details in Diagnostics_db
-        if Diagnostics_test_details is not None:
-            diag_docs = list(Diagnostics_test_details.find({
-                "$or": [
-                    {"department": {"$regex": "CT|Computed|MRI|Magnetic|X[-_]?RAY|Radiology", "$options": "i"}},
-                    {"test_name": {"$regex": "\\b(CT|MRI|X[-_]?RAY)\\b", "$options": "i"}}
-                ]
-            }))
-            for d in diag_docs:
-                t_name = str(d.get("test_name") or "").strip()
-                dept = str(d.get("department") or "").strip().upper()
-                t_id = d.get("test_id") or t_name
-                name_upper = t_name.upper()
+            category = "Other"
+            if is_ct:
+                category = "CT"
+            elif is_mri:
+                category = "MRI"
+            elif is_xray:
+                category = "X-Ray"
+            elif is_usg:
+                category = "USG"
 
-                if "CT" in dept or re.search(r'\bCT\b', name_upper):
-                    if t_name.lower() not in seen_ct:
-                        seen_ct.add(t_name.lower())
-                        ct_items.append({
-                            "id": f"CT_{t_id}",
-                            "item_id": t_id,
-                            "name": t_name,
-                            "category": "CT",
-                            "shortcut": d.get("shortcut", ""),
-                            "department": d.get("department", "CT")
-                        })
-                elif "MRI" in dept or re.search(r'\bMRI\b', name_upper):
-                    if t_name.lower() not in seen_mri:
-                        seen_mri.add(t_name.lower())
-                        mri_items.append({
-                            "id": f"MRI_{t_id}",
-                            "item_id": t_id,
-                            "name": t_name,
-                            "category": "MRI",
-                            "shortcut": d.get("shortcut", ""),
-                            "department": d.get("department", "MRI")
-                        })
-                elif "XRAY" in dept or "X-RAY" in dept or re.search(r'\bX[-_]?RAY\b', name_upper) or "RADIOLOGY" in dept:
-                    if t_name.lower() not in seen_xray:
-                        seen_xray.add(t_name.lower())
-                        xray_items.append({
-                            "id": f"XRAY_{t_id}",
-                            "item_id": t_id,
-                            "name": t_name,
-                            "category": "X-Ray",
-                            "shortcut": d.get("shortcut", ""),
-                            "department": d.get("department", "X-Ray")
-                        })
+            items = doc.get("Items", [])
+            for itm in items:
+                if not isinstance(itm, dict):
+                    continue
+                name = str(itm.get("itemName") or "").strip()
+                if not name:
+                    continue
 
-        # 3. Standard Medical Catalogs as fallback/enhancement
-        default_ct = [
-            "CT Brain Plain", "CT Brain with Contrast", "CT PNS (Coronal & Axial)",
-            "CT Chest Plain", "CT Chest HRCT", "CT Chest with Contrast",
-            "CT Abdomen Plain", "CT Abdomen & Pelvis (Triple Phase)", "CT KUB",
-            "CT Cervical Spine", "CT Lumbar Spine", "CT Thoracic Spine",
-            "CT Angiography Brain & Neck", "CT Angiography Pulmonary", "CT Temporal Bone (HRCT)",
-            "CT Neck Soft Tissue", "CT Facial 3D Reconstruction", "CT Extremity / Joints"
-        ]
-        for name in default_ct:
-            if name.lower() not in seen_ct:
-                seen_ct.add(name.lower())
-                ct_items.append({
-                    "id": f"CT_{len(ct_items)+1}",
-                    "item_id": f"CT_{len(ct_items)+1}",
+                item_id = itm.get("item_id")
+                if item_id is None:
+                    item_id = itm.get("id") or name
+
+                price = 0.0
+                if "price" in itm:
+                    price = safe_float(itm["price"])
+                else:
+                    for k, v in itm.items():
+                        if k not in ["itemName", "item_id", "id", "nabh_code"]:
+                            if isinstance(v, (int, float, str)):
+                                try:
+                                    price = float(v)
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                            elif isinstance(v, dict) and "price" in v:
+                                try:
+                                    price = float(v["price"])
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+
+                item_obj = {
+                    "id": item_id,
+                    "item_id": item_id,
                     "name": name,
-                    "category": "CT"
-                })
+                    "itemName": name,
+                    "billTypeNo": doc.get("billTypeNo"),
+                    "BillType": bt,
+                    "category": category,
+                    "price": price
+                }
 
-        default_mri = [
-            "MRI Brain Plain", "MRI Brain with Contrast", "MRI Brain Stroke Protocol (DWI/FLAIR)",
-            "MRI Brain with MR Angio (MRA/MRV)", "MRI Cervical Spine Plain", "MRI Cervical Spine with Contrast",
-            "MRI Lumbar Spine (LS Spine)", "MRI Lumbar Spine with Contrast", "MRI Thoracic Spine Plain",
-            "MRI Knee Joint (Right)", "MRI Knee Joint (Left)", "MRI Shoulder Joint",
-            "MRI Hip Joint Bilateral", "MRI Ankle Joint", "MRI Whole Spine Screening",
-            "MRI Abdomen & MRCP", "MRI Pelvis", "MRI Fistulogram"
-        ]
-        for name in default_mri:
-            if name.lower() not in seen_mri:
-                seen_mri.add(name.lower())
-                mri_items.append({
-                    "id": f"MRI_{len(mri_items)+1}",
-                    "item_id": f"MRI_{len(mri_items)+1}",
-                    "name": name,
-                    "category": "MRI"
-                })
+                all_items.append(item_obj)
 
-        default_xray = [
-            "Chest X-Ray PA View", "Chest X-Ray AP View (Bedside)", "Chest X-Ray Lateral View",
-            "X-Ray KUB", "X-Ray Abdomen Erect & Supine",
-            "X-Ray Cervical Spine AP & Lateral", "X-Ray Lumbar Spine AP & Lateral", "X-Ray Thoracic Spine AP & Lateral",
-            "X-Ray Pelvis AP View", "X-Ray Knee Joint AP & Lateral", "X-Ray Shoulder Joint AP View",
-            "X-Ray Foot AP & Oblique", "X-Ray Hand AP & Oblique", "X-Ray Wrist Joint AP & Lateral",
-            "X-Ray Elbow Joint AP & Lateral", "X-Ray Skull AP & Lateral", "X-Ray PNS (Water's View)"
-        ]
-        for name in default_xray:
-            if name.lower() not in seen_xray:
-                seen_xray.add(name.lower())
-                xray_items.append({
-                    "id": f"XRAY_{len(xray_items)+1}",
-                    "item_id": f"XRAY_{len(xray_items)+1}",
-                    "name": name,
-                    "category": "X-Ray"
-                })
+                name_key = name.lower()
+                if is_ct and name_key not in seen_ct:
+                    seen_ct.add(name_key)
+                    ct_items.append(item_obj)
+                elif is_mri and name_key not in seen_mri:
+                    seen_mri.add(name_key)
+                    mri_items.append(item_obj)
+                elif is_xray and name_key not in seen_xray:
+                    seen_xray.add(name_key)
+                    xray_items.append(item_obj)
+                elif is_usg and name_key not in seen_usg:
+                    seen_usg.add(name_key)
+                    usg_items.append(item_obj)
 
         ct_items.sort(key=lambda x: x["name"])
         mri_items.sort(key=lambda x: x["name"])
         xray_items.sort(key=lambda x: x["name"])
+        usg_items.sort(key=lambda x: x["name"])
+        all_items.sort(key=lambda x: x["name"])
 
         return Response({
             "success": True,
             "ct": ct_items,
             "mri": mri_items,
-            "xray": xray_items
+            "xray": xray_items,
+            "usg": usg_items,
+            "data": {
+                "ct": ct_items,
+                "mri": mri_items,
+                "xray": xray_items,
+                "usg": usg_items
+            },
+            "all": all_items
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -707,8 +690,98 @@ def OPEMR_get_medicines(request):
     """
     Get medicines list from medicine_package (hospital_pharmacyitem) dbcollection.py.
     Displays item_name in dropdown, returns item_id to store upon selection.
+    Also retrieves batch_number, expiry_date, mrp, and available batches from pharmacy stock.
     """
     try:
+        from hospital.Views.dbcollection import hms_db
+
+        # Build batch map from pharmacy stock, velavan stock, and grn
+        batch_map = {}
+
+        # 1. hospital_pharmacystock (primary pharmacy stock)
+        try:
+            for s in hms_db['hospital_pharmacystock'].find():
+                iid = s.get('item_id')
+                bn = s.get('batch_number')
+                if iid is not None and bn:
+                    try:
+                        iid_key = int(iid)
+                    except Exception:
+                        iid_key = iid
+                    tot = float(s.get('total_stock', 0) or 0)
+                    sold = float(s.get('sold_quantity', 0) or 0)
+                    blk = float(s.get('blocked_quantity', 0) or 0)
+                    avail = tot - sold - blk
+                    exp = s.get('expiry_date')
+                    exp_str = exp.strftime('%Y-%m-%d') if hasattr(exp, 'strftime') else str(exp or '')
+                    mrp_val = float(str(s.get('mrp', 0) or 0))
+                    price_val = float(str(s.get('Selling_Price', 0) or mrp_val))
+                    entry = {
+                        'batch_number': str(bn).strip(),
+                        'expiry_date': exp_str,
+                        'mrp': mrp_val,
+                        'price': price_val,
+                        'available_stock': avail
+                    }
+                    if iid_key not in batch_map:
+                        batch_map[iid_key] = []
+                    batch_map[iid_key].append(entry)
+        except Exception as e:
+            print("Error loading pharmacystock batches:", e)
+
+        # 2. hospital_velavan_stock
+        try:
+            for v in hms_db['hospital_velavan_stock'].find():
+                iid = v.get('item_id')
+                bn = v.get('batch_no')
+                if iid is not None and bn:
+                    try:
+                        iid_key = int(iid)
+                    except Exception:
+                        iid_key = iid
+                    if iid_key not in batch_map:
+                        batch_map[iid_key] = []
+                    if not any(x['batch_number'] == str(bn).strip() for x in batch_map[iid_key]):
+                        avail = float(v.get('total_quantity', 0) or 0) - float(v.get('sold_quantity', 0) or 0)
+                        exp_str = str(v.get('expiry', '') or '')
+                        mrp_val = float(str(v.get('mrp', 0) or 0))
+                        batch_map[iid_key].append({
+                            'batch_number': str(bn).strip(),
+                            'expiry_date': exp_str,
+                            'mrp': mrp_val,
+                            'price': mrp_val,
+                            'available_stock': avail
+                        })
+        except Exception as e:
+            print("Error loading velavan batches:", e)
+
+        # 3. hospital_grn
+        try:
+            for g in hms_db['hospital_grn'].find():
+                items = g.get('items', [])
+                if isinstance(items, list):
+                    for it in items:
+                        if isinstance(it, dict):
+                            iid = it.get('item_id')
+                            bn = it.get('batch')
+                            if iid is not None and bn:
+                                try:
+                                    iid_key = int(iid)
+                                except Exception:
+                                    iid_key = iid
+                                if iid_key not in batch_map:
+                                    batch_map[iid_key] = []
+                                if not any(x['batch_number'] == str(bn).strip() for x in batch_map[iid_key]):
+                                    batch_map[iid_key].append({
+                                        'batch_number': str(bn).strip(),
+                                        'expiry_date': str(it.get('expiry', '') or ''),
+                                        'mrp': float(it.get('mrp', 0) or 0),
+                                        'price': float(it.get('selling_price', 0) or it.get('mrp', 0) or 0),
+                                        'available_stock': float(it.get('quantity', 0) or 0)
+                                    })
+        except Exception as e:
+            print("Error loading grn batches:", e)
+
         docs = list(medicine_package.find({"is_active": True}))
         if not docs:
             docs = list(medicine_package.find({}))
@@ -718,18 +791,181 @@ def OPEMR_get_medicines(request):
             m_id = doc.get("item_id")
             m_name = doc.get("item_name")
             if m_id is not None and m_name:
+                try:
+                    num_id = int(m_id) if str(m_id).isdigit() else m_id
+                except Exception:
+                    num_id = m_id
+
+                # Get batch info
+                batches = batch_map.get(num_id, [])
+                if not batches and isinstance(num_id, int):
+                    batches = batch_map.get(str(num_id), [])
+
+                best_batch = ""
+                exp_date = ""
+                mrp = 0.0
+                price = 0.0
+                if batches:
+                    with_stock = [b for b in batches if b.get('available_stock', 0) > 0]
+                    chosen = with_stock[0] if with_stock else batches[0]
+                    best_batch = chosen.get('batch_number', '')
+                    exp_date = chosen.get('expiry_date', '')
+                    mrp = chosen.get('mrp', 0.0)
+                    price = chosen.get('price', 0.0)
+
                 medicines.append({
-                    "item_id": int(m_id) if str(m_id).isdigit() else m_id,
+                    "item_id": num_id,
                     "item_name": str(m_name).strip(),
                     "category": doc.get("category", "") or "",
-                    "chemical_composition": doc.get("chemical_composition", "") or ""
+                    "chemical_composition": doc.get("chemical_composition", "") or "",
+                    "batch_number": best_batch,
+                    "batch_no": best_batch,
+                    "batches": [b.get('batch_number') for b in batches],
+                    "expiry_date": exp_date,
+                    "mrp": mrp,
+                    "price": price
                 })
 
         medicines.sort(key=lambda x: x["item_name"])
         return Response(medicines, status=status.HTTP_200_OK)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+def enrich_consultation_investigation_names(consult_dict):
+    """
+    Dynamically compares billTypeNo + item_id against hospital_investigationprice to get itemName,
+    and test_id against Diagnostics_test_details to get test_name,
+    attaching resolved names on GET so MongoDB never stores investigation names.
+    """
+    if not isinstance(consult_dict, dict):
+        return consult_dict
+
+    consult_copy = dict(consult_dict)
+    from hospital.Views.dbcollection import hospital_investigationprice, Diagnostics_test_details
+
+    # Cache radiology items map: (billTypeNo, item_id) -> (itemName, category)
+    rad_name_map = {}
+    try:
+        if hospital_investigationprice is not None:
+            inv_prices = list(hospital_investigationprice.find({"is_active": True})) or list(hospital_investigationprice.find({}))
+            for doc in inv_prices:
+                b_no = str(doc.get("billTypeNo") or "").strip().upper()
+                b_type = str(doc.get("BillType") or "").strip().upper()
+                cat = "CT" if ("CT" in b_no or "CT" in b_type) else (
+                    "MRI" if ("MRI" in b_no or "MRI" in b_type) else (
+                        "X-Ray" if ("XRAY" in b_no or "XRAY" in b_type) else (
+                            "USG" if ("USG" in b_no or "USG" in b_type) else "Radiology"
+                        )
+                    )
+                )
+                for it in doc.get("Items", []):
+                    if isinstance(it, dict) and it.get("item_id") is not None:
+                        try:
+                            iid = int(it.get("item_id"))
+                        except Exception:
+                            iid = it.get("item_id")
+                        name = it.get("itemName") or ""
+                        rad_name_map[(b_no, iid)] = (name, cat)
+                        rad_name_map[(b_no, str(iid))] = (name, cat)
+                        if iid not in rad_name_map:
+                            rad_name_map[iid] = (name, cat)
+                        if str(iid) not in rad_name_map:
+                            rad_name_map[str(iid)] = (name, cat)
+    except Exception as e:
+        print("Error building rad_name_map in enrich_consultation_investigation_names:", e)
+
+    # Cache lab tests map: test_id -> (test_name, department)
+    lab_test_map = {}
+    try:
+        if Diagnostics_test_details is not None:
+            lab_tests = list(Diagnostics_test_details.find({}))
+            for lt in lab_tests:
+                tid = lt.get("test_id")
+                if tid is not None:
+                    try:
+                        tid_key = int(tid)
+                    except Exception:
+                        tid_key = tid
+                    tname = lt.get("test_name") or ""
+                    dept = lt.get("department") or "Diagnostics"
+                    lab_test_map[tid_key] = (tname, dept)
+                    lab_test_map[str(tid_key)] = (tname, dept)
+    except Exception as e:
+        print("Error building lab_test_map in enrich_consultation_investigation_names:", e)
+
+    def enrich_rad_list(rad_list, default_cat):
+        if not isinstance(rad_list, list):
+            return rad_list
+        enriched = []
+        for it in rad_list:
+            if not isinstance(it, dict):
+                continue
+            it_c = dict(it)
+            bno = str(it_c.get("billTypeNo") or "").strip().upper()
+            iid = it_c.get("item_id") if it_c.get("item_id") is not None else it_c.get("id")
+            try:
+                iid_key = int(iid)
+            except Exception:
+                iid_key = iid
+            matched = rad_name_map.get((bno, iid_key)) or rad_name_map.get(iid_key)
+            name = matched[0] if matched else (it_c.get("item_name") or it_c.get("name") or "")
+            cat = matched[1] if matched else default_cat
+            it_c["item_name"] = name
+            it_c["name"] = name
+            it_c["category"] = cat
+            enriched.append(it_c)
+        return enriched
+
+    if "ct_scan_details" in consult_copy:
+        consult_copy["ct_scan_details"] = enrich_rad_list(consult_copy.get("ct_scan_details"), "CT")
+    if "mri_scan_details" in consult_copy:
+        consult_copy["mri_scan_details"] = enrich_rad_list(consult_copy.get("mri_scan_details"), "MRI")
+    if "xray_details" in consult_copy:
+        consult_copy["xray_details"] = enrich_rad_list(consult_copy.get("xray_details"), "X-Ray")
+    if "usg_details" in consult_copy:
+        consult_copy["usg_details"] = enrich_rad_list(consult_copy.get("usg_details"), "USG")
+
+    if "investigation_details" in consult_copy:
+        raw_inv = consult_copy.get("investigation_details")
+        if isinstance(raw_inv, list):
+            enriched_inv = []
+            for it in raw_inv:
+                if not isinstance(it, dict):
+                    continue
+                it_c = dict(it)
+                bno = str(it_c.get("billTypeNo") or "").strip().upper()
+                iid = it_c.get("item_id")
+                tid = it_c.get("test_id")
+                if bno or (iid is not None and not tid):
+                    try:
+                        iid_key = int(iid) if iid is not None else int(tid)
+                    except Exception:
+                        iid_key = iid if iid is not None else tid
+                    matched = rad_name_map.get((bno, iid_key)) or rad_name_map.get(iid_key)
+                    name = matched[0] if matched else (it_c.get("test_name") or it_c.get("item_name") or "")
+                    cat = matched[1] if matched else "Radiology"
+                    it_c["test_name"] = name
+                    it_c["item_name"] = name
+                    it_c["department"] = cat
+                elif tid is not None:
+                    try:
+                        tid_key = int(tid)
+                    except Exception:
+                        tid_key = tid
+                    matched_lab = lab_test_map.get(tid_key)
+                    name = matched_lab[0] if matched_lab else (it_c.get("test_name") or "")
+                    dept = matched_lab[1] if matched_lab else (it_c.get("department") or "Diagnostics")
+                    it_c["test_name"] = name
+                    it_c["department"] = dept
+                enriched_inv.append(it_c)
+            consult_copy["investigation_details"] = enriched_inv
+
+    return consult_copy
 
 
 
@@ -756,7 +992,8 @@ def OPEMR_DoctorConsultation(request):
 
             qs = qs.order_by('-created_date', '-date')
             serializer = OPDoctorConsultationSerializer(qs, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            enriched_data = [enrich_consultation_investigation_names(c) for c in serializer.data]
+            return Response(enriched_data, status=status.HTTP_200_OK)
 
         elif request.method == 'POST':
             data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
@@ -783,6 +1020,75 @@ def OPEMR_DoctorConsultation(request):
                 if not vitals_data.get("created_by") and employee_id:
                     vitals_data["created_by"] = str(employee_id)
                 data["vitals"] = vitals_data
+
+            # Ensure ONLY billTypeNo and item_id are saved in ct_scan_details, mri_scan_details, xray_details, usg_details (NO NAMES STORED)
+            def sanitize_rad_records(items, default_bno):
+                if not isinstance(items, list):
+                    return []
+                clean_items = []
+                for itm in items:
+                    if isinstance(itm, dict):
+                        b_no = str(itm.get("billTypeNo") or default_bno).strip()
+                        i_id = itm.get("item_id")
+                        if i_id is None:
+                            i_id = itm.get("id") or itm.get("test_id")
+                        try:
+                            i_id = int(i_id)
+                        except Exception:
+                            pass
+                        clean_items.append({
+                            "billTypeNo": b_no,
+                            "item_id": i_id
+                        })
+                    elif itm is not None:
+                        try:
+                            i_id = int(itm)
+                        except Exception:
+                            i_id = itm
+                        clean_items.append({
+                            "billTypeNo": default_bno,
+                            "item_id": i_id
+                        })
+                return clean_items
+
+            if "ct_scan_details" in data:
+                data["ct_scan_details"] = sanitize_rad_records(data.get("ct_scan_details"), "CT01")
+            if "mri_scan_details" in data:
+                data["mri_scan_details"] = sanitize_rad_records(data.get("mri_scan_details"), "MRI01")
+            if "xray_details" in data:
+                data["xray_details"] = sanitize_rad_records(data.get("xray_details"), "XRAY01")
+            if "usg_details" in data:
+                data["usg_details"] = sanitize_rad_records(data.get("usg_details"), "USG01")
+
+            # Ensure NO investigation names are stored in investigation_details
+            if "investigation_details" in data:
+                raw_inv = data.get("investigation_details")
+                if isinstance(raw_inv, list):
+                    clean_inv = []
+                    for itm in raw_inv:
+                        if isinstance(itm, dict):
+                            entry = {}
+                            if "billTypeNo" in itm:
+                                entry["billTypeNo"] = str(itm["billTypeNo"]).strip()
+                            if "item_id" in itm:
+                                try:
+                                    entry["item_id"] = int(itm["item_id"])
+                                except Exception:
+                                    entry["item_id"] = itm["item_id"]
+                            if "test_id" in itm:
+                                try:
+                                    entry["test_id"] = int(itm["test_id"])
+                                except Exception:
+                                    entry["test_id"] = itm["test_id"]
+                            # Explicitly drop test_name, item_name, name, department, MRP
+                            if entry:
+                                clean_inv.append(entry)
+                        elif itm is not None:
+                            try:
+                                clean_inv.append({"test_id": int(itm)})
+                            except Exception:
+                                clean_inv.append({"test_id": itm})
+                    data["investigation_details"] = clean_inv
 
             # Determine status
             new_status = data.get("status")
@@ -904,7 +1210,7 @@ def OPEMR_get_vital_history(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([HasRoleAndDataPermission])
 def OPEMR_get_referral_doctors(request):
     """
     Get all employees who have 'doctor_role_code' in their primaryRole or additionalRoles.
@@ -1412,6 +1718,7 @@ def OPEMR_get_Doctor_patient(request):
         if emp_str.isdigit():
             num = int(emp_str)
             possible_ids.add(str(num))
+            possible_ids.add(num)
             possible_ids.add(f"{num:04d}")
             possible_ids.add(f"{num:05d}")
             possible_ids.add(f"{num:06d}")
@@ -1463,7 +1770,18 @@ def OPEMR_get_Doctor_patient(request):
 
             is_referred = uhid_str in referred_uhid_map
             ref_consult = referred_uhid_map.get(uhid_str)
-            referred_from_name = get_employee_name_by_id(getattr(ref_consult, 'doctor_id', '')) if ref_consult else ""
+            ref_creator_id = ""
+            referred_from_name = ""
+            if ref_consult:
+                # Use created_by as the referring doctor ID
+                ref_creator_id = getattr(ref_consult, 'created_by', None) or getattr(ref_consult, 'doctor_id', None) or ""
+                referred_from_name = get_employee_name_by_id(ref_creator_id)
+                if not referred_from_name or referred_from_name == "Unknown":
+                    doc_id_val = getattr(ref_consult, 'doctor_id', None)
+                    if doc_id_val and str(doc_id_val) != str(ref_creator_id):
+                        referred_from_name = get_employee_name_by_id(doc_id_val)
+                if not referred_from_name or referred_from_name == "Unknown":
+                    referred_from_name = bill_doctor_name if bill_doctor_name != "Unknown" else str(ref_creator_id)
 
             patient_data = {
                 "id": getattr(patient_obj, 'id', None),
@@ -1538,7 +1856,7 @@ def OPEMR_get_Doctor_patient(request):
                     c_start = getattr(consult_obj, 'consultation_start_time', None) or getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
 
                     if is_consult_today(consult_obj):
-                        latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                        latest_consult = enrich_consultation_investigation_names(OPDoctorConsultationSerializer(consult_obj).data)
                         consult_time_str = safe_isoformat(c_start)
 
                     if any((getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') for c in consult_entries if is_consult_today(c)):
@@ -1582,7 +1900,11 @@ def OPEMR_get_Doctor_patient(request):
                 "is_consultation_completed": is_consultation_completed_today,
                 "consultation_time": consult_time_str,
                 "is_referred": is_referred,
-                "referred_from": referred_from_name or bill_doctor_name if is_referred else None
+                "referred_from": referred_from_name if is_referred else None,
+                "refer_from": referred_from_name if is_referred else None,
+                "referred_from_doctor": referred_from_name if is_referred else None,
+                "referred_from_id": str(ref_creator_id) if is_referred else None,
+                "refer_to_doctor": getattr(ref_consult, 'refer_to_doctor', '') if is_referred else None
             })
 
         # Add any referred patients who do not have an active billing record
@@ -1599,7 +1921,14 @@ def OPEMR_get_Doctor_patient(request):
             last_name = getattr(patient_obj, 'lastName', '') or ''
             full_name = f"{salutation} {first_name} {last_name}".strip()
 
-            referred_from_name = get_employee_name_by_id(getattr(ref_c, 'doctor_id', ''))
+            ref_creator_id = getattr(ref_c, 'created_by', None) or getattr(ref_c, 'doctor_id', None) or ""
+            referred_from_name = get_employee_name_by_id(ref_creator_id)
+            if not referred_from_name or referred_from_name == "Unknown":
+                doc_id_val = getattr(ref_c, 'doctor_id', None)
+                if doc_id_val and str(doc_id_val) != str(ref_creator_id):
+                    referred_from_name = get_employee_name_by_id(doc_id_val)
+            if not referred_from_name or referred_from_name == "Unknown":
+                referred_from_name = str(ref_creator_id)
 
             patient_data = {
                 "id": getattr(patient_obj, 'id', None),
@@ -1671,7 +2000,7 @@ def OPEMR_get_Doctor_patient(request):
                 c_start = getattr(consult_obj, 'consultation_start_time', None) or getattr(consult_obj, 'created_date', None) or getattr(consult_obj, 'date', None)
 
                 if is_consult_today_ref(consult_obj):
-                    latest_consult = OPDoctorConsultationSerializer(consult_obj).data
+                    latest_consult = enrich_consultation_investigation_names(OPDoctorConsultationSerializer(consult_obj).data)
                     consult_time_str = safe_isoformat(c_start)
 
                 if any((getattr(c, 'consultation_end_time', None) or getattr(c, 'status', '') == 'Completed') for c in consult_entries if is_consult_today_ref(c)):
@@ -1703,7 +2032,11 @@ def OPEMR_get_Doctor_patient(request):
                 "is_consultation_completed": is_consultation_completed_today,
                 "consultation_time": consult_time_str,
                 "is_referred": True,
-                "referred_from": referred_from_name
+                "referred_from": referred_from_name,
+                "refer_from": referred_from_name,
+                "referred_from_doctor": referred_from_name,
+                "referred_from_id": str(ref_creator_id),
+                "refer_to_doctor": getattr(ref_c, 'refer_to_doctor', '')
             })
 
         return Response(result, status=status.HTTP_200_OK)
@@ -1841,6 +2174,23 @@ def OPEMR_get_patient_lab_results(request):
                                 "method": param_value.get("method", ""),
                                 "comment": param_value.get("comment", "")
                             })
+                    elif test.get("value") is not None and str(test.get("value")).strip() != "":
+                        val = str(test.get("value")).strip()
+                        t_code = test.get("test_code")
+                        p_def = get_parameter_from_core(core_test, device_id, test_code=t_code, param_index=0) if core_test else None
+                        param_name = (p_def.get("test_name") if p_def else None) or testname
+                        unit = (p_def.get("unit") if p_def else None) or (core_test.get("unit") if core_test else "") or ""
+                        ref_range = (p_def.get("reference_range") if p_def else None) or (core_test.get("reference_range") if core_test else "") or ""
+                        method = (p_def.get("method") if p_def else None) or (core_test.get("method") if core_test else "") or ""
+                        parsed_params.append({
+                            "name": param_name,
+                            "test_code": t_code or "",
+                            "value": val,
+                            "unit": unit,
+                            "reference_range": ref_range,
+                            "method": method,
+                            "comment": test.get("comment", "")
+                        })
 
                     lab_results.append({
                         "barcode": bc,
@@ -1895,5 +2245,82 @@ def OPEMR_get_patient_lab_results(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def OPEMR_get_patient_discharge_summaries(request):
+    """
+    Fetches all discharge summaries for a given patient UHID, grouped/admission-wise.
+    Enriches with summaryType, heading, and patient info for displaying in Patient Past History modal.
+    """
+    uhid = request.query_params.get("uhid", "").strip()
+    if not uhid:
+        return Response({"success": False, "message": "UHID is required", "data": []}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        from hospital.Views.dbcollection import hms_db
+        summary_coll = hms_db['hospital_summary']
+        patient_coll = hms_db['hospital_patient']
+        summary_type_coll = hms_db['hospital_summarytype']
+        summary_heading_coll = hms_db['hospital_summaryheading']
+
+        # Find summaries by exact UHID or regex
+        cursor = summary_coll.find({"uhid": uhid, "is_active": {"$ne": False}})
+        summaries = list(cursor)
+        if not summaries:
+            cursor = summary_coll.find({"uhid": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}, "is_active": {"$ne": False}})
+            summaries = list(cursor)
+
+        # Preload masters
+        types_map = {str(t.get('summaryNo')): t.get('summaryType') for t in summary_type_coll.find({}, {"summaryNo": 1, "summaryType": 1})}
+        headings_map = {str(h.get('headingNo')): h.get('heading') for h in summary_heading_coll.find({}, {"headingNo": 1, "heading": 1})}
+
+        # Patient demographic info
+        patient_doc = patient_coll.find_one({"uhid": uhid}) or {}
+
+        results = []
+        for s in summaries:
+            s_copy = dict(s)
+            s_copy["_id"] = str(s_copy.get("_id", ""))
+            s_no = str(s_copy.get("summaryNo") or "").strip()
+            h_no = str(s_copy.get("headingNo") or "").strip()
+            s_copy["summaryType"] = types_map.get(s_no) or s_copy.get("summaryType") or "Discharge Summary"
+            s_copy["heading"] = headings_map.get(h_no) or s_copy.get("heading") or ""
+
+            # Stringify dates
+            for dt_f in ["date", "doa", "dod", "created_date", "lastmodified_date", "approve_time", "nextReviewDate", "surgeryDate"]:
+                if s_copy.get(dt_f):
+                    s_copy[dt_f] = str(s_copy[dt_f])
+
+            # Standardize fieldsData as list of {key, value}
+            raw_fields = s_copy.get("fieldsData")
+            if isinstance(raw_fields, str):
+                try:
+                    s_copy["fieldsData"] = json.loads(raw_fields)
+                except Exception:
+                    s_copy["fieldsData"] = []
+            elif isinstance(raw_fields, dict):
+                s_copy["fieldsData"] = [{"key": k, "value": v} for k, v in raw_fields.items()]
+            elif not isinstance(raw_fields, list):
+                s_copy["fieldsData"] = []
+
+            # Patient details fallback
+            s_copy["patient_name"] = patient_doc.get("patient_name") or patient_doc.get("name") or s_copy.get("patient") or ""
+            s_copy["age"] = patient_doc.get("age") or s_copy.get("age") or ""
+            s_copy["gender"] = patient_doc.get("gender") or s_copy.get("gender") or ""
+            s_copy["mobilePhone"] = patient_doc.get("mobilePhone") or patient_doc.get("mobile_number") or s_copy.get("mobilePhone") or ""
+            s_copy["address"] = patient_doc.get("address") or s_copy.get("address") or ""
+
+            results.append(s_copy)
+
+        # Sort admission-wise by DOA descending, then date descending
+        results.sort(key=lambda x: str(x.get("doa") or x.get("date") or ""), reverse=True)
+
+        return Response({"success": True, "data": results, "count": len(results)}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 

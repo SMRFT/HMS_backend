@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand
@@ -352,13 +352,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--daemon",
             action="store_true",
-            help="Run continuously as a daemon"
+            help="Run continuously as a daemon, triggering at --run-hour every day"
         )
         parser.add_argument(
-            "--interval",
+            "--run-hour",
             type=int,
-            default=86400,  # 24 hours
-            help="Interval in seconds (default: 86400)"
+            default=10,  # 10:00 AM
+            help="Hour of day (24h format) to send emails daily (default: 10)"
+        )
+        parser.add_argument(
+            "--run-minute",
+            type=int,
+            default=0,
+            help="Minute of hour to send emails daily (default: 0)"
         )
 
     def handle(self, *args, **options):
@@ -370,12 +376,32 @@ class Command(BaseCommand):
                 pass
 
         daemon = options.get("daemon")
-        interval = options.get("interval")
+        run_hour = options.get("run_hour", 10)
+        run_minute = options.get("run_minute", 0)
 
         if daemon:
-            self.stdout.write("[START] Starting Licence Expiry Daemon...\n")
+            self.stdout.write(
+                f"[START] Starting Licence Expiry Daemon — will run daily at "
+                f"{run_hour:02d}:{run_minute:02d}...\n"
+            )
 
             while True:
+                now = datetime.now()
+
+                # ✅ Calculate next run time (today or tomorrow at run_hour:run_minute)
+                next_run = now.replace(hour=run_hour, minute=run_minute, second=0, microsecond=0)
+                if now >= next_run:
+                    # Already past today's scheduled time — wait for tomorrow
+                    next_run += timedelta(days=1)
+
+                sleep_seconds = (next_run - now).total_seconds()
+                self.stdout.write(
+                    f"[WAIT] Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(sleeping {int(sleep_seconds // 3600)}h "
+                    f"{int((sleep_seconds % 3600) // 60)}m)...\n"
+                )
+                time.sleep(sleep_seconds)
+
                 self.stdout.write(f"\n[TIME] Running at {timezone.now()}\n")
 
                 result = run_licence_expiry_check()
@@ -383,9 +409,6 @@ class Command(BaseCommand):
                 self.stdout.write("\n[RESULT]")
                 self.stdout.write(f"Sent: {result['total_sent']}")
                 self.stdout.write(f"Skipped: {result['total_skipped']}")
-
-                self.stdout.write(f"\n[SLEEP] Sleeping for {interval} seconds...\n")
-                time.sleep(interval)
 
         else:
             self.stdout.write("[START] Running once...\n")
