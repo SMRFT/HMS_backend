@@ -685,7 +685,6 @@ PAGE_MAPPING = {
 
         # Invoices & Purchase Returns
         r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/?(\?.*)?$': 'HMS-P-VIN',
-        r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/list/?(\?.*)?$': 'HMS-P-VIN',
         r'^/_b_a_c_k_e_n_d/HMS/velavan/previous-purchases/?(\?.*)?$': 'HMS-P-VIN',
         r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update/.+/?(\?.*)?$': 'HMS-P-VINE',
         r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve/.+/?(\?.*)?$': 'HMS-P-VINA',
