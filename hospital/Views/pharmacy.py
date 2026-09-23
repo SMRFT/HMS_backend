@@ -3937,27 +3937,53 @@ def get_doctor_prescriptions(request):
 
         consultations = list(qs.order_by("-created_date", "-date"))
 
-        # Batch lookup map for prescription details enrichment
-        batch_stock_map = {}
+        # Full stock detail map for prescription enrichment: item_id -> {batch, price, mrp, expiry}
+        stock_detail_map = {}
         try:
             for s in hms_mongo["hospital_pharmacystock"].find():
                 iid = s.get("item_id")
-                bn = s.get("batch_number")
-                if iid is not None and bn and iid not in batch_stock_map:
-                    batch_stock_map[iid] = str(bn).strip()
-                    try:
-                        batch_stock_map[int(iid)] = str(bn).strip()
-                    except Exception:
-                        pass
+                if iid is None:
+                    continue
+                detail = {
+                    "batch_number": str(s.get("batch_number") or "").strip(),
+                    "price":        float(s.get("price") or s.get("mrp") or 0),
+                    "mrp":          float(s.get("mrp") or s.get("price") or 0),
+                    "expiry_date":  str(s.get("expiry_date") or "").strip(),
+                    "hsn_code":     str(s.get("hsn_code") or "").strip(),
+                    "cgst_rate":    float(s.get("CGST_Percentage") or s.get("cgst_rate") or 0),
+                    "sgst_rate":    float(s.get("SGST_Percentage") or s.get("sgst_rate") or 0),
+                    "cgst_amount":  float(s.get("CGST_Amt") or s.get("cgst_amount") or 0),
+                    "sgst_amount":  float(s.get("SGST_Amt") or s.get("sgst_amount") or 0),
+                }
+                if iid not in stock_detail_map:
+                    stock_detail_map[iid] = detail
+                try:
+                    if int(iid) not in stock_detail_map:
+                        stock_detail_map[int(iid)] = detail
+                except Exception:
+                    pass
             for v in hms_mongo["hospital_velavan_stock"].find():
                 iid = v.get("item_id")
-                bn = v.get("batch_no")
-                if iid is not None and bn and iid not in batch_stock_map:
-                    batch_stock_map[iid] = str(bn).strip()
-                    try:
-                        batch_stock_map[int(iid)] = str(bn).strip()
-                    except Exception:
-                        pass
+                if iid is None:
+                    continue
+                detail = {
+                    "batch_number": str(v.get("batch_no") or v.get("batch_number") or "").strip(),
+                    "price":        float(v.get("price") or v.get("mrp") or 0),
+                    "mrp":          float(v.get("mrp") or v.get("price") or 0),
+                    "expiry_date":  str(v.get("expiry_date") or "").strip(),
+                    "hsn_code":     str(v.get("hsn_code") or "").strip(),
+                    "cgst_rate":    float(v.get("CGST_Percentage") or v.get("cgst_rate") or 0),
+                    "sgst_rate":    float(v.get("SGST_Percentage") or v.get("sgst_rate") or 0),
+                    "cgst_amount":  float(v.get("CGST_Amt") or v.get("cgst_amount") or 0),
+                    "sgst_amount":  float(v.get("SGST_Amt") or v.get("sgst_amount") or 0),
+                }
+                if iid not in stock_detail_map:
+                    stock_detail_map[iid] = detail
+                try:
+                    if int(iid) not in stock_detail_map:
+                        stock_detail_map[int(iid)] = detail
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -3973,11 +3999,40 @@ def get_doctor_prescriptions(request):
                     continue
                 it_copy = dict(it)
                 it_id = it_copy.get("item_id")
+
+                # Look up full stock details for this item
+                stock_info = (
+                    stock_detail_map.get(it_id)
+                    or stock_detail_map.get(str(it_id) if it_id is not None else "")
+                    or {}
+                )
+
+                # ── Batch number ──
                 it_bn = str(it_copy.get("batch_number") or it_copy.get("batch_no") or "").strip()
-                if not it_bn or it_bn.lower() == "none" or it_bn.lower() == "null" or it_bn == "N/A":
-                    it_bn = batch_stock_map.get(it_id, "") or batch_stock_map.get(str(it_id), "")
+                if not it_bn or it_bn.lower() in ("none", "null", "n/a", ""):
+                    it_bn = stock_info.get("batch_number", "")
                 it_copy["batch_number"] = it_bn
                 it_copy["batch_no"] = it_bn
+
+                # ── Price / MRP ── (fill from stock if prescription item has no price)
+                if not it_copy.get("price") and not it_copy.get("mrp"):
+                    it_copy["price"]    = stock_info.get("price", 0)
+                    it_copy["mrp"]      = stock_info.get("mrp", 0)
+                else:
+                    it_copy.setdefault("price", stock_info.get("price", 0))
+                    it_copy.setdefault("mrp",   stock_info.get("mrp", 0))
+
+                # ── Expiry date ──
+                if not it_copy.get("expiry_date"):
+                    it_copy["expiry_date"] = stock_info.get("expiry_date", "")
+
+                # ── HSN / Tax rates ──
+                it_copy.setdefault("hsn_code",    stock_info.get("hsn_code", ""))
+                it_copy.setdefault("cgst_rate",   stock_info.get("cgst_rate", 0))
+                it_copy.setdefault("sgst_rate",   stock_info.get("sgst_rate", 0))
+                it_copy.setdefault("cgst_amount", stock_info.get("cgst_amount", 0))
+                it_copy.setdefault("sgst_amount", stock_info.get("sgst_amount", 0))
+
                 presc_items.append(it_copy)
 
             c_uhid = getattr(c, "uhid", "") or ""
