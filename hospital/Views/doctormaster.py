@@ -130,8 +130,7 @@ def doctor_schedule_list(request):
                 "mobileNumber": doc.get('mobileNumber', ''),
                 "specialty": doc.get('specialty', 'General'),
                 "consulting_fee": 0,
-                "registration_fee": 0, 
-                "renewal_fee": 0,
+                "registration_fee": 0,
                 "day_schedule": [],
                 "time_schedule": [],
                 "schedule_exists": False
@@ -145,8 +144,7 @@ def doctor_schedule_list(request):
 
                 doc_data.update({
                     "consulting_fee": schedule.get("consulting_fee", 0),
-                    "renewal_fee": schedule.get("renewal_fee", 0),
-                    "registration_fee": schedule.get("renewal_fee", 0),
+                    "registration_fee": schedule.get("registration_fee", 0),
                     "day_schedule": schedule.get("day_schedule", []),
                     "time_schedule": schedule.get("time_schedule", []),
                     "schedule_exists": True
@@ -202,7 +200,7 @@ def doctor_schedule_detail(request, employee_id):
             "department": resolved_dept,
             "designation": resolved_desig,
             "consulting_fee": "",
-            "renewal_fee": "",
+            "registration_fee": "",
             "day_schedule": [],
             "time_schedule": []
         }
@@ -210,7 +208,7 @@ def doctor_schedule_detail(request, employee_id):
         if doctor_schedule:
             response_data.update({
                 "consulting_fee": doctor_schedule.get("consulting_fee", ""),
-                "renewal_fee": doctor_schedule.get("renewal_fee", ""),
+                "registration_fee": doctor_schedule.get("registration_fee", ""),
                 "day_schedule": doctor_schedule.get("day_schedule", []),
                 "time_schedule": doctor_schedule.get("time_schedule", [])
             })
@@ -251,7 +249,7 @@ def doctor_schedule_upsert(request, employee_id):
             "employeeId": employee_id,
             "department": request.data.get("department", diagnostic_profile.get("department", "")),
             "consulting_fee": request.data.get("consulting_fee", ""),
-            "renewal_fee": request.data.get("renewal_fee", ""),
+            "registration_fee": request.data.get("registration_fee", ""),
             "day_schedule": request.data.get("day_schedule", []),
             "time_schedule": request.data.get("time_schedule", []),
             "created_by": created_by,
