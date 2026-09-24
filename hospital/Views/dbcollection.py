@@ -10,7 +10,7 @@ client = MongoClient(mongo_url)
 global_db = client["Global"]
 hms_db = client["HMS"]
 Diagnostics_db=client["Diagnostics"]
-ER_db = client["ER"]
+ER_db = client["ER_Billing"]
 
 # Collections
 
@@ -24,7 +24,7 @@ HMS_Symptoms_list                 = hms_db["hospital_Symptoms_list"]
 medicine_package                  = hms_db["hospital_pharmacyitem"]
 shanmuga360_collection            = hms_db["hospital_Shanmuga360_MedicineList"]
 Diagnostics_test_details          = Diagnostics_db["core_testdetails"]
-doctor_list                       = ER_db["er_doctors"]
+doctor_list                       = ER_db["doctors_list"]
 hms_billtype                      = hms_db["hospital_billtype"]
 hospital_investigationprice       = hms_db["hospital_investigationprice"]
 
