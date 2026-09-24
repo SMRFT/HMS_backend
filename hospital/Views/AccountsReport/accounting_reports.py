@@ -69,6 +69,8 @@ def _format_dt(val):
     if not val: return ""
     if isinstance(val, datetime):
         return val.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, date):
+        return val.strftime("%Y-%m-%d")
     return str(val)
 
 def _format_time(val):
@@ -582,6 +584,8 @@ def discharge_bills_report(request):
         }
         if status_f and status_f.lower() != "all":
             mongo_q["status"] = status_f
+        if outlet_f and outlet_f.lower() != "all":
+            mongo_q["$or"] = [{"outlet_code": outlet_f}, {"outlet": outlet_f}]
         if hospital_code:
             mongo_q["hospital_code"] = hospital_code
         if branch_code:
@@ -1641,6 +1645,7 @@ def date_wise_collection_summary_report(request):
     try:
         from_d_str = request.GET.get("from_date")
         to_d_str = request.GET.get("to_date")
+        outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         hospital_code, branch_code = _auth_scope(request)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1654,6 +1659,8 @@ def date_wise_collection_summary_report(request):
         t_dt = datetime.combine(t_d, datetime.max.time())
 
         date_q = {"created_date": {"$gte": f_dt, "$lte": t_dt}}
+        if outlet_code and outlet_code.lower() != "all":
+            date_q["$or"] = [{"outlet_code": outlet_code}, {"outlet": outlet_code}]
         if hospital_code:
             date_q["hospital_code"] = hospital_code
         if branch_code:
@@ -1962,6 +1969,7 @@ def miscellaneous_payment_report(request):
         to_f   = request.GET.get("to_date")
         account_head_f = request.GET.get("account_head")
         receipt_type_f = request.GET.get("receipt_type")
+        outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
 
         qs = ReceiptAndPayment.objects.all()
         if from_f:
@@ -1974,6 +1982,8 @@ def miscellaneous_payment_report(request):
             qs = qs.filter(account_head=account_head_f)
         if receipt_type_f and receipt_type_f.lower() != "all":
             qs = qs.filter(receipt_type=receipt_type_f)
+        if outlet_code and outlet_code.lower() != "all":
+            qs = qs.filter(outlet_code=outlet_code)
 
         records = list(qs.order_by("-voucher_date"))
 
@@ -2158,11 +2168,14 @@ def debit_bills_report(request):
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
+        outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
         amount_fields = {"consulting_fee", "registration_fee", "total_fees"}
         records = list(Billing.objects.exclude(edit_history=[]).exclude(edit_history__isnull=True))
+        if outlet_code and outlet_code.lower() != "all":
+            records = [b for b in records if getattr(b, 'outlet_code', None) == outlet_code]
 
         rows = []
         patient_ids = set()
@@ -2216,7 +2229,10 @@ def debit_bills_report(request):
         if not rows:
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             db = client["HMS"]
-            dch_docs = list(db["hospital_dischargebilling"].find({}))
+            dch_q = {}
+            if outlet_code and outlet_code.lower() != "all":
+                dch_q["$or"] = [{"outlet_code": outlet_code}, {"outlet": outlet_code}]
+            dch_docs = list(db["hospital_dischargebilling"].find(dch_q))
             client.close()
 
             uhids = list(set(d.get("uhid") for d in dch_docs if d.get("uhid")))
@@ -2276,6 +2292,7 @@ def audit_report(request):
     try:
         from_f = request.GET.get("from_date")
         to_f   = request.GET.get("to_date")
+        outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
@@ -2288,7 +2305,10 @@ def audit_report(request):
         employee_ids = set()
 
         # 1. Registration Billing
-        for bill in Billing.objects.exclude(edit_history=[]).exclude(edit_history__isnull=True):
+        reg_bills = Billing.objects.exclude(edit_history=[]).exclude(edit_history__isnull=True)
+        if outlet_code and outlet_code.lower() != "all":
+            reg_bills = reg_bills.filter(outlet_code=outlet_code)
+        for bill in reg_bills:
             for entry in (bill.edit_history or []):
                 if not isinstance(entry, dict): continue
                 d = _parse_date(entry.get("date"))
@@ -2306,7 +2326,10 @@ def audit_report(request):
         # 2. Pharmacy Billing (per medicine item qty edits)
         item_ids = set()
         pharmacy_events = []
-        for bill in PharmacyBilling.objects.all():
+        pharm_bills = PharmacyBilling.objects.all()
+        if outlet_code and outlet_code.lower() != "all":
+            pharm_bills = pharm_bills.filter(outlet_code=outlet_code)
+        for bill in pharm_bills:
             meds = bill.medicine_particulars if isinstance(bill.medicine_particulars, list) else []
             for med in meds:
                 if not isinstance(med, dict): continue
@@ -2343,7 +2366,10 @@ def audit_report(request):
             })
 
         # 3. Sales Return (same per-item edit_history pattern)
-        for ret in SalesReturn.objects.all():
+        ret_bills = SalesReturn.objects.all()
+        if outlet_code and outlet_code.lower() != "all":
+            ret_bills = ret_bills.filter(outlet_code=outlet_code)
+        for ret in ret_bills:
             meds = ret.medicine_particulars if isinstance(ret.medicine_particulars, list) else []
             for med in meds:
                 if not isinstance(med, dict): continue
@@ -2366,7 +2392,10 @@ def audit_report(request):
         # 4. Investigation Billing (raw Mongo 'history' array — old value only, no new value stored)
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
-        for doc in db["hospital_investbilling"].find({"history.0": {"$exists": True}}, {"investBillNo": 1, "uhid": 1, "history": 1}):
+        invest_q = {"history.0": {"$exists": True}}
+        if outlet_code and outlet_code.lower() != "all":
+            invest_q["$or"] = [{"outlet_code": outlet_code}, {"outlet": outlet_code}]
+        for doc in db["hospital_investbilling"].find(invest_q, {"investBillNo": 1, "uhid": 1, "history": 1}):
             for entry in (doc.get("history") or []):
                 if not isinstance(entry, dict): continue
                 d = _parse_date(entry.get("modified_date"))
@@ -2404,8 +2433,17 @@ def audit_report(request):
         for r in rows:
             r["edited_by_name"] = employee_map.get(str(r["edited_by"]), r["edited_by"] or "")
             r["patient_name"] = patient_map.get(r.get("uhid"), "") if r.get("uhid") else ""
+            ed = r.get("edited_date")
+            if isinstance(ed, datetime):
+                r["edited_date"] = ed.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(ed, date):
+                r["edited_date"] = ed.strftime("%Y-%m-%d")
+            elif ed is None:
+                r["edited_date"] = ""
+            else:
+                r["edited_date"] = str(ed)
 
-        rows.sort(key=lambda x: x["edited_date"] or "", reverse=True)
+        rows.sort(key=lambda x: str(x.get("edited_date") or ""), reverse=True)
 
         summary = {}
         for r in rows:
@@ -2442,6 +2480,7 @@ def sales_tax_register(request):
         to_f   = request.GET.get("to_date")
         patient_type = (request.GET.get("patient_type") or "all").lower()
         report_type = (request.GET.get("report_type") or "all").lower()
+        outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
@@ -2450,8 +2489,16 @@ def sales_tax_register(request):
             if t_date and d and d > t_date: return False
             return True
 
-        sale_bills = list(PharmacyBilling.objects.filter(billing_status="Paid")) if report_type in ("all", "sales", "sale") else []
-        returns = list(SalesReturn.objects.all()) if report_type in ("all", "returns", "return") else []
+        sale_bills_qs = PharmacyBilling.objects.filter(billing_status="Paid")
+        if outlet_code and outlet_code.lower() != "all":
+            sale_bills_qs = sale_bills_qs.filter(outlet_code=outlet_code)
+        sale_bills = list(sale_bills_qs) if report_type in ("all", "sales", "sale") else []
+
+        returns_qs = SalesReturn.objects.all()
+        if outlet_code and outlet_code.lower() != "all":
+            returns_qs = returns_qs.filter(outlet_code=outlet_code)
+        returns = list(returns_qs) if report_type in ("all", "returns", "return") else []
+
         return_bill_nos = {r.bill_no for r in returns if r.bill_no}
         orig_bill_map = {b.bill_no: b for b in PharmacyBilling.objects.filter(bill_no__in=return_bill_nos)} if return_bill_nos else {}
 
@@ -2487,7 +2534,7 @@ def sales_tax_register(request):
         for b in sale_bills:
             d = _parse_date(b.bill_date)
             if not in_range(d): continue
-            category = "IP" if b.inpatient_number else "OP"
+            category = "IP" if (b.inpatient_number or getattr(b, 'ip_number', None) or (getattr(b, 'patient_type', '') or '').upper() == 'IP') else "OP"
             if patient_type in ("ip", "op") and category.lower() != patient_type: continue
 
             for med in (b.medicine_particulars or []):
@@ -2500,7 +2547,7 @@ def sales_tax_register(request):
                 taxable, cgst_amt, sgst_amt = tax_split(amount, cgst_pct, sgst_pct)
                 sales_lines.append({
                     "type": "Sale", "patient_type": category, "bill_no": b.bill_no,
-                    "date": b.bill_date.isoformat() if b.bill_date else None,
+                    "date": _format_dt(b.bill_date),
                     "item_name": med.get("item_name") or item_name_map.get(iid, ""),
                     "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
@@ -2511,7 +2558,7 @@ def sales_tax_register(request):
         return_lines = []
         for r in returns:
             orig = orig_bill_map.get(r.bill_no)
-            category = "IP" if (orig and orig.inpatient_number) else "OP"
+            category = "IP" if (orig and (orig.inpatient_number or getattr(orig, 'ip_number', None) or (getattr(orig, 'patient_type', '') or '').upper() == 'IP')) else "OP"
             if patient_type in ("ip", "op") and category.lower() != patient_type: continue
             d = _parse_date(r.return_bill_date)
             if not in_range(d): continue
@@ -2528,7 +2575,7 @@ def sales_tax_register(request):
                     "type": "Return", "patient_type": category,
                     "bill_no": r.return_bill_no,
                     "orig_bill_no": r.bill_no or "—",
-                    "date": r.return_bill_date.isoformat() if r.return_bill_date else None,
+                    "date": _format_dt(r.return_bill_date),
                     "item_name": item_name_map.get(iid, "") or med.get("item_name", ""),
                     "batch_no": med.get("batch_number") or "",
                     "rate": round(cgst_pct + sgst_pct, 2),
@@ -2624,7 +2671,7 @@ def sales_tax_register(request):
                 "gross_amount": -l["gross_amount"],
             })
 
-        all_lines = sorted(sales_lines + consolidated_return_lines, key=lambda x: x["date"] or "", reverse=True)
+        all_lines = sorted(sales_lines + consolidated_return_lines, key=lambda x: str(x.get("date") or ""), reverse=True)
 
         def build_daywise_register(lines, is_return=False):
             day_groups = {}
@@ -2800,10 +2847,10 @@ def sales_tax_register(request):
             day_wise_net.append(net_row)
 
         if report_type in ("returns", "return"):
-            active_data = sorted(return_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_data = sorted(return_lines, key=lambda x: str(x.get("date") or ""), reverse=True)
             active_summary = return_summary
         elif report_type in ("sales", "sale"):
-            active_data = sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True)
+            active_data = sorted(sales_lines, key=lambda x: str(x.get("date") or ""), reverse=True)
             active_summary = sales_summary
         else:
             active_data = all_lines
@@ -2813,8 +2860,8 @@ def sales_tax_register(request):
             "success": True,
             "data": active_data,
             "summary": active_summary,
-            "sales_data": sorted(sales_lines, key=lambda x: x["date"] or "", reverse=True),
-            "return_data": sorted(return_lines, key=lambda x: x["date"] or "", reverse=True),
+            "sales_data": sorted(sales_lines, key=lambda x: str(x.get("date") or ""), reverse=True),
+            "return_data": sorted(return_lines, key=lambda x: str(x.get("date") or ""), reverse=True),
             "consolidated_data": all_lines,
             "sales_summary": sales_summary,
             "return_summary": return_summary,
