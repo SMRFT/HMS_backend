@@ -1,5 +1,9 @@
 from rest_framework import serializers
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, GeneralStoreVendor, VendingMachineSale
+from .models import (
+    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
+    GeneralStoreVendor, VendingMachineSale, StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn,
+    Stores_LabApprovedItem, Stores_LabUsedQtyDetail
+)
 
 class StoresGRNSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -131,6 +135,7 @@ class ItemMasterSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     unit_price = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True, default=0.00)
     ved_category = serializers.CharField(required=False, allow_null=True, default='D')
+    abc_category = serializers.CharField(required=False, allow_null=True, default='C')
     is_VM = serializers.BooleanField(required=False, default=False)
 
     class Meta:
@@ -143,6 +148,8 @@ class ItemMasterSerializer(serializers.ModelSerializer):
             data['unit_price'] = 0.00
         if data.get('ved_category') is None or data.get('ved_category') == '':
             data['ved_category'] = 'D'
+        if data.get('abc_category') is None or data.get('abc_category') == '':
+            data['abc_category'] = 'C'
         return super().to_internal_value(data)
 
     def to_representation(self, instance):
@@ -234,6 +241,18 @@ class GroupTypeSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     class Meta:
         model = GroupType
+        fields = '__all__'
+
+class RackSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = Rack
+        fields = '__all__'
+
+class ShelfSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = Shelf
         fields = '__all__'
 
 class StoresIntentSerializer(serializers.ModelSerializer):
@@ -351,4 +370,111 @@ class VendingMachineSaleSerializer(serializers.ModelSerializer):
     class Meta:
         model = VendingMachineSale
         fields = '__all__'
+
+
+class StoresPurchaseOrderSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = StoresPurchaseOrder
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        val = getattr(instance, 'items', None)
+        if isinstance(val, list):
+            clean_list = []
+            for item in val:
+                if isinstance(item, (dict, OrderedDict)):
+                    clean_list.append(dict(item))
+                else:
+                    clean_list.append(item)
+            representation['items'] = clean_list
+        elif isinstance(val, str):
+            try:
+                representation['items'] = json.loads(val)
+            except Exception:
+                try:
+                    representation['items'] = ast.literal_eval(val)
+                except Exception:
+                    representation['items'] = []
+        elif val is None:
+            representation['items'] = []
+        return representation
+
+
+class StoresPurchaseReturnSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = StoresPurchaseReturn
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        val = getattr(instance, 'items', None)
+        if isinstance(val, list):
+            clean_list = []
+            for item in val:
+                if isinstance(item, (dict, OrderedDict)):
+                    clean_list.append(dict(item))
+                else:
+                    clean_list.append(item)
+            representation['items'] = clean_list
+        elif isinstance(val, str):
+            try:
+                representation['items'] = json.loads(val)
+            except Exception:
+                try:
+                    representation['items'] = ast.literal_eval(val)
+                except Exception:
+                    representation['items'] = []
+        elif val is None:
+            representation['items'] = []
+        return representation
+
+
+class StoresIndentReturnSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = StoresIndentReturn
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        val = getattr(instance, 'items', None)
+        if isinstance(val, list):
+            clean_list = []
+            for item in val:
+                if isinstance(item, (dict, OrderedDict)):
+                    clean_list.append(dict(item))
+                else:
+                    clean_list.append(item)
+            representation['items'] = clean_list
+        elif isinstance(val, str):
+            try:
+                representation['items'] = json.loads(val)
+            except Exception:
+                try:
+                    representation['items'] = ast.literal_eval(val)
+                except Exception:
+                    representation['items'] = []
+        elif val is None:
+            representation['items'] = []
+        return representation
+
+
 

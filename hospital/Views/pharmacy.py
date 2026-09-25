@@ -335,13 +335,45 @@ import os
 def sanitize_medicines(medicines):
     clean = []
 
+    # Fallback map for batch numbers if missing
+    fallback_batch_map = {}
+    try:
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        for s in db["hospital_pharmacystock"].find():
+            iid = s.get("item_id")
+            bn = s.get("batch_number")
+            if iid is not None and bn and iid not in fallback_batch_map:
+                fallback_batch_map[iid] = str(bn).strip()
+                try:
+                    fallback_batch_map[int(iid)] = str(bn).strip()
+                except Exception:
+                    pass
+        for v in db["hospital_velavan_stock"].find():
+            iid = v.get("item_id")
+            bn = v.get("batch_no")
+            if iid is not None and bn and iid not in fallback_batch_map:
+                fallback_batch_map[iid] = str(bn).strip()
+                try:
+                    fallback_batch_map[int(iid)] = str(bn).strip()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     for med in medicines:
         if not med:
             continue
 
+        item_id_val = int(med.get("item_id"))
+        bn_val = str(med.get("batch_number") or med.get("batch_no") or "").strip()
+        if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
+            bn_val = fallback_batch_map.get(item_id_val, "") or fallback_batch_map.get(str(item_id_val), "")
+
         clean.append({
-            "item_id": int(med.get("item_id")),
-            "batch_number": str(med.get("batch_number")),
+            "item_id": item_id_val,
+            "item_name": med.get("item_name") or med.get("name") or "",
+            "batch_number": bn_val,
             "qty": int(med.get("qty", 0)),
             "price": float(med.get("price", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
@@ -2798,10 +2830,19 @@ def finalize_bill(request):
                         "edited_by":      employee_id,
                     })
 
+            bn_val = str(med.get("batch_number") or med.get("batch_no") or "").strip()
+            if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
+                try:
+                    stk = bill_collection.database["hospital_pharmacystock"].find_one({"item_id": item_id})
+                    if stk and stk.get("batch_number"):
+                        bn_val = str(stk["batch_number"]).strip()
+                except Exception:
+                    pass
+
             med_entry = {
                 "item_id":          item_id,
                 "item_name":        med.get("item_name") or med.get("name"),
-                "batch_number":     med.get("batch_number"),
+                "batch_number":     bn_val,
                 "quantity":         qty,
                 "price":            price,
                 "calculated_price": calculated_price,
@@ -3865,3 +3906,232 @@ def pharmacy_expiry_report(request):
             "success": False,
             "message": f"Internal server error: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def get_doctor_prescriptions(request):
+    """
+    Retrieve doctor consultation records with prescription_details for pharmacy billing.
+    Returns patient demographics, doctor name, prescribed medicines list, and pharmacy billing status.
+    """
+    try:
+        uhid_filter = request.query_params.get("uhid")
+        search_filter = (request.query_params.get("search") or "").strip().lower()
+        from_date_str = request.query_params.get("from_date")
+        to_date_str = request.query_params.get("to_date")
+
+        from hospital.Views.OPEMR.models import OPDoctorConsultation
+        from hospital.models import Patient
+        from hospital.Views.dbcollection import get_employee_name_by_id
+        from pymongo import MongoClient
+        from django.utils import timezone
+
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_mongo = client["HMS"]
+        pb_col = hms_mongo["hospital_pharmacybilling"]
+
+        qs = OPDoctorConsultation.objects.all()
+        if uhid_filter:
+            qs = qs.filter(uhid=uhid_filter)
+
+        consultations = list(qs.order_by("-created_date", "-date"))
+
+        # Full stock detail map for prescription enrichment: item_id -> {batch, price, mrp, expiry}
+        stock_detail_map = {}
+        try:
+            for s in hms_mongo["hospital_pharmacystock"].find():
+                iid = s.get("item_id")
+                if iid is None:
+                    continue
+                detail = {
+                    "batch_number": str(s.get("batch_number") or "").strip(),
+                    "price":        float(s.get("price") or s.get("mrp") or 0),
+                    "mrp":          float(s.get("mrp") or s.get("price") or 0),
+                    "expiry_date":  str(s.get("expiry_date") or "").strip(),
+                    "hsn_code":     str(s.get("hsn_code") or "").strip(),
+                    "cgst_rate":    float(s.get("CGST_Percentage") or s.get("cgst_rate") or 0),
+                    "sgst_rate":    float(s.get("SGST_Percentage") or s.get("sgst_rate") or 0),
+                    "cgst_amount":  float(s.get("CGST_Amt") or s.get("cgst_amount") or 0),
+                    "sgst_amount":  float(s.get("SGST_Amt") or s.get("sgst_amount") or 0),
+                }
+                if iid not in stock_detail_map:
+                    stock_detail_map[iid] = detail
+                try:
+                    if int(iid) not in stock_detail_map:
+                        stock_detail_map[int(iid)] = detail
+                except Exception:
+                    pass
+            for v in hms_mongo["hospital_velavan_stock"].find():
+                iid = v.get("item_id")
+                if iid is None:
+                    continue
+                detail = {
+                    "batch_number": str(v.get("batch_no") or v.get("batch_number") or "").strip(),
+                    "price":        float(v.get("price") or v.get("mrp") or 0),
+                    "mrp":          float(v.get("mrp") or v.get("price") or 0),
+                    "expiry_date":  str(v.get("expiry_date") or "").strip(),
+                    "hsn_code":     str(v.get("hsn_code") or "").strip(),
+                    "cgst_rate":    float(v.get("CGST_Percentage") or v.get("cgst_rate") or 0),
+                    "sgst_rate":    float(v.get("SGST_Percentage") or v.get("sgst_rate") or 0),
+                    "cgst_amount":  float(v.get("CGST_Amt") or v.get("cgst_amount") or 0),
+                    "sgst_amount":  float(v.get("SGST_Amt") or v.get("sgst_amount") or 0),
+                }
+                if iid not in stock_detail_map:
+                    stock_detail_map[iid] = detail
+                try:
+                    if int(iid) not in stock_detail_map:
+                        stock_detail_map[int(iid)] = detail
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        results = []
+        for c in consultations:
+            raw_presc_items = getattr(c, "prescription_details", []) or []
+            if not isinstance(raw_presc_items, list) or len(raw_presc_items) == 0:
+                continue
+
+            presc_items = []
+            for it in raw_presc_items:
+                if not isinstance(it, dict):
+                    continue
+                it_copy = dict(it)
+                it_id = it_copy.get("item_id")
+
+                # Look up full stock details for this item
+                stock_info = (
+                    stock_detail_map.get(it_id)
+                    or stock_detail_map.get(str(it_id) if it_id is not None else "")
+                    or {}
+                )
+
+                # ── Batch number ──
+                it_bn = str(it_copy.get("batch_number") or it_copy.get("batch_no") or "").strip()
+                if not it_bn or it_bn.lower() in ("none", "null", "n/a", ""):
+                    it_bn = stock_info.get("batch_number", "")
+                it_copy["batch_number"] = it_bn
+                it_copy["batch_no"] = it_bn
+
+                # ── Price / MRP ── (fill from stock if prescription item has no price)
+                if not it_copy.get("price") and not it_copy.get("mrp"):
+                    it_copy["price"]    = stock_info.get("price", 0)
+                    it_copy["mrp"]      = stock_info.get("mrp", 0)
+                else:
+                    it_copy.setdefault("price", stock_info.get("price", 0))
+                    it_copy.setdefault("mrp",   stock_info.get("mrp", 0))
+
+                # ── Expiry date ──
+                if not it_copy.get("expiry_date"):
+                    it_copy["expiry_date"] = stock_info.get("expiry_date", "")
+
+                # ── HSN / Tax rates ──
+                it_copy.setdefault("hsn_code",    stock_info.get("hsn_code", ""))
+                it_copy.setdefault("cgst_rate",   stock_info.get("cgst_rate", 0))
+                it_copy.setdefault("sgst_rate",   stock_info.get("sgst_rate", 0))
+                it_copy.setdefault("cgst_amount", stock_info.get("cgst_amount", 0))
+                it_copy.setdefault("sgst_amount", stock_info.get("sgst_amount", 0))
+
+                presc_items.append(it_copy)
+
+            c_uhid = getattr(c, "uhid", "") or ""
+            c_created = getattr(c, "created_date", None) or getattr(c, "date", None)
+
+            # Date filtering if provided
+            if c_created:
+                c_date_val = c_created.date() if hasattr(c_created, "date") else None
+                if from_date_str and c_date_val:
+                    try:
+                        from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
+                        if c_date_val < from_d:
+                            continue
+                    except Exception:
+                        pass
+                if to_date_str and c_date_val:
+                    try:
+                        to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
+                        if c_date_val > to_d:
+                            continue
+                    except Exception:
+                        pass
+
+            # Patient details
+            p_obj = Patient.objects.filter(uhid=c_uhid).first() if c_uhid else None
+            if p_obj:
+                p_name = f"{p_obj.salutation or ''} {p_obj.firstName or ''} {p_obj.lastName or ''}".strip()
+                p_age = p_obj.age or ""
+                p_gender = p_obj.gender or ""
+                p_mobile = p_obj.mobilePhone or ""
+                p_address = p_obj.permanent_address or p_obj.city or ""
+            else:
+                p_name = f"Patient ({c_uhid})"
+                p_age = ""
+                p_gender = ""
+                p_mobile = ""
+                p_address = ""
+
+            # Search filter matching
+            if search_filter:
+                match_uhid = search_filter in c_uhid.lower()
+                match_name = search_filter in p_name.lower()
+                if not (match_uhid or match_name):
+                    continue
+
+            # Doctor name
+            doc_id = getattr(c, "doctor_id", "") or getattr(c, "created_by", "") or ""
+            doc_name = get_employee_name_by_id(doc_id)
+            if not doc_name or doc_name == "Unknown":
+                doc_name = f"Dr. ({doc_id})" if doc_id else "Doctor"
+            elif not doc_name.lower().startswith("dr"):
+                doc_name = f"Dr. {doc_name}"
+
+            # Check if matching bill exists in pharmacy billing
+            billing_status = "Pending"
+            bill_no = None
+            bill_id = None
+            if c_uhid:
+                matching_bill = pb_col.find_one({"uhid": c_uhid}, sort=[("created_date", -1)])
+                if matching_bill:
+                    billing_status = matching_bill.get("billing_status") or "Billed"
+                    bill_no = matching_bill.get("bill_no")
+                    bill_id = matching_bill.get("Bill_id")
+
+            # Localize timestamp to Asia/Kolkata
+            created_str = ""
+            if c_created:
+                try:
+                    if timezone.is_naive(c_created):
+                        c_created = timezone.make_aware(c_created, timezone.utc)
+                    created_str = timezone.localtime(c_created).isoformat()
+                except Exception:
+                    created_str = c_created.isoformat() if hasattr(c_created, "isoformat") else str(c_created)
+
+            results.append({
+                "id": str(getattr(c, "_id", "") or getattr(c, "pk", "") or ""),
+                "_id": str(getattr(c, "_id", "") or getattr(c, "pk", "") or ""),
+                "uhid": c_uhid,
+                "patient_name": p_name,
+                "age": p_age,
+                "gender": p_gender,
+                "mobile": p_mobile,
+                "address": p_address,
+                "doctor_id": doc_id,
+                "doctor_name": doc_name,
+                "created_date": created_str,
+                "status": getattr(c, "status", "Completed") or "Completed",
+                "finding": getattr(c, "finding", "") or "",
+                "prescription_details": presc_items,
+                "items_count": len(presc_items),
+                "billing_status": billing_status,
+                "bill_no": bill_no,
+                "Bill_id": bill_id
+            })
+
+        return Response({"success": True, "data": results}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

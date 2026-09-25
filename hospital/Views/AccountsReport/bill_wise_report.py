@@ -20,6 +20,7 @@ def bill_wise_report(request):
         to_date_str = data.get("to_date")
         type_filter = data.get("bill_type") # "All", "Pharmacy", "Investigation", etc.
         patient_filter = data.get("uhid")
+        outlet_code_filter = data.get("outlet_code") or data.get("outlet")
         
         # AUTH CODES
         hospital_code = (
@@ -52,6 +53,8 @@ def bill_wise_report(request):
         mongo_query = {}
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
+        if outlet_code_filter and str(outlet_code_filter).strip().lower() != "all":
+            mongo_query["outlet_code"] = outlet_code_filter
         mongo_query["created_date"] = {"$gte": from_date, "$lte": to_date}
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
@@ -63,22 +66,29 @@ def bill_wise_report(request):
         report_data = []
         for r in enriched_data:
             # Map type representation for filter checks
-            mapped_type = r["type"]
+            mapped_type = r.get("type", "")
             if mapped_type in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"]:
                 r["type"] = "Pharmacy"
             elif mapped_type in ["Investigation", "InvestigationBills"]:
                 r["type"] = "Investigation"
-            elif mapped_type in ["Billing", "Registration", "RegistrationBills"]:
+            elif mapped_type in ["Billing", "Registration", "RegistrationBills", "OPRegistration", "IPRegistration"]:
                 r["type"] = "Registration"
             elif mapped_type in ["Discharge", "DischargeBills"]:
                 r["type"] = "Discharge"
-            elif mapped_type in ["IPAdvance", "IPAdvanceBills"]:
-                r["type"] = "IPAdvance"
-            elif mapped_type in ["Sales Return", "sales_return"]:
+            elif mapped_type in ["IPAdvance", "IPAdvanceBills", "IP Advance", "Advance"]:
+                r["type"] = "IP Advance"
+            elif mapped_type in ["Sales Return", "sales_return", "SalesReturn"]:
                 r["type"] = "Sales Return"
+            elif mapped_type in ["Admission", "IPAdmission", "IP Admission"]:
+                r["type"] = "Admission"
+            elif mapped_type in ["Miscellaneous", "MiscPayment", "Miscellaneous Payment"]:
+                r["type"] = "Miscellaneous"
                 
-            if type_filter and type_filter != "All" and type_filter != r["type"]:
-                continue
+            if type_filter and type_filter != "All":
+                tf_norm = type_filter.replace(" ", "").lower()
+                rt_norm = str(r["type"]).replace(" ", "").lower()
+                if tf_norm != rt_norm:
+                    continue
             if patient_filter and patient_filter != r["uhid"]:
                 continue
                 

@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.core.management.base import BaseCommand
@@ -16,6 +16,7 @@ _hms_db = _client["HMS"]
 profile_collection = _global_db["backend_diagnostics_profile"]
 department_collection = _global_db["backend_diagnostics_Departments"]
 company_secretary_collection = _hms_db["hospital_licencemasterdetails"]
+licence_email_logs_collection = _hms_db["hospital_licence_email_logs"]
 
 
 
@@ -164,17 +165,38 @@ def run_licence_expiry_check():
                 print("CC Emails:", cc_emails)
 
                 if not incharge_emails:
+                    now_dt = timezone.now()
+                    skip_reason = "No incharge email"
                     skipped.append({
                         "licence": record.get("licence_name"),
-                        "reason": "No incharge email",
+                        "reason": skip_reason,
                         "threshold": days_before
                     })
                     print("❌ Skipped: No email")
+
+                    # ✅ Log skipped to DB
+                    licence_email_logs_collection.insert_one({
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "to_emails": [],
+                        "cc_emails": cc_emails,
+                        "status": "Skipped",
+                        "error_message": skip_reason,
+                        "created_date": now_dt,
+                    })
                     continue
 
 
                 try:
                     subject = f"Licence Expiry Reminder - {record.get('licence_name')}"
+                    email_body = build_email_body(record, days_before)
 
                     cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'cs@smrft.org')
                     cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
@@ -191,7 +213,7 @@ def run_licence_expiry_check():
 
                     email = EmailMessage(
                         subject=subject,
-                        body=build_email_body(record, days_before),
+                        body=email_body,
                         from_email=cs_email,
                         to=incharge_emails,
                         cc=cc_emails,
@@ -205,6 +227,52 @@ def run_licence_expiry_check():
                     # ✅ Mark as sent
                     updates[flag_field] = True
 
+                    now_dt = timezone.now()
+                    log_doc = {
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "renewal_date": format_date(record.get("renewal_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "from_email": cs_email,
+                        "to_emails": incharge_emails,
+                        "cc_emails": cc_emails,
+                        "subject": subject,
+                        "body": email_body,
+                        "status": "Sent",
+                        "error_message": None,
+                        "sent_at": now_dt,
+                        "created_date": now_dt,
+                    }
+
+                    # ✅ 1. Insert into dedicated log collection
+                    licence_email_logs_collection.insert_one(log_doc)
+
+                    # ✅ 2. Append to licence document history/email_logs
+                    company_secretary_collection.update_one(
+                        {"_id": record["_id"]},
+                        {
+                            "$push": {
+                                "email_logs": {
+                                    "threshold_days": days_before,
+                                    "threshold_flag": flag_field,
+                                    "days_left": diff_days,
+                                    "from_email": cs_email,
+                                    "to_emails": incharge_emails,
+                                    "cc_emails": cc_emails,
+                                    "subject": subject,
+                                    "status": "Sent",
+                                    "sent_at": now_dt
+                                }
+                            }
+                        }
+                    )
+
                     sent.append({
                         "licence": record.get("licence_name"),
                         "threshold": days_before,
@@ -215,10 +283,49 @@ def run_licence_expiry_check():
 
                 except Exception as e:
                     print("❌ EMAIL ERROR:", str(e))
+                    err_msg = str(e)
+                    now_dt = timezone.now()
+
+                    # ✅ Log failure to DB
+                    licence_email_logs_collection.insert_one({
+                        "licence_id": str(record.get("_id")),
+                        "s_no": record.get("s_no"),
+                        "licence_name": record.get("licence_name"),
+                        "license_number": record.get("license_number"),
+                        "valid_from": format_date(record.get("valid_from")),
+                        "expiry_date": format_date(record.get("expiry_date")),
+                        "threshold_days": days_before,
+                        "threshold_flag": flag_field,
+                        "days_left": diff_days,
+                        "from_email": cs_email if 'cs_email' in locals() else None,
+                        "to_emails": incharge_emails,
+                        "cc_emails": cc_emails,
+                        "subject": subject if 'subject' in locals() else f"Licence Expiry Reminder - {record.get('licence_name')}",
+                        "status": "Failed",
+                        "error_message": err_msg,
+                        "sent_at": now_dt,
+                        "created_date": now_dt,
+                    })
+
+                    company_secretary_collection.update_one(
+                        {"_id": record["_id"]},
+                        {
+                            "$push": {
+                                "email_logs": {
+                                    "threshold_days": days_before,
+                                    "threshold_flag": flag_field,
+                                    "days_left": diff_days,
+                                    "status": "Failed",
+                                    "error_message": err_msg,
+                                    "sent_at": now_dt
+                                }
+                            }
+                        }
+                    )
 
                     skipped.append({
                         "licence": record.get("licence_name"),
-                        "reason": str(e),
+                        "reason": err_msg,
                         "threshold": days_before
                     })
 
@@ -245,13 +352,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--daemon",
             action="store_true",
-            help="Run continuously as a daemon"
+            help="Run continuously as a daemon, triggering at --run-hour every day"
         )
         parser.add_argument(
-            "--interval",
+            "--run-hour",
             type=int,
-            default=86400,  # 24 hours
-            help="Interval in seconds (default: 86400)"
+            default=10,  # 10:00 AM
+            help="Hour of day (24h format) to send emails daily (default: 10)"
+        )
+        parser.add_argument(
+            "--run-minute",
+            type=int,
+            default=0,
+            help="Minute of hour to send emails daily (default: 0)"
         )
 
     def handle(self, *args, **options):
@@ -263,12 +376,32 @@ class Command(BaseCommand):
                 pass
 
         daemon = options.get("daemon")
-        interval = options.get("interval")
+        run_hour = options.get("run_hour", 10)
+        run_minute = options.get("run_minute", 0)
 
         if daemon:
-            self.stdout.write("[START] Starting Licence Expiry Daemon...\n")
+            self.stdout.write(
+                f"[START] Starting Licence Expiry Daemon — will run daily at "
+                f"{run_hour:02d}:{run_minute:02d}...\n"
+            )
 
             while True:
+                now = datetime.now()
+
+                # ✅ Calculate next run time (today or tomorrow at run_hour:run_minute)
+                next_run = now.replace(hour=run_hour, minute=run_minute, second=0, microsecond=0)
+                if now >= next_run:
+                    # Already past today's scheduled time — wait for tomorrow
+                    next_run += timedelta(days=1)
+
+                sleep_seconds = (next_run - now).total_seconds()
+                self.stdout.write(
+                    f"[WAIT] Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"(sleeping {int(sleep_seconds // 3600)}h "
+                    f"{int((sleep_seconds % 3600) // 60)}m)...\n"
+                )
+                time.sleep(sleep_seconds)
+
                 self.stdout.write(f"\n[TIME] Running at {timezone.now()}\n")
 
                 result = run_licence_expiry_check()
@@ -276,9 +409,6 @@ class Command(BaseCommand):
                 self.stdout.write("\n[RESULT]")
                 self.stdout.write(f"Sent: {result['total_sent']}")
                 self.stdout.write(f"Skipped: {result['total_skipped']}")
-
-                self.stdout.write(f"\n[SLEEP] Sleeping for {interval} seconds...\n")
-                time.sleep(interval)
 
         else:
             self.stdout.write("[START] Running once...\n")

@@ -1,18 +1,23 @@
-import datetime
 import json
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import ItemMaster, Department, Group, Category, GroupType, storesGRN, storesIntent, Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale
+from .models import (
+    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
+    Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale,
+    StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn
+)
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
-    GroupSerializer, CategorySerializer, GroupTypeSerializer, StoresGRNSerializer, StoresIntentSerializer,
+    GroupSerializer, CategorySerializer, GroupTypeSerializer, RackSerializer, ShelfSerializer,
+    StoresGRNSerializer, StoresIntentSerializer,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
-    VendingMachineSaleSerializer
+    VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
+    StoresIndentReturnSerializer
 )
 from django.shortcuts import get_object_or_404
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from pyauth.auth import HasRoleAndDataPermission
 from ..dbcollection import department_collection
 from django.utils import timezone
@@ -121,6 +126,8 @@ def item_master_detail(request, pk):
             data['unit_price'] = 0.00
         if data.get('ved_category') is None or data.get('ved_category') == '':
             data['ved_category'] = 'D'
+        if data.get('abc_category') is None or data.get('abc_category') == '':
+            data['abc_category'] = 'C'
         if 'is_VM' in data:
             data['is_VM'] = bool(data.get('is_VM'))
         
@@ -504,6 +511,147 @@ def group_type_detail(request, pk):
         item.lastmodified_by = employee_id
         item.save()
         return Response({"message": "GroupType soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Rack Views ---
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def rack_master_list_create(request):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+    
+    if request.method == 'GET':
+        items = Rack.objects.filter(is_active__in=[True]).order_by('rack_name')
+        serializer = RackSerializer(items, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('rack_id'):
+            data['rack_id'] = generate_custom_id_without_fy(Rack, 'rack_id', 'RCK', 4)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = RackSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def rack_master_detail(request, pk):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+    
+    try:
+        item = Rack.objects.filter(pk=pk, is_active__in=[True]).first()
+        if not item:
+            return Response({"error": "Rack not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'GET':
+        serializer = RackSerializer(item)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = RackSerializer(item, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        item.is_active = False
+        item.lastmodified_by = employee_id
+        item.save()
+        return Response({"message": "Rack soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Shelf Views ---
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def shelf_master_list_create(request):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+    
+    if request.method == 'GET':
+        rack_id = request.query_params.get('rack_id')
+        queryset = Shelf.objects.filter(is_active__in=[True])
+        if rack_id:
+            queryset = queryset.filter(rack_id=rack_id)
+        items = queryset.order_by('shelf_name')
+        serializer = ShelfSerializer(items, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('shelf_id'):
+            data['shelf_id'] = generate_custom_id_without_fy(Shelf, 'shelf_id', 'SHF', 4)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = ShelfSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def shelf_master_detail(request, pk):
+    employee_id  = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+    
+    try:
+        item = Shelf.objects.filter(pk=pk, is_active__in=[True]).first()
+        if not item:
+            return Response({"error": "Shelf not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'GET':
+        serializer = ShelfSerializer(item)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+
+        serializer = ShelfSerializer(item, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        item.is_active = False
+        item.lastmodified_by = employee_id
+        item.save()
+        return Response({"message": "Shelf soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+
 
 # --- Stores GRN Views ---
 @api_view(['GET', 'POST'])
@@ -2228,5 +2376,1315 @@ def stores_indent_department_report(request):
         "summary": summary,
         "data": department_list
     }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# Helper functions for safe numerical and date conversions with Decimal128 support
+# ==============================================================================
+
+def safe_float(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        return float(str(val))
+    except Exception:
+        return default
+
+def safe_int(val, default=0):
+    if val is None:
+        return default
+    try:
+        return int(float(str(val)))
+    except Exception:
+        return default
+
+def safe_date(val, default=None):
+    if val is None:
+        return default
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, str):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(val.strip(), fmt).date()
+            except Exception:
+                pass
+    return default
+
+
+# ==============================================================================
+# 1. Purchase Order Views
+# ==============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_order_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    if request.method == 'GET':
+        from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+        vendor_id = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+        status_filter = request.query_params.get('status') or request.GET.get('status')
+        search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+        qs = StoresPurchaseOrder.objects.filter(is_active__in=[True]).order_by('-po_date', '-created_date')
+        if from_date:
+            qs = qs.filter(po_date__gte=from_date)
+        if to_date:
+            qs = qs.filter(po_date__lte=to_date)
+        if vendor_id:
+            qs = qs.filter(vendor_id=vendor_id)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        serializer = StoresPurchaseOrderSerializer(qs, many=True)
+        po_list = serializer.data
+
+        if search_query:
+            sq = search_query.lower()
+            po_list = [
+                p for p in po_list 
+                if sq in str(p.get('po_number', '')).lower() 
+                or sq in str(p.get('vendor_name', '')).lower()
+                or sq in str(p.get('vendor_id', '')).lower()
+            ]
+
+        total_amount = sum(safe_float(p.get('total_amount')) for p in po_list)
+
+        return Response({
+            "success": True,
+            "count": len(po_list),
+            "total_amount": round(total_amount, 2),
+            "data": po_list
+        }, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('po_number'):
+            data['po_number'] = generate_custom_id(StoresPurchaseOrder, 'po_number', 'PO', 5)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        # If vendor_name is missing, look it up
+        v_id = data.get('vendor_id')
+        if v_id and not data.get('vendor_name'):
+            vendor = GeneralStoreVendor.objects.filter(vendor_id=v_id, is_active__in=[True]).first()
+            if vendor:
+                data['vendor_name'] = vendor.name
+
+        serializer = StoresPurchaseOrderSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_order_detail(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    po = StoresPurchaseOrder.objects.filter(po_number=pk, is_active__in=[True]).first()
+    if not po:
+        return Response({"error": "Purchase Order not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = StoresPurchaseOrderSerializer(po)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        serializer = StoresPurchaseOrderSerializer(po, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        po.is_active = False
+        po.lastmodified_by = employee_id
+        po.save()
+        return Response({"message": "Purchase order deleted successfully"}, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 2. Purchase Return Views (Return to Vendor & Debit Note)
+# ==============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_return_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    if request.method == 'GET':
+        from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+        vendor_id = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+        search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+        qs = StoresPurchaseReturn.objects.filter(is_active__in=[True]).order_by('-return_date', '-created_date')
+        if from_date:
+            qs = qs.filter(return_date__gte=from_date)
+        if to_date:
+            qs = qs.filter(return_date__lte=to_date)
+        if vendor_id:
+            qs = qs.filter(vendor_id=vendor_id)
+
+        serializer = StoresPurchaseReturnSerializer(qs, many=True)
+        return_list = serializer.data
+
+        if search_query:
+            sq = search_query.lower()
+            return_list = [
+                r for r in return_list
+                if sq in str(r.get('return_id', '')).lower()
+                or sq in str(r.get('grn_number', '')).lower()
+                or sq in str(r.get('vendor_name', '')).lower()
+                or sq in str(r.get('debit_note_no', '')).lower()
+            ]
+
+        total_return_value = sum(safe_float(r.get('total_return_amount')) for r in return_list)
+
+        return Response({
+            "success": True,
+            "count": len(return_list),
+            "total_return_value": round(total_return_value, 2),
+            "data": return_list
+        }, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('return_id'):
+            data['return_id'] = generate_custom_id(StoresPurchaseReturn, 'return_id', 'RTV', 5)
+        if not data.get('debit_note_no'):
+            data['debit_note_no'] = generate_custom_id(StoresPurchaseReturn, 'debit_note_no', 'DBN', 5)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        # If vendor_name is missing, look it up
+        v_id = data.get('vendor_id')
+        if v_id and not data.get('vendor_name'):
+            vendor = GeneralStoreVendor.objects.filter(vendor_id=v_id, is_active__in=[True]).first()
+            if vendor:
+                data['vendor_name'] = vendor.name
+
+        serializer = StoresPurchaseReturnSerializer(data=data)
+        if serializer.is_valid():
+            return_obj = serializer.save()
+
+            # Automatic stock deduction from ItemMaster for returned items
+            items = data.get('items', [])
+            if isinstance(items, str):
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    items = []
+
+            for it in items:
+                it_id = it.get('item_id') or it.get('id')
+                ret_qty = safe_int(it.get('return_qty') or it.get('quantity'))
+
+                if it_id and ret_qty > 0:
+                    item_master = ItemMaster.objects.filter(item_id=it_id, is_active__in=[True]).first()
+                    if item_master:
+                        curr_qty = safe_int(item_master.total_quantity)
+                        item_master.total_quantity = max(0, curr_qty - ret_qty)
+                        item_master.lastmodified_by = employee_id
+                        item_master.save()
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_return_detail(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    ret = StoresPurchaseReturn.objects.filter(return_id=pk, is_active__in=[True]).first()
+    if not ret:
+        return Response({"error": "Purchase Return not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = StoresPurchaseReturnSerializer(ret)
+        return Response(serializer.data)
+
+    elif request.method == 'PATCH':
+        data = request.data.copy()
+        data['lastmodified_by'] = employee_id
+        serializer = StoresPurchaseReturnSerializer(ret, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        ret.is_active = False
+        ret.lastmodified_by = employee_id
+        ret.save()
+        return Response({"message": "Purchase return deleted successfully"}, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 3. Purchase Analysis Report
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_analysis_report(request):
+    from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+    vendor_filter = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+
+    vendor_map = {v.vendor_id: v.name for v in GeneralStoreVendor.objects.filter(is_active__in=[True]) if v.vendor_id}
+
+    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+    if from_date:
+        grn_qs = grn_qs.filter(date__gte=from_date)
+    if to_date:
+        grn_qs = grn_qs.filter(date__lte=to_date)
+    if vendor_filter:
+        grn_qs = grn_qs.filter(vendor_id=vendor_filter)
+
+    monthly_spend = {}
+    vendor_spend = {}
+    item_analysis = {}
+    total_spend = 0.0
+    total_tax = 0.0
+    total_discount = 0.0
+    total_grns = 0
+
+    for grn in grn_qs:
+        tot_amt = safe_float(grn.total_amount or grn.net_invoice_amount)
+        tax = safe_float(grn.cgst) + safe_float(grn.sgst) + safe_float(grn.igst) + safe_float(grn.local_tax)
+        disc = safe_float(grn.total_discount)
+        v_id = str(grn.vendor_id or 'UNKNOWN')
+        v_name = vendor_map.get(v_id) or v_id
+
+        total_spend += tot_amt
+        total_tax += tax
+        total_discount += disc
+        total_grns += 1
+
+        # Month grouping (YYYY-MM)
+        m_key = grn.date.strftime('%Y-%m') if grn.date else 'Unknown'
+        if m_key not in monthly_spend:
+            monthly_spend[m_key] = {'month': m_key, 'total_amount': 0.0, 'tax_amount': 0.0, 'grn_count': 0}
+        monthly_spend[m_key]['total_amount'] += tot_amt
+        monthly_spend[m_key]['tax_amount'] += tax
+        monthly_spend[m_key]['grn_count'] += 1
+
+        # Vendor grouping
+        if v_id not in vendor_spend:
+            vendor_spend[v_id] = {'vendor_id': v_id, 'vendor_name': v_name, 'total_amount': 0.0, 'grn_count': 0}
+        vendor_spend[v_id]['total_amount'] += tot_amt
+        vendor_spend[v_id]['grn_count'] += 1
+
+        # Item-wise spend & rate tracking
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or it.get('id') or it.get('itemName') or 'UNKNOWN')
+                i_name = it.get('itemName') or it.get('name') or i_id
+                rate = safe_float(it.get('rate') or it.get('purchase_price') or it.get('unit_price') or it.get('price'))
+                qty = safe_float(it.get('quantity'))
+                net = safe_float(it.get('net_amount')) or (rate * qty)
+
+                if i_id not in item_analysis:
+                    item_analysis[i_id] = {
+                        'item_id': i_id,
+                        'item_name': i_name,
+                        'total_quantity': 0.0,
+                        'total_spend': 0.0,
+                        'rates': [],
+                        'min_rate': rate,
+                        'max_rate': rate
+                    }
+                item_analysis[i_id]['total_quantity'] += qty
+                item_analysis[i_id]['total_spend'] += net
+                if rate > 0:
+                    item_analysis[i_id]['rates'].append(rate)
+                    item_analysis[i_id]['min_rate'] = min(item_analysis[i_id]['min_rate'], rate)
+                    item_analysis[i_id]['max_rate'] = max(item_analysis[i_id]['max_rate'], rate)
+
+    # Format monthly trends
+    monthly_trends = sorted(list(monthly_spend.values()), key=lambda x: x['month'])
+    for m in monthly_trends:
+        m['total_amount'] = round(m['total_amount'], 2)
+        m['tax_amount'] = round(m['tax_amount'], 2)
+
+    # Format vendor breakdown (sorted desc)
+    vendor_breakdown = sorted(list(vendor_spend.values()), key=lambda x: x['total_amount'], reverse=True)
+    for v in vendor_breakdown:
+        v['total_amount'] = round(v['total_amount'], 2)
+        v['share_percentage'] = round((v['total_amount'] / total_spend * 100) if total_spend > 0 else 0, 2)
+
+    # Format top items (sorted desc by spend)
+    top_items = sorted(list(item_analysis.values()), key=lambda x: x['total_spend'], reverse=True)
+    for it in top_items:
+        it['total_spend'] = round(it['total_spend'], 2)
+        it['avg_rate'] = round(sum(it['rates'])/len(it['rates']), 2) if it['rates'] else 0.0
+        it.pop('rates', None)
+
+    return Response({
+        "success": True,
+        "summary": {
+            "total_spend": round(total_spend, 2),
+            "total_tax": round(total_tax, 2),
+            "total_discount": round(total_discount, 2),
+            "total_grns": total_grns,
+            "average_grn_value": round(total_spend / total_grns, 2) if total_grns > 0 else 0.0
+        },
+        "monthly_trends": monthly_trends,
+        "vendor_breakdown": vendor_breakdown,
+        "top_items": top_items[:50]
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 4. Previous Day / Daily Stock Movement Report
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_previous_day_stock_report(request):
+    report_date_str = request.query_params.get('date') or request.GET.get('date')
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    department_filter = request.query_params.get('department') or request.GET.get('department')
+    group_filter = request.query_params.get('group') or request.GET.get('group')
+
+    today = datetime.now().date()
+    if report_date_str:
+        try:
+            target_date = datetime.strptime(report_date_str, "%Y-%m-%d").date()
+        except Exception:
+            target_date = today - timedelta(days=1)
+    else:
+        target_date = today - timedelta(days=1)
+
+    target_date_str = target_date.strftime("%Y-%m-%d")
+
+    # Fetch all items
+    items_qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('itemName')
+    if department_filter:
+        items_qs = items_qs.filter(department=department_filter)
+    if group_filter:
+        items_qs = items_qs.filter(group=group_filter)
+
+    # Inward for target date from GRN
+    inward_map = {}
+    grns_on_date = storesGRN.objects.filter(is_active__in=[True], date=target_date)
+    for grn in grns_on_date:
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or it.get('id') or '')
+                qty = safe_float(it.get('quantity')) + safe_float(it.get('free'))
+                inward_map[i_id] = inward_map.get(i_id, 0.0) + qty
+
+    # Outward for target date from approved Indents
+    outward_map = {}
+    intents_on_date = storesIntent.objects.filter(is_active__in=[True], date=target_date, is_approved__in=[True])
+    for ind in intents_on_date:
+        items = ind.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or '')
+                qty = safe_float(it.get('approved_quantity') or it.get('quantity'))
+                outward_map[i_id] = outward_map.get(i_id, 0.0) + qty
+
+    # Purchase returns on target date
+    returns_map = {}
+    returns_on_date = StoresPurchaseReturn.objects.filter(is_active__in=[True], return_date=target_date)
+    for ret in returns_on_date:
+        items = ret.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or it.get('id') or '')
+                qty = safe_float(it.get('return_qty') or it.get('quantity'))
+                returns_map[i_id] = returns_map.get(i_id, 0.0) + qty
+
+    stock_records = []
+    total_opening_qty = 0.0
+    total_inward_qty = 0.0
+    total_outward_qty = 0.0
+    total_returns_qty = 0.0
+    total_closing_qty = 0.0
+    total_closing_value = 0.0
+
+    for itm in items_qs:
+        i_id = str(itm.item_id)
+        i_name = itm.itemName
+
+        if search_query:
+            sq = search_query.lower()
+            if sq not in i_name.lower() and sq not in i_id.lower():
+                continue
+
+        current_stock = safe_float(itm.total_quantity)
+        inward = inward_map.get(i_id, 0.0)
+        outward = outward_map.get(i_id, 0.0)
+        returned = returns_map.get(i_id, 0.0)
+        
+        # If target_date is today or previous day, calculate Opening = Closing - Inward + Outward + Returned
+        closing = current_stock
+        opening = max(0.0, closing - inward + outward + returned)
+        unit_price = safe_float(itm.unit_price)
+        valuation = closing * unit_price
+
+        total_opening_qty += opening
+        total_inward_qty += inward
+        total_outward_qty += outward
+        total_returns_qty += returned
+        total_closing_qty += closing
+        total_closing_value += valuation
+
+        stock_records.append({
+            'item_id': i_id,
+            'item_name': i_name,
+            'department': itm.department or 'Stores',
+            'group': itm.group or '',
+            'category': itm.category or '',
+            'rack_no': itm.rack_no or '',
+            'shelf_no': itm.shelf_no or '',
+            'opening_stock': round(opening, 2),
+            'inward_qty': round(inward, 2),
+            'outward_qty': round(outward, 2),
+            'return_qty': round(returned, 2),
+            'closing_stock': round(closing, 2),
+            'unit_price': round(unit_price, 2),
+            'stock_valuation': round(valuation, 2)
+        })
+
+    return Response({
+        "success": True,
+        "date": target_date_str,
+        "summary": {
+            "total_items": len(stock_records),
+            "total_opening_qty": round(total_opening_qty, 2),
+            "total_inward_qty": round(total_inward_qty, 2),
+            "total_outward_qty": round(total_outward_qty, 2),
+            "total_returns_qty": round(total_returns_qty, 2),
+            "total_closing_qty": round(total_closing_qty, 2),
+            "total_closing_value": round(total_closing_value, 2)
+        },
+        "data": stock_records
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 5. Supplier Wise List & Purchase Report
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_supplier_wise_list_report(request):
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    city_filter = request.query_params.get('city') or request.GET.get('city')
+    state_filter = request.query_params.get('state') or request.GET.get('state')
+
+    vendors = GeneralStoreVendor.objects.filter(is_active__in=[True]).order_by('name')
+    if city_filter:
+        vendors = vendors.filter(city__iexact=city_filter)
+    if state_filter:
+        vendors = vendors.filter(state__iexact=state_filter)
+
+    # Pre-aggregate GRN data per vendor
+    grn_stats = {}
+    for grn in storesGRN.objects.filter(is_active__in=[True]):
+        v_id = str(grn.vendor_id or '')
+        if not v_id:
+            continue
+        tot = safe_float(grn.total_amount or grn.net_invoice_amount)
+        paid = safe_float(grn.total_amount_paid)
+        pend = max(0.0, tot - paid)
+
+        if v_id not in grn_stats:
+            grn_stats[v_id] = {
+                'total_grns': 0,
+                'total_purchase_amount': 0.0,
+                'total_paid': 0.0,
+                'total_pending': 0.0,
+                'last_purchase_date': None,
+                'items_supplied': set()
+            }
+        grn_stats[v_id]['total_grns'] += 1
+        grn_stats[v_id]['total_purchase_amount'] += tot
+        grn_stats[v_id]['total_paid'] += paid
+        grn_stats[v_id]['total_pending'] += pend
+        if grn.date:
+            if not grn_stats[v_id]['last_purchase_date'] or grn.date > grn_stats[v_id]['last_purchase_date']:
+                grn_stats[v_id]['last_purchase_date'] = grn.date
+
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                name = it.get('itemName') or it.get('name')
+                if name:
+                    grn_stats[v_id]['items_supplied'].add(name)
+
+    supplier_list = []
+    grand_total_purchases = 0.0
+    grand_total_paid = 0.0
+    grand_total_pending = 0.0
+
+    for v in vendors:
+        v_id = str(v.vendor_id)
+        name = v.name
+
+        if search_query:
+            sq = search_query.lower()
+            if (sq not in name.lower() and sq not in v_id.lower() 
+                and sq not in str(v.phone or '').lower() 
+                and sq not in str(v.email or '').lower()
+                and sq not in str(v.gstin or '').lower()):
+                continue
+
+        stats = grn_stats.get(v_id, {
+            'total_grns': 0,
+            'total_purchase_amount': 0.0,
+            'total_paid': 0.0,
+            'total_pending': 0.0,
+            'last_purchase_date': None,
+            'items_supplied': set()
+        })
+
+        tot_p = stats['total_purchase_amount']
+        tot_pd = stats['total_paid']
+        tot_pnd = stats['total_pending']
+
+        grand_total_purchases += tot_p
+        grand_total_paid += tot_pd
+        grand_total_pending += tot_pnd
+
+        supplier_list.append({
+            'vendor_id': v_id,
+            'vendor_name': name,
+            'vendor_type': v.vendor_type,
+            'contact_person': v.contact_person or '',
+            'phone': v.phone or '',
+            'email': v.email or '',
+            'city': v.city or '',
+            'state': v.state or '',
+            'gstin': v.gstin or '',
+            'payment_terms': v.payment_terms or '',
+            'total_grns': stats['total_grns'],
+            'total_purchase_amount': round(tot_p, 2),
+            'total_paid': round(tot_pd, 2),
+            'pending_amount': round(tot_pnd, 2),
+            'last_purchase_date': stats['last_purchase_date'].strftime('%Y-%m-%d') if stats['last_purchase_date'] else None,
+            'items_supplied_count': len(stats['items_supplied']),
+            'items_sample': list(stats['items_supplied'])[:5]
+        })
+
+    return Response({
+        "success": True,
+        "summary": {
+            "total_suppliers": len(supplier_list),
+            "grand_total_purchases": round(grand_total_purchases, 2),
+            "grand_total_paid": round(grand_total_paid, 2),
+            "grand_total_pending": round(grand_total_pending, 2)
+        },
+        "data": supplier_list
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 6. Non-Moving Items Report (Dead Stock / Slow Moving)
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_non_moving_items_report(request):
+    days_threshold = safe_int(request.query_params.get('days') or request.GET.get('days'), 30)
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    department_filter = request.query_params.get('department') or request.GET.get('department')
+    group_filter = request.query_params.get('group') or request.GET.get('group')
+
+    today = datetime.now().date()
+    cutoff_date = today - timedelta(days=days_threshold)
+
+    # Collect all items with recent outward movement (indents within cutoff_date)
+    recent_moved_item_ids = set()
+    recent_intents = storesIntent.objects.filter(is_active__in=[True], date__gte=cutoff_date, is_approved__in=[True])
+    for ind in recent_intents:
+        items = ind.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or '')
+                if i_id:
+                    recent_moved_item_ids.add(i_id)
+
+    # Find last outward date for all items
+    last_outward_map = {}
+    for ind in storesIntent.objects.filter(is_active__in=[True], is_approved__in=[True]).order_by('-date'):
+        items = ind.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or '')
+                if i_id and i_id not in last_outward_map and ind.date:
+                    last_outward_map[i_id] = ind.date
+
+    # Find last inward date for all items
+    last_inward_map = {}
+    for grn in storesGRN.objects.filter(is_active__in=[True]).order_by('-date'):
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                i_id = str(it.get('item_id') or it.get('id') or '')
+                if i_id and i_id not in last_inward_map and grn.date:
+                    last_inward_map[i_id] = grn.date
+
+    items_qs = ItemMaster.objects.filter(is_active__in=[True], total_quantity__gt=0).order_by('-total_quantity')
+    if department_filter:
+        items_qs = items_qs.filter(department=department_filter)
+    if group_filter:
+        items_qs = items_qs.filter(group=group_filter)
+
+    non_moving_items = []
+    total_idle_qty = 0.0
+    total_idle_value = 0.0
+
+    for itm in items_qs:
+        i_id = str(itm.item_id)
+        if i_id in recent_moved_item_ids:
+            continue
+
+        i_name = itm.itemName
+        if search_query:
+            sq = search_query.lower()
+            if sq not in i_name.lower() and sq not in i_id.lower():
+                continue
+
+        qty = safe_float(itm.total_quantity)
+        unit_price = safe_float(itm.unit_price)
+        idle_value = qty * unit_price
+
+        last_out_d = safe_date(last_outward_map.get(i_id))
+        last_in_d = safe_date(last_inward_map.get(i_id))
+        created_d = safe_date(itm.created_date)
+
+        # Days without movement
+        ref_date = last_out_d or last_in_d or created_d or today
+        days_idle = max(0, (today - ref_date).days) if ref_date else days_threshold
+
+        total_idle_qty += qty
+        total_idle_value += idle_value
+
+        non_moving_items.append({
+            'item_id': i_id,
+            'item_name': i_name,
+            'department': itm.department or 'Stores',
+            'group': itm.group or '',
+            'category': itm.category or '',
+            'rack_no': itm.rack_no or '',
+            'shelf_no': itm.shelf_no or '',
+            'stock_on_hand': qty,
+            'unit_price': round(unit_price, 2),
+            'idle_valuation': round(idle_value, 2),
+            'last_inward_date': last_in_d.strftime('%Y-%m-%d') if last_in_d else None,
+            'last_outward_date': last_out_d.strftime('%Y-%m-%d') if last_out_d else None,
+            'days_idle': max(days_threshold, days_idle)
+        })
+
+    non_moving_items.sort(key=lambda x: x['days_idle'], reverse=True)
+
+    return Response({
+        "success": True,
+        "days_threshold": days_threshold,
+        "summary": {
+            "total_non_moving_items": len(non_moving_items),
+            "total_idle_quantity": round(total_idle_qty, 2),
+            "total_idle_value": round(total_idle_value, 2)
+        },
+        "data": non_moving_items
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 7. Short Expiry List Report
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_short_expiry_report(request):
+    days_threshold = safe_int(request.query_params.get('days') or request.GET.get('days'), 90)
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    vendor_filter = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+
+    today = datetime.now().date()
+    expiry_limit = today + timedelta(days=days_threshold)
+
+    vendor_map = {v.vendor_id: v.name for v in GeneralStoreVendor.objects.filter(is_active__in=[True]) if v.vendor_id}
+
+    expiry_items = []
+    total_short_expiry_qty = 0.0
+    total_short_expiry_value = 0.0
+    critical_count = 0
+    expired_count = 0
+
+    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+    if vendor_filter:
+        grn_qs = grn_qs.filter(vendor_id=vendor_filter)
+
+    for grn in grn_qs:
+        v_id = str(grn.vendor_id or '')
+        v_name = vendor_map.get(v_id) or v_id
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if isinstance(items, list):
+            for it in items:
+                exp_str = it.get('expiry_date') or it.get('exp_date') or it.get('expiry')
+                if not exp_str:
+                    continue
+
+                try:
+                    exp_date = None
+                    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%Y", "%Y/%m/%d"):
+                        try:
+                            exp_date = datetime.strptime(str(exp_str).strip(), fmt).date()
+                            break
+                        except Exception:
+                            pass
+                    if not exp_date:
+                        continue
+                except Exception:
+                    continue
+
+                if exp_date <= expiry_limit:
+                    i_id = str(it.get('item_id') or it.get('id') or '')
+                    i_name = it.get('itemName') or it.get('name') or i_id
+                    qty = safe_float(it.get('quantity'))
+                    rate = safe_float(it.get('rate') or it.get('purchase_price') or it.get('unit_price'))
+                    val = qty * rate
+                    days_remaining = (exp_date - today).days
+
+                    status_label = 'EXPIRED' if days_remaining < 0 else ('CRITICAL' if days_remaining <= 30 else 'ALERT')
+                    if days_remaining < 0:
+                        expired_count += 1
+                    elif days_remaining <= 30:
+                        critical_count += 1
+
+                    if search_query:
+                        sq = search_query.lower()
+                        if sq not in i_name.lower() and sq not in i_id.lower() and sq not in str(it.get('batch_no', '')).lower():
+                            continue
+
+                    total_short_expiry_qty += qty
+                    total_short_expiry_value += val
+
+                    expiry_items.append({
+                        'grn_number': grn.grn_number,
+                        'grn_date': grn.date.strftime('%Y-%m-%d') if grn.date else None,
+                        'vendor_id': v_id,
+                        'vendor_name': v_name,
+                        'item_id': i_id,
+                        'item_name': i_name,
+                        'batch_no': it.get('batch_no') or it.get('batch') or 'N/A',
+                        'expiry_date': exp_date.strftime('%Y-%m-%d'),
+                        'days_remaining': days_remaining,
+                        'status': status_label,
+                        'quantity': qty,
+                        'rate': round(rate, 2),
+                        'total_value': round(val, 2),
+                        'rack_no': it.get('rack_no') or '',
+                        'shelf_no': it.get('shelf_no') or ''
+                    })
+
+    expiry_items.sort(key=lambda x: x['days_remaining'])
+
+    return Response({
+        "success": True,
+        "days_threshold": days_threshold,
+        "summary": {
+            "total_items": len(expiry_items),
+            "expired_count": expired_count,
+            "critical_count": critical_count,
+            "total_quantity": round(total_short_expiry_qty, 2),
+            "total_value": round(total_short_expiry_value, 2)
+        },
+        "data": expiry_items
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 8. Reorder Level Indication Report
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_reorder_level_report(request):
+    status_filter = request.query_params.get('status') or request.GET.get('status') # OUT_OF_STOCK, LOW_STOCK, ADEQUATE
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    department_filter = request.query_params.get('department') or request.GET.get('department')
+    group_filter = request.query_params.get('group') or request.GET.get('group')
+
+    items_qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('itemName')
+    if department_filter:
+        items_qs = items_qs.filter(department=department_filter)
+    if group_filter:
+        items_qs = items_qs.filter(group=group_filter)
+
+    report_items = []
+    out_of_stock_count = 0
+    low_stock_count = 0
+    adequate_count = 0
+    total_reorder_est_cost = 0.0
+
+    for itm in items_qs:
+        i_id = str(itm.item_id)
+        i_name = itm.itemName
+
+        if search_query:
+            sq = search_query.lower()
+            if sq not in i_name.lower() and sq not in i_id.lower():
+                continue
+
+        current_stock = safe_float(itm.total_quantity)
+        reorder_level = safe_float(itm.stockReorderLevel)
+
+        if current_stock <= 0:
+            stock_status = 'OUT_OF_STOCK'
+            out_of_stock_count += 1
+        elif reorder_level > 0 and current_stock <= reorder_level:
+            stock_status = 'LOW_STOCK'
+            low_stock_count += 1
+        else:
+            stock_status = 'ADEQUATE'
+            adequate_count += 1
+
+        if status_filter and stock_status != status_filter:
+            continue
+
+        unit_price = safe_float(itm.unit_price)
+        suggested_reorder_qty = max(0.0, (reorder_level * 2) - current_stock) if reorder_level > 0 else (10.0 if current_stock <= 0 else 0.0)
+        est_cost = suggested_reorder_qty * unit_price
+        total_reorder_est_cost += est_cost
+
+        report_items.append({
+            'item_id': i_id,
+            'item_name': i_name,
+            'department': itm.department or 'Stores',
+            'group': itm.group or '',
+            'category': itm.category or '',
+            'ved_category': itm.ved_category or 'D',
+            'abc_category': itm.abc_category or 'C',
+            'rack_no': itm.rack_no or '',
+            'shelf_no': itm.shelf_no or '',
+            'current_stock': current_stock,
+            'reorder_level': reorder_level,
+            'stock_status': stock_status,
+            'unit_price': round(unit_price, 2),
+            'suggested_reorder_qty': round(suggested_reorder_qty, 2),
+            'estimated_reorder_cost': round(est_cost, 2)
+        })
+
+    # Sort so OUT_OF_STOCK and LOW_STOCK appear first
+    order_map = {'OUT_OF_STOCK': 0, 'LOW_STOCK': 1, 'ADEQUATE': 2}
+    report_items.sort(key=lambda x: (order_map.get(x['stock_status'], 3), -x['suggested_reorder_qty']))
+
+    return Response({
+        "success": True,
+        "summary": {
+            "total_items_tracked": len(report_items),
+            "out_of_stock_count": out_of_stock_count,
+            "low_stock_count": low_stock_count,
+            "adequate_count": adequate_count,
+            "total_estimated_reorder_cost": round(total_reorder_est_cost, 2)
+        },
+        "data": report_items
+    }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 9. Barcode Entry & Rack Classification Views
+# ==============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_item_rack_update(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+
+    if request.method == 'GET':
+        rack = request.query_params.get('rack_no') or request.GET.get('rack_no')
+        shelf = request.query_params.get('shelf_no') or request.GET.get('shelf_no')
+        barcode = request.query_params.get('barcode') or request.GET.get('barcode')
+        search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+        qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('rack_no', 'shelf_no', 'itemName')
+        if rack:
+            qs = qs.filter(rack_no__iexact=rack)
+        if shelf:
+            qs = qs.filter(shelf_no__iexact=shelf)
+        if barcode:
+            qs = qs.filter(barcode=barcode)
+
+        serializer = ItemMasterSerializer(qs, many=True)
+        items_list = serializer.data
+
+        if search_query:
+            sq = search_query.lower()
+            items_list = [
+                i for i in items_list
+                if sq in str(i.get('itemName', '')).lower()
+                or sq in str(i.get('item_id', '')).lower()
+                or sq in str(i.get('barcode', '')).lower()
+                or sq in str(i.get('rack_no', '')).lower()
+            ]
+
+        # Distinct racks & shelves list for dropdowns (from Rack & Shelf masters + ItemMaster)
+        master_racks = list(Rack.objects.filter(is_active__in=[True]).values_list('rack_name', flat=True))
+        item_racks = list(ItemMaster.objects.filter(is_active__in=[True]).values_list('rack_no', flat=True).distinct())
+        all_racks = sorted(list(set([r for r in (master_racks + item_racks) if r])))
+
+        master_shelves = list(Shelf.objects.filter(is_active__in=[True]).values_list('shelf_name', flat=True))
+        item_shelves = list(ItemMaster.objects.filter(is_active__in=[True]).values_list('shelf_no', flat=True).distinct())
+        all_shelves = sorted(list(set([s for s in (master_shelves + item_shelves) if s])))
+
+        rack_objects = list(Rack.objects.filter(is_active__in=[True]).values('rack_id', 'rack_name', 'description'))
+        shelf_objects = list(Shelf.objects.filter(is_active__in=[True]).values('shelf_id', 'shelf_name', 'rack_id', 'description'))
+
+        return Response({
+            "success": True,
+            "racks": all_racks,
+            "shelves": all_shelves,
+            "rack_masters": rack_objects,
+            "shelf_masters": shelf_objects,
+            "data": items_list
+        }, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        # Support bulk update via "items" list or single item update
+        items_payload = request.data.get('items')
+        if items_payload and isinstance(items_payload, list):
+            updated_count = 0
+            for entry in items_payload:
+                it_id = entry.get('item_id')
+                if not it_id:
+                    continue
+                itm = ItemMaster.objects.filter(item_id=it_id, is_active__in=[True]).first()
+                if itm:
+                    if 'rack_no' in entry:
+                        itm.rack_no = entry.get('rack_no')
+                    if 'shelf_no' in entry:
+                        itm.shelf_no = entry.get('shelf_no')
+                    if 'bin_no' in entry:
+                        itm.bin_no = entry.get('bin_no')
+                    if 'barcode' in entry:
+                        itm.barcode = entry.get('barcode')
+                    itm.lastmodified_by = employee_id
+                    itm.save()
+                    updated_count += 1
+
+            return Response({
+                "success": True,
+                "message": f"Successfully updated {updated_count} items with rack and barcode details"
+            }, status=status.HTTP_200_OK)
+
+        item_id = request.data.get('item_id')
+        if not item_id:
+            return Response({"error": "item_id or items list is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        item = ItemMaster.objects.filter(item_id=item_id, is_active__in=[True]).first()
+        if not item:
+            return Response({"error": "Item not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if 'rack_no' in request.data:
+            item.rack_no = request.data.get('rack_no')
+        if 'shelf_no' in request.data:
+            item.shelf_no = request.data.get('shelf_no')
+        if 'bin_no' in request.data:
+            item.bin_no = request.data.get('bin_no')
+        if 'barcode' in request.data:
+            item.barcode = request.data.get('barcode')
+
+        item.lastmodified_by = employee_id
+        item.save()
+
+        serializer = ItemMasterSerializer(item)
+        return Response({
+            "success": True,
+            "message": "Item rack & barcode details updated successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# 10. Stores Indent Return Views (Department Indent Returns & Approval)
+# ==============================================================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_indent_return_list_create(request):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    outlet_code = request.data.get('auth-outlet-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    if request.method == 'GET':
+        from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+        department = request.query_params.get('department') or request.GET.get('department')
+        status_filter = request.query_params.get('status') or request.GET.get('status')
+        intent_id = request.query_params.get('intent_id') or request.GET.get('intent_id')
+        search_query = request.query_params.get('search') or request.GET.get('search') or ''
+
+        qs = StoresIndentReturn.objects.filter(is_active__in=[True]).order_by('-return_date', '-created_date')
+        if from_date:
+            qs = qs.filter(return_date__gte=from_date)
+        if to_date:
+            qs = qs.filter(return_date__lte=to_date)
+        if department:
+            qs = qs.filter(department=department)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if intent_id:
+            qs = qs.filter(intent_id=intent_id)
+
+        serializer = StoresIndentReturnSerializer(qs, many=True)
+        return_list = serializer.data
+
+        if search_query:
+            sq = search_query.lower()
+            return_list = [
+                r for r in return_list
+                if sq in str(r.get('return_id', '')).lower()
+                or sq in str(r.get('intent_id', '')).lower()
+                or sq in str(r.get('department_name', '')).lower()
+                or sq in str(r.get('remarks', '')).lower()
+            ]
+
+        return Response({
+            "success": True,
+            "count": len(return_list),
+            "data": return_list
+        }, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        data = request.data.copy()
+        if not data.get('return_id'):
+            data['return_id'] = generate_custom_id(StoresIndentReturn, 'return_id', 'INRET', 5)
+
+        data['created_by'] = employee_id
+        data['branch_code'] = branch_code
+        data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        # Department name lookup if not provided
+        dept_code = data.get('department')
+        if dept_code and not data.get('department_name'):
+            dept = Department.objects.filter(department_id=dept_code, is_active__in=[True]).first()
+            if dept:
+                data['department_name'] = dept.department_name
+
+        items = data.get('items', [])
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+
+        total_qty = sum(safe_int(it.get('return_quantity') or it.get('quantity') or 0) for it in items)
+        total_val = sum(safe_float(it.get('return_quantity') or it.get('quantity') or 0) * safe_float(it.get('unit_price') or 0) for it in items)
+
+        data['total_returned_qty'] = total_qty
+        data['total_returned_value'] = total_val
+        data['status'] = 'Pending'
+
+        serializer = StoresIndentReturnSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "success": True,
+                "message": "Indent return submitted successfully and sent for approval",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_indent_return_approve(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    branch_code = request.data.get('auth-branch-code', 'system')
+    hospital_code = request.data.get('auth-hospital-code', 'system')
+
+    ret_obj = StoresIndentReturn.objects.filter(return_id=pk, is_active__in=[True]).first()
+    if not ret_obj:
+        return Response({"error": "Indent return record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if ret_obj.status == 'Approved':
+        return Response({"error": "This return is already approved"}, status=status.HTTP_400_BAD_REQUEST)
+
+    items = ret_obj.items or []
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:
+            items = []
+
+    # Optional custom approval item adjustments passed in request
+    req_items = request.data.get('items')
+    if req_items and isinstance(req_items, list):
+        items = req_items
+        ret_obj.items = req_items
+
+    for it in items:
+        item_id = it.get('item_id')
+        ret_qty = safe_int(it.get('return_quantity') or it.get('quantity') or 0)
+
+        if item_id and ret_qty > 0:
+            # 1. Deduct approved_quantity from ItemMaster (which increases available stock in Central Stores)
+            try:
+                item_master = ItemMaster.objects.filter(item_id=item_id).first()
+                if item_master:
+                    item_master.approved_quantity = max(0, (item_master.approved_quantity or 0) - ret_qty)
+                    item_master.lastmodified_by = employee_id
+                    item_master.save()
+            except Exception as e:
+                print(f"Error updating ItemMaster on return: {e}")
+
+            # 2. If Department is DEPT002 (Lab), deduct from Stores_LabApprovedItem
+            if ret_obj.department == 'DEPT002':
+                lab_item = Stores_LabApprovedItem.objects.filter(
+                    item_id=item_id,
+                    branch_code=branch_code,
+                    hospital_code=hospital_code
+                ).first()
+                if lab_item:
+                    lab_item.quantity = max(0, (lab_item.quantity or 0) - ret_qty)
+                    lab_item.lastmodified_by = employee_id
+                    lab_item.save()
+
+            # 3. Update original storesIntent record returned_quantity
+            if ret_obj.intent_id:
+                intent_obj = storesIntent.objects.filter(intent_id=ret_obj.intent_id, is_active__in=[True]).first()
+                if intent_obj and intent_obj.items:
+                    updated_items = []
+                    for ind_it in intent_obj.items:
+                        if str(ind_it.get('item_id')) == str(item_id):
+                            curr_ret = int(ind_it.get('returned_quantity') or 0)
+                            ind_it['returned_quantity'] = curr_ret + ret_qty
+                        updated_items.append(ind_it)
+                    intent_obj.items = updated_items
+                    intent_obj.lastmodified_by = employee_id
+                    intent_obj.save()
+
+    ret_obj.status = 'Approved'
+    ret_obj.approved_by = employee_id
+    ret_obj.approved_date = timezone.now()
+    ret_obj.lastmodified_by = employee_id
+    ret_obj.save()
+
+    serializer = StoresIndentReturnSerializer(ret_obj)
+    return Response({
+        "success": True,
+        "message": "Indent return approved successfully. Stock restored to central inventory.",
+        "data": serializer.data
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_indent_return_reject(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    ret_obj = StoresIndentReturn.objects.filter(return_id=pk, is_active__in=[True]).first()
+    if not ret_obj:
+        return Response({"error": "Indent return record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if ret_obj.status == 'Approved':
+        return Response({"error": "Approved returns cannot be rejected"}, status=status.HTTP_400_BAD_REQUEST)
+
+    rejection_reason = request.data.get('rejection_reason', 'Rejected by Stores Manager')
+    ret_obj.status = 'Rejected'
+    ret_obj.rejection_reason = rejection_reason
+    ret_obj.approved_by = employee_id
+    ret_obj.approved_date = timezone.now()
+    ret_obj.lastmodified_by = employee_id
+    ret_obj.save()
+
+    serializer = StoresIndentReturnSerializer(ret_obj)
+    return Response({
+        "success": True,
+        "message": "Indent return marked as Rejected.",
+        "data": serializer.data
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_indent_return_delete(request, pk):
+    employee_id = request.data.get('auth-user-id', 'system')
+    ret_obj = StoresIndentReturn.objects.filter(return_id=pk, is_active__in=[True]).first()
+    if not ret_obj:
+        return Response({"error": "Indent return record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if ret_obj.status == 'Approved':
+        return Response({"error": "Approved returns cannot be deleted"}, status=status.HTTP_400_BAD_REQUEST)
+
+    ret_obj.is_active = False
+    ret_obj.lastmodified_by = employee_id
+    ret_obj.save()
+    return Response({"success": True, "message": "Indent return deleted successfully"}, status=status.HTTP_200_OK)
+
+
 
 

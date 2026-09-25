@@ -57,7 +57,8 @@ from .Views import (
     patient_inquiry,
     mrd,
     OPEMR,
-    IPEMR
+    IPEMR,
+    Shanmuga360
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -127,6 +128,7 @@ urlpatterns = [
     path('collect_oppharmacy_payment/', pharmacy.collect_oppharmacy_payment, name='collect_oppharmacy_payment'),
     path('pharmacy_deletebill/', pharmacy.pharmacy_deletebill, name='pharmacy_deletebill'),
     path('pharmacy_medicinechart/', pharmacy.pharmacy_medicinechart, name='pharmacy_medicinechart'),
+    path('get_doctor_prescriptions/', pharmacy.get_doctor_prescriptions, name='get_doctor_prescriptions'),
     path('admissionstatus/', pharmacy.admissionstatus, name='admissionstatus'),
     path('patient_details/', pharmacy.patient_details, name='patient_details'),
     # path("salesreturn_get_patientdetails/",  pharmacy.salesreturn_get_patientdetails),
@@ -496,12 +498,20 @@ urlpatterns = [
     path('category-master/<str:pk>/', stores.category_detail, name='category_detail'),
     path('group-type-master/', stores.group_type_list_create, name='group_type_list_create'),
     path('group-type-master/<str:pk>/', stores.group_type_detail, name='group_type_detail'),
+    path('rack-master/', stores.rack_master_list_create, name='rack_master_list_create'),
+    path('rack-master/<str:pk>/', stores.rack_master_detail, name='rack_master_detail'),
+    path('shelf-master/', stores.shelf_master_list_create, name='shelf_master_list_create'),
+    path('shelf-master/<str:pk>/', stores.shelf_master_detail, name='shelf_master_detail'),
     path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
     path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
     path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    path('stores-indent-returns/', stores.stores_indent_return_list_create, name='stores_indent_return_list_create'),
+    path('stores-indent-returns/approve/<str:pk>/', stores.stores_indent_return_approve, name='stores_indent_return_approve'),
+    path('stores-indent-returns/reject/<str:pk>/', stores.stores_indent_return_reject, name='stores_indent_return_reject'),
+    path('stores-indent-returns/delete/<str:pk>/', stores.stores_indent_return_delete, name='stores_indent_return_delete'),
     path('stores-get_stores_lab_approved_items/', stores.get_stores_lab_approved_items, name='get_stores_lab_approved_items'),
     path('stores-stores_daily_usage_items/', stores.stores_daily_usage_items, name='stores_daily_usage_items'),
     path('stores-stores_daily_usage_report/', stores.stores_lab_used_qty_report, name='stores_lab_used_qty_report'),
@@ -510,6 +520,24 @@ urlpatterns = [
     path('vending-machine-report/', stores.vending_machine_report, name='vending_machine_report'),
     path('stores-grn-supplier-report/', stores.stores_grn_supplier_report, name='stores_grn_supplier_report'),
     path('stores-indent-department-report/', stores.stores_indent_department_report, name='stores_indent_department_report'),
+    
+    # Stores Purchase Orders
+    path('stores-purchase-orders/', stores.stores_purchase_order_list_create, name='stores_purchase_order_list_create'),
+    path('stores-purchase-orders/<str:pk>/', stores.stores_purchase_order_detail, name='stores_purchase_order_detail'),
+
+    # Stores Purchase Returns & Debit Notes
+    path('stores-purchase-returns/', stores.stores_purchase_return_list_create, name='stores_purchase_return_list_create'),
+    path('stores-purchase-returns/<str:pk>/', stores.stores_purchase_return_detail, name='stores_purchase_return_detail'),
+
+    # Stores Advanced Reports
+    path('stores-purchase-analysis-report/', stores.stores_purchase_analysis_report, name='stores_purchase_analysis_report'),
+    path('stores-previous-day-stock-report/', stores.stores_previous_day_stock_report, name='stores_previous_day_stock_report'),
+    path('stores-supplier-wise-report/', stores.stores_supplier_wise_list_report, name='stores_supplier_wise_list_report'),
+    path('stores-non-moving-items-report/', stores.stores_non_moving_items_report, name='stores_non_moving_items_report'),
+    path('stores-short-expiry-report/', stores.stores_short_expiry_report, name='stores_short_expiry_report'),
+    path('stores-reorder-level-report/', stores.stores_reorder_level_report, name='stores_reorder_level_report'),
+    path('stores-rack-classification/', stores.stores_item_rack_update, name='stores_item_rack_update'),
+
 
 
     
@@ -593,13 +621,17 @@ urlpatterns = [
     path('get_shift_summary_report/', accounting_reports.get_shift_summary_report, name='get_shift_summary_report'),
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
     path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
-    path('datewise-collection-summary/', accounting_reports.datewise_collection_summary, name='datewise_collection_summary'),
+    path('cash-bills-report/', accounting_reports.cash_bills_report, name='cash_bills_report'),
+    path('date_wise_collection_summary_report/', accounting_reports.date_wise_collection_summary_report, name='date_wise_collection_summary_report'),
     path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
     path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),
     path('debit-bills-report/', accounting_reports.debit_bills_report, name='debit_bills_report'),
     path('audit-report/', accounting_reports.audit_report, name='audit_report'),
     path('sales-tax-register/', accounting_reports.sales_tax_register, name='sales_tax_register'),
     path('stock-report-ip-op/', accounting_reports.stock_report_ip_op, name='stock_report_ip_op'),
+    path('patient-advance-report/', accounting_reports.patient_advance_details_report, name='patient_advance_details_report'),
+    path('ip-advance-report/', accounting_reports.patient_advance_details_report, name='ip_advance_report'),
+    path('discount-bills-report/', accounting_reports.discount_bills_report, name='discount_bills_report'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
@@ -698,16 +730,30 @@ urlpatterns = [
     path('mrd/discharged-files/', mrd.mrd_discharged_files, name='mrd-discharged-files'),
     path('mrd/update-status/', mrd.mrd_update_status, name='mrd-update-status'),
     path('mrd/stats/', mrd.mrd_stats, name='mrd-stats'),
+    path('mrd/upload-pdf/', mrd.mrd_upload_pdf, name='mrd-upload-pdf'),
+    re_path(r'^mrd/file/(?P<file_id>[^/]+)/$', mrd.mrd_get_pdf, name='mrd-get-pdf'),
+    path('mrd/delete-pdf/', mrd.mrd_delete_pdf, name='mrd-delete-pdf'),
 
 
     # OPEMR
     path('OPEMR_get_billing_patient/', OPEMR.OPEMR_get_billing_patient, name='OPEMR_get_billing_patient'),
+    path('OPEMR_get_Doctor_patient/', OPEMR.OPEMR_get_Doctor_patient, name='OPEMR_get_Doctor_patient'),
     path('OPEMR_VitalEntry/', OPEMR.OPEMR_VitalEntry, name='OPEMR_VitalEntry'),
     path('OPEMR_get_vital_history/', OPEMR.OPEMR_get_vital_history, name='OPEMR_get_vital_history'),
     path('OPEMR_get_symptoms/', OPEMR.OPEMR_get_symptoms, name='OPEMR_get_symptoms'),
     path('OPEMR_get_diagnostics_tests/', OPEMR.OPEMR_get_diagnostics_tests, name='OPEMR_get_diagnostics_tests'),
     path('OPEMR_get_medicines/', OPEMR.OPEMR_get_medicines, name='OPEMR_get_medicines'),
     path('OPEMR_DoctorConsultation/', OPEMR.OPEMR_DoctorConsultation, name='OPEMR_DoctorConsultation'),
+    path('OPEMR_get_patient_lab_results/', OPEMR.OPEMR_get_patient_lab_results, name='OPEMR_get_patient_lab_results'),
+    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
+    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
+    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
+    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
+    path('OPEMR_upload_vital_file/', OPEMR.OPEMR_upload_vital_file, name='OPEMR_upload_vital_file'),
+    path('OPEMR_get_vital_file/<str:file_id>/', OPEMR.OPEMR_get_vital_file, name='OPEMR_get_vital_file'),
+    path('OPEMR_delete_vital_file/<str:file_id>/', OPEMR.OPEMR_delete_vital_file, name='OPEMR_delete_vital_file'),
+    path('OPEMR_get_radiology_items/', OPEMR.OPEMR_get_radiology_items, name='OPEMR_get_radiology_items'),
+    path('OPEMR_get_patient_discharge_summaries/', OPEMR.OPEMR_get_patient_discharge_summaries, name='OPEMR_get_patient_discharge_summaries'),
 
     # IPEMR
     path('IPEMR_get_admitted_patients/', IPEMR.IPEMR_get_admitted_patients, name='IPEMR_get_admitted_patients'),
@@ -718,13 +764,18 @@ urlpatterns = [
     path('IPEMR_get_patient_summary/', IPEMR.IPEMR_get_patient_summary, name='IPEMR_get_patient_summary'),
     path('IPEMR_patient_history/', IPEMR.IPEMR_patient_history, name='IPEMR_patient_history'),
     path('IPEMR_doctor_dashboard_analytics/', IPEMR.IPEMR_doctor_dashboard_analytics, name='IPEMR_doctor_dashboard_analytics'),
-    path('OPEMR_get_referral_doctors/', OPEMR.OPEMR_get_referral_doctors, name='OPEMR_get_referral_doctors'),
-    path('OPEMR_Vitaldashboard/', OPEMR.OPEMR_Vitaldashboard, name='OPEMR_Vitaldashboard'),
-    path('OPEMR_doctordashboard/', OPEMR.OPEMR_docotordashboard, name='OPEMR_docotordashboard'),
-    path('OPEMR_patientlivetracking/', OPEMR.OPEMR_patientlivetracking, name='OPEMR_patientlivetracking'),
+    
+
+
+    # Shanmuga360
+    path('360_registration/', Shanmuga360.shanmuga360_registration, name='360_registration'),
+    path('get_360_medicinelist/', Shanmuga360.get_360_medicinelist, name='get_360_medicinelist'),
+    path('get_360_doctorlist/', Shanmuga360.get_360_doctorlist, name='get_360_doctorlist'),
+    path('get_360_testlist/', Shanmuga360.get_360_testlist, name='get_360_testlist'),
+    path('360_report/', Shanmuga360.shanmuga360_report, name='360_report'),
+    path('sample_collector/', Shanmuga360.get_sample_collector, name='sample_collector'),
+
 ]
-
-
 
 
 
