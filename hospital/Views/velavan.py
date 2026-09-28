@@ -3051,18 +3051,28 @@ def get_velavan_dashboard_stats(request):
             cid = str(c.get('customer_id') or '')
             customer_map[cid] = c.get('name') or c.get('company_name') or f"Customer #{cid}"
 
-        # Build item and category map
+        # Build item, category, and HSN map
         item_map = {}
         item_cat_map = {}
-        for itm in item_col.find({'is_active': True}):
-            iid = itm.get('item_id')
+        item_hsn_map = {}
+        for itm in item_col.find({}):
+            raw_iid = itm.get('item_id')
+            name = itm.get('itemName') or itm.get('name') or itm.get('item_name') or ''
             cat = itm.get('category') or ''
-            name = (itm.get('itemName') or '').strip().lower()
-            if iid is not None:
-                item_map[iid] = itm.get('itemName') or ''
-                item_cat_map[str(iid)] = cat
+            hsn = itm.get('hsn') or ''
+            if raw_iid not in (None, ''):
+                item_map[raw_iid] = name
+                item_map[str(raw_iid)] = name
+                try:
+                    item_map[int(raw_iid)] = name
+                except (ValueError, TypeError):
+                    pass
+                item_cat_map[str(raw_iid)] = cat
+                item_hsn_map[str(raw_iid)] = hsn
             if name:
-                item_cat_map[name] = cat
+                clean_name = name.strip().lower()
+                item_cat_map[clean_name] = cat
+                item_hsn_map[clean_name] = hsn
 
         # Fetch records
         all_sales = list(sales_col.find({}).sort("bill_date", -1))
@@ -3083,7 +3093,7 @@ def get_velavan_dashboard_stats(request):
 
         filtered_invs = []
         for inv in all_invs:
-            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('created_date'))
             if i_date:
                 if start_date and i_date < start_date:
                     continue
@@ -3272,7 +3282,7 @@ def get_velavan_dashboard_stats(request):
                 timeline_dict[d_key]['sales_count'] += 1
 
         for inv in filtered_invs:
-            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('created_date'))
             if i_date:
                 d_key = i_date.strftime('%Y-%m-%d')
                 if d_key not in timeline_dict:
@@ -3299,7 +3309,7 @@ def get_velavan_dashboard_stats(request):
                 'profit': prof,
                 'margin': marg,
                 'sales_count': item['sales_count'],
-                'purchase_count': item['purchase_count']
+                'purchase_count': item['purchase_count'],
             })
 
         # ── Monthly Overview (All-Time or 12-Months) ──
@@ -3313,7 +3323,7 @@ def get_velavan_dashboard_stats(request):
                 monthly_map[m_key]['sales'] += to_f(s.get('total_amount'))
 
         for inv in all_invs:
-            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('created_date'))
             if i_date:
                 m_key = i_date.strftime('%Y-%m')
                 if m_key not in monthly_map:
@@ -3368,15 +3378,42 @@ def get_velavan_dashboard_stats(request):
                 except (ValueError, TypeError):
                     markdown_val = None
                 
-                # Determine item category
-                item_name = it.get('name') or it.get('item_name') or it.get('description') or 'Unnamed Item'
-                iid_str = str(it.get('item_id') or '')
+                # Determine item name & category from item_id and item maps
+                raw_iid = it.get('item_id')
+                iid_str = str(raw_iid or '')
+                
+                resolved_name = (
+                    it.get('name') or 
+                    it.get('item_name') or 
+                    it.get('itemName') or 
+                    (item_map.get(raw_iid) if raw_iid not in (None, '') else None) or
+                    (item_map.get(iid_str) if iid_str else None)
+                )
+                if not resolved_name and raw_iid not in (None, ''):
+                    try:
+                        resolved_name = item_map.get(int(raw_iid))
+                    except (ValueError, TypeError):
+                        pass
+                
+                if not resolved_name:
+                    resolved_name = it.get('description') or (f"Item #{raw_iid}" if raw_iid not in (None, '') else 'Unnamed Item')
+                
+                item_name = resolved_name
+                
                 item_cat = (
                     it.get('category') or 
+                    it.get('purchaseCategory') or
                     item_cat_map.get(iid_str) or 
                     item_cat_map.get(item_name.strip().lower()) or 
                     inv_category or 
                     'IMPLANT'
+                )
+                
+                item_hsn = (
+                    it.get('hsn') or 
+                    item_hsn_map.get(iid_str) or 
+                    item_hsn_map.get(item_name.strip().lower()) or 
+                    ''
                 )
                 
                 if mode == 'markdown':
@@ -3389,7 +3426,7 @@ def get_velavan_dashboard_stats(request):
                     applied_rate = markup_val if markup_val is not None else 30.0
                 
                 p_cost = to_f(it.get('unitCostWithGst') or it.get('purchaseCost') or it.get('unitPrice'))
-                s_cost = to_f(it.get('sellingUnitCost') or it.get('unitSellingCost'))
+                s_cost = to_f(it.get('unitSellingCost') or it.get('sellingUnitCost'))
                 mrp_val = to_f(it.get('mrp'))
                 qty = to_f(it.get('quantity') or it.get('qty') or 1)
                 diff = round(applied_rate - std_rate, 2)
@@ -3401,7 +3438,7 @@ def get_velavan_dashboard_stats(request):
                     'vendor_name': vendor_name,
                     'category': item_cat,
                     'item_name': item_name,
-                    'hsn': it.get('hsn', ''),
+                    'hsn': item_hsn,
                     'batch_no': it.get('batchNo') or it.get('batch_no', ''),
                     'pricing_mode': dev_type,
                     'standard_rate': std_rate,
