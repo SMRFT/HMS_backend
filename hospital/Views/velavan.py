@@ -2976,3 +2976,542 @@ def list_velavan_purchase_returns(request):
     except Exception as e:
         logger.error(f"Error in list_velavan_purchase_returns: {str(e)}\n{traceback.format_exc()}")
         return Response({'status': 'error', 'message': str(e)}, status=500)
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_velavan_dashboard_stats(request):
+    try:
+        from_date_str = request.GET.get('from_date', None)
+        to_date_str   = request.GET.get('to_date', None)
+        period        = request.GET.get('period', 'custom')
+
+        start_date = None
+        end_date = None
+
+        if from_date_str:
+            try:
+                start_date = datetime.strptime(from_date_str[:10], "%Y-%m-%d").date()
+            except ValueError:
+                start_date = None
+
+        if to_date_str:
+            try:
+                end_date = datetime.strptime(to_date_str[:10], "%Y-%m-%d").date()
+            except ValueError:
+                end_date = None
+
+        def to_f(v):
+            if v is None:
+                return 0.0
+            if isinstance(v, Decimal128):
+                return float(v.to_decimal())
+            if isinstance(v, Decimal):
+                return float(v)
+            try:
+                return float(v)
+            except:
+                return 0.0
+
+        def parse_doc_date(dt_val):
+            if isinstance(dt_val, (datetime, date)):
+                if isinstance(dt_val, datetime):
+                    return dt_val.date()
+                return dt_val
+            if isinstance(dt_val, str) and dt_val.strip():
+                try:
+                    return datetime.fromisoformat(dt_val.replace('Z', '')).date()
+                except:
+                    pass
+                try:
+                    return datetime.strptime(dt_val[:10], '%Y-%m-%d').date()
+                except:
+                    pass
+            return None
+
+        # Fetch all collections
+        sales_col  = db["hospital_velavansalesbill"]
+        inv_col    = db["hospital_velavaninvoice"]
+        pr_col     = db["hospital_velavan_purchasereturn"]
+        sr_col     = db["hospital_velavan_salesreturn"]
+        vendor_col = db["hospital_velavan_vendors"]
+        cust_col   = db["hospital_velavan_customers"]
+        item_col   = db["hospital_velavan_items"]
+
+        # Build vendor map
+        vendor_map = {}
+        for v in vendor_col.find({'is_active': True}):
+            vid = str(v.get('vendor_id') or '')
+            vendor_map[vid] = v.get('name') or v.get('contactPerson') or f"Vendor #{vid}"
+
+        # Build customer map
+        customer_map = {}
+        for c in cust_col.find({'is_active': True}):
+            cid = str(c.get('customer_id') or '')
+            customer_map[cid] = c.get('name') or c.get('company_name') or f"Customer #{cid}"
+
+        # Build item and category map
+        item_map = {}
+        item_cat_map = {}
+        for itm in item_col.find({'is_active': True}):
+            iid = itm.get('item_id')
+            cat = itm.get('category') or ''
+            name = (itm.get('itemName') or '').strip().lower()
+            if iid is not None:
+                item_map[iid] = itm.get('itemName') or ''
+                item_cat_map[str(iid)] = cat
+            if name:
+                item_cat_map[name] = cat
+
+        # Fetch records
+        all_sales = list(sales_col.find({}).sort("bill_date", -1))
+        all_invs  = list(inv_col.find({}).sort("date", -1))
+        all_pr    = list(pr_col.find({}).sort("return_date", -1))
+        all_sr    = list(sr_col.find({}).sort("return_date", -1))
+
+        # Filter by date range if provided
+        filtered_sales = []
+        for s in all_sales:
+            s_date = parse_doc_date(s.get('bill_date')) or parse_doc_date(s.get('created_date'))
+            if s_date:
+                if start_date and s_date < start_date:
+                    continue
+                if end_date and s_date > end_date:
+                    continue
+            filtered_sales.append(s)
+
+        filtered_invs = []
+        for inv in all_invs:
+            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            if i_date:
+                if start_date and i_date < start_date:
+                    continue
+                if end_date and i_date > end_date:
+                    continue
+            filtered_invs.append(inv)
+
+        filtered_pr = []
+        for pr in all_pr:
+            pr_date = parse_doc_date(pr.get('return_date')) or parse_doc_date(pr.get('created_date'))
+            if pr_date:
+                if start_date and pr_date < start_date:
+                    continue
+                if end_date and pr_date > end_date:
+                    continue
+            filtered_pr.append(pr)
+
+        filtered_sr = []
+        for sr in all_sr:
+            sr_date = parse_doc_date(sr.get('return_date')) or parse_doc_date(sr.get('created_date'))
+            if sr_date:
+                if start_date and sr_date < start_date:
+                    continue
+                if end_date and sr_date > end_date:
+                    continue
+            filtered_sr.append(sr)
+
+        # ── KPI Calculations ──
+        gross_sales_amt = sum(to_f(s.get('total_amount')) for s in filtered_sales)
+        sales_returns_amt = sum(to_f(r.get('total_amount')) for r in filtered_sr)
+        net_sales_amt = max(0.0, gross_sales_amt - sales_returns_amt)
+
+        sales_taxable_amt = sum(to_f(s.get('taxable_amount')) for s in filtered_sales)
+        sales_cgst = sum(to_f(s.get('cgst')) for s in filtered_sales)
+        sales_sgst = sum(to_f(s.get('sgst')) for s in filtered_sales)
+        sales_gst_total = sales_cgst + sales_sgst
+
+        gross_purchases_amt = sum(to_f(i.get('net_invoice_amount') or i.get('total_amount')) for i in filtered_invs)
+        purchase_returns_amt = sum(to_f(r.get('total_amount')) for r in filtered_pr)
+        net_purchases_amt = max(0.0, gross_purchases_amt - purchase_returns_amt)
+
+        purchase_taxable_amt = sum(to_f(i.get('taxable_amount')) for i in filtered_invs)
+        purchase_cgst = sum(to_f(i.get('cgst')) for i in filtered_invs)
+        purchase_sgst = sum(to_f(i.get('sgst')) for i in filtered_invs)
+        purchase_igst = sum(to_f(i.get('igst')) for i in filtered_invs)
+        purchase_gst_total = purchase_cgst + purchase_sgst + purchase_igst
+        purchase_discount_total = sum(to_f(i.get('total_discount')) for i in filtered_invs)
+
+        gross_profit = net_sales_amt - net_purchases_amt
+        profit_margin = round((gross_profit / net_sales_amt * 100.0), 2) if net_sales_amt > 0 else 0.0
+
+        net_gst_liability = sales_gst_total - purchase_gst_total
+
+        # Item quantities sold & purchased
+        items_sold_count = 0
+        top_items_map = {}
+        for s in filtered_sales:
+            raw_items = s.get('items', [])
+            items = normalize_items_payload(raw_items)
+            for itm in items:
+                qty = to_f(itm.get('quantity') or 1)
+                items_sold_count += int(qty)
+                iid = itm.get('item_id')
+                name = itm.get('name') or (item_map.get(iid) if iid in item_map else '') or itm.get('itemName') or f"Item #{iid}"
+                hsn = itm.get('hsn') or ''
+                selling_cost = to_f(itm.get('sellingCost') or (to_f(itm.get('unitSellingCost')) * qty))
+
+                key = str(iid) if iid is not None else name
+                if key not in top_items_map:
+                    top_items_map[key] = {
+                        'item_id': iid,
+                        'name': name,
+                        'hsn': hsn,
+                        'quantity': 0,
+                        'sales_amount': 0.0,
+                    }
+                top_items_map[key]['quantity'] += int(qty)
+                top_items_map[key]['sales_amount'] += selling_cost
+
+        items_purchased_count = 0
+        for inv in filtered_invs:
+            raw_items = inv.get('items', [])
+            items = normalize_items_payload(raw_items)
+            for itm in items:
+                qty = to_f(itm.get('quantity') or 1)
+                items_purchased_count += int(qty)
+
+        top_selling_items = sorted(
+            top_items_map.values(),
+            key=lambda x: x['sales_amount'],
+            reverse=True
+        )[:10]
+
+        # Top vendors by purchase amount
+        vendor_purchases_map = {}
+        for inv in filtered_invs:
+            vid = str(inv.get('vendor_id') or '')
+            vname = vendor_map.get(vid) or f"Vendor #{vid}"
+            amt = to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+            if vid not in vendor_purchases_map:
+                vendor_purchases_map[vid] = {
+                    'vendor_id': vid,
+                    'name': vname,
+                    'amount': 0.0,
+                    'count': 0
+                }
+            vendor_purchases_map[vid]['amount'] += amt
+            vendor_purchases_map[vid]['count'] += 1
+
+        top_vendors = sorted(
+            vendor_purchases_map.values(),
+            key=lambda x: x['amount'],
+            reverse=True
+        )[:10]
+        for tv in top_vendors:
+            tv['percentage'] = round((tv['amount'] / gross_purchases_amt * 100.0), 1) if gross_purchases_amt > 0 else 0
+
+        # Breakdown by Payment Mode
+        sales_pm_map = {}
+        for s in filtered_sales:
+            pm = (s.get('payment_mode') or 'CASH').upper().strip()
+            amt = to_f(s.get('total_amount'))
+            if pm not in sales_pm_map:
+                sales_pm_map[pm] = {'name': pm, 'value': 0.0, 'count': 0}
+            sales_pm_map[pm]['value'] += amt
+            sales_pm_map[pm]['count'] += 1
+
+        sales_by_payment_mode = []
+        for pm, data in sales_pm_map.items():
+            pct = round((data['value'] / gross_sales_amt * 100.0), 1) if gross_sales_amt > 0 else 0
+            sales_by_payment_mode.append({
+                'name': pm,
+                'value': round(data['value'], 2),
+                'count': data['count'],
+                'percentage': pct
+            })
+
+        purchases_pm_map = {}
+        for inv in filtered_invs:
+            pm = (inv.get('payment_mode') or 'CHEQUE').upper().strip()
+            amt = to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+            if pm not in purchases_pm_map:
+                purchases_pm_map[pm] = {'name': pm, 'value': 0.0, 'count': 0}
+            purchases_pm_map[pm]['value'] += amt
+            purchases_pm_map[pm]['count'] += 1
+
+        purchases_by_payment_mode = []
+        for pm, data in purchases_pm_map.items():
+            pct = round((data['value'] / gross_purchases_amt * 100.0), 1) if gross_purchases_amt > 0 else 0
+            purchases_by_payment_mode.append({
+                'name': pm,
+                'value': round(data['value'], 2),
+                'count': data['count'],
+                'percentage': pct
+            })
+
+        # Breakdown by Customer Type
+        cust_type_map = {}
+        for s in filtered_sales:
+            ct = (s.get('customer_type') or 'General Patient').strip()
+            amt = to_f(s.get('total_amount'))
+            if ct not in cust_type_map:
+                cust_type_map[ct] = {'name': ct, 'value': 0.0, 'count': 0}
+            cust_type_map[ct]['value'] += amt
+            cust_type_map[ct]['count'] += 1
+
+        sales_by_customer_type = []
+        for ct, data in cust_type_map.items():
+            pct = round((data['value'] / gross_sales_amt * 100.0), 1) if gross_sales_amt > 0 else 0
+            sales_by_customer_type.append({
+                'name': ct,
+                'value': round(data['value'], 2),
+                'count': data['count'],
+                'percentage': pct
+            })
+
+        # ── Timeline (Trend series by Date) ──
+        timeline_dict = {}
+        for s in filtered_sales:
+            s_date = parse_doc_date(s.get('bill_date')) or parse_doc_date(s.get('created_date'))
+            if s_date:
+                d_key = s_date.strftime('%Y-%m-%d')
+                if d_key not in timeline_dict:
+                    timeline_dict[d_key] = {'date': d_key, 'sales': 0.0, 'purchases': 0.0, 'sales_count': 0, 'purchase_count': 0}
+                timeline_dict[d_key]['sales'] += to_f(s.get('total_amount'))
+                timeline_dict[d_key]['sales_count'] += 1
+
+        for inv in filtered_invs:
+            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            if i_date:
+                d_key = i_date.strftime('%Y-%m-%d')
+                if d_key not in timeline_dict:
+                    timeline_dict[d_key] = {'date': d_key, 'sales': 0.0, 'purchases': 0.0, 'sales_count': 0, 'purchase_count': 0}
+                timeline_dict[d_key]['purchases'] += to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+                timeline_dict[d_key]['purchase_count'] += 1
+
+        # Sort timeline
+        sorted_dates = sorted(timeline_dict.keys())
+        timeline = []
+        for d_key in sorted_dates:
+            item = timeline_dict[d_key]
+            d_obj = datetime.strptime(d_key, '%Y-%m-%d').date()
+            label = d_obj.strftime('%d %b')
+            s_val = round(item['sales'], 2)
+            p_val = round(item['purchases'], 2)
+            prof = round(s_val - p_val, 2)
+            marg = round((prof / s_val * 100.0), 1) if s_val > 0 else 0.0
+            timeline.append({
+                'date': d_key,
+                'label': label,
+                'sales': s_val,
+                'purchases': p_val,
+                'profit': prof,
+                'margin': marg,
+                'sales_count': item['sales_count'],
+                'purchase_count': item['purchase_count']
+            })
+
+        # ── Monthly Overview (All-Time or 12-Months) ──
+        monthly_map = {}
+        for s in all_sales:
+            s_date = parse_doc_date(s.get('bill_date')) or parse_doc_date(s.get('created_date'))
+            if s_date:
+                m_key = s_date.strftime('%Y-%m')
+                if m_key not in monthly_map:
+                    monthly_map[m_key] = {'month': m_key, 'sales': 0.0, 'purchases': 0.0}
+                monthly_map[m_key]['sales'] += to_f(s.get('total_amount'))
+
+        for inv in all_invs:
+            i_date = parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('created_date'))
+            if i_date:
+                m_key = i_date.strftime('%Y-%m')
+                if m_key not in monthly_map:
+                    monthly_map[m_key] = {'month': m_key, 'sales': 0.0, 'purchases': 0.0}
+                monthly_map[m_key]['purchases'] += to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+
+        monthly_overview = []
+        for m_key in sorted(monthly_map.keys()):
+            m_data = monthly_map[m_key]
+            try:
+                m_dt = datetime.strptime(m_key, '%Y-%m')
+                label = m_dt.strftime('%b %Y')
+            except:
+                label = m_key
+            s_val = round(m_data['sales'], 2)
+            p_val = round(m_data['purchases'], 2)
+            prof = round(s_val - p_val, 2)
+            marg = round((prof / s_val * 100.0), 1) if s_val > 0 else 0.0
+            monthly_overview.append({
+                'month': m_key,
+                'label': label,
+                'sales': s_val,
+                'purchases': p_val,
+                'profit': prof,
+                'margin': marg
+            })
+
+        # ── Markup & Markdown Pricing List ──
+        # Displays all markup items (including standard 30% and modified values) and markdown items with category
+        markup_markdown_variances = []
+        for inv in filtered_invs:
+            i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date'))
+            vid = str(inv.get('vendor_id') or '')
+            vendor_name = vendor_map.get(vid) or f"Vendor #{vid}"
+            grn_num = inv.get('grn_number', '')
+            inv_no = inv.get('invoice_no', '')
+            inv_category = inv.get('purchase_category') or 'IMPLANT'
+            
+            raw_items = normalize_items_payload(inv.get('items', []))
+            for it in raw_items:
+                mode = str(it.get('sellingPricingMode') or ('markdown' if it.get('sellingMarkdownPercent') else 'markup')).lower().strip()
+                raw_markup = it.get('sellingMarkupPercent')
+                raw_markdown = it.get('sellingMarkdownPercent')
+                
+                try:
+                    markup_val = float(raw_markup) if raw_markup not in (None, '') else None
+                except (ValueError, TypeError):
+                    markup_val = None
+                    
+                try:
+                    markdown_val = float(raw_markdown) if raw_markdown not in (None, '') else None
+                except (ValueError, TypeError):
+                    markdown_val = None
+                
+                # Determine item category
+                item_name = it.get('name') or it.get('item_name') or it.get('description') or 'Unnamed Item'
+                iid_str = str(it.get('item_id') or '')
+                item_cat = (
+                    it.get('category') or 
+                    item_cat_map.get(iid_str) or 
+                    item_cat_map.get(item_name.strip().lower()) or 
+                    inv_category or 
+                    'IMPLANT'
+                )
+                
+                if mode == 'markdown':
+                    dev_type = 'Markdown'
+                    std_rate = 13.0
+                    applied_rate = markdown_val if markdown_val is not None else 13.0
+                else:
+                    dev_type = 'Markup'
+                    std_rate = 30.0
+                    applied_rate = markup_val if markup_val is not None else 30.0
+                
+                p_cost = to_f(it.get('unitCostWithGst') or it.get('purchaseCost') or it.get('unitPrice'))
+                s_cost = to_f(it.get('sellingUnitCost') or it.get('unitSellingCost'))
+                mrp_val = to_f(it.get('mrp'))
+                qty = to_f(it.get('quantity') or it.get('qty') or 1)
+                diff = round(applied_rate - std_rate, 2)
+                
+                markup_markdown_variances.append({
+                    'grn_number': grn_num,
+                    'invoice_no': inv_no,
+                    'invoice_date': i_date.strftime('%d/%m/%Y') if i_date else '',
+                    'vendor_name': vendor_name,
+                    'category': item_cat,
+                    'item_name': item_name,
+                    'hsn': it.get('hsn', ''),
+                    'batch_no': it.get('batchNo') or it.get('batch_no', ''),
+                    'pricing_mode': dev_type,
+                    'standard_rate': std_rate,
+                    'applied_rate': applied_rate,
+                    'diff': diff,
+                    'purchase_cost': p_cost,
+                    'selling_price': s_cost,
+                    'mrp': mrp_val,
+                    'quantity': qty,
+                    'remarks': it.get('pricingRemarks') or it.get('priceChangeRemarks') or it.get('remarks') or ''
+                })
+
+        # ── Recent Transactions ──
+        recent_sales = []
+        for s in filtered_sales[:8]:
+            s_date = parse_doc_date(s.get('bill_date'))
+            recent_sales.append({
+                'bill_number': s.get('bill_number', ''),
+                'bill_date': s_date.strftime('%d/%m/%Y') if s_date else '',
+                'patient_name': s.get('patient_name', '') or s.get('customer_name', 'Walk-in'),
+                'customer_type': s.get('customer_type', 'General'),
+                'payment_mode': s.get('payment_mode', 'CASH'),
+                'total_amount': to_f(s.get('total_amount')),
+                'items_count': len(normalize_items_payload(s.get('items', []))),
+            })
+
+        recent_purchases = []
+        for inv in filtered_invs[:8]:
+            i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date'))
+            vid = str(inv.get('vendor_id') or '')
+            recent_purchases.append({
+                'grn_number': inv.get('grn_number', ''),
+                'invoice_no': inv.get('invoice_no', ''),
+                'invoice_date': i_date.strftime('%d/%m/%Y') if i_date else '',
+                'vendor_name': vendor_map.get(vid) or f"Vendor #{vid}",
+                'payment_mode': inv.get('payment_mode', 'CHEQUE'),
+                'total_amount': to_f(inv.get('net_invoice_amount') or inv.get('total_amount')),
+                'is_approved': bool(inv.get('is_approved', False)),
+                'items_count': len(normalize_items_payload(inv.get('items', []))),
+            })
+
+        response_data = {
+            'status': 'success',
+            'date_range': {
+                'from_date': start_date.strftime('%Y-%m-%d') if start_date else None,
+                'to_date': end_date.strftime('%Y-%m-%d') if end_date else None,
+                'period': period
+            },
+            'kpis': {
+                'total_sales': round(net_sales_amt, 2),
+                'gross_sales': round(gross_sales_amt, 2),
+                'sales_returns': round(sales_returns_amt, 2),
+                'sales_count': len(filtered_sales),
+                'total_purchases': round(net_purchases_amt, 2),
+                'gross_purchases': round(gross_purchases_amt, 2),
+                'purchase_returns': round(purchase_returns_amt, 2),
+                'purchase_count': len(filtered_invs),
+                'gross_profit': round(gross_profit, 2),
+                'profit_margin': profit_margin,
+                'sales_taxable': round(sales_taxable_amt, 2),
+                'sales_gst': round(sales_gst_total, 2),
+                'sales_cgst': round(sales_cgst, 2),
+                'sales_sgst': round(sales_sgst, 2),
+                'purchase_taxable': round(purchase_taxable_amt, 2),
+                'purchase_gst': round(purchase_gst_total, 2),
+                'purchase_cgst': round(purchase_cgst, 2),
+                'purchase_sgst': round(purchase_sgst, 2),
+                'purchase_igst': round(purchase_igst, 2),
+                'net_gst_liability': round(net_gst_liability, 2),
+                'total_discount': round(purchase_discount_total, 2),
+                'total_items_sold': items_sold_count,
+                'total_items_purchased': items_purchased_count,
+                'avg_sales_value': round(gross_sales_amt / len(filtered_sales), 2) if filtered_sales else 0.0,
+                'avg_purchase_value': round(gross_purchases_amt / len(filtered_invs), 2) if filtered_invs else 0.0,
+                'active_vendors_count': len(vendor_map),
+                'active_customers_count': len(customer_map),
+                'total_item_catalog_count': len(item_map),
+            },
+            'timeline': timeline,
+            'monthly_overview': monthly_overview,
+            'payment_modes': {
+                'sales': sales_by_payment_mode,
+                'purchases': purchases_by_payment_mode,
+            },
+            'customer_types': sales_by_customer_type,
+            'top_selling_items': top_selling_items,
+            'top_vendors': top_vendors,
+            'tax_breakdown': {
+                'sales': {
+                    'taxable': round(sales_taxable_amt, 2),
+                    'cgst': round(sales_cgst, 2),
+                    'sgst': round(sales_sgst, 2),
+                    'total_tax': round(sales_gst_total, 2),
+                },
+                'purchases': {
+                    'taxable': round(purchase_taxable_amt, 2),
+                    'cgst': round(purchase_cgst, 2),
+                    'sgst': round(purchase_sgst, 2),
+                    'igst': round(purchase_igst, 2),
+                    'total_tax': round(purchase_gst_total, 2),
+                },
+                'net_gst': round(net_gst_liability, 2),
+            },
+            'markup_markdown_variances': markup_markdown_variances,
+            'recent_sales': recent_sales,
+            'recent_purchases': recent_purchases,
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Error in get_velavan_dashboard_stats: {str(e)}\n{traceback.format_exc()}")
+        return Response({'status': 'error', 'message': str(e)}, status=500)

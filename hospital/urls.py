@@ -460,6 +460,7 @@ urlpatterns = [
     path('velavan_create_customer/', velavan.velavan_create_customer, name='velavan_create_customer'),
     path('velavan_update_customer/<str:customer_id>/', velavan.velavan_update_customer, name='velavan_update_customer'),
     path('velavan_delete_customer/<str:customer_id>/', velavan.velavan_delete_customer, name='velavan_delete_customer'),
+    path('velavan/dashboard/stats/', velavan.get_velavan_dashboard_stats, name='get_velavan_dashboard_stats'),
 
     # Dashboard URLs
     path('dashboard/stats/', dashboard.dashboard_stats, name='dashboard_stats'),

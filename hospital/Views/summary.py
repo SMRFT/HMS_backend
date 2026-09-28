@@ -1162,33 +1162,36 @@ def get_printsummary(request, ip_no):
         summary['investBillNo'] = None
         summary['signatures']   = []
 
-        # ── STEP 3: Get barcode from core_hmsbarcode ──────────────────────────
-        # Try to find by ipnumber first
-        barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
-            {"ipnumber": decoded_ip_no}
-        )
+        # ── STEP 3: Get barcode strictly requiring ipnumber == decoded_ip_no ──
+        barcode_record = None
 
-        # Fallback 1: Match billnumber from hospital_investbilling
-        if not barcode_record:
-            investbilling_collection = hms_db['hospital_investbilling']
-            invest_bills = list(investbilling_collection.find(
-                {'ipNumber': decoded_ip_no, 'is_active': True},
-                {'investBillNo': 1, '_id': 0}
-            ))
-            if invest_bills:
-                bill_numbers = [b['investBillNo'] for b in invest_bills if b.get('investBillNo')]
-                if bill_numbers:
-                    barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
-                        {"billnumber": {"$in": bill_numbers}}
-                    )
+        # 1. Fetch investBillNo(s) for this specific ipNumber from hospital_investbilling
+        investbilling_collection = hms_db['hospital_investbilling']
+        invest_bills = list(investbilling_collection.find(
+            {'ipNumber': decoded_ip_no, 'is_active': True},
+            {'investBillNo': 1, '_id': 0}
+        ).sort("created_date", -1))
 
-        # Fallback 2: Match patient_id (uhid) in core_hmsbarcode ordered by latest
-        if not barcode_record and uhid:
+        bill_numbers = [b['investBillNo'] for b in invest_bills if b.get('investBillNo')]
+
+        # 2. In core_hmsbarcode, MUST match ipnumber == decoded_ip_no AND billnumber in this IP's invest bills
+        if bill_numbers and decoded_ip_no:
             barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
-                {"patient_id": uhid},
+                {
+                    "ipnumber": decoded_ip_no,
+                    "billnumber": {"$in": bill_numbers}
+                },
                 sort=[("created_date", -1)]
             )
 
+        # 3. If not matched with billnumber, check core_hmsbarcode strictly with ipnumber == decoded_ip_no
+        if not barcode_record and decoded_ip_no:
+            barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
+                {"ipnumber": decoded_ip_no},
+                sort=[("created_date", -1)]
+            )
+
+        # If core_hmsbarcode does not have matching ipnumber, DO NOT fall back to anything
         if not barcode_record:
             client.close()
             return JsonResponse(serialize_mongo(summary), safe=False)
