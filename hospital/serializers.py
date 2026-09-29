@@ -322,6 +322,15 @@ class PatientSerializer(serializers.ModelSerializer):
         model = Patient
         fields = '__all__'
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        fn = (data.get('firstName') or '').strip()
+        ln = (data.get('lastName') or '').strip()
+        if fn and ln:
+            if fn.upper() == ln.upper() or fn.upper().endswith(ln.upper()) or fn.upper().replace(' ', '') == ln.upper().replace(' ', ''):
+                data['lastName'] = ''
+        return data
+
 class InsuranceProviderSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
