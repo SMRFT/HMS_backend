@@ -3124,8 +3124,27 @@ def get_salesreturn_details(request):
             salutation  = (pd.get("salutation") or "").strip()
             first_name  = (pd.get("firstName")  or "").strip()
             last_name   = (pd.get("lastName")   or "").strip()
-            full_name   = " ".join(filter(None, [salutation, first_name, last_name]))
-            patient_map[pd["uhid"]] = full_name
+            if first_name and last_name:
+                if (
+                    first_name.lower() == last_name.lower()
+                    or first_name.lower().endswith(last_name.lower())
+                    or first_name.lower().replace(" ", "") == last_name.lower().replace(" ", "")
+                ):
+                    last_name = ""
+                elif last_name.lower().startswith(first_name.lower()):
+                    first_name = ""
+            full_name = " ".join(filter(None, [salutation, first_name, last_name])).strip()
+            words = full_name.split()
+            if len(words) >= 2 and len(words) % 2 == 0:
+                half = len(words) // 2
+                if [w.lower() for w in words[:half]] == [w.lower() for w in words[half:]]:
+                    words = words[:half]
+            clean_words = []
+            for idx, w in enumerate(words):
+                if idx > 0 and len(w) > 1 and w.lower() == words[idx - 1].lower():
+                    continue
+                clean_words.append(w)
+            patient_map[pd["uhid"]] = " ".join(clean_words).strip()
 
         # ── 4. Pharmacist name lookup (MongoDB cross-db) ──────────────────────
         pharmacist_map = {}

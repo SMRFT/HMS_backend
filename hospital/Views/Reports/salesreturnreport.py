@@ -69,8 +69,30 @@ def sales_return_report_view(request):
 
         patient_map = {}
         for p in Patient.objects.filter(uhid__in=uhids):
-            name_parts = [p.salutation, p.firstName, p.lastName]
-            patient_map[p.uhid] = " ".join([x for x in name_parts if x]).strip() or "Unknown"
+            sal = (p.salutation or "").strip()
+            fn  = (p.firstName or "").strip()
+            ln  = (p.lastName or "").strip()
+            if fn and ln:
+                if (
+                    fn.lower() == ln.lower()
+                    or fn.lower().endswith(ln.lower())
+                    or fn.lower().replace(" ", "") == ln.lower().replace(" ", "")
+                ):
+                    ln = ""
+                elif ln.lower().startswith(fn.lower()):
+                    fn = ""
+            full_name = f"{sal} {fn} {ln}".strip()
+            words = full_name.split()
+            if len(words) >= 2 and len(words) % 2 == 0:
+                half = len(words) // 2
+                if [w.lower() for w in words[:half]] == [w.lower() for w in words[half:]]:
+                    words = words[:half]
+            clean_words = []
+            for idx, w in enumerate(words):
+                if idx > 0 and len(w) > 1 and w.lower() == words[idx - 1].lower():
+                    continue
+                clean_words.append(w)
+            patient_map[p.uhid] = " ".join(clean_words).strip() or "Unknown"
 
         item_ids = set()
         for r in records:

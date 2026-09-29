@@ -6,6 +6,9 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 from pymongo import MongoClient
 
 mongo_url = os.getenv("GLOBAL_DB_HOST")
@@ -200,6 +203,14 @@ def run_licence_expiry_check():
 
                     cs_email = getattr(settings, 'HMS_CS_EMAIL', None) or os.getenv('HMS_CS_EMAIL') or getattr(settings, 'EMAIL_HOST_USER', 'cs@smrft.org')
                     cs_password = getattr(settings, 'HMS_CS_EMAIL_PASSWORD', None) or os.getenv('HMS_CS_EMAIL_PASSWORD') or getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+
+                    if not cs_password:
+                        raise ValueError(
+                            f"SMTP Authentication error: Password is missing for {cs_email}. "
+                            f"Please configure HMS_CS_EMAIL_PASSWORD in .env and restart the service."
+                        )
+
+                    cs_password = str(cs_password).strip()
 
                     # ✅ Authenticate SMTP using HMS_CS_EMAIL credentials
                     # so the mail is truly sent FROM cs@smrft.org (env-specific)
