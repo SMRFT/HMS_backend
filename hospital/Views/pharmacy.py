@@ -3469,17 +3469,58 @@ def pharmacy_view_bills(request):
             billtype_map[int(bill_type)] = bt.get("bill_name", "")
 
     # =========================================================
-    # ✅ Django Bills
+    # ✅ Date Filtering from query params
     # =========================================================
-    bills = list(
-        PharmacyBilling.objects.filter(
-            billing_status__in=["Billed", "Paid", "Processing", "deleted"],
-            hospital_code=hospital_code,
-            branch_code=branch_code,
-            outlet_code=matched_outlet,
-            bill_type__in=allowed_bill_types
-        ).order_by("-created_date")
-    )
+    from_date_str = request.GET.get("from_date") or request.query_params.get("from_date")
+    to_date_str   = request.GET.get("to_date")   or request.query_params.get("to_date")
+
+    from_dt = None
+    to_dt   = None
+    if from_date_str:
+        try:
+            from django.utils.timezone import make_aware
+            from_dt = make_aware(datetime.strptime(from_date_str.strip(), "%Y-%m-%d"))
+        except Exception:
+            try:
+                from_dt = datetime.strptime(from_date_str.strip(), "%Y-%m-%d")
+            except Exception:
+                pass
+
+    if to_date_str:
+        try:
+            from django.utils.timezone import make_aware
+            to_dt = make_aware(datetime.strptime(to_date_str.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59))
+        except Exception:
+            try:
+                to_dt = datetime.strptime(to_date_str.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            except Exception:
+                pass
+
+    # =========================================================
+    # ✅ Django Bills Query
+    # =========================================================
+    bill_filters = {
+        "billing_status__in": ["Billed", "Paid", "Processing", "deleted"],
+        "hospital_code": hospital_code,
+        "branch_code": branch_code,
+        "outlet_code": matched_outlet,
+        "bill_type__in": allowed_bill_types
+    }
+
+    if from_dt and to_dt:
+        bill_filters["bill_date__range"] = (from_dt, to_dt)
+    elif from_dt:
+        bill_filters["bill_date__gte"] = from_dt
+    elif to_dt:
+        bill_filters["bill_date__lte"] = to_dt
+
+    bills_qs = PharmacyBilling.objects.filter(**bill_filters).order_by("-bill_date")
+
+    # If no date filter is applied, limit to latest 1000 to keep responses fast
+    if not from_dt and not to_dt:
+        bills = list(bills_qs[:1000])
+    else:
+        bills = list(bills_qs)
 
     # =========================================================
     # ✅ Patient Mapping
@@ -3487,10 +3528,15 @@ def pharmacy_view_bills(request):
     uhids = [bill.uhid for bill in bills if bill.uhid]
 
     patients    = Patient.objects.filter(uhid__in=uhids)
-    patient_map = {
-        p.uhid: f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
-        for p in patients
-    }
+    patient_map = {}
+    for p in patients:
+        sal = (p.salutation or "").strip()
+        fn  = (p.firstName or "").strip()
+        ln  = (p.lastName or "").strip()
+        if ln.lower() == fn.lower():
+            ln = ""
+        full_name = f"{sal} {fn} {ln}".strip()
+        patient_map[p.uhid] = " ".join(full_name.split())
 
     # =========================================================
     # ✅ Doctor Mapping
@@ -3507,6 +3553,34 @@ def pharmacy_view_bills(request):
             str(doc["employeeId"]): doc.get("employeeName", "")
             for doc in doctor_cursor
         }
+
+    # =========================================================
+    # ✅ Employee / Creator Mapping
+    #    1. Match created_by / cashier_id against profile collection
+    #    2. If string/id not found in profile collection, display as-is
+    # =========================================================
+    creator_ids = list(set([
+        str(bill.created_by).strip() for bill in bills if bill.created_by
+    ] + [
+        str(bill.cashier_id).strip() for bill in bills if bill.cashier_id
+    ]))
+
+    employee_map = {}
+    if creator_ids:
+        search_ids = []
+        for cid in creator_ids:
+            search_ids.append(cid)
+            if cid.isdigit():
+                search_ids.append(int(cid))
+
+        creator_cursor = profile_collection.find(
+            {"employeeId": {"$in": search_ids}},
+            {"employeeId": 1, "employeeName": 1}
+        )
+        for doc in creator_cursor:
+            emp_n = doc.get("employeeName", "")
+            if emp_n:
+                employee_map[str(doc["employeeId"])] = emp_n
 
     # =========================================================
     # ✅ Collect Bill Items from MongoDB (oppharmacy_collection)
@@ -3614,9 +3688,14 @@ def pharmacy_view_bills(request):
 
         serialized = PharmacyBillingSerializer(bill).data
 
-        serialized["patient_name"]   = patient_map.get(bill.uhid, "")
+        serialized["patient_name"]   = patient_map.get(bill.uhid, "") or getattr(bill, "patientname", "") or getattr(bill, "patient_name", "") or ""
         serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
         serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type), "")
+
+        created_val = str(bill.created_by or bill.cashier_id or "").strip()
+        matched_user = employee_map.get(created_val) or created_val
+        serialized["employee_name"]   = matched_user
+        serialized["created_by_name"] = matched_user
 
         mongo_bill    = mongo_map.get(bill.Bill_id, {})
         medicine_list = mongo_bill.get("medicine_particulars", [])
