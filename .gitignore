@@ -14,5 +14,6 @@ clean_converter_script.py
 insert_pharmacy_billing.py
 migrate_hospital_salesreturn.py
 update_pharmacy_billing_uhid.py
+migrate_cash_counter_module.py
 convert_*.py
 migrate_*.py
