@@ -1,3 +1,4 @@
+import re
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -5,6 +6,9 @@ from rest_framework.response import Response
 from ..models import PharmacyItem, PharmacyStock, PhysicalStockEntry
 from ..serializers import PhysicalStockEntrySerializer
 from pyauth.auth import HasRoleAndDataPermission
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -55,10 +59,6 @@ def _compute_available_stock(stock):
 def pharmacy_stock_batches_view(request):
     """
     GET /pharmacy-stock-batches/?item_name=<search>
-
-    Search PharmacyItem by name (case-insensitive contains).
-    For each matching item, return all active PharmacyStock batches with
-    the computed available stock.
     """
     _, hospital_code, branch_code = _get_auth(request)
     item_name_query = request.query_params.get("item_name", "").strip()
@@ -67,42 +67,49 @@ def pharmacy_stock_batches_view(request):
         return Response({"error": "item_name query parameter is required"}, status=400)
 
     try:
-        # ── Search PharmacyItem ───────────────────────────────────────────
-        all_items = PharmacyItem.objects.all()
-        matched_items = [
-            i for i in all_items
-            if i.is_active
-            and getattr(i, "hospital_code", None) == hospital_code
-            and getattr(i, "branch_code", None) == branch_code
-            and item_name_query.lower() in (i.item_name or "").lower()
-        ]
+        client, hms_db = get_hms_db()
+
+        # Search matching items
+        matched_items = list(hms_db["hospital_pharmacyitem"].find({
+            "is_active": True,
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "item_name": {"$regex": item_name_query, "$options": "i"}
+        }, {"item_id": 1, "item_name": 1}))
 
         if not matched_items:
             return Response([], status=200)
 
+        item_map = {m.get("item_id"): m.get("item_name") for m in matched_items}
+        matched_ids = list(item_map.keys())
+
+        # Query batches for matched item_ids
+        batches = list(hms_db["hospital_pharmacystock"].find({
+            "item_id": {"$in": matched_ids},
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+        }))
+
         result = []
+        for stock in batches:
+            total     = stock.get("total_stock", 0) or 0
+            sold      = stock.get("sold_quantity", 0) or 0
+            trans_out = stock.get("transferred_out_quantity", 0) or 0
+            grn_ret   = stock.get("grn_return_quantity", 0) or 0
+            blocked   = stock.get("blocked_quantity", 0) or 0
+            sales_ret = stock.get("sales_return_quantity", 0) or 0
+            available = total - sold - trans_out - grn_ret - blocked + sales_ret
 
-        for item in matched_items:
-            # ── Fetch batches for this item ───────────────────────────────
-            all_stocks = PharmacyStock.objects.all()
-            batches = [
-                s for s in all_stocks
-                if getattr(s, "item_id", None) == item.item_id
-                and getattr(s, "hospital_code", None) == hospital_code
-                and getattr(s, "branch_code", None) == branch_code
-            ]
-
-            for stock in batches:
-                available = _compute_available_stock(stock)
-                result.append({
-                    "item_id":        item.item_id,
-                    "item_name":      item.item_name,
-                    "stock_id":       getattr(stock, "stock_id", None),
-                    "batch_number":   stock.batch_number,
-                    "computer_stock": available,
-                    "expiry_date":    str(stock.expiry_date) if stock.expiry_date else None,
-                    "mrp":            str(stock.mrp) if stock.mrp else None,
-                })
+            iid = stock.get("item_id")
+            result.append({
+                "item_id":        iid,
+                "item_name":      item_map.get(iid, f"Item #{iid}"),
+                "stock_id":       stock.get("stock_id"),
+                "batch_number":   stock.get("batch_number", ""),
+                "computer_stock": available,
+                "expiry_date":    str(stock.get("expiry_date")) if stock.get("expiry_date") else None,
+                "mrp":            str(stock.get("mrp")) if stock.get("mrp") is not None else None,
+            })
 
         return Response(result, status=200)
 
@@ -117,8 +124,6 @@ def pharmacy_stock_batches_view(request):
 def physical_stock_entry_view(request, pk=None):
     """
     CRUD for PhysicalStockEntry.
-
-    POST accepts either a single object or a list (bulk save).
     """
     employee_id, hospital_code, branch_code = _get_auth(request)
 
@@ -126,23 +131,40 @@ def physical_stock_entry_view(request, pk=None):
     if request.method == "GET":
         try:
             if pk:
-                entry = PhysicalStockEntry.objects.get(entry_id=pk)
-                if (
-                    not entry.is_active or
-                    entry.hospital_code != hospital_code or
-                    entry.branch_code != branch_code
-                ):
+                try:
+                    entry = PhysicalStockEntry.objects.get(
+                        entry_id=int(pk) if str(pk).isdigit() else pk,
+                        hospital_code=hospital_code,
+                        branch_code=branch_code,
+                        is_active=True,
+                    )
+                    return Response(PhysicalStockEntrySerializer(entry).data)
+                except PhysicalStockEntry.DoesNotExist:
                     return Response({"error": "Entry not found"}, status=404)
-                return Response(PhysicalStockEntrySerializer(entry).data)
 
-            all_entries = PhysicalStockEntry.objects.all()
-            entries = [
-                e for e in all_entries
-                if e.is_active
-                and e.hospital_code == hospital_code
-                and e.branch_code == branch_code
-            ]
-            return Response(PhysicalStockEntrySerializer(entries, many=True).data)
+            filter_q = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
+            search = request.GET.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"item_name": reg},
+                    {"batch_number": reg},
+                    {"remarks": reg}
+                ]
+
+            filter_q = apply_date_filter(filter_q, request, "created_date")
+
+            return Response(paginate_mongo_query(
+                "hospital_physicalstockentry",
+                filter_q,
+                sort=[("entry_id", DESCENDING)],
+                request=request
+            ))
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
@@ -151,14 +173,11 @@ def physical_stock_entry_view(request, pk=None):
     if request.method == "POST":
         try:
             data = request.data
-
-            # Support bulk: list of entries
             is_bulk = isinstance(data, list)
             payload_list = data if is_bulk else [data]
 
             saved = []
             errors = []
-
             for payload in payload_list:
                 item_payload = payload.copy() if hasattr(payload, "copy") else dict(payload)
                 item_payload["hospital_code"] = hospital_code
@@ -175,10 +194,10 @@ def physical_stock_entry_view(request, pk=None):
                 else:
                     errors.append(serializer.errors)
 
-            if errors:
-                return Response({"saved": saved, "errors": errors}, status=207)
+            if errors and not saved:
+                return Response({"errors": errors}, status=400)
 
-            return Response(saved if is_bulk else saved[0], status=201)
+            return Response(saved if is_bulk else (saved[0] if saved else {}), status=201 if saved else 400)
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
@@ -241,23 +260,39 @@ def physical_stock_approval_view(request, pk=None):
     """
     GET  /physical-stock-approval/      → list all active entries (pending + approved)
     PUT  /physical-stock-approval/<pk>/ → approve or reject an entry
-
-    Body for PUT:
-        { "action": "approve" | "reject", "approval_notes": "..." }
     """
     employee_id, hospital_code, branch_code = _get_auth(request)
 
     # ── GET ──────────────────────────────────────────────────────────────
     if request.method == "GET":
         try:
-            all_entries = PhysicalStockEntry.objects.all()
-            entries = [
-                e for e in all_entries
-                if e.is_active
-                and e.hospital_code == hospital_code
-                and e.branch_code == branch_code
-            ]
-            return Response(PhysicalStockEntrySerializer(entries, many=True).data)
+            filter_q = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
+            status_param = request.GET.get("status", "").strip()
+            if status_param == "approved":
+                filter_q["is_approved"] = True
+            elif status_param == "pending":
+                filter_q["is_approved"] = False
+
+            search = request.GET.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"item_name": reg},
+                    {"batch_number": reg},
+                    {"approval_notes": reg}
+                ]
+
+            return Response(paginate_mongo_query(
+                "hospital_physicalstockentry",
+                filter_q,
+                sort=[("entry_id", DESCENDING)],
+                request=request
+            ))
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 

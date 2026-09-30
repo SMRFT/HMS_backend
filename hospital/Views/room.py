@@ -3,13 +3,14 @@ from django.http import JsonResponse
 from rest_framework import status
 from pymongo import MongoClient
 import os
+import re
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
 from django.views.decorators.csrf import csrf_exempt
 import json
 from uuid import uuid4
-from django.utils import timezone as tz
-from datetime import datetime
+from django.utils import timezone as tz, timezone
+from datetime import datetime, timedelta
 import traceback
 
 from ..models import Block, RoomCategory, Room, Admission, Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
@@ -125,6 +126,67 @@ def _save_room(room, services=None, beds=None, room_kits=None):
         print(f"[_save_room] Mongo sync failed for {room.room_number}: {ex}")
 
 
+_mongo_client = None
+
+def _get_hms_db():
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'), maxPoolSize=50, connectTimeoutMS=5000)
+    hms_db = _mongo_client[os.getenv("HMS_DB_NAME", "HMS")]
+    return _mongo_client, hms_db
+
+
+_room_indexes_created = False
+
+
+def _ensure_room_indexes(hms_db):
+    global _room_indexes_created
+    if _room_indexes_created:
+        return
+    def _safe_idx(coll, keys, **kwargs):
+        try:
+            hms_db[coll].create_index(keys, background=True, **kwargs)
+        except Exception:
+            pass
+
+    # Hospital Admission indexes
+    _safe_idx("hospital_admission", [("hospital_code", 1), ("branch_code", 1), ("is_admitted", 1), ("is_discharged", 1)])
+    _safe_idx("hospital_admission", [("uhid", 1)])
+    _safe_idx("hospital_admission", [("ipNumber", 1)])
+    _safe_idx("hospital_admission", [("hospital_code", 1), ("branch_code", 1), ("ipNumber", 1)])
+    _safe_idx("hospital_admission", [("hospital_code", 1), ("branch_code", 1), ("uhid", 1)])
+    _safe_idx("hospital_admission", [("room_details.roomNo", 1), ("room_details.bedNo", 1)])
+    _safe_idx("hospital_admission", [("roomShitingDetails.newRoomNo", 1), ("roomShitingDetails.newBedNo", 1)])
+    _safe_idx("hospital_admission", [("roomShitingDetails.shiftingDateTime", -1)])
+    _safe_idx("hospital_admission", [("lastmodified_date", -1)])
+    _safe_idx("hospital_admission", [("admissionDateTime", -1)])
+
+    # Patient indexes
+    _safe_idx("hospital_patient", [("hospital_code", 1), ("uhid", 1)])
+    _safe_idx("hospital_patient", [("uhid", 1)])
+
+    # Room indexes
+    _safe_idx("hospital_room", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+    _safe_idx("hospital_room", [("hospital_code", 1), ("branch_code", 1), ("room_number", 1)])
+    _safe_idx("hospital_room", [("room_number", 1)])
+    _safe_idx("hospital_room", [("floor", 1), ("room_number", 1)])
+
+    # RoomBooking indexes
+    _safe_idx("hospital_roombooking", [("hospital_code", 1), ("branch_code", 1), ("is_booked", 1), ("room_shifted", 1)])
+    _safe_idx("hospital_roombooking", [("ip_number", 1)])
+    _safe_idx("hospital_roombooking", [("hospital_code", 1), ("branch_code", 1), ("ip_number", 1)])
+    _safe_idx("hospital_roombooking", [("room_number", 1), ("bed_number", 1)])
+
+    # Master tables indexes
+    _safe_idx("hospital_block", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+    _safe_idx("hospital_roomcategory", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+    _safe_idx("hospital_nursingstation", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+    _safe_idx("hospital_roomservicedescription", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+    _safe_idx("hospital_roomkititems", [("hospital_code", 1), ("branch_code", 1), ("is_active", 1)])
+
+    _room_indexes_created = True
+
+
 # --------------------------------------------------
 # BLOCK
 # --------------------------------------------------
@@ -161,10 +223,8 @@ def block_view(request, pk=None):
                     hospital_code=hospital_code,
                     branch_code=branch_code
                 )
-
                 if not block.is_active:
                     return Response({"error": "Block not found"}, status=404)
-
             except Block.DoesNotExist:
                 return Response({"error": "Block not found"}, status=404)
 
@@ -296,10 +356,8 @@ def room_category_view(request, pk=None):
                     hospital_code=hospital_code,
                     branch_code=branch_code
                 )
-
                 if not category.is_active:
                     return Response({"error": "Room category not found"}, status=404)
-
             except RoomCategory.DoesNotExist:
                 return Response({"error": "Room category not found"}, status=404)
 
@@ -352,10 +410,8 @@ def room_category_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
-
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
 
@@ -387,10 +443,8 @@ def room_category_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not category.is_active:
                 return Response({"error": "Room category not found"}, status=404)
-
         except RoomCategory.DoesNotExist:
             return Response({"error": "Room category not found"}, status=404)
 
@@ -438,10 +492,8 @@ def nursingstation_view(request, pk=None):
                     hospital_code=hospital_code,
                     branch_code=branch_code
                 )
-
                 if not nursingstation.is_active:
                     return Response({"error": "NursingStation not found"}, status=404)
-
             except NursingStation.DoesNotExist:
                 return Response({"error": "NursingStation not found"}, status=404)
 
@@ -491,10 +543,8 @@ def nursingstation_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not nursingstation.is_active:
                 return Response({"error": "NursingStation not found"}, status=404)
-
         except NursingStation.DoesNotExist:
             return Response({"error": "NursingStation not found"}, status=404)
 
@@ -526,10 +576,8 @@ def nursingstation_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not nursingstation.is_active:
                 return Response({"error": "NursingStation not found"}, status=404)
-
         except NursingStation.DoesNotExist:
             return Response({"error": "NursingStation not found"}, status=404)
 
@@ -578,10 +626,8 @@ def room_service_description_view(request, pk=None):
                     hospital_code=hospital_code,
                     branch_code=branch_code
                 )
-
                 if not roomservicedescription.is_active:
                     return Response({"error": "RoomServiceDescription not found"}, status=404)
-
             except RoomServiceDescription.DoesNotExist:
                 return Response({"error": "RoomServiceDescription not found"}, status=404)
 
@@ -635,10 +681,8 @@ def room_service_description_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not roomservicedescription.is_active:
                 return Response({"error": "RoomServiceDescription not found"}, status=404)
-
         except RoomServiceDescription.DoesNotExist:
             return Response({"error": "RoomServiceDescription not found"}, status=404)
 
@@ -671,10 +715,8 @@ def room_service_description_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not roomservicedescription.is_active:
                 return Response({"error": "RoomServiceDescription not found"}, status=404)
-
         except RoomServiceDescription.DoesNotExist:
             return Response({"error": "RoomServiceDescription not found"}, status=404)
 
@@ -724,10 +766,8 @@ def room_kititems_view(request, pk=None):
                     hospital_code=hospital_code,
                     branch_code=branch_code
                 )
-
                 if not roomkititems.is_active:
                     return Response({"error": "RoomKitItems not found"}, status=404)
-
             except RoomKitItems.DoesNotExist:
                 return Response({"error": "RoomKitItems not found"}, status=404)
 
@@ -781,10 +821,8 @@ def room_kititems_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not roomkititems.is_active:
                 return Response({"error": "RoomKitItems not found"}, status=404)
-
         except RoomKitItems.DoesNotExist:
             return Response({"error": "RoomKitItems not found"}, status=404)
 
@@ -817,10 +855,8 @@ def room_kititems_view(request, pk=None):
                 hospital_code=hospital_code,
                 branch_code=branch_code
             )
-
             if not roomkititems.is_active:
                 return Response({"error": "RoomKitItems not found"}, status=404)
-
         except RoomKitItems.DoesNotExist:
             return Response({"error": "RoomKitItems not found"}, status=404)
 
@@ -863,7 +899,7 @@ def room_view(request, pk=None):
                 room = Room.objects.get(
                     pk=pk,
                     hospital_code=hospital_code,
-                    branch_code=branch_code,
+                    branch_code=branch_code
                 )
                 if not room.is_active:
                     return Response({"error": "Room not found"}, status=404)
@@ -873,10 +909,10 @@ def room_view(request, pk=None):
  
         all_rooms = Room.objects.filter(
             hospital_code=hospital_code,
-            branch_code=branch_code,
-        )
-        active = [r for r in all_rooms if r.is_active]
-        return Response(RoomSerializer(active, many=True).data)
+            branch_code=branch_code
+        ).order_by("room_number")
+        rooms = [r for r in all_rooms if r.is_active]
+        return Response(RoomSerializer(rooms, many=True).data)
  
     # ── POST ─────────────────────────────────────────────────────────────────
     elif request.method == "POST":
@@ -896,7 +932,7 @@ def room_view(request, pk=None):
         existing = Room.objects.filter(
             room_number=room_number,
             hospital_code=hospital_code,
-            branch_code=branch_code,
+            branch_code=branch_code
         )
         if any(r.is_active for r in existing):
             return Response(
@@ -929,7 +965,7 @@ def room_view(request, pk=None):
             room = Room.objects.get(
                 pk=pk,
                 hospital_code=hospital_code,
-                branch_code=branch_code,
+                branch_code=branch_code
             )
             if not room.is_active:
                 return Response({"error": "Room not found"}, status=404)
@@ -949,7 +985,7 @@ def room_view(request, pk=None):
             existing = Room.objects.filter(
                 room_number=new_room_number,
                 hospital_code=hospital_code,
-                branch_code=branch_code,
+                branch_code=branch_code
             )
             if any(r.is_active and str(r.pk) != str(pk) for r in existing):
                 return Response(
@@ -1030,72 +1066,31 @@ def safe_json_from_db_value(self, value, expression, connection):
 
 
 JSONField.from_db_value = safe_json_from_db_value
-# --------------------------------------------------
-# SAFE JSON PARSER
-# Handles list / dict / string / bytes
-# --------------------------------------------------
 def parse_json_field(value):
-
+    """Safely parse a JSON-like field that might be a list, dict, or string."""
     if isinstance(value, list):
         return value
-
     if isinstance(value, dict):
         return [value]
-
     if value is None:
         return []
-
     if isinstance(value, (bytes, bytearray)):
         try:
             value = value.decode("utf-8")
         except Exception:
             return []
-
     if isinstance(value, str):
         value = value.strip()
-
         if not value or value in ("null", "None", "[]", "{}"):
             return []
-
         try:
             parsed = json.loads(value)
-
             if isinstance(parsed, list):
                 return parsed
-
             if isinstance(parsed, dict):
                 return [parsed]
-
         except Exception:
             return []
-
-    try:
-        parsed = json.loads(str(value))
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            return [parsed]
-    except Exception:
-        pass
-
-    return []
-
-
-def parse_json_field(value):
-    """Safely parse a JSON field that may already be a list/dict or a JSON string."""
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-            if isinstance(parsed, dict):
-                return [parsed]
-        except Exception:
-            pass
     return []
  
  
@@ -1135,7 +1130,7 @@ def generate_shifting_id(existing_shiftings):
 def room_enquiry_view(request):
 
     try:
-        result   = []
+        result    = []
         floor_map = {}
 
         hospital_code = (
@@ -1150,37 +1145,14 @@ def room_enquiry_view(request):
             "system"
         )
 
+        client, hms_db = _get_hms_db()
+        _ensure_room_indexes(hms_db)
+
         # ═══════════════════════════════════════════════
-        # STEP 1 — PATIENT MAP & DOCTOR MAP
+        # STEP 1 — DOCTOR MAP
         # ═══════════════════════════════════════════════
-        patient_map = {}
-
-        pat_qs = Patient.objects.all()
-        if hospital_code and hospital_code != "system":
-            h_qs = Patient.objects.filter(hospital_code=hospital_code)
-            if h_qs.exists():
-                pat_qs = h_qs
-
-        for patient in pat_qs:
-            k = str(patient.uhid or "").strip()
-            if not k:
-                continue
-            pname = f"{patient.firstName or ''} {patient.lastName or ''}".strip()
-            patient_map[k] = {
-                "uhid":        k,
-                "patientname": pname,
-                "name":        pname,
-                "firstName":   str(patient.firstName or ""),
-                "lastName":    str(patient.lastName or ""),
-                "age":         str(patient.age or ""),
-                "gender":      str(patient.gender or ""),
-                "mobilePhone": str(patient.mobilePhone or ""),
-            }
-
-        # Build doctor map from MongoDB diagnostics profile
         doctor_map = {}
         try:
-            client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
             global_db = client['Global']
             diag_prof = global_db['backend_diagnostics_profile']
             for d in diag_prof.find({}, {"employeeId": 1, "employeeName": 1, "_id": 0}):
@@ -1192,97 +1164,122 @@ def room_enquiry_view(request):
             print("doctor_map error:", e)
 
         # ═══════════════════════════════════════════════
-        # STEP 2 — ADMISSION MAP
-        #
-        # FIX: Do NOT skip discharged admissions entirely.
-        #      A discharged bed that is NOT cleaned must still
-        #      appear as "Not Cleaned" until housekeeping marks
-        #      it clean.  Only skip beds that are already clean.
+        # STEP 2 — ACTIVE & UNCLEANED ADMISSIONS (INDEXED QUERY)
+        # ═══════════════════════════════════════════════
+        recent_dt = datetime.now() - timedelta(days=7)
+        adm_query = {
+            "$or": [
+                {"is_admitted": True, "is_discharged": False, "is_cancelled": {"$ne": True}},
+                {"is_discharged": True, "lastmodified_date": {"$gte": recent_dt}, "room_details.is_roomCleaned": False},
+                {"is_discharged": True, "lastmodified_date": {"$gte": recent_dt}, "roomShitingDetails.is_roomCleaned": False}
+            ]
+        }
+        if hospital_code and hospital_code != "system":
+            adm_query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            adm_query["branch_code"] = branch_code
+
+        active_admissions = list(hms_db["hospital_admission"].find(
+            adm_query,
+            {
+                "uhid": 1, "ipNumber": 1, "admittingDoctor": 1, "admissionDateTime": 1,
+                "is_high_risk": 1, "high_risk_reason": 1, "high_risk_date": 1,
+                "room_details": 1, "roomShitingDetails": 1, "is_admitted": 1, "is_discharged": 1
+            }
+        ))
+
+        # ═══════════════════════════════════════════════
+        # STEP 3 — PATIENTS MAP (ONLY FOR ACTIVE ADMISSIONS)
+        # ═══════════════════════════════════════════════
+        uhids = list(filter(None, {str(a.get("uhid") or "").strip() for a in active_admissions}))
+        patient_map = {}
+        if uhids:
+            pat_query = {"uhid": {"$in": uhids}}
+            if hospital_code and hospital_code != "system":
+                pat_query["hospital_code"] = hospital_code
+
+            pat_cursor = hms_db["hospital_patient"].find(
+                pat_query,
+                {
+                    "uhid": 1, "firstName": 1, "lastName": 1, "age": 1,
+                    "gender": 1, "mobilePhone": 1
+                }
+            )
+            for patient in pat_cursor:
+                k = str(patient.get("uhid") or "").strip()
+                if not k:
+                    continue
+                pname = f"{patient.get('firstName') or ''} {patient.get('lastName') or ''}".strip()
+                patient_map[k] = {
+                    "uhid":        k,
+                    "patientname": pname,
+                    "name":        pname,
+                    "firstName":   str(patient.get("firstName") or ""),
+                    "lastName":    str(patient.get("lastName") or ""),
+                    "age":         str(patient.get("age") or ""),
+                    "gender":      str(patient.get("gender") or ""),
+                    "mobilePhone": str(patient.get("mobilePhone") or ""),
+                }
+
+        # ═══════════════════════════════════════════════
+        # STEP 4 — BUILD ADMISSION MAP FOR ROOMS/BEDS
         # ═══════════════════════════════════════════════
         admission_map = {}
-
-        adm_qs = Admission.objects.all()
-        if hospital_code and hospital_code != "system":
-            h_qs = adm_qs.filter(hospital_code=hospital_code)
-            if h_qs.exists():
-                adm_qs = h_qs
-        if branch_code and branch_code != "system":
-            b_qs = adm_qs.filter(branch_code=branch_code)
-            if b_qs.exists():
-                adm_qs = b_qs
-
-        for admission in adm_qs:
-            uhid        = str(admission.uhid or "").strip()
-            ip_number   = str(admission.ipNumber or "").strip()
+        for admission in active_admissions:
+            uhid = str(admission.get("uhid") or "").strip()
+            ip_number = str(admission.get("ipNumber") or "").strip()
             p_dict = patient_map.get(uhid)
-            if not p_dict:
-                pat = Patient.objects.filter(uhid=uhid).first()
-                if pat:
-                    pname = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
-                    p_dict = {
-                        "uhid": uhid,
-                        "patientname": pname,
-                        "name": pname,
-                        "firstName": str(pat.firstName or ""),
-                        "lastName": str(pat.lastName or ""),
-                        "age": str(pat.age or ""),
-                        "gender": str(pat.gender or ""),
-                        "mobilePhone": str(pat.mobilePhone or ""),
-                    }
-                    patient_map[uhid] = p_dict
             patient_info = dict(p_dict) if isinstance(p_dict, dict) else {
-                "uhid": uhid,
+                "uhid":        uhid,
                 "patientname": "",
-                "name": "",
-                "age": "",
-                "gender": "",
+                "name":        "",
+                "firstName":   "",
+                "lastName":    "",
+                "age":         "",
+                "gender":      "",
                 "mobilePhone": "",
             }
 
             # Resolve Doctor Name
-            doc_id = str(getattr(admission, "admittingDoctor", "") or "").strip()
+            doc_id = str(admission.get("admittingDoctor") or "").strip()
             doc_name = doctor_map.get(doc_id) or doc_id
             if doc_name and not doc_name.startswith("Dr.") and doc_id in doctor_map:
                 doc_name = f"Dr. {doc_name}"
             elif doc_name and not doc_name.startswith("Dr.") and not doc_name.isdigit():
                 doc_name = f"Dr. {doc_name}"
 
-            patient_info["admittingDoctor"] = doc_name
+            patient_info["admittingDoctor"]   = doc_name
             patient_info["admittingDoctorId"] = doc_id
-            patient_info["admissionDateTime"] = str(getattr(admission, "admissionDateTime", "") or "")
-            patient_info["is_high_risk"] = bool(getattr(admission, "is_high_risk", False))
-            patient_info["high_risk_reason"] = str(getattr(admission, "high_risk_reason", "") or "")
-            patient_info["high_risk_date"] = str(getattr(admission, "high_risk_date", "") or "")
+            patient_info["admissionDateTime"] = str(admission.get("admissionDateTime") or "")
+            patient_info["is_high_risk"]      = bool(admission.get("is_high_risk", False))
+            patient_info["high_risk_reason"]  = str(admission.get("high_risk_reason") or "")
+            patient_info["high_risk_date"]    = str(admission.get("high_risk_date") or "")
 
-            details  = parse_json_field(admission.room_details)
-            shifts   = parse_json_field(admission.roomShitingDetails)
-            shifts   = [s for s in shifts if isinstance(s, dict)]
+            details = _safe_list(admission.get("room_details"))
+            shifts  = _safe_list(admission.get("roomShitingDetails"))
+            shifts  = [s for s in shifts if isinstance(s, dict)]
+            details = [d for d in details if isinstance(d, dict)]
 
-            # ── Process roomShiftingDetails entries ───────────────────────
+            # ── Process roomShiftingDetails entries ───────────────────
             for shift in shifts:
-                room_no = str(shift.get("newRoomNo", "")).strip()
-                bed_no  = str(shift.get("newBedNo",  "")).strip()
-
+                room_no = str(shift.get("newRoomNo", "") or shift.get("roomNo", "")).strip()
+                bed_no  = str(shift.get("newBedNo", "") or shift.get("bedNo", "")).strip()
                 if not room_no or not bed_no:
                     continue
 
                 is_room_active = bool(shift.get("is_roomActive", False))
                 is_cleaned     = bool(shift.get("is_roomCleaned", False))
 
-                # Apply the 3-state rule directly from the entry flags
                 if is_room_active and not is_cleaned:
                     status       = "Occupied"
                     patient_data = patient_info
                 elif not is_room_active and not is_cleaned:
-                    # Bed vacated but not yet cleaned — must show Not Cleaned
                     status       = "Not Cleaned"
-                    patient_data = patient_info   # previous patient shown in hover
+                    patient_data = patient_info
                 else:
-                    # is_roomCleaned=True → ready for next patient
                     status       = "Available"
                     patient_data = {}
 
-                # Later entries (more recent shifts) win for the same bed
                 admission_map[(room_no, bed_no)] = {
                     "status":        status,
                     "patient":       patient_data,
@@ -1290,18 +1287,16 @@ def room_enquiry_view(request):
                     "is_roomCleaned": is_cleaned,
                 }
 
-            # ── Process room_details entries ───────────────────────────────
+            # ── Process room_details entries ─────────────────────────
             for entry in details:
                 room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo",  "")).strip()
-
+                bed_no  = str(entry.get("bedNo", "")).strip()
                 if not room_no or not bed_no:
                     continue
 
                 is_room_active = bool(entry.get("is_roomActive", False))
                 is_cleaned     = bool(entry.get("is_roomCleaned", False))
 
-                # Same 3-state rule
                 if is_room_active and not is_cleaned:
                     status       = "Occupied"
                     patient_data = patient_info
@@ -1312,8 +1307,6 @@ def room_enquiry_view(request):
                     status       = "Available"
                     patient_data = {}
 
-                # Shifting details take priority — only write if not already set
-                # by a shift entry (shifts are processed first above)
                 if (room_no, bed_no) not in admission_map:
                     admission_map[(room_no, bed_no)] = {
                         "status":        status,
@@ -1323,49 +1316,53 @@ def room_enquiry_view(request):
                     }
 
         # ═══════════════════════════════════════════════
-        # STEP 3 — BOOKING MAP
+        # STEP 5 — BOOKING MAP (INDEXED QUERY)
         # ═══════════════════════════════════════════════
         booking_map = {}
+        booking_query = {"is_booked": True, "room_shifted": {"$ne": True}}
+        if hospital_code and hospital_code != "system":
+            booking_query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            booking_query["branch_code"] = branch_code
 
-        for booking in RoomBooking.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ):
-            if not bool(getattr(booking, "is_booked", False)):
-                continue
-
-            if bool(getattr(booking, "room_shifted", False)):
-                continue
-
-            room_number = str(booking.room_number or "")
-            bed_number  = str(booking.bed_number  or "")
-
-            booking_map[(room_number, bed_number)] = {
-                "ip_number": str(getattr(booking, "ip_number", "")),
-                "uhid":      str(getattr(booking, "uhid", "")),
-            }
+        for booking in hms_db["hospital_roombooking"].find(booking_query):
+            room_number = str(booking.get("room_number") or "")
+            bed_number  = str(booking.get("bed_number") or "")
+            if room_number and bed_number:
+                booking_map[(room_number, bed_number)] = {
+                    "ip_number": str(booking.get("ip_number") or ""),
+                    "uhid":      str(booking.get("uhid") or ""),
+                }
 
         # ═══════════════════════════════════════════════
-        # STEP 4 — ROOM LOOP
+        # STEP 6 — ROOMS & BEDS (INDEXED QUERY)
         # ═══════════════════════════════════════════════
-        for room in Room.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ):
-            if not getattr(room, "is_active", False):
-                continue
+        room_query = {"is_active": True}
+        if hospital_code and hospital_code != "system":
+            room_query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            room_query["branch_code"] = branch_code
 
-            floor = getattr(room, "floor", 0) or 0
+        rooms_list = list(hms_db["hospital_room"].find(room_query).sort([("floor", 1), ("room_number", 1)]))
+        if not rooms_list and branch_code and branch_code != "system":
+            fallback_query = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                fallback_query["hospital_code"] = hospital_code
+            rooms_list = list(hms_db["hospital_room"].find(fallback_query).sort([("floor", 1), ("room_number", 1)]))
 
+        for room_doc in rooms_list:
+            floor = room_doc.get("floor", 0) or 0
             if floor not in floor_map:
                 floor_map[floor] = []
 
-            beds      = parse_json_field(room.beds)
+            beds      = _safe_list(room_doc.get("beds"))
             beds_data = []
 
             for bed in beds:
+                if not isinstance(bed, dict):
+                    continue
                 bed_number = str(bed.get("bed_number", "")).strip()
-                key        = (str(room.room_number), bed_number)
+                key        = (str(room_doc.get("room_number", "")), bed_number)
 
                 # 1. Maintenance / blocked
                 if bool(bed.get("blocked", False)) or str(bed.get("bed_status", "")).lower() == "blocked":
@@ -1378,15 +1375,15 @@ def room_enquiry_view(request):
                     })
                     continue
 
-                # 2. Admission-driven status (Occupied / Not Cleaned / Available from admission)
+                # 2. Admission-driven status (Occupied / Not Cleaned / Available)
                 if key in admission_map:
                     info = admission_map[key]
                     beds_data.append({
-                        "bed_number":  bed_number,
-                        "status":      info["status"],
-                        "patient":     info["patient"],
-                        "booking":     None,
-                        "ip_number":   info["ip_number"],
+                        "bed_number":     bed_number,
+                        "status":         info["status"],
+                        "patient":        info["patient"],
+                        "booking":        None,
+                        "ip_number":      info["ip_number"],
                         "is_roomCleaned": info["is_roomCleaned"],
                     })
                     continue
@@ -1412,17 +1409,17 @@ def room_enquiry_view(request):
                 })
 
             floor_map[floor].append({
-                "room_number":     room.room_number,
-                "room_type":       getattr(room, "room_category", "") or "",
-                "room_category":   getattr(room, "room_category", "") or "",
-                "block":           getattr(room, "block", "") or "",
-                "nursing_station": getattr(room, "nursing_station", "") or "",
+                "room_number":     room_doc.get("room_number", ""),
+                "room_type":       room_doc.get("room_category") or room_doc.get("room_type") or "",
+                "room_category":   room_doc.get("room_category") or room_doc.get("room_type") or "",
+                "block":           room_doc.get("block", "") or "",
+                "nursing_station": room_doc.get("nursing_station", "") or "",
                 "floor":           floor,
                 "beds":            beds_data,
             })
 
         # ═══════════════════════════════════════════════
-        # STEP 5 — SORT FLOORS
+        # STEP 7 — SORT FLOORS
         # ═══════════════════════════════════════════════
         for floor in sorted(floor_map.keys()):
             result.append({
@@ -1480,16 +1477,15 @@ def book_room_view(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Find Admission ────────────────────────────────────────────────
-        admission = None
-
-        for adm in Admission.objects.filter(
+        # ── Find Admission (indexed direct lookup) ─────────────────────────
+        admission = Admission.objects.filter(
             hospital_code=hospital_code,
             branch_code=branch_code,
-        ):
-            if str(adm.ipNumber).strip() == ip_number:
-                admission = adm
-                break
+            ipNumber=ip_number
+        ).first()
+
+        if not admission:
+            admission = Admission.objects.filter(ipNumber=ip_number).first()
 
         if not admission:
             return Response(
@@ -1500,21 +1496,23 @@ def book_room_view(request):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # ── Duplicate check ───────────────────────────────────────────────
-        existing_booking = None
-
-        for booking in RoomBooking.objects.filter(
+        # ── Duplicate check (indexed direct lookup) ────────────────────────
+        existing_booking = RoomBooking.objects.filter(
             hospital_code=hospital_code,
             branch_code=branch_code,
-        ):
-            if (
-                str(booking.room_number).strip() == room_number and
-                str(booking.bed_number).strip()  == bed_number  and
-                bool(booking.is_booked)          is True        and
-                bool(getattr(booking, "room_shifted", False)) is False
-            ):
-                existing_booking = booking
-                break
+            room_number=room_number,
+            bed_number=bed_number,
+            is_booked=True,
+            room_shifted=False
+        ).first()
+
+        if not existing_booking:
+            existing_booking = RoomBooking.objects.filter(
+                room_number=room_number,
+                bed_number=bed_number,
+                is_booked=True,
+                room_shifted=False
+            ).first()
 
         if existing_booking:
             return Response(
@@ -1575,9 +1573,6 @@ def book_room_view(request):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE is_roomCleaned  (PUT)
-# Body: { "room_no": "101", "bed_no": "2", "is_roomCleaned": true,
-#         "ip_number": "S026/500001", "shifting_id": "" }
-# Changed from PATCH → PUT to prevent Djongo from stringifying other JSONFields.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["PUT"])
@@ -1599,28 +1594,33 @@ def update_room_cleaned_view(request):
 
         admission = None
 
-        # Prefer exact match by ip_number
+        # Direct indexed lookup by ip_number
         if ip_number:
-            for adm in Admission.objects.all():
-                if str(adm.ipNumber) == ip_number:
-                    admission = adm
-                    break
+            admission = Admission.objects.filter(ipNumber=ip_number).first()
 
-        # Fallback: find by room/bed match in any entry
+        # Fallback: fast indexed Mongo lookup by room/bed
         if not admission:
-            for adm in Admission.objects.all():
-                details   = parse_json_field(adm.room_details)
-                shiftings = parse_json_field(adm.roomShitingDetails)
-                for entry in details + shiftings:
-                    if not isinstance(entry, dict):
-                        continue
-                    rn = str(entry.get("roomNo") or entry.get("newRoomNo", "")).strip()
-                    bn = str(entry.get("bedNo")  or entry.get("newBedNo",  "")).strip()
-                    if rn == room_no and bn == bed_no:
-                        admission = adm
-                        break
-                if admission:
-                    break
+            client, hms_db = _get_hms_db()
+            doc = hms_db["hospital_admission"].find_one({
+                "$or": [
+                    {"room_details.roomNo": room_no, "room_details.bedNo": bed_no},
+                    {"roomShitingDetails.roomNo": room_no, "roomShitingDetails.bedNo": bed_no},
+                    {"roomShitingDetails.newRoomNo": room_no, "roomShitingDetails.newBedNo": bed_no}
+                ],
+                "is_discharged": False
+            }, {"ipNumber": 1})
+            if not doc:
+                # If already discharged recently, still allow cleaning room
+                doc = hms_db["hospital_admission"].find_one({
+                    "$or": [
+                        {"room_details.roomNo": room_no, "room_details.bedNo": bed_no},
+                        {"roomShitingDetails.roomNo": room_no, "roomShitingDetails.bedNo": bed_no},
+                        {"roomShitingDetails.newRoomNo": room_no, "roomShitingDetails.newBedNo": bed_no}
+                    ]
+                }, {"ipNumber": 1}, sort=[("lastmodified_date", -1)])
+
+            if doc and doc.get("ipNumber"):
+                admission = Admission.objects.filter(ipNumber=str(doc["ipNumber"])).first()
 
         if not admission:
             return Response(
@@ -1635,39 +1635,41 @@ def update_room_cleaned_view(request):
 
         updated = False
 
-        # ── Try shifting entry first ──────────────────────────────────────
+        # ── Update shifting entries (support all key variants and case-insensitivity) ──
         new_sd = []
         for shift in sd:
             if not isinstance(shift, dict):
                 continue
             obj = dict(shift)
-            rn  = str(obj.get("newRoomNo", "")).strip()
-            bn  = str(obj.get("newBedNo",  "")).strip()
-            sid = str(obj.get("shifting_id", ""))
-            if rn == room_no and bn == bed_no:
-                if shifting_id and sid != shifting_id:
+            rn  = str(obj.get("newRoomNo") or obj.get("roomNo") or obj.get("room_no") or obj.get("room") or obj.get("roomNumber") or "").strip()
+            bn  = str(obj.get("newBedNo") or obj.get("bedNo") or obj.get("bed_no") or obj.get("bed") or obj.get("bedNumber") or "").strip()
+            sid = str(obj.get("shifting_id") or obj.get("room_entry_id") or "").strip()
+            if rn.lower() == room_no.lower() and bn.lower() == bed_no.lower():
+                if shifting_id and sid and sid.lower() != shifting_id.lower():
                     new_sd.append(obj)
                     continue
                 obj["is_roomCleaned"] = is_cleaned
                 updated = True
             new_sd.append(obj)
+        sd = new_sd
 
-        if updated:
-            sd = new_sd
-        else:
-            # ── Fall back to room_details ─────────────────────────────────
-            new_rd = []
-            for entry in rd:
-                if not isinstance(entry, dict):
+        # ── Update room_details entries (support all key variants and case-insensitivity) ──
+        new_rd = []
+        for entry in rd:
+            if not isinstance(entry, dict):
+                continue
+            obj = dict(entry)
+            rn  = str(obj.get("roomNo") or obj.get("newRoomNo") or obj.get("room_no") or obj.get("room") or obj.get("roomNumber") or "").strip()
+            bn  = str(obj.get("bedNo") or obj.get("newBedNo") or obj.get("bed_no") or obj.get("bed") or obj.get("bedNumber") or "").strip()
+            sid = str(obj.get("shifting_id") or obj.get("room_entry_id") or "").strip()
+            if rn.lower() == room_no.lower() and bn.lower() == bed_no.lower():
+                if shifting_id and sid and sid.lower() != shifting_id.lower():
+                    new_rd.append(obj)
                     continue
-                obj = dict(entry)
-                rn  = str(obj.get("roomNo", "")).strip()
-                bn  = str(obj.get("bedNo",  "")).strip()
-                if rn == room_no and bn == bed_no:
-                    obj["is_roomCleaned"] = is_cleaned
-                    updated = True
-                new_rd.append(obj)
-            rd = new_rd
+                obj["is_roomCleaned"] = is_cleaned
+                updated = True
+            new_rd.append(obj)
+        rd = new_rd
 
         if not updated:
             return Response(
@@ -1679,26 +1681,6 @@ def update_room_cleaned_view(request):
         # _save_admission assigns all 3 arrays, calls save(), then syncs Mongo
         _save_admission(admission, rd, sd, ap)
 
-        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
-        try:
-            import os
-            from pymongo import MongoClient
-            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
-            if MONGO_URI:
-                client = MongoClient(MONGO_URI)
-                mongo_db = client["HMS"]
-                
-                mongo_db["hospital_admission"].update_one(
-                    {"ipNumber": str(admission.ipNumber)},
-                    {"$set": {
-                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
-                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
-                    }}
-                )
-        except Exception as ex:
-            print("Failed to save admission fields natively:", str(ex))
-
-
         return Response({"success": True, "message": "Room cleaned status updated"})
 
     except Exception as exc:
@@ -1707,54 +1689,10 @@ def update_room_cleaned_view(request):
             {"error": f"Update failed: {str(exc)}"},
             status=500,
         )
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GET ACTIVE ADMISSION
-# ─────────────────────────────────────────────────────────────────────────────
- 
-import traceback
-from datetime import datetime
-from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from django.utils import timezone as tz
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def parse_json_field(value):
-    """Safely parse a JSON-like field that might be a list, dict, or string."""
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
-    if isinstance(value, str):
-        import json
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-            if isinstance(parsed, dict):
-                return [parsed]
-        except Exception:
-            pass
-    return []
-
-
-def generate_shifting_id(existing_shiftings):
-    """Generate a sequential shifting ID like SH001, SH002, …"""
-    max_num = 0
-    for s in existing_shiftings:
-        if isinstance(s, dict):
-            sid = str(s.get("shifting_id", ""))
-            if sid.startswith("SH") and sid[2:].isdigit():
-                max_num = max(max_num, int(sid[2:]))
-    return f"SH{str(max_num + 1).zfill(3)}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET ACTIVE ADMISSION  (updated: includes RoomBooking check)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
@@ -1776,40 +1714,30 @@ def get_active_admission(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ── Find matching admissions ──────────────────────────────────────
-        all_admissions = []
-        for adm in Admission.objects.all():
-            if uhid      and str(adm.uhid)     != uhid:
-                continue
-            if ip_number and str(adm.ipNumber) != ip_number:
-                continue
-            all_admissions.append(adm)
+        # ── Find active admission (fast indexed DB filter) ────────────────
+        query = {"is_discharged": False, "is_cancelled": False}
+        if uhid:
+            query["uhid"] = uhid
+        if ip_number:
+            query["ipNumber"] = ip_number
 
-        active_records = [
-            adm for adm in all_admissions
-            if getattr(adm, "is_admitted",        False) is True
-            and getattr(adm, "is_discharged",      True)  is False
-            and getattr(adm, "is_cancelled",       False) is False
-        ]
+        admission = Admission.objects.filter(**query).order_by("-admissionDateTime").first()
 
-        if not active_records:
+        if not admission:
+            fallback_query = {}
+            if ip_number:
+                fallback_query["ipNumber"] = ip_number
+            elif uhid:
+                fallback_query["uhid"] = uhid
+            admission = Admission.objects.filter(**fallback_query, is_discharged=False).order_by("-admissionDateTime").first()
+
+        if not admission:
             return Response(
                 {"success": False, "error": "No active admission found", "message": "No active admission found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        def safe_sort_key(adm):
-            dt = adm.admissionDateTime
-            if dt is None:
-                return datetime.min
-            if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
-                return tz.make_naive(dt)
-            return dt
-
-        active_records.sort(key=safe_sort_key, reverse=True)
-        admission = active_records[0]
-
-        # ── Patient ───────────────────────────────────────────────────────
+        # ── Patient (indexed lookup) ──────────────────────────────────────
         patient_data = {}
         try:
             patient = Patient.objects.filter(uhid=admission.uhid).first()
@@ -1832,7 +1760,7 @@ def get_active_admission(request):
             traceback.print_exc()
 
         # ── Active room from room_details ─────────────────────────────────
-        room_details = parse_json_field(admission.room_details)
+        room_details = _safe_list(admission.room_details)
         active_room  = {}
         for r in reversed(room_details):
             if isinstance(r, dict) and r.get("is_roomActive"):
@@ -1843,34 +1771,19 @@ def get_active_admission(request):
             active_room = last if isinstance(last, dict) else {}
 
         # ── Has already been shifted? ─────────────────────────────────────
-        shiftings   = parse_json_field(admission.roomShitingDetails)
+        shiftings   = _safe_list(admission.roomShitingDetails)
         has_shifted = any(isinstance(s, dict) for s in shiftings)
 
-        # ── Check RoomBooking for a pre-reserved room ─────────────────────
-        #    Looks for a booking where:
-        #      ip_number matches AND is_booked=True AND room_shifted=False
+        # ── Check RoomBooking for a pre-reserved room (indexed lookup) ─────
         reserved_room = None
         reserved_bed  = None
         has_reservation = False
         try:
-            booking = None
-
-            for rb in RoomBooking.objects.all():
-                if str(getattr(rb, "ip_number", "")).strip() != str(admission.ipNumber).strip():
-                    continue
-
-                is_booked = getattr(rb, "is_booked", False)
-                room_shifted = getattr(rb, "room_shifted", False)
-
-                # handle both boolean and string values
-                if str(is_booked).lower() != "true":
-                    continue
-
-                if str(room_shifted).lower() != "false":
-                    continue
-
-                booking = rb
-                break
+            booking = RoomBooking.objects.filter(
+                ip_number=str(admission.ipNumber).strip(),
+                is_booked=True,
+                room_shifted=False
+            ).first()
 
             if booking:
                 has_reservation = True
@@ -1878,24 +1791,6 @@ def get_active_admission(request):
                 reserved_bed    = str(booking.bed_number  or "")
         except Exception:
             traceback.print_exc()
-
-        # ── Admission date/time formatting ────────────────────────────────
-        admission_date = admission_time = ""
-        dt = admission.admissionDateTime
-        if dt:
-            try:
-                admission_date = dt.strftime("%Y-%m-%d")
-                admission_time = dt.strftime("%H:%M:%S")
-            except Exception:
-                admission_date = str(dt)[:10]
-                admission_time = str(dt)[11:19]
-
-        from pymongo import MongoClient
-
-        # Mongo connection (adjust if already configured)
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        global_db = client['Global']
-        profile_collection = global_db['backend_diagnostics_profile']
 
         # ── Admission date + time formatting ─────────────────────────────
         admission_date = admission_time = ""
@@ -1906,7 +1801,7 @@ def get_active_admission(request):
             try:
                 admission_date = dt.strftime("%Y-%m-%d")
                 admission_time = dt.strftime("%H:%M:%S")
-                formatted_datetime = dt.strftime("%d-%m-%Y %I:%M %p")  # 👈 FINAL FORMAT
+                formatted_datetime = dt.strftime("%d-%m-%Y %I:%M %p")
             except Exception:
                 admission_date = str(dt)[:10]
                 admission_time = str(dt)[11:19]
@@ -1917,9 +1812,14 @@ def get_active_admission(request):
         doctor_name = ""
 
         if doctor_id:
-            doc = profile_collection.find_one({"employeeId": doctor_id})
-            if doc:
-                doctor_name = doc.get("employeeName", "")
+            try:
+                client, _ = _get_hms_db()
+                global_db = client['Global']
+                doc = global_db['backend_diagnostics_profile'].find_one({"employeeId": doctor_id}, {"employeeName": 1, "_id": 0})
+                if doc:
+                    doctor_name = doc.get("employeeName", "")
+            except Exception:
+                pass
 
         return Response({
             "success": True,
@@ -1939,7 +1839,7 @@ def get_active_admission(request):
                 "room_details":     room_details,
                 "has_shifted":      has_shifted,
                 # ── Reservation fields ─────────────────────────────────────
-                "has_reservation":  has_reservation,   # True if a pre-booked room exists
+                "has_reservation":  has_reservation,
                 "reservedRoomNo":   reserved_room or "",
                 "reservedBedNo":    reserved_bed  or "",
                 # ── Status flags ───────────────────────────────────────────
@@ -1966,91 +1866,126 @@ def get_active_admission(request):
 @csrf_exempt
 def room_shifting_view(request):
 
-    user_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
+    user_id = (request.data.get('auth-user-id') or request.headers.get('auth-user-id') or "system")
 
     # ════════════════════════════════════════════════════════════════════════
-    # GET — list shifting history
+    # GET — list shifting history (Fast Indexed Direct Query + Batching)
     # ════════════════════════════════════════════════════════════════════════
     if request.method == "GET":
-        from_date = str(request.GET.get("from_date", "")).strip()[:10]
-        to_date   = str(request.GET.get("to_date",   "")).strip()[:10]
-        uhid      = str(request.GET.get("uhid",      "")).strip()
-        ip_number = str(request.GET.get("ip_number", "")).strip()
+        try:
+            from_date = str(request.GET.get("from_date", "")).strip()[:10]
+            to_date   = str(request.GET.get("to_date",   "")).strip()[:10]
+            uhid      = str(request.GET.get("uhid",      "")).strip()
+            ip_number = str(request.GET.get("ip_number", "")).strip()
 
-        results = []
+            client, hms_db = _get_hms_db()
+            _ensure_room_indexes(hms_db)
 
-        for admission in Admission.objects.all():
-            if uhid      and uhid.lower()      not in str(admission.uhid     or "").lower():
-                continue
-            if ip_number and ip_number.lower() not in str(admission.ipNumber or "").lower():
-                continue
+            adm_query = {"roomShitingDetails.0": {"$exists": True}}
+            if uhid:
+                adm_query["uhid"] = {"$regex": f"^{re.escape(uhid)}", "$options": "i"} if len(uhid) < 6 else uhid
+            if ip_number:
+                adm_query["ipNumber"] = {"$regex": f"^{re.escape(ip_number)}", "$options": "i"} if len(ip_number) < 6 else ip_number
 
-            patient_name = ""
-            try:
-                patient = Patient.objects.filter(uhid=admission.uhid).first()
-                if patient:
-                    patient_name = f"{patient.firstName or ''} {patient.lastName or ''}".strip()
-            except Exception:
-                pass
+            # Fetch matching admissions with projection of only required fields
+            admissions_cursor = hms_db["hospital_admission"].find(
+                adm_query,
+                {
+                    "uhid": 1,
+                    "ipNumber": 1,
+                    "ipserial_number": 1,
+                    "room_details": 1,
+                    "roomShitingDetails": 1,
+                    "lastmodified_date": 1,
+                }
+            ).sort([("lastmodified_date", -1)]).limit(5000)
 
-            # Current active room (for old room display)
-            room_details = parse_json_field(admission.room_details)
-            old_room_no = old_bed_no = ""
-            for r in reversed(room_details):
-                if isinstance(r, dict) and r.get("is_roomActive"):
-                    old_room_no = str(r.get("roomNo", ""))
-                    old_bed_no  = str(r.get("bedNo",  ""))
-                    break
-            if not old_room_no and room_details:
-                last = room_details[-1]
-                if isinstance(last, dict):
-                    old_room_no = str(last.get("roomNo", ""))
-                    old_bed_no  = str(last.get("bedNo",  ""))
+            admissions_list = list(admissions_cursor)
 
-            shiftings = parse_json_field(admission.roomShitingDetails)
+            # ── Batch fetch all Patient names in a single indexed query ──────
+            uhids = list(filter(None, {str(a.get("uhid") or "").strip() for a in admissions_list}))
+            patient_name_map = {}
+            if uhids:
+                pat_cursor = hms_db["hospital_patient"].find(
+                    {"uhid": {"$in": uhids}},
+                    {"uhid": 1, "firstName": 1, "lastName": 1, "_id": 0}
+                )
+                for p in pat_cursor:
+                    uk = str(p.get("uhid") or "").strip()
+                    if uk:
+                        patient_name_map[uk] = f"{p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
 
-            for shift in shiftings:
-                if not isinstance(shift, dict):
-                    continue
+            results = []
+            for admission in admissions_list:
+                adm_uhid = str(admission.get("uhid") or "").strip()
+                adm_ip   = str(admission.get("ipNumber") or "").strip()
+                patient_name = patient_name_map.get(adm_uhid, "")
 
-                raw_dt = shift.get("shiftingDateTime") or shift.get("startDateTime") or ""
-                if isinstance(raw_dt, dict) and "$date" in raw_dt:
-                    raw_dt = raw_dt["$date"]
-                if hasattr(raw_dt, "strftime"):
-                    shift_date = raw_dt.strftime("%Y-%m-%d")
-                else:
-                    shift_date = str(raw_dt).replace("T", " ")[:10]
+                # Current active room (for old room display)
+                room_details = _safe_list(admission.get("room_details"))
+                old_room_no = old_bed_no = ""
+                for r in reversed(room_details):
+                    if isinstance(r, dict) and r.get("is_roomActive"):
+                        old_room_no = str(r.get("roomNo", ""))
+                        old_bed_no  = str(r.get("bedNo",  ""))
+                        break
+                if not old_room_no and room_details:
+                    last = room_details[-1]
+                    if isinstance(last, dict):
+                        old_room_no = str(last.get("roomNo", ""))
+                        old_bed_no  = str(last.get("bedNo",  ""))
 
-                if from_date and shift_date and shift_date < from_date:
-                    continue
-                if to_date   and shift_date and shift_date > to_date:
-                    continue
+                shiftings = _safe_list(admission.get("roomShitingDetails"))
 
-                results.append({
-                    "uhid":             str(admission.uhid            or ""),
-                    "ipNumber":         str(admission.ipNumber        or ""),
-                    "ipserial_number":  str(admission.ipserial_number or ""),
-                    "patient_name":     patient_name,
-                    "shifting_id":      str(shift.get("shifting_id",      "")),
-                    "oldRoomNo":        str(shift.get("oldRoomNo",        old_room_no)),
-                    "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
-                    "newRoomNo":        str(shift.get("newRoomNo",        "")),
-                    "newBedNo":         str(shift.get("newBedNo",         "")),
-                    "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
-                    "startDateTime":    str(shift.get("startDateTime",    "")),
-                    "endDateTime":      str(shift.get("endDateTime",      "") or ""),
-                    "shifted_by":       str(shift.get("shifted_by",       "")),
-                    "is_roomActive":    bool(shift.get("is_roomActive",   False)),
-                    "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
-                    "edited_from":      str(shift.get("edited_from",      "") or ""),
-                })
+                for shift in shiftings:
+                    if not isinstance(shift, dict):
+                        continue
 
-        # Sort by shiftingDateTime descending
-        results.sort(key=lambda x: x.get("shiftingDateTime", ""), reverse=True)
-        return Response(results, status=status.HTTP_200_OK)
+                    raw_dt = shift.get("shiftingDateTime") or shift.get("startDateTime") or ""
+                    if isinstance(raw_dt, dict) and "$date" in raw_dt:
+                        raw_dt = raw_dt["$date"]
+                    if hasattr(raw_dt, "strftime"):
+                        shift_date = raw_dt.strftime("%Y-%m-%d")
+                    else:
+                        shift_date = str(raw_dt).replace("T", " ")[:10]
+
+                    if from_date and shift_date and shift_date < from_date:
+                        continue
+                    if to_date and shift_date and shift_date > to_date:
+                        continue
+
+                    results.append({
+                        "uhid":             adm_uhid,
+                        "ipNumber":         adm_ip,
+                        "ipserial_number":  str(admission.get("ipserial_number") or ""),
+                        "patient_name":     patient_name,
+                        "shifting_id":      str(shift.get("shifting_id",      "")),
+                        "oldRoomNo":        str(shift.get("oldRoomNo",        old_room_no)),
+                        "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
+                        "newRoomNo":        str(shift.get("newRoomNo",        "")),
+                        "newBedNo":         str(shift.get("newBedNo",         "")),
+                        "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
+                        "startDateTime":    str(shift.get("startDateTime",    "")),
+                        "endDateTime":      str(shift.get("endDateTime",      "") or ""),
+                        "shifted_by":       str(shift.get("shifted_by",       "")),
+                        "is_roomActive":    bool(shift.get("is_roomActive",   False)),
+                        "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
+                        "edited_from":      str(shift.get("edited_from",      "") or ""),
+                    })
+
+            # Sort by shiftingDateTime descending
+            results.sort(key=lambda x: x.get("shiftingDateTime", ""), reverse=True)
+            return Response(results, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            traceback.print_exc()
+            return Response(
+                {"error": f"Failed to fetch shifting history: {str(exc)}"},
+                status=500,
+            )
 
     # ════════════════════════════════════════════════════════════════════════
-    # POST — create a new shift
+    # POST — create a new shift (Indexed Direct Filter)
     # ════════════════════════════════════════════════════════════════════════
     elif request.method == "POST":
         ip_number = str(request.data.get("ip_number", "")).strip()
@@ -2068,16 +2003,19 @@ def room_shifting_view(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        admission = None
-        for adm in Admission.objects.all():
-            if (
-                str(adm.ipNumber) == ip_number
-                and bool(adm.is_admitted)
-                and not bool(adm.is_discharged)
-                and not bool(getattr(adm, "is_cancelled", False))
-            ):
-                admission = adm
-                break
+        # Direct indexed lookup for active admission
+        admission = Admission.objects.filter(
+            ipNumber=ip_number,
+            is_admitted=True,
+            is_discharged=False,
+            is_cancelled=False
+        ).first()
+
+        if not admission:
+            admission = Admission.objects.filter(
+                ipNumber=ip_number,
+                is_discharged=False
+            ).first()
 
         if not admission:
             return Response(
@@ -2086,7 +2024,7 @@ def room_shifting_view(request):
             )
 
         # ── Guard: only one active shift allowed ──────────────────────────
-        existing_shiftings = parse_json_field(admission.roomShitingDetails)
+        existing_shiftings = _safe_list(admission.roomShitingDetails)
         active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
 
         if active_shiftings:
@@ -2099,7 +2037,7 @@ def room_shifting_view(request):
             )
 
         # ── Old room ──────────────────────────────────────────────────────
-        room_details = parse_json_field(admission.room_details)
+        room_details = _safe_list(admission.room_details)
         old_room_no  = old_bed_no = ""
         for r in reversed(room_details):
             if isinstance(r, dict) and r.get("is_roomActive"):
@@ -2121,7 +2059,7 @@ def room_shifting_view(request):
             obj = dict(room)
             if obj.get("is_roomActive"):
                 obj["is_roomActive"] = False
-                obj["endDateTime"]   = now_iso   # ← track how long patient was in room
+                obj["endDateTime"]   = now_iso
             updated_room_details.append(obj)
 
         admission.room_details = updated_room_details
@@ -2134,7 +2072,6 @@ def room_shifting_view(request):
             if isinstance(shift, dict):
                 cleaned_shiftings.append(dict(shift))
 
-        # New shift entry — startDateTime set now, endDateTime null
         cleaned_shiftings.append({
             "shifting_id":      new_shifting_id,
             "oldRoomNo":        old_room_no,
@@ -2142,8 +2079,8 @@ def room_shifting_view(request):
             "newRoomNo":        new_room,
             "newBedNo":         new_bed,
             "shiftingDateTime": now_iso,
-            "startDateTime":    now_iso,   # ← patient enters new room now
-            "endDateTime":      None,      # ← still in this room
+            "startDateTime":    now_iso,
+            "endDateTime":      None,
             "shifted_by":       str(user_id),
             "is_roomActive":    True,
             "is_roomCleaned":   False,
@@ -2153,46 +2090,19 @@ def room_shifting_view(request):
         admission.lastmodified_by    = str(user_id)
         admission.lastmodified_date  = timezone.now()
 
-        # Read advance_payments before save so it isn't lost
         ap = _safe_list(admission.advance_payments)
-
-        # _save_admission assigns all 3 arrays, saves, and syncs Mongo atomically
         _save_admission(admission, updated_room_details, cleaned_shiftings, ap)
 
-
-        # --- Ensure JSON fields are saved as native arrays in MongoDB ---
+        # ── Mark RoomBooking as shifted (indexed direct update) ───────────
         try:
-            import os
-            from pymongo import MongoClient
-            MONGO_URI = os.getenv("GLOBAL_DB_HOST")
-            if MONGO_URI:
-                client = MongoClient(MONGO_URI)
-                mongo_db = client["HMS"]
-                
-                mongo_db["hospital_admission"].update_one(
-                    {"ipNumber": str(admission.ipNumber)},
-                    {"$set": {
-                        "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
-                        "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
-                    }}
-                )
-        except Exception as ex:
-            print("Failed to save admission fields natively:", str(ex))
-
-
-        # ── Mark RoomBooking as shifted (if one existed) ──────────────────
-        try:
-            for rb in RoomBooking.objects.all():
-                if str(getattr(rb, "ip_number", "")).strip() != str(ip_number).strip():
-                    continue
-                if str(getattr(rb, "is_booked", "")).lower() != "true":
-                    continue
-                if str(getattr(rb, "room_shifted", "")).lower() != "false":
-                    continue
-                rb.room_shifted = True
-                rb.is_booked    = False
-                rb.save()
-                break
+            RoomBooking.objects.filter(
+                ip_number=str(ip_number).strip(),
+                is_booked=True,
+                room_shifted=False
+            ).update(
+                room_shifted=True,
+                is_booked=False
+            )
         except Exception:
             traceback.print_exc()
 
@@ -2213,9 +2123,6 @@ def room_shifting_view(request):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PUT /room-shifting/<ip_number>/update/
-# Changed from PATCH → PUT to prevent Djongo from stringifying other JSONFields.
-# Editing creates a NEW shifting object; previous one is set is_roomActive=False
-# and endDateTime is stamped on it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["PUT"])
@@ -2239,11 +2146,8 @@ def room_shifting_detail_view(request, ip_number):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    admission = None
-    for adm in Admission.objects.all():
-        if str(adm.ipNumber) == str(ip_number):
-            admission = adm
-            break
+    # Direct indexed lookup
+    admission = Admission.objects.filter(ipNumber=str(ip_number).strip()).first()
 
     if not admission:
         return Response(
@@ -2251,9 +2155,9 @@ def room_shifting_detail_view(request, ip_number):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    shifting_details = parse_json_field(admission.roomShitingDetails)
-    room_details     = parse_json_field(admission.room_details)
-    advance_payments = _safe_list(admission.advance_payments)   # read ap too — must preserve it
+    shifting_details = _safe_list(admission.roomShitingDetails)
+    room_details     = _safe_list(admission.room_details)
+    advance_payments = _safe_list(admission.advance_payments)
 
     # Check the target shift exists
     shift_found = any(
@@ -2277,10 +2181,9 @@ def room_shifting_detail_view(request, ip_number):
         obj = dict(shift)
         if str(obj.get("shifting_id", "")) == shifting_id:
             obj["is_roomActive"]      = False
-            obj["endDateTime"]        = now_iso   # ← how long patient was in that shifted room
+            obj["endDateTime"]        = now_iso
             obj["lastmodified_by"]    = str(user_id)
             obj["lastmodified_date"]  = now_iso
-            # Capture old room for the new entry
             old_room_no = str(obj.get("newRoomNo", ""))
             old_bed_no  = str(obj.get("newBedNo",  ""))
         updated_shiftings.append(obj)
@@ -2317,28 +2220,7 @@ def room_shifting_detail_view(request, ip_number):
     admission.room_details       = updated_rooms
     admission.lastmodified_by    = str(user_id)
     admission.lastmodified_date  = timezone.now()
-    # _save_admission assigns all 3 arrays, saves, then syncs Mongo
     _save_admission(admission, updated_rooms, updated_shiftings, advance_payments)
-
-    # --- Ensure JSON fields are saved as native arrays in MongoDB ---
-    try:
-        import os
-        from pymongo import MongoClient
-        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
-        if MONGO_URI:
-            client = MongoClient(MONGO_URI)
-            mongo_db = client["HMS"]
-            
-            mongo_db["hospital_admission"].update_one(
-                {"ipNumber": str(admission.ipNumber)},
-                {"$set": {
-                    "roomShitingDetails": parse_json_field(admission.roomShitingDetails) if not isinstance(admission.roomShitingDetails, list) else admission.roomShitingDetails,
-                    "room_details": parse_json_field(admission.room_details) if not isinstance(admission.room_details, list) else admission.room_details
-                }}
-            )
-    except Exception as ex:
-        print("Failed to save admission fields natively:", str(ex))
-
 
     return Response(
         {
