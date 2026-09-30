@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime
 
 from django.utils import timezone
@@ -73,6 +74,11 @@ def _auth(request):
     }
 
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
+
 def _current_fin_year():
     today     = datetime.today()
     from_year = today.year if today.month >= 4 else today.year - 1
@@ -83,10 +89,15 @@ def _next_pr_number():
     """PR/<FINYEAR>/<SEQ6>  e.g. PR/2627/000001"""
     fin_year = _current_fin_year()
     prefix   = f"PR/{fin_year}/"
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_purchaserequisition"].find(
+        {"pr_number": {"$regex": f"^{prefix}"}},
+        {"pr_number": 1}
+    ).sort("pr_number", DESCENDING).limit(1))
     max_seq  = 0
-    for row in PurchaseRequisition.objects.filter(pr_number__startswith=prefix):
+    if top_doc:
         try:
-            seq = int(str(row.pr_number).split("/")[-1])
+            seq = int(str(top_doc[0].get("pr_number", "")).split("/")[-1])
             if seq > max_seq:
                 max_seq = seq
         except Exception:
@@ -163,17 +174,40 @@ _EMPLOYEE_FIELDS = (
 )
 
 
-def _enrich_pr(pr) -> dict:
-    """
-    Serialise a PurchaseRequisition instance and add computed fields:
-      • items — read directly from the model instance (bypasses serializer
-                BSON round-trip issue that returns [])
-      • <field>_name — employee name resolved from MongoDB profile for every
-                       *_by audit field.
-    """
-    data = PurchaseRequisitionSerializer(pr).data
+def _enrich_pr_list_batch(pr_list: list) -> list:
+    """Batch enrichment for Purchase Requisitions on current page."""
+    if not pr_list:
+        return pr_list
 
-    # ── FIX: read items directly from the model instance ──
+    client, _ = get_hms_db()
+    emp_ids = set()
+    for item in pr_list:
+        if not isinstance(item.get("items"), list):
+            item["items"] = []
+        for field in _EMPLOYEE_FIELDS:
+            eid = str(item.get(field, "") or "").strip()
+            if eid and eid != "system":
+                emp_ids.add(eid)
+
+    emp_map = {}
+    if emp_ids:
+        try:
+            global_db = client["Global"]
+            for prof in global_db["backend_diagnostics_profile"].find({"employeeId": {"$in": list(emp_ids)}}, {"employeeId": 1, "employeeName": 1}):
+                emp_map[str(prof.get("employeeId"))] = prof.get("employeeName", "")
+        except Exception:
+            pass
+
+    for item in pr_list:
+        for field in _EMPLOYEE_FIELDS:
+            eid = str(item.get(field, "") or "").strip()
+            item[f"{field}_name"] = emp_map.get(eid, eid) if eid else ""
+
+    return pr_list
+
+
+def _enrich_pr(pr) -> dict:
+    data = PurchaseRequisitionSerializer(pr).data
     data["items"] = _read_items_from_instance(pr)
 
     for field in _EMPLOYEE_FIELDS:
@@ -206,56 +240,47 @@ def purchase_requisition_view(request, pk=None):
     # ── GET ──────────────────────────────────────────────────────────────────
     if request.method == "GET":
         try:
-            qs = PurchaseRequisition.objects.filter(
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-            )
-
             # Single record
             if pk:
                 try:
-                    obj = qs.get(pr_number=pk)
+                    pr = PurchaseRequisition.objects.get(
+                        pr_number=pk,
+                        hospital_code=hospital_code,
+                        branch_code=branch_code
+                    )
+                    enriched = _enrich_pr_list_batch([PurchaseRequisitionSerializer(pr).data])[0]
+                    return Response({"success": True, "data": enriched})
                 except PurchaseRequisition.DoesNotExist:
                     return Response({"success": False, "error": "Purchase Requisition not found."}, status=404)
-                return Response({"success": True, "data": _enrich_pr(obj)})
 
-            # Optional status filter
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
             status_filter = request.GET.get("status", "").strip()
             if status_filter:
-                qs = qs.filter(status=status_filter)
+                filter_q["status"] = status_filter
 
-            # Optional date range filter (created_date)
-            from_date_str = request.GET.get("from_date", "").strip()
-            to_date_str   = request.GET.get("to_date",   "").strip()
+            search = request.GET.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"pr_number": reg},
+                    {"rejected_reason": reg},
+                    {"edited_reason": reg}
+                ]
 
-            if from_date_str:
-                try:
-                    from_dt = timezone.make_aware(
-                        datetime.combine(
-                            datetime.strptime(from_date_str, "%Y-%m-%d").date(),
-                            datetime.min.time(),
-                        )
-                    )
-                    qs = qs.filter(created_date__gte=from_dt)
-                except ValueError:
-                    pass
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            if to_date_str:
-                try:
-                    to_dt = timezone.make_aware(
-                        datetime.combine(
-                            datetime.strptime(to_date_str, "%Y-%m-%d").date(),
-                            datetime.max.time(),
-                        )
-                    )
-                    qs = qs.filter(created_date__lte=to_dt)
-                except ValueError:
-                    pass
-
-            qs     = qs.order_by("-created_date")
-            result = [_enrich_pr(i) for i in qs]
-
-            return Response({"success": True, "count": len(result), "data": result})
+            return Response(paginate_mongo_query(
+                "hospital_purchaserequisition",
+                filter_q,
+                sort=[("created_date", DESCENDING)],
+                request=request,
+                enrich_fn=_enrich_pr_list_batch
+            ))
 
         except Exception as e:
             logger.error("[PR GET] %s", e, exc_info=True)

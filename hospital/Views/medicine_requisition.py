@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 
 from django.utils import timezone
@@ -32,20 +33,28 @@ def _current_fin_year():
     return f"{str(from_yr)[-2:]}{str(from_yr + 1)[-2:]}"
 
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
+
 def _next_mr_number():
     """MR/<FINYEAR>/<SEQ6>  e.g. MR/2627/000001"""
     fin_year = _current_fin_year()
     prefix   = f"MR/{fin_year}/"
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_medicinerequisition"].find(
+        {"mr_number": {"$regex": f"^{prefix}"}},
+        {"mr_number": 1}
+    ).sort("mr_number", DESCENDING).limit(1))
     max_seq  = 0
-    for row in MedicineRequisition.objects.all():
-        ref = str(getattr(row, "mr_number", "") or "")
-        if ref.startswith(prefix):
-            try:
-                seq = int(ref.split("/")[-1])
-                if seq > max_seq:
-                    max_seq = seq
-            except (ValueError, IndexError):
-                pass
+    if top_doc:
+        try:
+            seq = int(str(top_doc[0].get("mr_number", "")).split("/")[-1])
+            if seq > max_seq:
+                max_seq = seq
+        except (ValueError, IndexError):
+            pass
     return f"{prefix}{str(max_seq + 1).zfill(6)}"
 
 
@@ -87,57 +96,48 @@ def medicine_requisition_view(request, pk=None):
             # ── Detail ────────────────────────────────────────────────────
             if pk:
                 try:
-                    obj = MedicineRequisition.objects.get(mr_number=pk)
+                    mr = MedicineRequisition.objects.get(
+                        mr_number=pk,
+                        hospital_code=hospital_code,
+                        branch_code=branch_code
+                    )
+                    return Response({"success": True, "data": MedicineRequisitionSerializer(mr).data})
                 except MedicineRequisition.DoesNotExist:
                     return Response({"success": False, "error": "Record not found"}, status=404)
-                if not _scope_ok(obj, hospital_code, branch_code):
-                    return Response({"success": False, "error": "Record not found"}, status=404)
-                return Response({"success": True, "data": MedicineRequisitionSerializer(obj).data})
 
             # ── List ──────────────────────────────────────────────────────
-            results = [
-                r for r in MedicineRequisition.objects.all()
-                if _scope_ok(r, hospital_code, branch_code)
-            ]
-            results.sort(key=lambda x: getattr(x, "created_date", timezone.now()), reverse=True)
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
 
             # Status filter
             status_filter = request.GET.get("status", "").strip()
             if status_filter:
-                results = [r for r in results if r.status == status_filter]
+                filter_q["status"] = status_filter
 
-            # ── Date filter (defaults to today if not supplied) ────────────
-            # Frontend sends from_date / to_date as YYYY-MM-DD.
-            # We filter on `created_date` (date part only).
-            # If neither param is sent, default both to today so the initial
-            # load only shows today's records.
-            from_date = request.GET.get("from_date", "").strip()
-            to_date   = request.GET.get("to_date",   "").strip()
+            search = request.GET.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"mr_number": reg},
+                    {"medicine_name": reg},
+                    {"consultant_name": reg},
+                    {"department_name": reg},
+                    {"patient_name": reg},
+                    {"patient_id": reg},
+                    {"nurse_name": reg}
+                ]
 
-            # Apply defaults only when the client sent NO date params at all
-            if not from_date and not to_date:
-                from_date = _today_str()
-                to_date   = _today_str()
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            # Apply date filtering
-            if from_date or to_date:
-                date_filtered = []
-                for r in results:
-                    d = getattr(r, "created_date", None)
-                    if d:
-                        d_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
-                        if from_date and d_str < from_date:
-                            continue
-                        if to_date and d_str > to_date:
-                            continue
-                    date_filtered.append(r)
-                results = date_filtered
-
-            return Response({
-                "success": True,
-                "count":   len(results),
-                "data":    MedicineRequisitionSerializer(results, many=True).data,
-            })
+            return Response(paginate_mongo_query(
+                "hospital_medicinerequisition",
+                filter_q,
+                sort=[("created_date", DESCENDING)],
+                request=request
+            ))
 
         except Exception as e:
             logger.error("[medicine_requisition GET] %s", e, exc_info=True)

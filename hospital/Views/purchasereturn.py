@@ -12,6 +12,7 @@ from bson import Decimal128, ObjectId
 from datetime import datetime
 import logging
 import os
+import re
 import json
 
 from rest_framework.decorators import api_view, permission_classes
@@ -165,18 +166,32 @@ def _serialize_doc(doc):
 # BILL-NO GENERATOR  (format: 2627/000001)
 # ─────────────────────────────────────────────────────────────────────────────
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
+
+def _current_fin_year():
+    today = datetime.today()
+    from_yr = today.year if today.month >= 4 else today.year - 1
+    return f"{str(from_yr)[-2:]}{str(from_yr + 1)[-2:]}"
+
+
 def _next_purchase_return_bill_no():
-    prefix = "2627/"
+    prefix = f"{_current_fin_year()}/"
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_purchase_returns"].find(
+        {"purchase_return_bill_no": {"$regex": f"^{prefix}"}},
+        {"purchase_return_bill_no": 1}
+    ).sort("purchase_return_bill_no", DESCENDING).limit(1))
     max_seq = 0
-    for row in PurchaseReturn.objects.filter(purchase_return_bill_no__startswith=prefix):
-        ref = str(getattr(row, "purchase_return_bill_no", "")).strip()
-        if ref.startswith(prefix):
-            try:
-                seq = int(ref.split("/")[-1])
-                if seq > max_seq:
-                    max_seq = seq
-            except (ValueError, IndexError):
-                pass
+    if top_doc:
+        try:
+            seq = int(str(top_doc[0].get("purchase_return_bill_no", "")).split("/")[-1])
+            if seq > max_seq:
+                max_seq = seq
+        except (ValueError, IndexError):
+            pass
     return f"{prefix}{str(max_seq + 1).zfill(6)}"
 
 
@@ -190,10 +205,6 @@ def get_grn_items(request):
     """
     Returns all PharmacyStock rows for the given GRN, enriched with
     item_name (from PharmacyItem), total_stock (raw), and computed available_qty.
-
-    available_qty formula:
-        total_stock - sold_quantity - transferred_out_quantity
-        - blocked_quantity - grn_return_quantity + sales_return_quantity
     """
     grn_number = request.query_params.get("grn_number", "").strip()
     vendor_id  = request.query_params.get("vendor_id", "").strip()
@@ -205,6 +216,8 @@ def get_grn_items(request):
     hospital_code, branch_code, outlet_code, user_id = _get_auth(request, request_data)
 
     try:
+        client, hms_db = get_hms_db()
+
         if vendor_id:
             try:
                 v_id = int(vendor_id)
@@ -212,88 +225,75 @@ def get_grn_items(request):
                 v_id = None
                 
             if v_id is not None:
-                # Need to use hospital.models.GRN directly instead of inventory.GRN to avoid ImportError if circular
-                from .inventory import GRN
-                # Fetch the GRN object to avoid strict type filtering issues with vendor_id
-                grn_obj = GRN.objects.filter(hospital_code=hospital_code, branch_code=branch_code, grn_number=grn_number).first()
-                if not grn_obj:
+                grn_doc = hms_db["hospital_grn"].find_one({
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "grn_number": grn_number
+                })
+                if not grn_doc:
                     return Response({"success": False, "error": f"GRN {grn_number} not found in records."})
                 
-                # Check vendor_id manually (cast to string to safely compare)
-                db_vendor_id = str(getattr(grn_obj, "vendor_id", "")).strip()
+                db_vendor_id = str(grn_doc.get("vendor_id", "")).strip()
                 if db_vendor_id != str(v_id):
-                    # Resolve both vendor names for a clearer error                                                                           
-                    from ..models import Vendor as VendorModel
                     def _vname(vid_str):
-                        try:
-                            vobj = VendorModel.objects.filter(
-                                hospital_code=hospital_code, branch_code=branch_code, vendor_id=vid_str
-                            ).first()
-                            if vobj:
-                                return getattr(vobj, "name", None) or getattr(vobj, "vendor_name", None) or vid_str
-                        except Exception:
-                            pass
+                        vdoc = hms_db["hospital_vendor"].find_one({
+                            "hospital_code": hospital_code, "branch_code": branch_code, "vendor_id": str(vid_str)
+                        })
+                        if vdoc:
+                            return vdoc.get("name") or vdoc.get("vendor_name") or vid_str
                         return vid_str
                     db_vname = _vname(db_vendor_id)
                     sel_vname = _vname(str(v_id))
                     return Response({"success": False, "error": f"GRN {grn_number} belongs to vendor '{db_vname}', not the selected vendor ('{sel_vname}')!"})
 
-        stock_qs = PharmacyStock.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code,
-            grn_number=grn_number,
-        )
+        stock_docs = list(hms_db["hospital_pharmacystock"].find({
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "grn_number": grn_number,
+        }))
 
-        item_ids = sorted(
-            {str(getattr(s, "item_id", "")) for s in stock_qs}
-        )
-        item_map = {
-            str(itm.item_id): getattr(itm, "item_name", "") or ""
-            for itm in PharmacyItem.objects.filter(
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-                item_id__in=[int(i) for i in item_ids if str(i).isdigit()],
-            )
-        }
+        item_ids = list({_int(s.get("item_id")) for s in stock_docs if s.get("item_id") is not None})
+        item_map = {}
+        if item_ids:
+            for itm in hms_db["hospital_pharmacyitem"].find({"item_id": {"$in": item_ids}}, {"item_id": 1, "item_name": 1}):
+                item_map[str(itm.get("item_id"))] = itm.get("item_name", "")
 
         results = []
-        for s in stock_qs:
-            available = _calc_available(s)
-            iid       = str(getattr(s, "item_id", ""))
+        for s in stock_docs:
+            total     = _int(s.get("total_stock", 0))
+            sold      = _int(s.get("sold_quantity", 0))
+            trans_out = _int(s.get("transferred_out_quantity", 0))
+            grn_ret   = _int(s.get("grn_return_quantity", 0))
+            blocked   = _int(s.get("blocked_quantity", 0))
+            sales_ret = _int(s.get("sales_return_quantity", 0))
+            available = total - sold - trans_out - grn_ret - blocked + sales_ret
 
-            # Try both field names that might hold the HSN code
-            hsn = (
-                str(getattr(s, "hsn_code", "") or "")
-                or str(getattr(s, "hsn",      "") or "")
-            )
+            iid = str(s.get("item_id", ""))
+            hsn = str(s.get("hsn_code", "") or s.get("hsn", "") or "")
 
-            exp = getattr(s, "expiry_date", None)
+            exp = s.get("expiry_date")
             try:
                 exp_str = exp.isoformat() if hasattr(exp, "isoformat") else str(exp) if exp else None
             except Exception:
                 exp_str = None
 
             results.append({
-                "stock_id":      getattr(s, "stock_id",      None),
+                "stock_id":      s.get("stock_id"),
                 "item_id":       iid,
                 "item_name":     item_map.get(iid, f"Item #{iid}"),
                 "hsn_code":      hsn,
-                "batch_number":  str(getattr(s, "batch_number",  "") or ""),
+                "batch_number":  str(s.get("batch_number", "") or ""),
                 "expiry_date":   exp_str,
-                "mrp":           str(_dec(getattr(s, "mrp",          0))),
-                "Selling_Price": str(_dec(getattr(s, "Selling_Price", 0))),
-                # total_stock: raw value from collection (displayed as "Batch Stock")
-                "total_stock":   _int(getattr(s, "total_stock", 0)),
-                # available_qty: computed using the formula
+                "mrp":           str(_dec(s.get("mrp", 0))),
+                "Selling_Price": str(_dec(s.get("Selling_Price") or s.get("selling_price") or 0)),
+                "total_stock":   total,
                 "available_qty": available,
-                "outlet_code":   str(getattr(s, "outlet_code", "") or ""),
+                "outlet_code":   str(s.get("outlet_code", "") or ""),
                 "grn_number":    grn_number,
             })
 
         if not results:
-            # Check if it exists in GRN
-            from .inventory import GRN
-            if GRN.objects.filter(hospital_code=hospital_code, branch_code=branch_code, grn_number=grn_number).exists():
+            if hms_db["hospital_grn"].find_one({"hospital_code": hospital_code, "branch_code": branch_code, "grn_number": grn_number}):
                 return Response({"success": False, "error": f"GRN {grn_number} exists, but no items found in PharmacyStock. Stock may not have been updated."})
 
         return Response({"success": True, "data": results})
@@ -301,6 +301,95 @@ def get_grn_items(request):
     except Exception as e:
         logger.error(f"[get_grn_items] Error: {e}", exc_info=True)
         return Response({"success": False, "error": str(e)}, status=500)
+
+
+def _enrich_purchase_returns_batch(returns_list: list, hospital_code: str, branch_code: str) -> list:
+    if not returns_list:
+        return returns_list
+
+    client, hms_db = get_hms_db()
+
+    # Collect item IDs and GRN numbers
+    item_ids = set()
+    grn_numbers = set()
+
+    for row in returns_list:
+        items = row.get("items", [])
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+                row["items"] = items
+            except Exception:
+                row["items"] = []
+                items = []
+
+        if isinstance(items, list):
+            for item in items:
+                iid = str(item.get("item_id", ""))
+                if iid.isdigit():
+                    item_ids.add(int(iid))
+
+        if row.get("grn_number"):
+            for g in str(row.get("grn_number", "")).split(","):
+                g = g.strip()
+                if g:
+                    grn_numbers.add(g)
+
+    # Batch item name resolution
+    name_map = {}
+    if item_ids:
+        for itm in hms_db["hospital_pharmacyitem"].find({"item_id": {"$in": list(item_ids)}}, {"item_id": 1, "item_name": 1}):
+            name_map[str(itm.get("item_id"))] = itm.get("item_name", "")
+
+    # Batch GRN / Vendor resolution
+    grn_to_vendor_id = {}
+    grn_to_category = {}
+    vendor_ids = set()
+
+    if grn_numbers:
+        for grn in hms_db["hospital_grn"].find({"grn_number": {"$in": list(grn_numbers)}}, {"grn_number": 1, "vendor_id": 1, "purchase_category": 1}):
+            vid = str(grn.get("vendor_id", "") or "").strip()
+            if vid:
+                vendor_ids.add(vid)
+                grn_to_vendor_id[grn.get("grn_number")] = vid
+            cat = str(grn.get("purchase_category", "") or "").strip()
+            if cat:
+                grn_to_category[grn.get("grn_number")] = cat
+
+    vendor_name_map = {}
+    if vendor_ids:
+        for v in hms_db["hospital_vendor"].find({"vendor_id": {"$in": list(vendor_ids)}}, {"vendor_id": 1, "name": 1, "vendor_name": 1}):
+            vendor_name_map[str(v.get("vendor_id"))] = v.get("name") or v.get("vendor_name") or str(v.get("vendor_id"))
+
+    # Enrich rows
+    for row in returns_list:
+        items = row.get("items", [])
+        if isinstance(items, list):
+            for itm in items:
+                if not itm.get("item_name") or str(itm.get("item_name")).startswith("Item #"):
+                    iid = str(itm.get("item_id", ""))
+                    if iid in name_map:
+                        itm["item_name"] = name_map[iid]
+
+        grn_list = [g.strip() for g in str(row.get("grn_number", "")).split(",") if g.strip()]
+        v_names = []
+        p_categories = []
+        for g in grn_list:
+            vid = grn_to_vendor_id.get(g)
+            if vid and vid in vendor_name_map:
+                vname = vendor_name_map[vid]
+                if vname not in v_names:
+                    v_names.append(vname)
+            cat = grn_to_category.get(g)
+            if cat and cat not in p_categories:
+                p_categories.append(cat)
+
+        if v_names:
+            row["vendor_name"] = ", ".join(v_names)
+        if p_categories:
+            row["purchase_category"] = ", ".join(p_categories)
+
+    return returns_list
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,149 +408,61 @@ def purchase_return_view(request, pk=None):
     # GET
     # ─────────────────────────────────────────────────────────────────────────
     if request.method == "GET":
-
-        from_date = request.query_params.get("from_date", "")
-        to_date   = request.query_params.get("to_date",   "")
-        ref_no    = request.query_params.get("purchase_return_bill_no", "")
-
-        if pk:
-            doc = PurchaseReturn.objects.filter(
-                purchase_return_bill_no=pk,
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-            ).first()
-            if not doc:
-                return Response({"success": False, "error": "Record not found"}, status=404)
-            return Response({"success": True, "data": PurchaseReturnSerializer(doc).data})
-
-        query = {
-            "hospital_code": hospital_code,
-            "branch_code":   branch_code,
-        }
-        if outlet_code:
-            query["outlet_code"] = outlet_code
-        if ref_no:
-            query["purchase_return_bill_no"] = ref_no
-        
-        status_filter = request.query_params.get("status", "")
-        if status_filter:
-            query["status"] = status_filter
-
-        qs = PurchaseReturn.objects.filter(**query).order_by("-created_date")
-
-        from datetime import datetime
-        if from_date:
-            try:
-                fd = datetime.strptime(from_date, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0)
-                qs = qs.filter(purchase_return_bill_date__gte=fd)
-            except ValueError:
-                pass
-        if to_date:
-            try:
-                td = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
-                qs = qs.filter(purchase_return_bill_date__lte=td)
-            except ValueError:
-                pass
-
-        serializer = PurchaseReturnSerializer(qs, many=True)
-        data_out = serializer.data
-
-        # Patch missing item_names dynamically
-        item_ids_to_fetch = set()
-        for row in data_out:
-            items_list = row.get("items")
-            if isinstance(items_list, str):
-                import json
+        try:
+            if pk:
                 try:
-                    items_list = json.loads(items_list)
-                    row["items"] = items_list
-                except:
-                    continue
-            if isinstance(items_list, list):
-                for item in items_list:
-                    if not item.get("item_name") or str(item.get("item_name")).startswith("Item #"):
-                        iid = str(item.get("item_id", ""))
-                        if iid.isdigit():
-                            item_ids_to_fetch.add(int(iid))
+                    pr = PurchaseReturn.objects.get(
+                        purchase_return_bill_no=pk,
+                        hospital_code=hospital_code,
+                        branch_code=branch_code,
+                    )
+                    enriched = _enrich_purchase_returns_batch([PurchaseReturnSerializer(pr).data], hospital_code, branch_code)[0]
+                    return Response({"success": True, "data": enriched})
+                except PurchaseReturn.DoesNotExist:
+                    return Response({"success": False, "error": "Record not found"}, status=404)
 
-        if item_ids_to_fetch:
-            name_map = {
-                str(itm.item_id): getattr(itm, "item_name", "") or ""
-                for itm in PharmacyItem.objects.filter(
-                    hospital_code=hospital_code,
-                    branch_code=branch_code,
-                    item_id__in=list(item_ids_to_fetch)
-                )
-            }
-            for row in data_out:
-                items_list = row.get("items")
-                if isinstance(items_list, list):
-                    for item in items_list:
-                        if not item.get("item_name") or str(item.get("item_name")).startswith("Item #"):
-                            iid = str(item.get("item_id", ""))
-                            if iid in name_map:
-                                item["item_name"] = name_map[iid]
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+            if outlet_code:
+                filter_q["outlet_code"] = outlet_code
 
-        # Fetch vendor_names for each GRN
-        grn_numbers_to_fetch = set()
-        for row in data_out:
-            if row.get("grn_number"):
-                for g in str(row.get("grn_number", "")).split(","):
-                    g = g.strip()
-                    if g:
-                        grn_numbers_to_fetch.add(g)
-        
-        if grn_numbers_to_fetch:
-            grns = GRN.objects.filter(
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-                grn_number__in=list(grn_numbers_to_fetch)
-            )
-            vendor_ids = set()
-            grn_to_vendor_id = {}
-            grn_to_purchase_category = {}
-            for grn in grns:
-                v_id = str(getattr(grn, "vendor_id", ""))
-                if v_id:
-                    vendor_ids.add(v_id)
-                    grn_to_vendor_id[grn.grn_number] = v_id
-                cat = str(getattr(grn, "purchase_category", ""))
-                if cat:
-                    grn_to_purchase_category[grn.grn_number] = cat
-            
-            vendor_name_map = {}
-            if vendor_ids:
-                vendors = Vendor.objects.filter(
-                    hospital_code=hospital_code,
-                    branch_code=branch_code,
-                    vendor_id__in=list(vendor_ids)
-                )
-                for v in vendors:
-                    vendor_name_map[str(v.vendor_id)] = getattr(v, "name", "") or getattr(v, "vendor_name", "") or str(v.vendor_id)
-            
-            for row in data_out:
-                grn_list = [g.strip() for g in str(row.get("grn_number", "")).split(",") if g.strip()]
-                v_names = []
-                p_categories = []
-                for g in grn_list:
-                    vid = grn_to_vendor_id.get(g)
-                    if vid and vid in vendor_name_map:
-                        if vendor_name_map[vid] not in v_names:
-                            v_names.append(vendor_name_map[vid])
-                    cat = grn_to_purchase_category.get(g)
-                    if cat and cat not in p_categories:
-                        p_categories.append(cat)
-                
-                if v_names:
-                    row["vendor_name"] = ", ".join(v_names)
-                if p_categories:
-                    row["purchase_category"] = ", ".join(p_categories)
+            ref_no = request.query_params.get("purchase_return_bill_no", "").strip()
+            if ref_no:
+                filter_q["purchase_return_bill_no"] = ref_no
 
-        return Response({
-            "success": True,
-            "count":   qs.count(),
-            "data":    data_out,
-        })
+            status_filter = request.query_params.get("status", "").strip()
+            if status_filter:
+                filter_q["status"] = status_filter
+
+            search = request.query_params.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"purchase_return_bill_no": reg},
+                    {"grn_number": reg},
+                    {"status": reg},
+                    {"return_remark": reg}
+                ]
+
+            filter_q = apply_date_filter(filter_q, request, "created_date")
+
+            def _enrich_page(data_list):
+                return _enrich_purchase_returns_batch(data_list, hospital_code, branch_code)
+
+            return Response(paginate_mongo_query(
+                "hospital_purchase_returns",
+                filter_q,
+                sort=[("created_date", DESCENDING)],
+                request=request,
+                enrich_fn=_enrich_page
+            ))
+
+        except Exception as e:
+            logger.error("[purchase_return GET] %s", e, exc_info=True)
+            return Response({"success": False, "error": str(e)}, status=500)
 
     # ─────────────────────────────────────────────────────────────────────────
     # POST — Create Purchase Return
