@@ -480,18 +480,41 @@ def pharmacy_item_view(request, pk=None):
                 serializer = PharmacyItemSerializer(item)
                 return Response(serializer.data)
 
-            # Djongo-safe fetch
-            all_items = PharmacyItem.objects.all()
+            # Fast PyMongo fetch
+            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            db = client["HMS"]
+            col = db["hospital_pharmacyitem"]
 
-            items = [
-                i for i in all_items
-                if i.is_active and
-                getattr(i, "hospital_code", None) == hospital_code and
-                getattr(i, "branch_code", None) == branch_code
-            ]
+            query = {"is_active": True}
+            if hospital_code:
+                query["hospital_code"] = hospital_code
+            if branch_code:
+                query["branch_code"] = branch_code
 
-            serializer = PharmacyItemSerializer(items, many=True)
-            return Response(serializer.data)
+            is_active_param = request.query_params.get("is_active")
+            if is_active_param is not None:
+                query["is_active"] = is_active_param.lower() not in ("false", "0", "no")
+
+            search = request.query_params.get("search", "").strip() or request.query_params.get("q", "").strip()
+            projection = {"_id": 0, "item_id": 1, "item_name": 1}
+
+            if search:
+                if search.isdigit():
+                    query["item_id"] = int(search)
+                else:
+                    query["item_name"] = re.compile(re.escape(search), re.I)
+
+            limit_param = request.query_params.get("limit", "50")
+            try:
+                limit = max(1, min(int(limit_param), 100))
+            except (ValueError, TypeError):
+                limit = 50
+
+            raw_items = list(col.find(query, projection).limit(limit))
+            client.close()
+
+            raw_items.sort(key=lambda x: str(x.get("item_name", "")).upper())
+            return Response(raw_items)
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)

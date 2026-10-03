@@ -58,38 +58,44 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
     if not ip_numbers:
         return {}
     try:
-        # Step 1: ip_number → (uhid, age, age_type, is_admitted,is_discharged)
-        admissions = list(
-            Admission.objects.filter(ipNumber__in=ip_numbers)
-            .values("ipNumber", "uhid", "age", "age_type", "is_admitted", "is_discharged")
-        )
+        global_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = global_client["HMS"]
+        adm_col = hms_db["hospital_admission"]
+        pt_col = hms_db["hospital_patient"]
+        ins_col = hms_db["hospital_insuranceprovider"]
+
+        clean_ips = [str(ip).strip() for ip in ip_numbers if ip]
+        admissions = list(adm_col.find(
+            {"ipNumber": {"$in": clean_ips}},
+            {"ipNumber": 1, "uhid": 1, "age": 1, "age_type": 1, "is_admitted": 1, "is_discharged": 1}
+        ))
         if not admissions:
+            global_client.close()
             return {}
 
         ip_to_admission = {a["ipNumber"]: a for a in admissions}
-        uhids = {a["uhid"] for a in admissions}
+        uhids = [a["uhid"] for a in admissions if a.get("uhid")]
 
-        # Step 2: uhid → Patient
-        patients = list(
-            Patient.objects.filter(uhid__in=uhids)
-            .values("uhid", "salutation", "firstName", "lastName",
-                    "gender", "customer_type", "company_code")
-        )
-        uhid_to_patient = {p["uhid"]: p for p in patients}
+        patients = list(pt_col.find(
+            {"uhid": {"$in": uhids}},
+            {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1, "gender": 1, "customer_type": 1, "company_code": 1}
+        ))
+        uhid_to_patient = {p["uhid"]: p for p in patients if p.get("uhid")}
 
-        # Step 3: company_code → company_name
-        company_codes = {p["company_code"] for p in patients if p.get("company_code")}
+        company_codes = [p["company_code"] for p in patients if p.get("company_code")]
         code_to_name = {}
         if company_codes:
-            insurers = InsuranceProvider.objects.filter(
-                company_code__in=company_codes
-            ).values("company_code", "company_name")
-            code_to_name = {i["company_code"]: i["company_name"] for i in insurers}
+            insurers = list(ins_col.find(
+                {"company_code": {"$in": company_codes}},
+                {"company_code": 1, "company_name": 1}
+            ))
+            code_to_name = {i["company_code"]: i["company_name"] for i in insurers if i.get("company_code")}
 
-        # Step 4: assemble result keyed by ip_number
+        global_client.close()
+
         result = {}
         for ip_num, adm in ip_to_admission.items():
-            uhid       = adm["uhid"]
+            uhid       = adm.get("uhid")
             pt         = uhid_to_patient.get(uhid, {})
             salutation = (pt.get("salutation") or "").strip()
             first      = (pt.get("firstName")  or "").strip()
@@ -313,6 +319,11 @@ def create_surgery_schedule(request):
             created_by    = user_id,
         )
 
+        try:
+            send_ot_schedule_whatsapp_to_doctors(schedule)
+        except Exception as wa_err:
+            print(f"[WhatsApp OT] Failed to send doctor notifications on create: {wa_err}")
+
         raw      = SurgeryScheduleSerializer(schedule).data
         enriched = _enrich(dict(raw))
 
@@ -413,8 +424,12 @@ def get_surgery_schedule(request):
         if not reference_no:
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
-        schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
-        if not schedule or not schedule.is_active:
+        try:
+            schedule = SurgerySchedule.objects.get(reference_no=reference_no)
+        except SurgerySchedule.DoesNotExist:
+            return Response({"success": False, "message": "Record not found"}, status=404)
+
+        if not schedule.is_active:
             return Response({"success": False, "message": "Record not found"}, status=404)
 
         raw      = SurgeryScheduleSerializer(schedule).data
@@ -437,9 +452,12 @@ def update_surgery_schedule(request):
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
         user_id  = request.data.get("auth-user-id", "system")
-        schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
+        try:
+            schedule = SurgerySchedule.objects.get(reference_no=reference_no)
+        except SurgerySchedule.DoesNotExist:
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
-        if not schedule or not schedule.is_active:
+        if not schedule.is_active:
             return Response({"success": False, "message": "Record not found"}, status=404)
 
         serializer = SurgeryScheduleWriteSerializer(schedule, data=request.data, partial=True)
@@ -478,9 +496,12 @@ def cancel_surgery_schedule(request):
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
         user_id  = request.data.get("auth-user-id", "system")
-        schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
+        try:
+            schedule = SurgerySchedule.objects.get(reference_no=reference_no)
+        except SurgerySchedule.DoesNotExist:
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
-        if not schedule or not schedule.is_active:
+        if not schedule.is_active:
             return Response({"success": False, "message": "Record not found"}, status=404)
 
         schedule.status            = "Cancelled"
@@ -507,9 +528,12 @@ def update_schedule_status(request):
             return Response({"success": False, "message": "reference_no is required"}, status=400)
 
         user_id  = request.data.get("auth-user-id", "system")
-        schedule = SurgerySchedule.objects.filter(reference_no=reference_no).first()
+        try:
+            schedule = SurgerySchedule.objects.get(reference_no=reference_no)
+        except SurgerySchedule.DoesNotExist:
+            return Response({"success": False, "message": "Record not found"}, status=404)
 
-        if not schedule or not schedule.is_active:
+        if not schedule.is_active:
             return Response({"success": False, "message": "Record not found"}, status=404)
 
         new_status = request.data.get("status", "").strip()
@@ -726,10 +750,8 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
                 return f"{d_str} ({s_str} - {e_str})"
             return "N/A"
 
-        is_resch = bool(schedule.is_rescheduled or schedule.rescheduled_date or schedule.status == "Rescheduled")
-        is_post = bool(schedule.is_postponed or schedule.postponed_date or schedule.status == "Postponed")
-
-        if is_resch:
+        # Determine template type based on current status and flags
+        if schedule.status == "Rescheduled" or schedule.is_rescheduled:
             template_name = (os.getenv("BOTIFY_OT_RESCHEDULE_TEMPLATE_NAME") or "sh_ot_reschedule").strip()
             if schedule.postponed_date:
                 prev_dt_str = _fmt_dt(schedule.postponed_date, schedule.post_startTime, schedule.post_endTime)
@@ -739,7 +761,7 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
             reason_str = str(schedule.rescheduled_remarks or schedule.remarks or "N/A").strip()
             template_type = "reschedule"
 
-        elif is_post:
+        elif schedule.status == "Postponed" or schedule.is_postponed:
             template_name = (os.getenv("BOTIFY_OT_POST_SCHEDULE_TEMPLATE_NAME") or "sh_ot_post_schedule").strip()
             prev_dt_str = _fmt_dt(schedule.scheduled_date, schedule.startTime, schedule.endTime)
             revised_dt_str = _fmt_dt(schedule.postponed_date, schedule.post_startTime, schedule.post_endTime)
@@ -764,18 +786,47 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
             "Content-Type": "application/json"
         }
 
+        sender_number = os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API")
+
+        def _log_to_db(doc_id, doc_name, phone_val, status_val, details_val):
+            try:
+                last_doc = hms_db["hospital_communicationlog"].find_one({"id": {"$exists": True, "$type": "number"}}, sort=[("id", -1)])
+                next_id = (int(last_doc["id"]) + 1) if (last_doc and isinstance(last_doc.get("id"), (int, float))) else 1
+
+                hms_db["hospital_communicationlog"].insert_one({
+                    "id": next_id,
+                    "patient_id": str(doc_id or ""),
+                    "patient_name": str(doc_name or ""),
+                    "type": "WhatsApp",
+                    "sender": sender_number,
+                    "recipient": str(phone_val or ""),
+                    "status": status_val,
+                    "details": details_val,
+                    "template_name": template_name,
+                    "created_by": "system",
+                    "created_date": timezone.now(),
+                    "branch_code": getattr(schedule, "branch_code", None) or "SHB001",
+                    "hospital_code": getattr(schedule, "hospital_code", None) or "SH001"
+                })
+            except Exception as log_ex:
+                print(f"[WhatsApp OT] Direct PyMongo logging failed: {log_ex}")
+
         results = []
         for doc_id in doc_ids:
             doc_profile = profile_map.get(doc_id)
             if not doc_profile:
-                print(f"[WhatsApp OT] Doctor profile not found for ID: {doc_id}")
+                msg = f"Doctor profile not found for ID: {doc_id} in Global profile collection"
+                print(f"[WhatsApp OT] {msg}")
+                _log_to_db(doc_id, str(doc_id), "N/A", "Failed", msg)
                 continue
 
             phone = doc_profile.get("mobileNumber") or doc_profile.get("phoneNumber") or doc_profile.get("guardianNumber")
             doc_name = doc_profile.get("employeeName") or str(doc_id)
 
             if not phone:
-                print(f"[WhatsApp OT] Mobile number missing for doctor: {doc_name} ({doc_id})")
+                msg = f"Mobile number missing in Global profile for Dr. {doc_name} ({doc_id})"
+                print(f"[WhatsApp OT] {msg}")
+                _log_to_db(doc_id, doc_name, "N/A", "Failed", msg)
                 continue
 
             clean_phone = re.sub(r'\D', '', str(phone))
@@ -820,31 +871,22 @@ def send_ot_schedule_whatsapp_to_doctors(schedule):
                 print(f"[WhatsApp OT ({template_type})] Botify response for Dr. {doc_name} ({clean_phone}): {r.status_code} {r.text}")
 
                 is_success = r.status_code in [200, 201]
-
-                try:
-                    CommunicationLog.objects.create(
-                        patient_id=str(doc_id),
-                        patient_name=str(doc_name),
-                        type="WhatsApp",
-                        sender=os.getenv("WHATSAPP_SENDER_NUMBER", "WhatsApp API"),
-                        recipient=str(clean_phone),
-                        status="Success" if is_success else "Failed",
-                        details=f"OT Schedule ({template_type}) notification sent to Dr. {doc_name} ({clean_phone}). Response: {r.text}",
-                        template_name=template_name,
-                        created_by="system",
-                        branch_code=schedule.branch_code or "SHB001",
-                        hospital_code=schedule.hospital_code or "SH001"
-                    )
-                except Exception as log_ex:
-                    print(f"[WhatsApp OT] Error logging CommunicationLog: {log_ex}")
+                details_text = f"OT Schedule ({template_type}) notification sent to Dr. {doc_name} ({clean_phone}). Response: {r.text}"
+                _log_to_db(doc_id, doc_name, clean_phone, "Success" if is_success else "Failed", details_text)
 
                 results.append({"doctor_id": doc_id, "doctor_name": doc_name, "success": is_success, "response": r.text})
 
             except Exception as req_ex:
-                print(f"[WhatsApp OT] Request error for Dr. {doc_name}: {req_ex}")
+                err_msg = f"OT Schedule ({template_type}) WhatsApp request error for Dr. {doc_name} ({clean_phone}): {str(req_ex)}"
+                print(f"[WhatsApp OT] {err_msg}")
+                _log_to_db(doc_id, doc_name, clean_phone, "Failed", err_msg)
                 results.append({"doctor_id": doc_id, "doctor_name": doc_name, "success": False, "error": str(req_ex)})
 
         return {"success": True, "results": results}
+
+    except Exception as e:
+        print(f"[WhatsApp OT] Error sending doctor messages: {e}")
+        return {"success": False, "error": str(e)}
 
     except Exception as e:
         print(f"[WhatsApp OT] Error sending doctor messages: {e}")

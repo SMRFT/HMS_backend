@@ -776,7 +776,7 @@ def get_investigation_items(request):
             # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
             hms_db = client['HMS']
             nabh_collection = hms_db['hospital_lab_nabh_rate']
-            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1}))
+            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1}))
 
             client.close()
 
@@ -787,12 +787,19 @@ def get_investigation_items(request):
                 if tid is not None:
                     nabh_map[str(tid).strip()] = n_rec
 
+            btn_upper = str(bill_type_no).upper().strip()
             formatted_items = []
             for test in tests:
                 t_id = test.get('test_id', '')
                 t_id_str = str(t_id).strip() if t_id is not None else ''
 
-                if str(bill_type_no).upper() == "LAB02":
+                if btn_upper == "LAB01":
+                    # LAB01: No nabh_code, price from SH_Rate
+                    nabh_code = ""
+                    price = test.get('SH_Rate', '0')
+
+                elif btn_upper == "LAB02":
+                    # LAB02: NABH rate & NABH code
                     if not (t_id_str and t_id_str in nabh_map):
                         continue
                     nabh_info = nabh_map[t_id_str]
@@ -802,7 +809,21 @@ def get_investigation_items(request):
                         price = str(nabh_rate).strip()
                     else:
                         price = "0"
+
+                elif btn_upper == "LAB03":
+                    # LAB03: Non-NABH rate & NABH code
+                    if not (t_id_str and t_id_str in nabh_map):
+                        continue
+                    nabh_info = nabh_map[t_id_str]
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    non_nabh_rate = nabh_info.get('non_nabh_rate')
+                    if non_nabh_rate is not None and str(non_nabh_rate).strip() != "" and str(non_nabh_rate).strip().lower() != "none":
+                        price = str(non_nabh_rate).strip()
+                    else:
+                        price = "0"
+
                 else:
+                    # Fallback for any other LAB category
                     nabh_info = nabh_map.get(t_id_str, {})
                     nabh_code = str(nabh_info.get('nabh_code', '')).strip()
                     price = test.get('SH_Rate', '0')
@@ -836,45 +857,48 @@ def get_investigation_items(request):
 
         if investigation_data and "Items" in investigation_data:
             items = investigation_data["Items"]
-            # Transform items to a more usable format
-            # Each item has structure like: {"8": "800", "41": "500", "itemName": "Chest X-Ray"}
-            # where "8" and "41" are bill_types and "800", "500" are their respective prices
+            is_surgery_type = str(bill_type_no).upper().startswith("SUR")
             formatted_items = []
             for item in items:
                 item_name = item.get("itemName", "")
                 item_id = item.get("item_id", "")
-                # Get the value for the specific bill_type
                 val = item.get(str(bill_type))
                 price = "0"
                 nabh_code = ""
 
-                if isinstance(val, dict):
-                    price = str(val.get("price", "0")).strip()
-                    nabh_code = str(val.get("nabh_code", "")).strip()
-                elif val is not None:
-                    price = str(val).strip()
+                if is_surgery_type:
+                    if isinstance(val, dict):
+                        price = str(val.get("price", "0")).strip()
+                        nabh_code = str(val.get("nabh_code", "")).strip()
+                    elif val is not None:
+                        price = str(val).strip()
+                    if item_name:
+                        formatted_items.append({
+                            "itemName": item_name,
+                            "item_id": item_id,
+                            "price": price if (price and price.lower() != "none") else "0",
+                            "nabh_code": nabh_code
+                        })
                 else:
-                    # Fallback: check if item has any other price key (e.g. '60')
-                    for k, v in item.items():
-                        if k not in ("itemName", "item_id", "nabh_code") and v:
-                            if isinstance(v, dict):
-                                price = str(v.get("price", "0")).strip()
-                                nabh_code = str(v.get("nabh_code", "")).strip()
-                            else:
-                                price = str(v).strip()
-                            if price and price != "0":
-                                break
+                    # Only return items where the specific bill_type rate exists
+                    if val is None:
+                        continue
 
-                # Include items if price exists OR if it's a Surgery bill type
-                is_surgery_type = str(bill_type_no).upper().startswith("SUR")
-                if item_name and ((price and price != "0" and price != "") or is_surgery_type):
-                    formatted_items.append({
-                        "itemName": item_name,
-                        "item_id": item_id,
-                        "price": price if price else "0",
-                        "nabh_code": nabh_code
-                    })
-            
+                    if isinstance(val, dict):
+                        price = str(val.get("price", "")).strip()
+                        nabh_code = str(val.get("nabh_code", "")).strip()
+                    else:
+                        price = str(val).strip()
+                        nabh_code = ""
+
+                    if price and price != "0" and price.lower() != "none" and item_name:
+                        formatted_items.append({
+                            "itemName": item_name,
+                            "item_id": item_id,
+                            "price": price,
+                            "nabh_code": nabh_code
+                        })
+
             return JsonResponse({"items": formatted_items}, safe=True)
 
         else:

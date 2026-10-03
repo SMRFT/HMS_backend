@@ -56,11 +56,13 @@ def _sanitize_items(raw_items):
         except (TypeError, ValueError):
             continue
 
-        try:
-            obj = PharmacyItem.objects.filter(item_id=item_id).values("item_name").first()
-            item_name = obj["item_name"] if obj else ""
-        except Exception:
-            item_name = ""
+        item_name = str(item.get("item_name") or "").strip()
+        if not item_name:
+            try:
+                obj = PharmacyItem.objects.filter(item_id=item_id).values("item_name").first()
+                item_name = obj["item_name"] if obj else ""
+            except Exception:
+                item_name = ""
 
         try:
             qty = int(item.get("qty", 1))
@@ -289,7 +291,7 @@ def update_medicine_package(request, pkg_id):
         data["lastmodified_date"] = datetime.utcnow()
 
         result = collection.update_one(
-            {"medPackage_id": int(pkg_id), "is_active": True},
+            {"medPackage_id": int(pkg_id)},
             {"$set": data},
         )
 

@@ -324,7 +324,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-items/?(\?.*)?$': 'HMS-P-MPKG',                
     '/_b_a_c_k_e_n_d/HMS/medicine-packages/create/': 'HMS-P-MPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/medicine-packages(?:/[^/]+)+/$': 'HMS-P-MPKG',                  
-    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/update/(?:/[^/]+)+/$': 'HMS-P-MPKGE',                  
+    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/update(?:/[^/]+)+/$': 'HMS-P-MPKGE',                  
     r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/delete(?:/[^/]+)+/$': 'HMS-P-MPKGD',   
     #Bill Type Master:
     '/_b_a_c_k_e_n_d/HMS/bill-types_get/': 'HMS-P-BT',                  

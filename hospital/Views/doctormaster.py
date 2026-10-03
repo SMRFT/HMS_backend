@@ -138,10 +138,6 @@ def doctor_schedule_list(request):
             
             schedule = doctor_collection.find_one({"employeeId": employee_id})
             if schedule:
-                sch_dept = schedule.get("department")
-                if sch_dept:
-                    doc_data["department"] = dept_map.get(sch_dept, sch_dept)
-
                 doc_data.update({
                     "consulting_fee": schedule.get("consulting_fee", 0),
                     "registration_fee": schedule.get("registration_fee", 0),
@@ -186,7 +182,7 @@ def doctor_schedule_detail(request, employee_id):
         doctor_collection = hms_db['hospital_doctor']
         doctor_schedule = doctor_collection.find_one({"employeeId": employee_id})
         
-        raw_dept = (doctor_schedule.get("department") if doctor_schedule else None) or diagnostic_profile.get("department")
+        raw_dept = diagnostic_profile.get("department")
         resolved_dept = dept_map.get(raw_dept, raw_dept) if raw_dept else ""
 
         raw_desig = diagnostic_profile.get("designation")
@@ -247,7 +243,6 @@ def doctor_schedule_upsert(request, employee_id):
         
         schedule_data = {
             "employeeId": employee_id,
-            "department": request.data.get("department", diagnostic_profile.get("department", "")),
             "consulting_fee": request.data.get("consulting_fee", ""),
             "registration_fee": request.data.get("registration_fee", ""),
             "day_schedule": request.data.get("day_schedule", []),
@@ -265,7 +260,10 @@ def doctor_schedule_upsert(request, employee_id):
         if existing_schedule:
             result = doctor_collection.update_one(
                 {"employeeId": employee_id},
-                {"$set": schedule_data}
+                {
+                    "$set": schedule_data,
+                    "$unset": {"department": ""}
+                }
             )
             message = "Doctor schedule updated successfully"
         else:
