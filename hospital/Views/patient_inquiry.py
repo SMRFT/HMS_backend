@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from bson import ObjectId, Decimal128
 from pymongo import MongoClient
@@ -21,6 +21,13 @@ def safe_float(val, default=0.0):
     except (ValueError, TypeError):
         return default
 
+def safe_iso(val):
+    if val is None or val == "":
+        return None
+    if isinstance(val, (datetime, date)):
+        return val.isoformat()
+    return str(val)
+
 def serialize_data(val):
     if isinstance(val, dict):
         return {k: serialize_data(v) for k, v in val.items()}
@@ -30,8 +37,9 @@ def serialize_data(val):
         return float(val.to_decimal()) if hasattr(val, 'to_decimal') else float(val)
     elif isinstance(val, ObjectId):
         return str(val)
-    elif isinstance(val, datetime):
+    elif isinstance(val, (datetime, date)):
         return val.isoformat()
+    return str(val) if val is not None else None
 import pytz
 from django.utils import timezone
 
@@ -495,7 +503,7 @@ def patient_inquiry_view(request):
             adm_dict = {
                 "ipNumber": adm.ipNumber,
                 "ipserial_number": adm.ipserial_number,
-                "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+                "admissionDateTime": safe_iso(getattr(adm, "admissionDateTime", None)),
                 "admittingDoctorId": adm.admittingDoctor,
                 "admittingDoctorName": doc_info["name"],
                 "admittingDoctorDept": doc_info["department"],
@@ -533,7 +541,7 @@ def patient_inquiry_view(request):
                 d_info = doctor_cache.get(d_id, {"name": b.doctor_id, "department": ""})
                 reg_visits_list.append({
                     "bill_number": b.bill_number,
-                    "billed_date": b.billed_date.isoformat() if b.billed_date else None,
+                    "billed_date": safe_iso(getattr(b, "billed_date", None)),
                     "doctor_id": b.doctor_id,
                     "doctor_name": d_info["name"],
                     "total_fees": safe_float(b.total_fees),
@@ -733,7 +741,7 @@ def patient_inquiry_view(request):
                 "gender": getattr(patient, 'gender', '—'),
                 "age": getattr(patient, 'age', None),
                 "age_type": getattr(patient, 'age_type', 'Y'),
-                "dob": patient.dob.isoformat() if getattr(patient, 'dob', None) else None,
+                "dob": safe_iso(getattr(patient, 'dob', None)),
                 "bloodGroup": getattr(patient, 'blood_group', None) or getattr(patient, 'bloodGroup', None),
                 "mobilePhone": getattr(patient, 'mobilePhone', None) or getattr(patient, 'home_phone', None),
                 "address": getattr(patient, 'permanent_address', None) or getattr(patient, 'address', None),
@@ -744,7 +752,7 @@ def patient_inquiry_view(request):
                 "guardianName": getattr(patient, 'guardianName', None) or getattr(patient, 'spouse_name', None),
                 "customerType": getattr(patient, 'customer_type', None) or getattr(patient, 'customerType', 'General') or "General",
                 "insuranceCompany": getattr(patient, 'insurance_company', None) or getattr(patient, 'insuranceCompany', '—') or "—",
-                "registeredDate": getattr(patient, 'registration_date', None) or (patient.created_date.isoformat() if getattr(patient, 'created_date', None) else None),
+                "registeredDate": safe_iso(getattr(patient, 'registration_date', None) or getattr(patient, 'created_date', None)),
             }
         else:
             patient_profile = {

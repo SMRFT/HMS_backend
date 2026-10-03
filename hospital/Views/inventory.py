@@ -26,6 +26,10 @@ from pyauth.auth import HasRoleAndDataPermission
 logger = logging.getLogger(__name__)
 
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, ensure_inventory_indexes, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
 #VENDOR VIEWS
 from ..models import Vendor, GRN, PharmacyStock, StockTransfer, PharmacyBilling, SalesReturn, PurchaseReturn, PharmacyItem
 from ..serializers import VendorSerializer
@@ -72,16 +76,39 @@ def vendor_view(request, pk=None):
             serializer = VendorSerializer(vendor)
             return Response(serializer.data)
 
-        # list
-        all_vendors = Vendor.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ).order_by("vendor_id")
+        # list with high-performance MongoDB index pagination
+        filter_q = {"is_active": True}
+        if hospital_code and hospital_code != "system":
+            filter_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            filter_q["branch_code"] = branch_code
 
-        vendors = [v for v in all_vendors if v.is_active]
+        search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
+        if search:
+            regex_q = {"$regex": re.escape(search), "$options": "i"}
+            filter_q["$or"] = [
+                {"name": regex_q},
+                {"vendor_type": regex_q},
+                {"city": regex_q},
+                {"state": regex_q},
+                {"gstin": regex_q},
+                {"phone": regex_q},
+                {"contact_person": regex_q},
+                {"vendor_id": regex_q},
+            ]
 
-        serializer = VendorSerializer(vendors, many=True)
-        return Response(serializer.data)
+        vendor_type = str(request.GET.get("vendor_type", "")).strip()
+        if vendor_type:
+            filter_q["vendor_type"] = vendor_type
+
+        filter_q = apply_date_filter(filter_q, request, "created_date")
+
+        return Response(paginate_mongo_query(
+            "hospital_vendor",
+            filter_q,
+            sort=[("vendor_id", DESCENDING)],
+            request=request
+        ))
 
     # ── POST ─────────────────────────────────────────────
     if request.method == "POST":
@@ -175,7 +202,7 @@ def chemical_composition_view(request, pk=None):
     hospital_code = (
         request.data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
-        None   # ⚠️ IMPORTANT
+        None
     )
 
     branch_code = (
@@ -186,46 +213,42 @@ def chemical_composition_view(request, pk=None):
 
     # ─────────────── GET ───────────────
     if request.method == "GET":
-
         try:
             if pk:
                 comp = ChemicalComposition.objects.get(composition_id=pk)
-
-                if (
-                    not comp.is_active or
-                    getattr(comp, "hospital_code", None) != hospital_code or
-                    getattr(comp, "branch_code", None) != branch_code
-                ):
+                if not comp.is_active:
                     return Response({"error": "Composition not found"}, status=404)
+                return Response(ChemicalCompositionSerializer(comp).data)
 
-                serializer = ChemicalCompositionSerializer(comp)
-                return Response(serializer.data)
+            filter_q = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
 
-            # SAFE FETCH (Djongo safe)
-            all_comps = ChemicalComposition.objects.all()
+            search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
+            if search:
+                filter_q["composition_name"] = {"$regex": re.escape(search), "$options": "i"}
 
-            comps = [
-                c for c in all_comps
-                if c.is_active and
-                getattr(c, "hospital_code", None) == hospital_code and
-                getattr(c, "branch_code", None) == branch_code
-            ]
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            serializer = ChemicalCompositionSerializer(comps, many=True)
-            return Response(serializer.data)
+            return Response(paginate_mongo_query(
+                "hospital_chemicalcomposition",
+                filter_q,
+                sort=[("composition_id", ASCENDING)],
+                request=request
+            ))
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
     # ─────────────── POST ───────────────
     if request.method == "POST":
-
         data = request.data.copy()
         data["hospital_code"] = hospital_code
         data["branch_code"] = branch_code
 
         serializer = ChemicalCompositionSerializer(data=data)
-
         if serializer.is_valid():
             serializer.save(
                 created_by=employee_id,
@@ -233,18 +256,14 @@ def chemical_composition_view(request, pk=None):
                 is_active=True
             )
             return Response(serializer.data, status=201)
-
         return Response(serializer.errors, status=400)
 
     # ─────────────── PUT ───────────────
     if request.method == "PUT":
-
         if not pk:
             return Response({"error": "Composition ID required"}, status=400)
-
         try:
             comp = ChemicalComposition.objects.get(composition_id=pk)
-
             if (
                 not comp.is_active or
                 getattr(comp, "hospital_code", None) != hospital_code or
@@ -252,33 +271,23 @@ def chemical_composition_view(request, pk=None):
             ):
                 return Response({"error": "Composition not found"}, status=404)
 
-            serializer = ChemicalCompositionSerializer(
-                comp,
-                data=request.data,
-                partial=True
-            )
-
+            serializer = ChemicalCompositionSerializer(comp, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save(
                     lastmodified_by=employee_id,
                     lastmodified_date=timezone.now()
                 )
                 return Response(serializer.data)
-
             return Response(serializer.errors, status=400)
-
         except ChemicalComposition.DoesNotExist:
             return Response({"error": "Composition not found"}, status=404)
 
     # ─────────────── DELETE ───────────────
     if request.method == "DELETE":
-
         if not pk:
             return Response({"error": "Composition ID required"}, status=400)
-
         try:
             comp = ChemicalComposition.objects.get(composition_id=pk)
-
             if (
                 not comp.is_active or
                 getattr(comp, "hospital_code", None) != hospital_code or
@@ -290,9 +299,7 @@ def chemical_composition_view(request, pk=None):
             comp.lastmodified_by = employee_id
             comp.lastmodified_date = timezone.now()
             comp.save()
-
             return Response({"message": "Deleted successfully"}, status=200)
-
         except ChemicalComposition.DoesNotExist:
             return Response({"error": "Composition not found"}, status=404)
 
@@ -314,7 +321,7 @@ def pharmacycategory_view(request, pk=None):
     hospital_code = (
         request.data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
-        None   # ⚠️ use None instead of "system"
+        None
     )
 
     branch_code = (
@@ -325,47 +332,42 @@ def pharmacycategory_view(request, pk=None):
 
     # ───────────────── GET ─────────────────
     if request.method == "GET":
-
         try:
             if pk:
                 category = PharmacyCategory.objects.get(category_id=pk)
-
-                # Djongo-safe filtering
-                if (
-                    not category.is_active or
-                    getattr(category, "hospital_code", None) != hospital_code or
-                    getattr(category, "branch_code", None) != branch_code
-                ):
+                if not category.is_active:
                     return Response({"error": "Category not found"}, status=404)
+                return Response(PharmacyCategorySerializer(category).data)
 
-                serializer = PharmacyCategorySerializer(category)
-                return Response(serializer.data)
+            filter_q = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
 
-            # SAFE FETCH (avoid Djongo crash)
-            all_categories = PharmacyCategory.objects.all()
+            search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
+            if search:
+                filter_q["category_name"] = {"$regex": re.escape(search), "$options": "i"}
 
-            categories = [
-                c for c in all_categories
-                if c.is_active and
-                getattr(c, "hospital_code", None) == hospital_code and
-                getattr(c, "branch_code", None) == branch_code
-            ]
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            serializer = PharmacyCategorySerializer(categories, many=True)
-            return Response(serializer.data)
+            return Response(paginate_mongo_query(
+                "hospital_pharmacycategory",
+                filter_q,
+                sort=[("category_id", ASCENDING)],
+                request=request
+            ))
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
     # ───────────────── POST ─────────────────
     if request.method == "POST":
-
         data = request.data.copy()
         data["hospital_code"] = hospital_code
         data["branch_code"] = branch_code
 
         serializer = PharmacyCategorySerializer(data=data)
-
         if serializer.is_valid():
             serializer.save(
                 created_by=employee_id,
@@ -373,18 +375,14 @@ def pharmacycategory_view(request, pk=None):
                 is_active=True
             )
             return Response(serializer.data, status=201)
-
         return Response(serializer.errors, status=400)
 
     # ───────────────── PUT ─────────────────
     if request.method == "PUT":
-
         if not pk:
             return Response({"error": "Category ID required"}, status=400)
-
         try:
             category = PharmacyCategory.objects.get(category_id=pk)
-
             if (
                 not category.is_active or
                 getattr(category, "hospital_code", None) != hospital_code or
@@ -392,33 +390,23 @@ def pharmacycategory_view(request, pk=None):
             ):
                 return Response({"error": "Category not found"}, status=404)
 
-            serializer = PharmacyCategorySerializer(
-                category,
-                data=request.data,
-                partial=True
-            )
-
+            serializer = PharmacyCategorySerializer(category, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save(
                     lastmodified_by=employee_id,
                     lastmodified_date=timezone.now()
                 )
                 return Response(serializer.data)
-
             return Response(serializer.errors, status=400)
-
         except PharmacyCategory.DoesNotExist:
             return Response({"error": "Category not found"}, status=404)
 
     # ───────────────── DELETE ─────────────────
     if request.method == "DELETE":
-
         if not pk:
             return Response({"error": "Category ID required"}, status=400)
-
         try:
             category = PharmacyCategory.objects.get(category_id=pk)
-
             if (
                 not category.is_active or
                 getattr(category, "hospital_code", None) != hospital_code or
@@ -430,9 +418,7 @@ def pharmacycategory_view(request, pk=None):
             category.lastmodified_by = employee_id
             category.lastmodified_date = timezone.now()
             category.save()
-
             return Response({"message": "Deleted successfully"}, status=200)
-
         except PharmacyCategory.DoesNotExist:
             return Response({"error": "Category not found"}, status=404)
 
@@ -454,7 +440,7 @@ def pharmacy_item_view(request, pk=None):
     hospital_code = (
         request.data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
-        None   # ⚠️ use None instead of "system"
+        None
     )
 
     branch_code = (
@@ -465,69 +451,54 @@ def pharmacy_item_view(request, pk=None):
 
     # ─────────────── GET ───────────────
     if request.method == "GET":
-
         try:
             if pk:
                 item = PharmacyItem.objects.get(item_id=pk)
-
-                if (
-                    not item.is_active or
-                    getattr(item, "hospital_code", None) != hospital_code or
-                    getattr(item, "branch_code", None) != branch_code
-                ):
+                if not item.is_active:
                     return Response({"error": "Item not found"}, status=404)
+                return Response(PharmacyItemSerializer(item).data)
 
-                serializer = PharmacyItemSerializer(item)
-                return Response(serializer.data)
+            filter_q = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
 
-            # Fast PyMongo fetch
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client["HMS"]
-            col = db["hospital_pharmacyitem"]
-
-            query = {"is_active": True}
-            if hospital_code:
-                query["hospital_code"] = hospital_code
-            if branch_code:
-                query["branch_code"] = branch_code
-
-            is_active_param = request.query_params.get("is_active")
-            if is_active_param is not None:
-                query["is_active"] = is_active_param.lower() not in ("false", "0", "no")
-
-            search = request.query_params.get("search", "").strip() or request.query_params.get("q", "").strip()
-            projection = {"_id": 0, "item_id": 1, "item_name": 1}
-
+            search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
             if search:
-                if search.isdigit():
-                    query["item_id"] = int(search)
-                else:
-                    query["item_name"] = re.compile(re.escape(search), re.I)
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"item_name": reg},
+                    {"item_last_name": reg},
+                    {"brand_name": reg},
+                    {"chemical_composition": reg},
+                    {"category": reg},
+                    {"hsn": reg}
+                ]
 
-            limit_param = request.query_params.get("limit", "50")
-            try:
-                limit = max(1, min(int(limit_param), 100))
-            except (ValueError, TypeError):
-                limit = 50
+            category = str(request.GET.get("category", "")).strip()
+            if category:
+                filter_q["category"] = category
 
-            raw_items = list(col.find(query, projection).limit(limit))
-            client.close()
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            raw_items.sort(key=lambda x: str(x.get("item_name", "")).upper())
-            return Response(raw_items)
+            return Response(paginate_mongo_query(
+                "hospital_pharmacyitem",
+                filter_q,
+                sort=[("item_id", ASCENDING)],
+                request=request
+            ))
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
     # ─────────────── POST ───────────────
     if request.method == "POST":
-
         payload = request.data.copy()
         payload["hospital_code"] = hospital_code
         payload["branch_code"] = branch_code
 
         serializer = PharmacyItemSerializer(data=payload)
-
         if serializer.is_valid():
             serializer.save(
                 created_by=employee_id,
@@ -535,18 +506,14 @@ def pharmacy_item_view(request, pk=None):
                 is_active=True
             )
             return Response(serializer.data, status=201)
-
         return Response(serializer.errors, status=400)
 
     # ─────────────── PUT ───────────────
     if request.method == "PUT":
-
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
-
         try:
             item = PharmacyItem.objects.get(item_id=pk)
-
             if (
                 not item.is_active or
                 getattr(item, "hospital_code", None) != hospital_code or
@@ -555,28 +522,22 @@ def pharmacy_item_view(request, pk=None):
                 return Response({"error": "Item not found"}, status=404)
 
             serializer = PharmacyItemSerializer(item, data=request.data, partial=True)
-
             if serializer.is_valid():
                 serializer.save(
                     lastmodified_by=employee_id,
                     lastmodified_date=timezone.now()
                 )
                 return Response(serializer.data)
-
             return Response(serializer.errors, status=400)
-
         except PharmacyItem.DoesNotExist:
             return Response({"error": "Item not found"}, status=404)
 
     # ─────────────── DELETE ───────────────
     if request.method == "DELETE":
-
         if not pk:
             return Response({"error": "Item ID required"}, status=400)
-
         try:
             item = PharmacyItem.objects.get(item_id=pk)
-
             if (
                 not item.is_active or
                 getattr(item, "hospital_code", None) != hospital_code or
@@ -588,9 +549,7 @@ def pharmacy_item_view(request, pk=None):
             item.lastmodified_by = employee_id
             item.lastmodified_date = timezone.now()
             item.save()
-
             return Response({"message": "Deleted successfully"}, status=200)
-
         except PharmacyItem.DoesNotExist:
             return Response({"error": "Item not found"}, status=404)
 
@@ -623,26 +582,23 @@ def _current_fin_year():
 
 
 def _next_draft_number():
-    """DRAFT/<FINYEAR>/<SEQ5>"""
+    """DRAFT/<FINYEAR>/<SEQ5> using high-speed indexed Mongo query"""
     fin_year = _current_fin_year()
     prefix = f"DRAFT/{fin_year}/"
 
-    all_grns = GRN.objects.all()
-
-    draft_numbers = [
-        getattr(g, "draft_number", "")
-        for g in all_grns
-        if getattr(g, "draft_number", "").startswith(prefix)
-    ]
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_grn"].find(
+        {"draft_number": {"$regex": f"^{prefix}"}},
+        {"draft_number": 1}
+    ).sort("draft_number", DESCENDING).limit(1))
 
     max_seq = 0
-    for draft in draft_numbers:
+    if top_doc:
+        d_val = top_doc[0].get("draft_number", "")
         try:
-            seq = int(draft.split("/")[-1])
-            if seq > max_seq:
-                max_seq = seq
+            max_seq = int(d_val.split("/")[-1])
         except (ValueError, IndexError):
-            continue
+            pass
 
     return f"{prefix}{str(max_seq + 1).zfill(5)}"
 
@@ -661,7 +617,7 @@ def _grn_number_from_draft(draft_number, purchase_category):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GRN VIEW — DJONGO SAFE + HOSPITAL/BRANCH FILTER
+# GRN VIEW — HIGH PERFORMANCE + PAGINATION + HOSPITAL/BRANCH FILTER
 # ─────────────────────────────────────────────────────────────────────────────
 from ..models import GRN, PharmacyStock
 @api_view(["GET", "POST", "PUT"])
@@ -691,11 +647,9 @@ def grn_view(request, pk=None):
  
     # ───────────────── GET ─────────────────
     if request.method == "GET":
- 
         try:
             if pk:
                 grn = None
- 
                 try:
                     grn = GRN.objects.get(pk=pk)
                 except Exception:
@@ -703,35 +657,53 @@ def grn_view(request, pk=None):
                         grn = GRN.objects.get(draft_number=pk)
                     except GRN.DoesNotExist:
                         pass
- 
+
                 if not grn:
                     return Response({"error": "GRN not found"}, status=404)
- 
-                if (
-                    getattr(grn, "hospital_code", None) != hospital_code or
-                    getattr(grn, "branch_code", None) != branch_code
-                ):
-                    return Response({"error": "GRN not found"}, status=404)
- 
+
                 return Response(GRNSerializer(grn).data)
- 
-            # Djongo-safe fetch — list all for this hospital+branch
-            all_grns = GRN.objects.all()
- 
-            grns = [
-                g for g in all_grns
-                if getattr(g, "hospital_code", None) == hospital_code
-                and getattr(g, "branch_code", None) == branch_code
-            ]
- 
-            grns = sorted(
-                grns,
-                key=lambda x: getattr(x, "created_date", timezone.now()),
-                reverse=True,
-            )
- 
-            return Response({"success": True, "data": GRNSerializer(grns, many=True).data})
- 
+
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
+            search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"draft_number": reg},
+                    {"grn_number": reg},
+                    {"invoice_no": reg},
+                    {"vendor_name": reg},
+                    {"purchase_category": reg},
+                    {"status": reg}
+                ]
+
+            status_f = str(request.GET.get("status", "")).strip()
+            if status_f:
+                filter_q["status"] = status_f
+
+            filter_q = apply_date_filter(filter_q, request, "created_date")
+
+            def _enrich_grn_items(data_list):
+                for r in data_list:
+                    if isinstance(r.get("items"), str):
+                        try:
+                            r["items"] = json.loads(r["items"])
+                        except Exception:
+                            pass
+                return data_list
+
+            return Response(paginate_mongo_query(
+                "hospital_grn",
+                filter_q,
+                sort=[("created_date", DESCENDING)],
+                request=request,
+                enrich_fn=_enrich_grn_items
+            ))
+
         except Exception as e:
             logger.error("[grn_view GET] %s", e, exc_info=True)
             return Response({"error": str(e)}, status=500)
@@ -955,53 +927,40 @@ def pharmacy_stock_history(request):
                 "error": "item_id is required"
             }, status=400)
 
-        # ───────── Djongo-safe fetch ─────────
-        all_stocks = PharmacyStock.objects.all()
+        # ───────── Indexed PyMongo fetch ─────────
+        client, hms_db = get_hms_db()
+        filter_q = {"item_id": int(item_id) if item_id.isdigit() else item_id}
+        if hospital_code and hospital_code != "system":
+            filter_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            filter_q["branch_code"] = branch_code
 
-        stocks = [
-            stock for stock in all_stocks
-            if str(getattr(stock, "item_id", "")) == item_id
-            and getattr(stock, "hospital_code", None) == hospital_code
-            and getattr(stock, "branch_code", None) == branch_code
-        ]
-
-        # Latest first
-        stocks = sorted(
-            stocks,
-            key=lambda x: (
-                getattr(x, "created_date", None) or "",
-                getattr(x, "stock_id", 0)
-            ),
-            reverse=True
-        )
+        cursor = hms_db["hospital_pharmacystock"].find(filter_q).sort("created_date", DESCENDING).limit(100)
+        stocks = list(cursor)
 
         # ───────── Build Response ─────────
         result = []
-
         for stock in stocks:
             result.append({
-                "stock_id": getattr(stock, "stock_id", ""),
-                "item_id": getattr(stock, "item_id", ""),
-                "item_name": getattr(stock, "item_name", ""),
-                "batch": getattr(stock, "batch_number", ""),
-                "expiry": getattr(stock, "expiry_date", ""),
-                "packing_price": str(getattr(stock, "packing_price", 0)),
-                "purchase_cost": str(getattr(stock, "purchase_cost", 0)),
-                "mrp": str(getattr(stock, "mrp", 0)),
-                "CGST_Amt": str(getattr(stock, "CGST_Amt", 0)),
-                "SGST_Amt": str(getattr(stock, "SGST_Amt", 0)),
-                "quantity": str(
-                    getattr(stock, "total_stock", 0)
-                ),
-                "vendor_id": getattr(stock, "vendor_id", ""),
-                "invoice_no": getattr(stock, "invoice_no", ""),
-                "grn_number": getattr(stock, "grn_number", ""),
-                "hospital_code": getattr(stock, "hospital_code", ""),
-                "branch_code": getattr(stock, "branch_code", ""),
-                "created_date": getattr(stock, "created_date", None),
+                "stock_id": stock.get("stock_id", ""),
+                "item_id": stock.get("item_id", ""),
+                "item_name": stock.get("item_name", ""),
+                "batch": stock.get("batch_number", ""),
+                "expiry": str(stock.get("expiry_date", "") or ""),
+                "packing_price": str(stock.get("packing_price", 0)),
+                "purchase_cost": str(stock.get("purchase_cost", 0)),
+                "mrp": str(stock.get("mrp", 0)),
+                "CGST_Amt": str(stock.get("CGST_Amt", 0)),
+                "SGST_Amt": str(stock.get("SGST_Amt", 0)),
+                "quantity": str(stock.get("total_stock", 0)),
+                "vendor_id": stock.get("vendor_id", ""),
+                "invoice_no": stock.get("invoice_no", ""),
+                "grn_number": stock.get("grn_number", ""),
+                "hospital_code": stock.get("hospital_code", ""),
+                "branch_code": stock.get("branch_code", ""),
+                "created_date": stock.get("created_date", None),
             })
 
-        # ───────── Final Response ─────────
         return Response({
             "success": True,
             "count": len(result),
@@ -1022,7 +981,7 @@ def medicine_tracking(request):
     try:
         item_id   = str(request.GET.get("item_id", "")).strip()
         item_name = str(request.GET.get("item_name", "")).strip().lower()
-        outlet_code = str(request.GET.get("outlet_code", "")).strip()
+        requested_outlet = str(request.GET.get("outlet_code", "")).strip()
 
         hospital_code = (
             request.GET.get("auth-hospital-code")
@@ -1041,288 +1000,539 @@ def medicine_tracking(request):
                 "error": "item_id or item_name is required"
             }, status=400)
 
-        if item_id and not item_name:
+        _, db = get_hms_db()
+
+        # Outlet map lookup
+        outlet_map = {
+            "OLET001": "IP Pharmacy",
+            "OLET002": "OP Pharmacy",
+            "OLET003": "Main Store / Procurement",
+        }
+        try:
+            for o in db.hospital_outlet.find({}, {"outlet_code": 1, "outlet_name": 1, "_id": 0}):
+                if o.get("outlet_code") and o.get("outlet_name"):
+                    outlet_map[o["outlet_code"]] = o["outlet_name"]
+        except Exception:
+            pass
+
+        item_doc = None
+        if item_id:
             try:
-                item_obj = PharmacyItem.objects.get(item_id=int(item_id), hospital_code=hospital_code, branch_code=branch_code)
-                item_name = getattr(item_obj, "item_name", "").lower()
+                item_doc = db.hospital_pharmacyitem.find_one({"item_id": int(item_id)}, {"item_id": 1, "item_name": 1})
             except Exception:
-                item_obj = None
+                pass
+            if not item_doc:
+                item_doc = db.hospital_pharmacyitem.find_one({"item_id": item_id}, {"item_id": 1, "item_name": 1})
 
-        if item_name and not item_id:
-            search_term = item_name
-            candidates = []
-            for i in PharmacyItem.objects.all():
-                name = getattr(i, "item_name", "") or ""
-                if search_term in name.lower():
-                    candidates.append(i)
+        if not item_doc and item_name:
+            item_doc = db.hospital_pharmacyitem.find_one(
+                {"item_name": {"$regex": f"^{re.escape(item_name)}$", "$options": "i"}},
+                {"item_id": 1, "item_name": 1}
+            )
+            if not item_doc:
+                item_doc = db.hospital_pharmacyitem.find_one(
+                    {"item_name": {"$regex": re.escape(item_name), "$options": "i"}},
+                    {"item_id": 1, "item_name": 1}
+                )
 
-            if candidates:
-                item_obj = candidates[0]
-                item_id = str(getattr(item_obj, "item_id", ""))
-            else:
-                item_obj = None
-                item_id = ""
+        if item_doc:
+            item_id = str(item_doc.get("item_id", ""))
+            item_name = str(item_doc.get("item_name", "")).lower()
+            item_name_display = item_doc.get("item_name", "")
+        else:
+            item_name_display = item_name
 
-        if not item_id:
+        if not item_id and not item_name:
             return Response({
                 "success": False,
                 "error": "Medicine not found"
             }, status=404)
 
-        item_name_display = getattr(item_obj, "item_name", "") if item_obj else item_name
-
         def _dt(v):
             if isinstance(v, datetime):
                 return v.isoformat()
-            return v
+            return str(v) if v else None
 
         def _dec(v):
             try:
-                return str(Decimal(v))
+                return str(Decimal(str(v)))
             except Exception:
                 return "0"
 
+        def _item_matches(it):
+            if not isinstance(it, dict):
+                return False
+            iid = str(it.get("item_id", "")).strip()
+            iname = str(it.get("medicine_name") or it.get("item_name") or it.get("particulars") or it.get("product_name") or "").strip().lower()
+            if item_id and iid == str(item_id):
+                return True
+            if item_name and (item_name in iname or iname in item_name):
+                return True
+            return False
+
         timeline = []
 
-        # GRN / Opening Stock movements
-        try:
-            all_grns = GRN.objects.all()
-        except Exception:
-            all_grns = []
+        # ── 1. Pharmacy Stock (Current Batches & Availability) ──────────────
+        stock_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                stock_or.append({"item_id": int(item_id)})
+            stock_or.append({"item_id": str(item_id)})
+        
+        stock_filter = {"$or": stock_or} if stock_or else {}
+        if hospital_code and hospital_code != "system":
+            stock_filter["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            stock_filter["branch_code"] = branch_code
 
-        for g in all_grns:
-            if getattr(g, "hospital_code", None) != hospital_code:
-                continue
-            if getattr(g, "branch_code", None) != branch_code:
-                continue
+        stock_docs = list(db.hospital_pharmacystock.find(stock_filter, {
+            "stock_id": 1, "item_id": 1, "batch_number": 1, "expiry_date": 1,
+            "total_stock": 1, "sold_quantity": 1, "transferred_out_quantity": 1,
+            "grn_return_quantity": 1, "blocked_quantity": 1, "sales_return_quantity": 1,
+            "outlet_code": 1, "_id": 0
+        }))
 
-            raw_items = getattr(g, "items", "")
+        stock_op = Decimal("0")
+        stock_ip = Decimal("0")
+        stock_main = Decimal("0")
+        stock_total = Decimal("0")
+        stock_batches = []
+
+        for s in stock_docs:
+            tot = Decimal(str(s.get("total_stock") or 0))
+            sold = Decimal(str(s.get("sold_quantity") or 0))
+            trans = Decimal(str(s.get("transferred_out_quantity") or 0))
+            grn_ret = Decimal(str(s.get("grn_return_quantity") or 0))
+            blk = Decimal(str(s.get("blocked_quantity") or 0))
+            s_ret = Decimal(str(s.get("sales_return_quantity") or 0))
+            avail = tot - sold - trans - grn_ret - blk + s_ret
+
+            s_outlet = str(s.get("outlet_code") or "").strip()
+            if s_outlet == "OLET002":
+                stock_op += avail
+            elif s_outlet == "OLET001":
+                stock_ip += avail
+            else:
+                stock_main += avail
+            stock_total += avail
+
+            exp = s.get("expiry_date")
+            exp_str = exp.strftime("%d-%m-%Y") if hasattr(exp, "strftime") else str(exp)[:10] if exp else "-"
+            stock_batches.append({
+                "batch_number": s.get("batch_number") or "-",
+                "expiry_date": exp_str,
+                "outlet_code": s_outlet,
+                "outlet_name": outlet_map.get(s_outlet, s_outlet or "Main Store"),
+                "available": str(avail),
+                "total_stock": str(tot)
+            })
+
+        # ── 2. GRN movements (Procurement) ─────────────────────────────────
+        grn_q = {}
+        if hospital_code and hospital_code != "system":
+            grn_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            grn_q["branch_code"] = branch_code
+
+        # If user explicitly wants single outlet alone (e.g. OLET001 / OLET002), filter if specified
+        if requested_outlet in ("OLET001", "OLET002"):
+            grn_q["outlet_code"] = requested_outlet
+
+        grn_search_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                grn_search_or.append({"items.item_id": int(item_id)})
+            grn_search_or.append({"items.item_id": str(item_id)})
+            grn_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
+            grn_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
+        if item_name:
+            grn_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            grn_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            grn_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
+        if grn_search_or:
+            grn_q["$or"] = grn_search_or
+
+        grn_docs = list(db.hospital_grn.find(grn_q, {
+            "date": 1, "created_date": 1, "grn_number": 1, "draft_number": 1,
+            "invoice_no": 1, "invoice_date": 1, "vendor_id": 1, "vendor_name": 1,
+            "outlet_code": 1, "purchase_category": 1, "status": 1, "items": 1
+        }).sort("created_date", -1).limit(1000))
+
+        for g in grn_docs:
+            raw_items = g.get("items", [])
             if isinstance(raw_items, str):
                 try:
                     raw_items = json.loads(raw_items)
                 except Exception:
-                    raw_items = []
+                    try:
+                        raw_items = ast.literal_eval(raw_items)
+                    except Exception:
+                        raw_items = []
             if not isinstance(raw_items, list):
                 continue
 
             for it in raw_items:
-                if not isinstance(it, dict):
-                    continue
-                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                if _item_matches(it):
                     batch_no = it.get("batch_number", "") or ""
                     qty = _dec(it.get("quantity", 0) or 0)
+                    g_outlet = g.get("outlet_code", "") or "OLET003"
                     timeline.append({
                         "type": "PURCHASE",
-                        "date": _dt(getattr(g, "date", None) or getattr(g, "created_date", None)),
-                        "ref_no": getattr(g, "grn_number", "") or getattr(g, "draft_number", ""),
-                        "bill_ref": getattr(g, "invoice_no", ""),
-                        "bill_date": _dt(getattr(g, "invoice_date", None)),
-                        "vendor_id": getattr(g, "vendor_id", ""),
-                        "vendor_name": it.get("vendor_name", "") or "",
-                        "outlet_code": getattr(g, "outlet_code", ""),
+                        "date": _dt(g.get("date") or g.get("created_date")),
+                        "ref_no": g.get("grn_number", "") or g.get("draft_number", ""),
+                        "bill_ref": g.get("invoice_no", ""),
+                        "bill_date": _dt(g.get("invoice_date")),
+                        "vendor_id": g.get("vendor_id", ""),
+                        "vendor_name": it.get("vendor_name", "") or g.get("vendor_name", "") or "",
+                        "outlet_code": g_outlet,
+                        "outlet_name": outlet_map.get(g_outlet, "Main Store"),
                         "batch_no": batch_no,
                         "quantity": qty,
-                        "status": getattr(g, "status", ""),
-                        "details": f"Purchased via GRN — {getattr(g, 'purchase_category', '')}"
+                        "status": g.get("status", ""),
+                        "details": f"Procured via GRN — {g.get('purchase_category', '') or 'Purchase'}"
                     })
 
-        # Stock Transfer movements
-        try:
-            all_transfers = StockTransfer.objects.all()
-        except Exception:
-            all_transfers = []
+        # ── 3. Stock Transfer movements ────────────────────────────────────
+        tf_q = {}
+        if hospital_code and hospital_code != "system":
+            tf_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            tf_q["branch_code"] = branch_code
 
-        for t in all_transfers:
-            if getattr(t, "hospital_code", None) != hospital_code:
-                continue
-            if getattr(t, "branch_code", None) != branch_code:
-                continue
-            if outlet_code and str(getattr(t, "to_outlet", "")) != outlet_code:
-                continue
+        if requested_outlet in ("OLET001", "OLET002"):
+            tf_q["$or"] = [{"to_outlet": requested_outlet}, {"from_outlet": requested_outlet}, {"outlet_code": requested_outlet}]
 
-            raw_items = getattr(t, "items", [])
+        tf_search_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                tf_search_or.append({"items.item_id": int(item_id)})
+            tf_search_or.append({"items.item_id": str(item_id)})
+            tf_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
+            tf_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
+        if item_name:
+            tf_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            tf_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            tf_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
+        if tf_search_or:
+            if "$or" in tf_q:
+                tf_q["$and"] = [{"$or": tf_q.pop("$or")}, {"$or": tf_search_or}]
+            else:
+                tf_q["$or"] = tf_search_or
+
+        tf_docs = list(db.hospital_stocktransfer.find(tf_q, {
+            "created_date": 1, "transfer_ref_number": 1, "outlet_code": 1,
+            "from_outlet": 1, "to_outlet": 1, "is_verified": 1, "approved_by": 1,
+            "approved_date": 1, "items": 1
+        }).sort("created_date", -1).limit(1000))
+
+        transferred_in = Decimal("0")
+        transferred_out = Decimal("0")
+
+        for t in tf_docs:
+            to_out = t.get("to_outlet", "") or ""
+            from_out = t.get("from_outlet", "") or t.get("outlet_code", "") or "Main Store"
+            raw_items = t.get("items", [])
             if isinstance(raw_items, str):
                 try:
                     raw_items = json.loads(raw_items)
                 except Exception:
-                    raw_items = []
+                    try:
+                        raw_items = ast.literal_eval(raw_items)
+                    except Exception:
+                        raw_items = []
             if not isinstance(raw_items, list):
                 continue
 
-            to_outlet = getattr(t, "to_outlet", "") or ""
-            is_incoming = (to_outlet == outlet_code) if outlet_code else (to_outlet != "")
-
             for it in raw_items:
-                if not isinstance(it, dict):
-                    continue
-                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                if _item_matches(it):
                     batch_no = it.get("batch_number", "") or ""
-                    qty = _dec(it.get("quantity", 0) or 0)
-                    direction = "IN" if is_incoming else "OUT"
-                    movement = f"Stock Transfer {direction} — From: {getattr(t, 'outlet_code', '') or 'Drug Purchase'} → To: {to_outlet or 'N/A'}"
+                    qty = _dec(it.get("quantity", 0) or it.get("transfer_quantity", 0) or it.get("transferred_out_quantity", 0) or 0)
+                    qty_dec = Decimal(str(qty))
+                    
+                    # Determine movement direction relative to requested outlet or general
+                    if requested_outlet == "OLET001":
+                        direction = "IN" if to_out == "OLET001" else "OUT"
+                    elif requested_outlet == "OLET002":
+                        direction = "IN" if to_out == "OLET002" else "OUT"
+                    else:
+                        direction = "TRANSFER"
+
+                    if direction == "IN":
+                        transferred_in += qty_dec
+                    elif direction == "OUT":
+                        transferred_out += qty_dec
+                    else:
+                        transferred_in += qty_dec
+
+                    from_name = outlet_map.get(from_out, from_out or "Main Store")
+                    to_name = outlet_map.get(to_out, to_out or "Pharmacy")
+                    movement_desc = f"Stock Transfer — From: {from_name} → To: {to_name}"
+
                     timeline.append({
                         "type": f"STOCK_TRANSFER_{direction}",
-                        "date": _dt(getattr(t, "created_date", None)),
-                        "ref_no": getattr(t, "transfer_ref_number", ""),
-                        "from_outlet": getattr(t, "outlet_code", "") or "",
-                        "to_outlet": to_outlet,
+                        "date": _dt(t.get("created_date")),
+                        "ref_no": t.get("transfer_ref_number", ""),
+                        "from_outlet": from_out,
+                        "from_outlet_name": from_name,
+                        "to_outlet": to_out,
+                        "to_outlet_name": to_name,
+                        "outlet_code": to_out or from_out,
+                        "outlet_name": to_name,
                         "batch_no": batch_no,
                         "quantity": qty,
-                        "status": getattr(t, "is_verified", ""),
-                        "details": movement,
-                        "approved_by": getattr(t, "approved_by", ""),
-                        "approved_date": _dt(getattr(t, "approved_date", None)),
+                        "status": t.get("is_verified", ""),
+                        "details": movement_desc,
+                        "approved_by": t.get("approved_by", ""),
+                        "approved_date": _dt(t.get("approved_date")),
                     })
 
-        # Pharmacy Billing (sale) movements
-        try:
-            all_bills = []
-            for b in PharmacyBilling.objects.all():
-                if getattr(b, "hospital_code", None) != hospital_code:
-                    continue
-                if getattr(b, "branch_code", None) != branch_code:
-                    continue
-                if outlet_code and str(getattr(b, "outlet_code", "")) != outlet_code:
-                    continue
-                all_bills.append(b)
-        except Exception:
-            all_bills = []
+        # ── 4. Pharmacy Billing (Sales in OP / IP) ─────────────────────────
+        bill_q = {}
+        if hospital_code and hospital_code != "system":
+            bill_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            bill_q["branch_code"] = branch_code
+        if requested_outlet in ("OLET001", "OLET002"):
+            bill_q["outlet_code"] = requested_outlet
 
-        for b in all_bills:
-            meds = getattr(b, "medicine_particulars", []) or []
+        bill_search_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                bill_search_or.append({"medicine_particulars.item_id": int(item_id)})
+            bill_search_or.append({"medicine_particulars.item_id": str(item_id)})
+            bill_search_or.append({"medicine_particulars": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
+            bill_search_or.append({"medicine_particulars": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
+        if item_name:
+            bill_search_or.append({"medicine_particulars.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            bill_search_or.append({"medicine_particulars.particulars": {"$regex": re.escape(item_name), "$options": "i"}})
+            bill_search_or.append({"medicine_particulars.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            bill_search_or.append({"medicine_particulars": {"$regex": re.escape(item_name), "$options": "i"}})
+        if bill_search_or:
+            bill_q["$or"] = bill_search_or
+
+        bill_docs = list(db.hospital_pharmacybilling.find(bill_q, {
+            "bill_date": 1, "created_date": 1, "bill_no": 1, "Bill_id": 1,
+            "uhid": 1, "outlet_code": 1, "billing_status": 1, "medicine_particulars": 1
+        }).sort("created_date", -1).limit(1000))
+
+        sold_op = Decimal("0")
+        sold_ip = Decimal("0")
+        sold_total = Decimal("0")
+
+        for b in bill_docs:
+            meds = b.get("medicine_particulars", []) or []
             if isinstance(meds, str):
                 try:
                     meds = json.loads(meds)
                 except Exception:
-                    meds = []
+                    try:
+                        meds = ast.literal_eval(meds)
+                    except Exception:
+                        meds = []
             if not isinstance(meds, list):
                 continue
 
+            b_outlet = str(b.get("outlet_code") or "").strip()
             for m in meds:
-                if not isinstance(m, dict):
-                    continue
-                if str(m.get("item_id", "")) == item_id or str(m.get("item_name", "")).lower() == item_name:
+                if _item_matches(m):
                     batch_no = m.get("batch_number", "") or ""
                     qty = _dec(m.get("quantity", 0) or 0)
+                    qty_dec = Decimal(str(qty))
+
+                    if b_outlet == "OLET002":
+                        sold_op += qty_dec
+                    elif b_outlet == "OLET001":
+                        sold_ip += qty_dec
+                    sold_total += qty_dec
+
+                    out_label = outlet_map.get(b_outlet, "OP Pharmacy" if b_outlet == "OLET002" else ("IP Pharmacy" if b_outlet == "OLET001" else b_outlet or "Pharmacy"))
+
                     timeline.append({
                         "type": "SALE",
-                        "date": _dt(getattr(b, "bill_date", None) or getattr(b, "created_date", None)),
-                        "ref_no": getattr(b, "bill_no", "") or str(getattr(b, "Bill_id", "")),
-                        "uhid": getattr(b, "uhid", ""),
+                        "date": _dt(b.get("bill_date") or b.get("created_date")),
+                        "ref_no": b.get("bill_no", "") or str(b.get("Bill_id", "")),
+                        "uhid": b.get("uhid", ""),
                         "patient_name": m.get("patient_name", "") or "",
-                        "outlet_code": getattr(b, "outlet_code", ""),
+                        "outlet_code": b_outlet,
+                        "outlet_name": out_label,
                         "batch_no": batch_no,
                         "quantity": qty,
-                        "status": getattr(b, "billing_status", ""),
-                        "details": f"Sold via Pharmacy Bill — {getattr(b, 'billing_status', '')}"
+                        "status": b.get("billing_status", ""),
+                        "details": f"Sold via Pharmacy Bill ({out_label}) — {b.get('billing_status', '')}"
                     })
 
-        # Sales Return movements
-        try:
-            all_sales_returns = SalesReturn.objects.all()
-        except Exception:
-            all_sales_returns = []
+        # ── 5. Sales Return movements ───────────────────────────────────────
+        sr_q = {}
+        if hospital_code and hospital_code != "system":
+            sr_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            sr_q["branch_code"] = branch_code
+        if requested_outlet in ("OLET001", "OLET002"):
+            sr_q["outlet_code"] = requested_outlet
 
-        for sr in all_sales_returns:
-            if getattr(sr, "hospital_code", None) != hospital_code:
-                continue
-            if getattr(sr, "branch_code", None) != branch_code:
-                continue
+        sr_search_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                sr_search_or.append({"medicine_particulars.item_id": int(item_id)})
+            sr_search_or.append({"medicine_particulars.item_id": str(item_id)})
+            sr_search_or.append({"medicine_particulars": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
+            sr_search_or.append({"medicine_particulars": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
+        if item_name:
+            sr_search_or.append({"medicine_particulars.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            sr_search_or.append({"medicine_particulars.particulars": {"$regex": re.escape(item_name), "$options": "i"}})
+            sr_search_or.append({"medicine_particulars.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            sr_search_or.append({"medicine_particulars": {"$regex": re.escape(item_name), "$options": "i"}})
+        if sr_search_or:
+            sr_q["$or"] = sr_search_or
 
-            meds = getattr(sr, "medicine_particulars", []) or []
+        sr_docs = list(db.hospital_salesreturn.find(sr_q, {
+            "return_bill_date": 1, "created_date": 1, "return_bill_no": 1,
+            "bill_no": 1, "uhid": 1, "outlet_code": 1, "medicine_particulars": 1
+        }).sort("created_date", -1).limit(1000))
+
+        returned_from_sale = Decimal("0")
+        for sr in sr_docs:
+            meds = sr.get("medicine_particulars", []) or []
             if isinstance(meds, str):
                 try:
                     meds = json.loads(meds)
                 except Exception:
-                    meds = []
+                    try:
+                        meds = ast.literal_eval(meds)
+                    except Exception:
+                        meds = []
             if not isinstance(meds, list):
                 continue
 
+            sr_out = str(sr.get("outlet_code") or "").strip()
             for m in meds:
-                if not isinstance(m, dict):
-                    continue
-                if str(m.get("item_id", "")) == item_id or str(m.get("item_name", "")).lower() == item_name:
+                if _item_matches(m):
                     batch_no = m.get("batch_number", "") or ""
                     qty = _dec(m.get("quantity", 0) or 0)
+                    returned_from_sale += Decimal(str(qty))
+                    sr_out_name = outlet_map.get(sr_out, "OP Pharmacy" if sr_out == "OLET002" else ("IP Pharmacy" if sr_out == "OLET001" else sr_out or "Pharmacy"))
                     timeline.append({
                         "type": "SALES_RETURN",
-                        "date": _dt(getattr(sr, "return_bill_date", None) or getattr(sr, "created_date", None)),
-                        "ref_no": getattr(sr, "return_bill_no", ""),
-                        "bill_no": getattr(sr, "bill_no", ""),
-                        "uhid": getattr(sr, "uhid", ""),
-                        "outlet_code": getattr(sr, "outlet_code", ""),
+                        "date": _dt(sr.get("return_bill_date") or sr.get("created_date")),
+                        "ref_no": sr.get("return_bill_no", ""),
+                        "bill_no": sr.get("bill_no", ""),
+                        "uhid": sr.get("uhid", ""),
+                        "outlet_code": sr_out,
+                        "outlet_name": sr_out_name,
                         "batch_no": batch_no,
                         "quantity": qty,
-                        "details": "Sales Return — returned by patient/customer"
+                        "details": f"Sales Return — returned by patient/customer ({sr_out_name})"
                     })
 
-        # Purchase Return movements
-        try:
-            all_pr = PurchaseReturn.objects.all()
-        except Exception:
-            all_pr = []
+        # ── 6. Purchase Return movements ───────────────────────────────────
+        pr_q = {}
+        if hospital_code and hospital_code != "system":
+            pr_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            pr_q["branch_code"] = branch_code
+        if requested_outlet in ("OLET001", "OLET002"):
+            pr_q["outlet_code"] = requested_outlet
 
-        for pr in all_pr:
-            if getattr(pr, "hospital_code", None) != hospital_code:
-                continue
-            if getattr(pr, "branch_code", None) != branch_code:
-                continue
+        pr_search_or = []
+        if item_id:
+            if str(item_id).isdigit():
+                pr_search_or.append({"items.item_id": int(item_id)})
+            pr_search_or.append({"items.item_id": str(item_id)})
+            pr_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
+            pr_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
+        if item_name:
+            pr_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            pr_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
+            pr_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
+        if pr_search_or:
+            pr_q["$or"] = pr_search_or
 
-            raw_items = getattr(pr, "items", [])
+        pr_docs = list(db.hospital_purchasereturn.find(pr_q, {
+            "purchase_return_bill_date": 1, "created_date": 1, "purchase_return_bill_no": 1,
+            "grn_number": 1, "vendor_code": 1, "vendor_name": 1, "outlet_code": 1,
+            "status": 1, "return_remark": 1, "items": 1
+        }).sort("created_date", -1).limit(1000))
+
+        returned_to_vendor = Decimal("0")
+        for pr in pr_docs:
+            raw_items = pr.get("items", [])
             if isinstance(raw_items, str):
                 try:
                     raw_items = json.loads(raw_items)
                 except Exception:
-                    raw_items = []
+                    try:
+                        raw_items = ast.literal_eval(raw_items)
+                    except Exception:
+                        raw_items = []
             if not isinstance(raw_items, list):
                 continue
 
             for it in raw_items:
-                if not isinstance(it, dict):
-                    continue
-                if str(it.get("item_id", "")) == item_id or str(it.get("medicine_name", "")).lower() == item_name:
+                if _item_matches(it):
                     batch_no = it.get("batch_number", "") or ""
                     qty = _dec(it.get("return_qty", 0) or 0)
+                    returned_to_vendor += Decimal(str(qty))
+                    pr_out = pr.get("outlet_code", "")
                     timeline.append({
                         "type": "PURCHASE_RETURN",
-                        "date": _dt(getattr(pr, "purchase_return_bill_date", None) or getattr(pr, "created_date", None)),
-                        "ref_no": getattr(pr, "purchase_return_bill_no", ""),
-                        "grn_number": getattr(pr, "grn_number", ""),
-                        "vendor_code": getattr(pr, "vendor_code", ""),
-                        "vendor_name": getattr(pr, "vendor_name", ""),
-                        "outlet_code": getattr(pr, "outlet_code", ""),
+                        "date": _dt(pr.get("purchase_return_bill_date") or pr.get("created_date")),
+                        "ref_no": pr.get("purchase_return_bill_no", ""),
+                        "grn_number": pr.get("grn_number", ""),
+                        "vendor_code": pr.get("vendor_code", ""),
+                        "vendor_name": pr.get("vendor_name", ""),
+                        "outlet_code": pr_out,
+                        "outlet_name": outlet_map.get(pr_out, "Main Store"),
                         "batch_no": batch_no,
                         "quantity": qty,
-                        "status": getattr(pr, "status", ""),
-                        "details": f"Purchase Return — {getattr(pr, 'return_remark', '') or 'Returned to vendor'}"
+                        "status": pr.get("status", ""),
+                        "details": f"Purchase Return — {pr.get('return_remark', '') or 'Returned to vendor'}"
                     })
 
-        # Sort by date descending
+        # Sort timeline by date descending
         def _sort_key(x):
             d = x.get("date") or ""
-            return d
+            return str(d)
 
         timeline.sort(key=_sort_key, reverse=True)
 
-        # Summary stats
         purchased = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "PURCHASE")
-        sold = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "SALE")
-        returned_from_sale = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "SALES_RETURN")
-        returned_to_vendor = sum(Decimal(t["quantity"]) for t in timeline if t["type"] == "PURCHASE_RETURN")
-        transferred = sum(Decimal(t["quantity"]) for t in timeline if "STOCK_TRANSFER" in t["type"])
+        transferred_total = sum(Decimal(t["quantity"]) for t in timeline if "STOCK_TRANSFER" in t["type"])
+
+        # Outlet-aware current stock & sold values
+        if requested_outlet == "OLET001":
+            effective_current_stock = stock_ip
+            effective_sold = sold_ip
+        elif requested_outlet == "OLET002":
+            effective_current_stock = stock_op
+            effective_sold = sold_op
+        else:
+            effective_current_stock = stock_total
+            effective_sold = sold_total
 
         return Response({
             "success": True,
             "item_id": item_id,
             "item_name": item_name_display,
+            "outlet_code": requested_outlet or "ALL",
+            "outlet_name": outlet_map.get(requested_outlet, "All Outlets (Combined)"),
             "summary": {
                 "purchased": str(purchased),
-                "sold": str(sold),
+                "sold": str(effective_sold),
+                "sold_op": str(sold_op),
+                "sold_ip": str(sold_ip),
+                "sold_total": str(sold_total),
                 "sales_return": str(returned_from_sale),
                 "purchase_return": str(returned_to_vendor),
-                "stock_transfer": str(transferred),
-                "current_stock": str(purchased - sold - returned_to_vendor),
+                "stock_transfer_in": str(transferred_in),
+                "stock_transfer_out": str(transferred_out),
+                "stock_transfer": str(transferred_total),
+                "current_stock": str(effective_current_stock),
+                "current_stock_op": str(stock_op),
+                "current_stock_ip": str(stock_ip),
+                "current_stock_main": str(stock_main),
+                "current_stock_total": str(stock_total),
             },
+            "batches": stock_batches,
             "count": len(timeline),
             "data": timeline
         })
@@ -1335,6 +1545,7 @@ def medicine_tracking(request):
         }, status=500)
 
 
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_item_tracking(request):
@@ -1342,48 +1553,78 @@ def get_pharmacy_item_tracking(request):
         item_id = request.GET.get("item_id")
         if not item_id:
             return Response({"success": False, "error": "item_id is required"}, status=400)
-            
-        from hospital.models import PharmacyStock, GRN
-        stocks = PharmacyStock.objects.filter(item_id=item_id)
-        
+
+        _, db = get_hms_db()
+
+        # Support both int and str item_id
+        item_filter = []
+        if str(item_id).isdigit():
+            item_filter.append({"item_id": int(item_id)})
+        item_filter.append({"item_id": str(item_id)})
+
+        stock_docs = list(db["hospital_pharmacystock"].find(
+            {"$or": item_filter},
+            {
+                "batch_number": 1,
+                "expiry_date": 1,
+                "grn_number": 1,
+                "total_stock": 1,
+                "sold_quantity": 1,
+                "transferred_out_quantity": 1,
+                "grn_return_quantity": 1,
+                "blocked_quantity": 1,
+                "sales_return_quantity": 1,
+                "_id": 0,
+            }
+        ))
+
+        # Batch lookup GRN dates in one single query
+        grn_numbers = list({s.get("grn_number") for s in stock_docs if s.get("grn_number")})
+        grn_map = {}
+        if grn_numbers:
+            for g in db["hospital_grn"].find({"grn_number": {"$in": grn_numbers}}, {"grn_number": 1, "date": 1, "_id": 0}):
+                g_date = g.get("date")
+                if g_date:
+                    grn_map[g.get("grn_number")] = g_date.strftime("%d-%m-%Y") if hasattr(g_date, "strftime") else str(g_date)[:10]
+
         batches = []
         total_stock = 0
-        
-        for s in stocks:
-            available_qty = (
-                s.total_stock
-                - s.sold_quantity
-                - s.transferred_out_quantity
-                - s.grn_return_quantity
-                - s.blocked_quantity
-                + s.sales_return_quantity
-            )
+
+        for s in stock_docs:
+            tot = float(s.get("total_stock") or 0)
+            sold = float(s.get("sold_quantity") or 0)
+            trans_out = float(s.get("transferred_out_quantity") or 0)
+            grn_ret = float(s.get("grn_return_quantity") or 0)
+            blocked = float(s.get("blocked_quantity") or 0)
+            sales_ret = float(s.get("sales_return_quantity") or 0)
+
+            available_qty = tot - sold - trans_out - grn_ret - blocked + sales_ret
             total_stock += available_qty
-            
-            grn_date = None
-            if s.grn_number:
-                grn = GRN.objects.filter(grn_number=s.grn_number).first()
-                if grn and grn.date:
-                    grn_date = grn.date.strftime("%d-%m-%Y") if hasattr(grn.date, 'strftime') else str(grn.date)
-                    
+
+            exp = s.get("expiry_date")
             expiry = "-"
-            if s.expiry_date:
-                expiry = s.expiry_date.strftime("%d-%m-%Y") if hasattr(s.expiry_date, 'strftime') else str(s.expiry_date)
-                    
+            if exp:
+                expiry = exp.strftime("%d-%m-%Y") if hasattr(exp, "strftime") else str(exp)[:10]
+
+            grn_num = s.get("grn_number")
+
             batches.append({
-                "batch_number": s.batch_number,
+                "batch_number": s.get("batch_number") or "-",
                 "expiry_date": expiry,
-                "grn_number": s.grn_number,
-                "procured_date": grn_date or "-",
+                "grn_number": grn_num or "-",
+                "procured_date": grn_map.get(grn_num, "-"),
                 "current_stock": available_qty,
-                "total_stock": s.total_stock
+                "total_stock": tot,
             })
-            
+
         return Response({
             "success": True,
             "total_stock": total_stock,
-            "times_procured": stocks.count(),
-            "batches": batches
+            "times_procured": len(stock_docs),
+            "batches": batches,
         })
     except Exception as e:
+        logger.error("[get_pharmacy_item_tracking] %s", e, exc_info=True)
         return Response({"success": False, "error": str(e)}, status=500)
+
+

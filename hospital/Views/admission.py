@@ -368,20 +368,27 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         adm_data["middleName"]           = pt.get("middleName") or ""
         adm_data["lastName"]             = pt.get("lastName") or ""
         adm_data["dob"]                  = str(dob or "")
-        if calc_num is not None:
-            adm_data["age"]              = calc_num
-            adm_data["age_type"]         = _normalize_age_type(calc_unit or "Y")
-        else:
-            if adm_data.get("age") is None:
+        # Preserve the age stored at the time of admission; fallback to calc_num / pt.age only if missing
+        if adm_data.get("age") is None or adm_data.get("age") == "":
+            if calc_num is not None:
+                adm_data["age"]          = calc_num
+                adm_data["age_type"]     = _normalize_age_type(calc_unit or "Y")
+            else:
                 adm_data["age"]          = pt.get("age")
-            adm_data["age_type"]         = _normalize_age_type(adm_data.get("age_type") or pt.get("age_type") or "Y")
+                adm_data["age_type"]     = _normalize_age_type(pt.get("age_type") or "Y")
+        else:
+            adm_data["age_type"]         = _normalize_age_type(adm_data.get("age_type") or "Y")
         adm_data["gender"]               = pt.get("gender") or ""
         adm_data["mobilePhone"]          = pt.get("mobilePhone") or ""
-        adm_data["permanent_address"]    = pt.get("permanent_address") or ""
+        adm_data["permanent_address"]    = pt.get("permanent_address") or pt.get("permanentAddress") or ""
         adm_data["area"]                 = pt.get("area") or ""
         adm_data["zipcode"]              = pt.get("zipcode") or ""
         adm_data["city"]                 = pt.get("city") or ""
         adm_data["state"]                = pt.get("state") or ""
+        adm_data["spouseName"]           = pt.get("spouseName") or pt.get("spouse_name") or ""
+        adm_data["fatherName"]           = pt.get("fatherName") or pt.get("father_name") or ""
+        adm_data["relationship"]         = pt.get("relationship") or adm_data.get("attender_relationship") or ""
+        adm_data["aadhaar"]              = pt.get("aadhaar") or pt.get("aadhaar_number") or pt.get("aadhar") or pt.get("national_id") or ""
         if not adm_data.get("customerType") and not adm_data.get("customer_type"):
             c_type = str(pt.get("customer_type") or pt.get("customerType") or "General")
             adm_data["customerType"]     = c_type
@@ -732,6 +739,10 @@ def op_patient_detail_by_uhid(request, uhid):
                 "insuranceCompanyName": company_name,
                 "doctorName": patient.get("doctorName") or "",
                 "referredBy": patient.get("referredBy") or "",
+                "spouseName": patient.get("spouseName") or patient.get("spouse_name") or "",
+                "fatherName": patient.get("fatherName") or patient.get("father_name") or "",
+                "relationship": patient.get("relationship") or "",
+                "aadhaar": patient.get("aadhaar") or patient.get("aadhaar_number") or patient.get("aadhar") or patient.get("national_id") or "",
                 "emergency_contact": patient.get("emergency_contact") or "",
                 "mlc_type": patient.get("mlc_type") or "",
                 "mlc_doc": patient.get("mlc_doc") or "",
@@ -816,7 +827,7 @@ def admission_view(request):
 
             client, hms_db = _get_hms_db()
             try:
-                cursor = hms_db["hospital_admission"].find(query).sort("admissionDateTime", -1)
+                cursor = hms_db["hospital_admission"].find(query).sort("admissionDateTime", 1)
                 adm_docs = list(cursor)
             finally:
                 if client:
@@ -1521,7 +1532,6 @@ def admission_advance(request, ipNumber=None):
                 return JsonResponse({'success': False, 'error': 'Provide ip_number/uhid or date range'}, status=400)
 
             q = {
-                "is_admitted": True,
                 "is_cancelled": {"$ne": True},
             }
             if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
@@ -1537,7 +1547,7 @@ def admission_advance(request, ipNumber=None):
             try:
                 admissions = list(hms_db["hospital_admission"].find(q))
                 if not admissions:
-                    return JsonResponse({'success': False, 'error': 'No matching admissions found'}, status=404)
+                    return JsonResponse({'success': True, 'data': [], 'count': 0})
 
                 uhids = list({str(a.get("uhid")).strip() for a in admissions if a.get("uhid")})
                 patient_map = {}

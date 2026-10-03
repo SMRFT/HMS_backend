@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime
 
 from django.core.mail import EmailMessage
@@ -79,6 +80,11 @@ def _auth(request):
     }
 
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
+
 def _current_fin_year():
     today     = datetime.today()
     from_year = today.year if today.month >= 4 else today.year - 1
@@ -88,10 +94,15 @@ def _current_fin_year():
 def _next_po_number():
     fin_year = _current_fin_year()
     prefix   = f"PO/{fin_year}/"
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_purchaseorder"].find(
+        {"po_number": {"$regex": f"^{prefix}"}},
+        {"po_number": 1}
+    ).sort("po_number", DESCENDING).limit(1))
     max_seq  = 0
-    for row in PurchaseOrder.objects.filter(po_number__startswith=prefix):
+    if top_doc:
         try:
-            seq = int(str(row.po_number).split("/")[-1])
+            seq = int(str(top_doc[0].get("po_number", "")).split("/")[-1])
             if seq > max_seq:
                 max_seq = seq
         except Exception:
@@ -102,12 +113,6 @@ def _next_po_number():
 def _safe_items(raw) -> list:
     """
     Guarantee items is always a plain Python list.
-
-    Items are stored as a native BSON array in MongoDB.
-    This function handles both the model instance attribute (already a list)
-    and edge-cases where the field might be None or absent.
-
-    ⚠️  Never call json.dumps / json.loads on items — it is NOT a JSON string.
     """
     if isinstance(raw, list):
         return raw
@@ -115,17 +120,9 @@ def _safe_items(raw) -> list:
 
 
 def _read_items_from_instance(po) -> list:
-    """
-    Read items directly from the model instance attribute, bypassing the
-    serializer which may not correctly round-trip the BSON array field.
-
-    This is the canonical way to get items — always use this in _enrich_po
-    instead of reading from serializer output.
-    """
     raw = getattr(po, "items", None)
     if isinstance(raw, list):
         return raw
-    # Fallback: attempt to read from __dict__ in case djongo wraps it
     raw = po.__dict__.get("items", None)
     if isinstance(raw, list):
         return raw
@@ -133,10 +130,6 @@ def _read_items_from_instance(po) -> list:
 
 
 def _items_to_store(items: list) -> list:
-    """
-    Clean and normalise a list of item dicts before writing to MongoDB.
-    Returns a plain Python list (stored as a BSON array, never a string).
-    """
     return [
         {
             "item_id":       item.get("item_id") or None,
@@ -148,7 +141,6 @@ def _items_to_store(items: list) -> list:
 
 
 def _validate_items(items: list) -> list:
-    """Return a list of validation error strings (empty = valid)."""
     errors = []
     if not items:
         errors.append("At least one item is required.")
@@ -165,23 +157,62 @@ def _validate_items(items: list) -> list:
     return errors
 
 
-def _enrich_po(po) -> dict:
+def _enrich_po_list_batch(po_list: list) -> list:
     """
-    Serialise a PurchaseOrder instance and add computed fields:
-      • items         — read directly from the model instance (bypasses
-                        serializer BSON round-trip issue that returns [])
-      • vendor_name   — resolved from Vendor model if not already stored
-      • approved_by_name — employee name resolved from MongoDB profile
-      • rejected_by_name — employee name resolved from MongoDB profile
+    High-speed batch enrichment for a single page of Purchase Orders.
+    Performs only 2 Mongo batch queries ($in) instead of 3 queries per row.
     """
-    data = PurchaseOrderSerializer(po).data
+    if not po_list:
+        return po_list
 
-    # ── FIX: read items directly from the model instance, not from the
-    #    serializer output.  DRF + djongo sometimes returns [] for embedded
-    #    ArrayField; the model attribute itself always has the correct list.
+    client, hms_db = get_hms_db()
+
+    # 1. Collect unique vendor_ids and employee_ids
+    vendor_ids = list({p.get("vendor_id") for p in po_list if p.get("vendor_id") and not p.get("vendor_name")})
+    emp_ids = set()
+    for p in po_list:
+        for f in ("approved_by", "rejected_by"):
+            eid = str(p.get(f, "") or "").strip()
+            if eid and eid != "system":
+                emp_ids.add(eid)
+
+    # 2. Batch lookup vendors
+    vendor_map = {}
+    if vendor_ids:
+        try:
+            for v in hms_db["hospital_vendor"].find({"vendor_id": {"$in": vendor_ids}}, {"vendor_id": 1, "name": 1}):
+                vendor_map[v.get("vendor_id")] = v.get("name", "")
+        except Exception:
+            pass
+
+    # 3. Batch lookup employee names
+    emp_map = {}
+    if emp_ids:
+        try:
+            global_db = client["Global"]
+            for prof in global_db["backend_diagnostics_profile"].find({"employeeId": {"$in": list(emp_ids)}}, {"employeeId": 1, "employeeName": 1}):
+                emp_map[str(prof.get("employeeId"))] = prof.get("employeeName", "")
+        except Exception:
+            pass
+
+    # 4. Enrich
+    for p in po_list:
+        if not p.get("vendor_name") and p.get("vendor_id") in vendor_map:
+            p["vendor_name"] = vendor_map[p.get("vendor_id")]
+
+        app_by = str(p.get("approved_by", "") or "").strip()
+        p["approved_by_name"] = emp_map.get(app_by, app_by) if app_by else ""
+
+        rej_by = str(p.get("rejected_by", "") or "").strip()
+        p["rejected_by_name"] = emp_map.get(rej_by, rej_by) if rej_by else ""
+
+    return po_list
+
+
+def _enrich_po(po) -> dict:
+    data = PurchaseOrderSerializer(po).data
     data["items"] = _read_items_from_instance(po)
 
-    # Vendor name
     vendor_name = data.get("vendor_name", "") or ""
     if not vendor_name:
         try:
@@ -190,7 +221,6 @@ def _enrich_po(po) -> dict:
             vendor_name = ""
     data["vendor_name"] = vendor_name
 
-    # Approved / Rejected by — resolve employee names
     approved_by_id = str(data.get("approved_by", "") or "").strip()
     data["approved_by_name"] = _get_employee_name(approved_by_id) if approved_by_id else ""
 
@@ -201,10 +231,6 @@ def _enrich_po(po) -> dict:
 
 
 def _get_vendor_email(vendor_id) -> str:
-    """
-    Resolve vendor email from the Vendor collection.
-    Returns email string or empty string if not found.
-    """
     try:
         vendor = Vendor.objects.get(vendor_id=vendor_id)
         return getattr(vendor, "email", "") or ""
@@ -343,59 +369,55 @@ def purchase_order_view(request, pk=None):
     # ── GET ──────────────────────────────────────────────────────────────────
     if request.method == "GET":
         try:
-            qs = PurchaseOrder.objects.filter(
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-            )
-
             # Single record
             if pk:
                 try:
-                    obj = qs.get(po_number=pk)
+                    po = PurchaseOrder.objects.get(
+                        po_number=pk,
+                        hospital_code=hospital_code,
+                        branch_code=branch_code
+                    )
+                    enriched = _enrich_po_list_batch([PurchaseOrderSerializer(po).data])[0]
+                    return Response({"success": True, "data": enriched})
                 except PurchaseOrder.DoesNotExist:
                     return Response({"success": False, "error": "Purchase Order not found."}, status=404)
-                return Response({"success": True, "data": _enrich_po(obj)})
 
-            # Optional filters
+            # Base query filter
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
             status_filter = request.GET.get("status", "").strip()
             if status_filter:
-                qs = qs.filter(status=status_filter)
+                filter_q["status"] = status_filter
 
             vendor_filter = request.GET.get("vendor_id", "").strip()
             if vendor_filter:
-                qs = qs.filter(vendor_id=vendor_filter)
-
-            from_date_str = request.GET.get("from_date", "").strip()
-            to_date_str   = request.GET.get("to_date",   "").strip()
-
-            if from_date_str:
                 try:
-                    from_dt = timezone.make_aware(
-                        datetime.combine(
-                            datetime.strptime(from_date_str, "%Y-%m-%d").date(),
-                            datetime.min.time(),
-                        )
-                    )
-                    qs = qs.filter(created_date__gte=from_dt)
+                    filter_q["vendor_id"] = int(vendor_filter)
                 except ValueError:
-                    pass
+                    filter_q["vendor_id"] = vendor_filter
 
-            if to_date_str:
-                try:
-                    to_dt = timezone.make_aware(
-                        datetime.combine(
-                            datetime.strptime(to_date_str, "%Y-%m-%d").date(),
-                            datetime.max.time(),
-                        )
-                    )
-                    qs = qs.filter(created_date__lte=to_dt)
-                except ValueError:
-                    pass
+            search = request.GET.get("search", "").strip()
+            if search:
+                reg = {"$regex": re.escape(search), "$options": "i"}
+                filter_q["$or"] = [
+                    {"po_number": reg},
+                    {"vendor_name": reg},
+                    {"notes": reg}
+                ]
 
-            qs     = qs.order_by("-created_date")
-            result = [_enrich_po(i) for i in qs]
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            return Response({"success": True, "count": len(result), "data": result})
+            return Response(paginate_mongo_query(
+                "hospital_purchaseorder",
+                filter_q,
+                sort=[("created_date", DESCENDING)],
+                request=request,
+                enrich_fn=_enrich_po_list_batch
+            ))
 
         except Exception as e:
             logger.error("[PO GET] %s", e, exc_info=True)
