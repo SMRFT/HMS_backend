@@ -200,7 +200,7 @@ def paginate_mongo_query(
 
     if request is not None and hasattr(request, "GET"):
         page_val = request.GET.get("page", page)
-        page_size_val = request.GET.get("page_size", page_size)
+        page_size_val = request.GET.get("page_size") or request.GET.get("limit") or page_size
     else:
         page_val = page
         page_size_val = page_size
