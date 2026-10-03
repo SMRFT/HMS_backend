@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.db import DatabaseError
 from django.utils import timezone
-from django.db.models import Max
+from django.db.models import Max, Q
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPermission
@@ -54,12 +54,15 @@ def convert_decimals(obj):
 def get_pharmacy_stock(request):
     try:
         # ✅ Get values
-        hospital_code = request.data.get("auth-hospital-code") 
-        branch_code = request.data.get("auth-branch-code")
+        data = request.data
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
         
         # Respect passed outlet_code (query param or body) before falling back to auth-outlet-code
-        passed_outlet = request.GET.get("outlet_code") or request.data.get("outlet_code")
-        outlet_code = passed_outlet if passed_outlet else request.data.get("auth-outlet-code")
+        passed_outlet = data.get("outlet_code") or request.GET.get("outlet_code")
+        if passed_outlet:
+            outlet_code = passed_outlet
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -81,6 +84,11 @@ def get_pharmacy_stock(request):
             "branch_code": branch_code,
             "outlet_code": outlet_code   
         }
+
+        # Filter to active batches with total_stock > 0 to avoid scanning tens of thousands of historical 0-stock batches
+        include_zero_stock = request.GET.get("include_zero_stock") or data.get("include_zero_stock")
+        if not include_zero_stock or str(include_zero_stock).lower() == "false":
+            match_stage["total_stock"] = {"$gt": 0}
 
         pipeline = [
 
@@ -212,7 +220,12 @@ def get_pharmacy_stock(request):
         "from": "hospital_chemicalcomposition",
         "let": {
             "composition_id": {
-                "$toInt": "$item_details.chemical_composition"
+                "$convert": {
+                    "input": "$item_details.chemical_composition",
+                    "to": "int",
+                    "onError": None,
+                    "onNull": None
+                }
             },
             "hospital_code": "$hospital_code",
             "branch_code": "$branch_code"
@@ -781,53 +794,90 @@ def get_last_oppharmacy_billno(fy):
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_last_billed_uhid(request):
+    try:
+        hospital_code = request.data.get("auth-hospital-code")
+        branch_code   = request.data.get("auth-branch-code")
+        outlet_code   = request.GET.get("outlet_code") or request.data.get("auth-outlet-code")
 
-    # 1️⃣ Get latest bill
-    last_bill = (
-        PharmacyBilling.objects
-        .order_by("-bill_date")
-        .first()
-    )
+        filters = {"uhid__isnull": False}
+        if hospital_code:
+            filters["hospital_code"] = hospital_code
+        if branch_code:
+            filters["branch_code"] = branch_code
+        if outlet_code:
+            filters["outlet_code"] = outlet_code
 
-    if not last_bill:
+        # 1️⃣ Get latest bill with a valid UHID
+        last_bill = (
+            PharmacyBilling.objects
+            .filter(**filters)
+            .exclude(uhid="")
+            .order_by("-bill_date")
+            .first()
+        )
+
+        # Fallback without outlet filter if not found
+        if not last_bill:
+            last_bill = (
+                PharmacyBilling.objects
+                .exclude(uhid__isnull=True)
+                .exclude(uhid="")
+                .order_by("-bill_date")
+                .first()
+            )
+
+        if not last_bill:
+            return Response({
+                "success": False,
+                "message": "No records found"
+            })
+
+        # 2️⃣ Get patient using UHID
+        patient = Patient.objects.filter(uhid=last_bill.uhid).first()
+
+        full_name = ""
+        if patient:
+            sal = (patient.salutation or "").strip()
+            fn  = (patient.firstName or "").strip()
+            ln  = (patient.lastName or "").strip()
+            if ln.lower() == fn.lower():
+                ln = ""
+            full_name = " ".join(f"{sal} {fn} {ln}".split()).strip()
+        else:
+            full_name = getattr(last_bill, "patientname", "") or ""
+
+        inpatient_num = (
+            getattr(last_bill, "inpatient_number", "")
+            or getattr(patient, "inpatient_number", "")
+            or ""
+        )
+
+        return Response({
+            "success": True,
+            "data": {
+                # 🔹 Patient Details
+                "uhid": last_bill.uhid,
+                "patient_name": full_name,
+                "inpatient_number": inpatient_num,
+                "age": getattr(patient, "age", None) or getattr(last_bill, "age", None),
+                "gender": getattr(patient, "gender", "") or "",
+                "mobile": getattr(patient, "mobilePhone", "") or "",
+                "city": getattr(patient, "city", "") or "",
+                "blood_group": getattr(patient, "blood_group", "") or "",
+
+                # 🔹 Bill Details
+                "doctor_id": getattr(last_bill, "doctor_id", ""),
+                "room_no": getattr(last_bill, "room_no", ""),
+                "bill_type": getattr(last_bill, "bill_type", ""),
+                "bill_no": getattr(last_bill, "bill_no", ""),
+                "bill_date": last_bill.bill_date.isoformat() if last_bill.bill_date else None,
+            }
+        })
+    except Exception as e:
         return Response({
             "success": False,
-            "message": "No records found"
-        })
-
-    # 2️⃣ Get patient using UHID
-    patient = Patient.objects.filter(uhid=last_bill.uhid).first()
-
-    if not patient:
-        return Response({
-            "success": False,
-            "message": "Patient not found"
-        })
-
-    # 3️⃣ Prepare full response
-    full_name = f"{patient.salutation or ''} {patient.firstName or ''} {patient.lastName or ''}".strip()
-
-    return Response({
-        "success": True,
-        "data": {
-            # 🔹 Patient Details
-            "uhid": patient.uhid,
-            "patient_name": full_name,
-            "inpatient_number": patient.ip_number,
-            "age": patient.age,
-            "gender": patient.gender,
-            "mobile": patient.mobilePhone,
-            "city": patient.city,
-            "blood_group": patient.blood_group,
-
-            # 🔹 Bill Details
-            "doctor_id": last_bill.doctor_id,
-            "room_no": last_bill.room_no,
-            "bill_type": last_bill.bill_type,
-            "bill_no": last_bill.bill_no,
-            "bill_date": last_bill.bill_date,
-        }
-    })
+            "message": str(e)
+        }, status=500)
 
 
 
@@ -3488,10 +3538,19 @@ def pharmacy_view_bills(request):
             billtype_map[int(bill_type)] = bt.get("bill_name", "")
 
     # =========================================================
-    # ✅ Date Filtering from query params
+    # ✅ Query Parameters: Date, Search, Bill Type, Limit
     # =========================================================
     from_date_str = request.GET.get("from_date") or request.query_params.get("from_date")
     to_date_str   = request.GET.get("to_date")   or request.query_params.get("to_date")
+    search_by     = (request.GET.get("search_by") or request.query_params.get("search_by") or "").strip()
+    search_value  = (request.GET.get("search_value") or request.query_params.get("search_value") or "").strip()
+    bill_type_param = request.GET.get("bill_type") or request.query_params.get("bill_type")
+    limit_param   = request.GET.get("limit") or request.query_params.get("limit")
+
+    try:
+        limit = min(int(limit_param), 2000) if limit_param else 1000
+    except (ValueError, TypeError):
+        limit = 1000
 
     from_dt = None
     to_dt   = None
@@ -3523,8 +3582,15 @@ def pharmacy_view_bills(request):
         "hospital_code": hospital_code,
         "branch_code": branch_code,
         "outlet_code": matched_outlet,
-        "bill_type__in": allowed_bill_types
     }
+
+    if bill_type_param and bill_type_param != "ALL":
+        try:
+            bill_filters["bill_type"] = int(bill_type_param)
+        except (ValueError, TypeError):
+            bill_filters["bill_type__in"] = allowed_bill_types
+    else:
+        bill_filters["bill_type__in"] = allowed_bill_types
 
     if from_dt and to_dt:
         bill_filters["bill_date__range"] = (from_dt, to_dt)
@@ -3533,36 +3599,53 @@ def pharmacy_view_bills(request):
     elif to_dt:
         bill_filters["bill_date__lte"] = to_dt
 
-    bills_qs = PharmacyBilling.objects.filter(**bill_filters).order_by("-bill_date")
+    extra_filter = None
+    if search_value:
+        if search_by == "bill_no":
+            bill_filters["bill_no__icontains"] = search_value
+        elif search_by == "uhid":
+            bill_filters["uhid__icontains"] = search_value
+        elif search_by == "patient_name":
+            matching_uhids = list(
+                Patient.objects.filter(
+                    Q(firstName__icontains=search_value) | Q(lastName__icontains=search_value)
+                ).values_list("uhid", flat=True)[:300]
+            )
+            if matching_uhids:
+                extra_filter = Q(patientname__icontains=search_value) | Q(uhid__in=matching_uhids)
+            else:
+                bill_filters["patientname__icontains"] = search_value
+        else:
+            bill_filters["bill_no__icontains"] = search_value
 
-    # If no date filter is applied, limit to latest 1000 to keep responses fast
-    if not from_dt and not to_dt:
-        bills = list(bills_qs[:1000])
-    else:
-        bills = list(bills_qs)
+    bills_qs = PharmacyBilling.objects.filter(**bill_filters)
+    if extra_filter:
+        bills_qs = bills_qs.filter(extra_filter)
+    bills_qs = bills_qs.order_by("-bill_date")
+
+    bills = list(bills_qs[:limit])
 
     # =========================================================
-    # ✅ Patient Mapping
+    # ✅ Patient Mapping (fast values() lookup)
     # =========================================================
-    uhids = [bill.uhid for bill in bills if bill.uhid]
-
-    patients    = Patient.objects.filter(uhid__in=uhids)
+    uhids = list(set([bill.uhid for bill in bills if bill.uhid]))
     patient_map = {}
-    for p in patients:
-        sal = (p.salutation or "").strip()
-        fn  = (p.firstName or "").strip()
-        ln  = (p.lastName or "").strip()
-        if ln.lower() == fn.lower():
-            ln = ""
-        full_name = f"{sal} {fn} {ln}".strip()
-        patient_map[p.uhid] = " ".join(full_name.split())
+    if uhids:
+        patients = Patient.objects.filter(uhid__in=uhids).values("uhid", "salutation", "firstName", "lastName")
+        for p in patients:
+            sal = (p.get("salutation") or "").strip()
+            fn  = (p.get("firstName") or "").strip()
+            ln  = (p.get("lastName") or "").strip()
+            if ln.lower() == fn.lower():
+                ln = ""
+            full_name = f"{sal} {fn} {ln}".strip()
+            patient_map[p["uhid"]] = " ".join(full_name.split())
 
     # =========================================================
     # ✅ Doctor Mapping
     # =========================================================
-    doctor_ids = list(set([bill.doctor_id for bill in bills if bill.doctor_id]))
+    doctor_ids = list(set([str(bill.doctor_id).strip() for bill in bills if bill.doctor_id]))
     doctor_map = {}
-
     if doctor_ids:
         doctor_cursor = profile_collection.find(
             {"employeeId": {"$in": doctor_ids}},
@@ -3575,8 +3658,6 @@ def pharmacy_view_bills(request):
 
     # =========================================================
     # ✅ Employee / Creator Mapping
-    #    1. Match created_by / cashier_id against profile collection
-    #    2. If string/id not found in profile collection, display as-is
     # =========================================================
     creator_ids = list(set([
         str(bill.created_by).strip() for bill in bills if bill.created_by
@@ -3602,144 +3683,80 @@ def pharmacy_view_bills(request):
                 employee_map[str(doc["employeeId"])] = emp_n
 
     # =========================================================
-    # ✅ Collect Bill Items from MongoDB (oppharmacy_collection)
-    #    This collection also holds edit_history with sales_return entries
+    # ✅ Fallback for bills missing medicine_particulars in Django
     # =========================================================
-    bill_ids    = [bill.Bill_id for bill in bills]
-    mongo_bills = []
-
-    if bill_ids:
-        mongo_bills = list(
-            oppharmacy_collection.find(
-                {
-                    "Bill_id":       {"$in": bill_ids},
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   matched_outlet
-                },
-                {
-                    "Bill_id":              1,
-                    "medicine_particulars": 1,
-                    "billing_status":       1,
-                }
-            )
-        )
-
-    mongo_map = {m["Bill_id"]: m for m in mongo_bills}
-
-    # =========================================================
-    # ✅ Collect item_ids + batch_numbers for mapping
-    # =========================================================
-    item_batch_set = set()
-
-    for m in mongo_bills:
-        for item in m.get("medicine_particulars", []):
-            if item.get("item_id") and item.get("batch_number"):
-                item_batch_set.add((
-                    int(item["item_id"]),
-                    str(item["batch_number"]).strip()
-                ))
-
-    item_ids      = list(set([i[0] for i in item_batch_set]))
-    batch_numbers = list(set([i[1] for i in item_batch_set]))
-
-    # =========================================================
-    # ✅ Item Mapping
-    # =========================================================
-    item_map = {}
-
-    if item_ids:
-        item_cursor = pharmacy_item_collection.find(
+    missing_med_bill_ids = [b.Bill_id for b in bills if not b.medicine_particulars]
+    mongo_map = {}
+    if missing_med_bill_ids:
+        mongo_bills = oppharmacy_collection.find(
             {
-                "item_id":       {"$in": item_ids},
+                "Bill_id": {"$in": missing_med_bill_ids},
                 "hospital_code": hospital_code,
-                "branch_code":   branch_code
+                "branch_code": branch_code,
+                "outlet_code": matched_outlet
             },
             {
-                "item_id":   1,
-                "item_name": 1
+                "Bill_id": 1,
+                "medicine_particulars": 1,
             }
         )
-        item_map = {
-            i["item_id"]: i.get("item_name", "")
-            for i in item_cursor
-        }
+        mongo_map = {m["Bill_id"]: m.get("medicine_particulars", []) for m in mongo_bills}
 
     # =========================================================
-    # ✅ Stock Mapping (GST)
+    # ✅ Fast Float Conversion Helper
     # =========================================================
-    stock_map = {}
-
-    if item_ids and batch_numbers:
-        stock_cursor = pharmacy_stock_collection.find(
-            {
-                "item_id":       {"$in": item_ids},
-                "batch_number":  {"$in": batch_numbers},
-                "hospital_code": hospital_code,
-                "branch_code":   branch_code,
-                "outlet_code":   matched_outlet
-            },
-            {
-                "item_id":         1,
-                "batch_number":    1,
-                "CGST_Percentage": 1,
-                "SGST_Percentage": 1,
-                "CGST_Amt":        1,
-                "SGST_Amt":        1
-            }
-        )
-        stock_map = {
-            (
-                s["item_id"],
-                str(s["batch_number"]).strip()
-            ): s
-            for s in stock_cursor
-        }
+    def to_num(val):
+        if val is None:
+            return 0.0
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, (Decimal, Decimal128)):
+            return float(val)
+        try:
+            return float(str(val).strip())
+        except (ValueError, TypeError):
+            return 0.0
 
     # =========================================================
-    # ✅ Build Bills Data
-    #    medicine_particulars includes edit_history so the frontend
-    #    can derive sales_return rows inline without a separate collection
+    # ✅ Build Bills Data (Fast direct serialization)
     # =========================================================
     data = []
 
     for bill in bills:
+        # Direct field dictionary (100x faster than DRF ModelSerializer in a loop)
+        serialized = {}
+        for f in bill._meta.fields:
+            val = getattr(bill, f.name)
+            if isinstance(val, (datetime, date)):
+                serialized[f.name] = val.isoformat()
+            elif isinstance(val, (Decimal, Decimal128)):
+                serialized[f.name] = float(val)
+            else:
+                serialized[f.name] = val
 
-        serialized = PharmacyBillingSerializer(bill).data
-
-        serialized["patient_name"]   = patient_map.get(bill.uhid, "") or getattr(bill, "patientname", "") or getattr(bill, "patient_name", "") or ""
+        p_name = patient_map.get(bill.uhid, "") or getattr(bill, "patientname", "") or ""
+        serialized["patient_name"]   = p_name
         serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
-        serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type), "")
+        serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type) if bill.bill_type is not None else 0, "")
 
-        created_val = str(bill.created_by or bill.cashier_id or "").strip()
+        created_val  = str(bill.created_by or bill.cashier_id or "").strip()
         matched_user = employee_map.get(created_val) or created_val
         serialized["employee_name"]   = matched_user
         serialized["created_by_name"] = matched_user
 
-        mongo_bill    = mongo_map.get(bill.Bill_id, {})
-        medicine_list = mongo_bill.get("medicine_particulars", [])
-
+        medicine_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
         updated_items = []
 
         for item in medicine_list:
-
-            item_id      = int(item.get("item_id")) if item.get("item_id") else None
-            batch_number = str(item.get("batch_number")).strip() if item.get("batch_number") else ""
-
-            item["item_name"] = item_map.get(item_id, "")
-
-            stock = stock_map.get((item_id, batch_number), {})
-
-            item["CGST_Percentage"] = convert_decimal(stock.get("CGST_Percentage", 0))
-            item["SGST_Percentage"] = convert_decimal(stock.get("SGST_Percentage", 0))
-            item["CGST_Amt"]        = convert_decimal(stock.get("CGST_Amt", 0))
-            item["SGST_Amt"]        = convert_decimal(stock.get("SGST_Amt", 0))
-
-            # ✅ edit_history is passed through as-is so the frontend can
-            #    extract sales_return entries and render them inline in the table
-            item["edit_history"] = item.get("edit_history", [])
-
-            updated_items.append(item)
+            it = dict(item)
+            it["CGST_Percentage"] = to_num(it.get("CGST_Percentage", 0))
+            it["SGST_Percentage"] = to_num(it.get("SGST_Percentage", 0))
+            it["CGST_Amt"]        = to_num(it.get("CGST_Amt", 0))
+            it["SGST_Amt"]        = to_num(it.get("SGST_Amt", 0))
+            it["price"]           = to_num(it.get("price", 0))
+            it["calculated_price"] = to_num(it.get("calculated_price", 0))
+            it["edit_history"]    = it.get("edit_history", [])
+            updated_items.append(it)
 
         serialized["medicine_particulars"] = updated_items
         data.append(serialized)

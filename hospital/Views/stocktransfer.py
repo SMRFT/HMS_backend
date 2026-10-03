@@ -67,6 +67,13 @@ def _int(value, default=0):
 
 # ─── Financial year + ref-number ─────────────────────────────────────────────
 
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from pymongo import ASCENDING, DESCENDING
+from django.db.models import Q
+
+
+# ─── Financial year + ref-number ─────────────────────────────────────────────
+
 def _current_fin_year():
     today = datetime.today()
     from_yr = today.year if today.month >= 4 else today.year - 1
@@ -79,16 +86,19 @@ def _next_transfer_ref_number():
     financial year.  Format: YYZZ/000001
     """
     prefix = f"{_current_fin_year()}/"
+    client, hms_db = get_hms_db()
+    top_doc = list(hms_db["hospital_stocktransfer"].find(
+        {"transfer_ref_number": {"$regex": f"^{prefix}"}},
+        {"transfer_ref_number": 1}
+    ).sort("transfer_ref_number", DESCENDING).limit(1))
     max_seq = 0
-    for row in StockTransfer.objects.all():
-        ref = str(getattr(row, "transfer_ref_number", "")).strip()
-        if ref.startswith(prefix):
-            try:
-                seq = int(ref.split("/")[-1])
-                if seq > max_seq:
-                    max_seq = seq
-            except (ValueError, IndexError):
-                pass
+    if top_doc:
+        try:
+            seq = int(str(top_doc[0].get("transfer_ref_number", "")).split("/")[-1])
+            if seq > max_seq:
+                max_seq = seq
+        except (ValueError, IndexError):
+            pass
     return f"{prefix}{str(max_seq + 1).zfill(6)}"
 
 
@@ -104,14 +114,12 @@ def get_active_stock_outlets(request):
     Drug Purchase is NOT in the DB — it is represented by outlet_code="" on frontend.
     """
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client.HMS
-        collection = db.hospital_outlets
-        outlets = list(collection.find(
+        client, hms_db = get_hms_db()
+        outlets = list(hms_db["hospital_outlets"].find(
             {"is_stock_outlet": True, "is_active": True},
             {"_id": 0}
         ))
-        return Response({"success": True, "data": outlets})
+        return Response({"success": True, "data": clean_docs(outlets)})
     except Exception as e:
         return Response({"success": False, "error": str(e)}, status=500)
 
@@ -121,14 +129,6 @@ def get_active_stock_outlets(request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_transfer_items(raw_items):
-    """
-    Handles:
-    1. Proper Python list
-    2. Dict
-    3. JSON string
-    4. Djongo OrderedDict string:
-       "[OrderedDict([('stock_id', 26), ('item_id', 1)])]"
-    """
     if not raw_items:
         return []
 
@@ -140,8 +140,6 @@ def parse_transfer_items(raw_items):
 
     if isinstance(raw_items, str):
         raw_items = raw_items.strip()
-
-        # Try JSON first
         try:
             parsed = json.loads(raw_items)
             if isinstance(parsed, list):
@@ -151,7 +149,6 @@ def parse_transfer_items(raw_items):
         except Exception:
             pass
 
-        # Handle OrderedDict string
         try:
             from collections import OrderedDict
             parsed = eval(raw_items, {"OrderedDict": OrderedDict})
@@ -174,38 +171,28 @@ def parse_transfer_items(raw_items):
 
 
 def enrich_items_with_medicine_name(items, hospital_code, branch_code):
-    """
-    Enriches each item dict with item_name from PharmacyItem,
-    and also adds expiry_date and Selling_Price from PharmacyStock.
-    Uses transferred_out_quantity (backend field) falling back to transfer_quantity (frontend field).
-    """
     if not items:
         return []
 
-    # Build item_id -> item_name map
-    pharmacy_items_qs = PharmacyItem.objects.filter(
-        hospital_code=hospital_code,
-        branch_code=branch_code
-    )
-    item_map = {int(p.item_id): p.item_name for p in pharmacy_items_qs}
+    client, hms_db = get_hms_db()
 
-    # Build stock_id -> stock info map
-    pharmacy_stocks_qs = PharmacyStock.objects.filter(
-        hospital_code=hospital_code,
-        branch_code=branch_code
-    )
+    item_ids = list({_int(it.get("item_id")) for it in items if it.get("item_id") is not None})
+    stock_ids = list({_int(it.get("stock_id")) for it in items if it.get("stock_id") is not None})
+
+    item_map = {}
+    if item_ids:
+        for p in hms_db["hospital_pharmacyitem"].find({"item_id": {"$in": item_ids}}, {"item_id": 1, "item_name": 1}):
+            item_map[int(p.get("item_id"))] = p.get("item_name", "")
+
     stock_map = {}
-    for s in pharmacy_stocks_qs:
-        sid = _int(getattr(s, "stock_id", 0))
-        stock_map[sid] = {
-            "expiry_date": getattr(s, "expiry_date", None),
-            "selling_price": float(_dec(
-                getattr(s, "Selling_Price", None) or
-                getattr(s, "selling_price", None) or
-                getattr(s, "mrp", 0)
-            )),
-            "batch_number": str(getattr(s, "batch_number", "") or ""),
-        }
+    if stock_ids:
+        for s in hms_db["hospital_pharmacystock"].find({"stock_id": {"$in": stock_ids}}, {"stock_id": 1, "expiry_date": 1, "Selling_Price": 1, "selling_price": 1, "mrp": 1, "batch_number": 1}):
+            sid = _int(s.get("stock_id"))
+            stock_map[sid] = {
+                "expiry_date": s.get("expiry_date"),
+                "selling_price": float(_dec(s.get("Selling_Price") or s.get("selling_price") or s.get("mrp") or 0)),
+                "batch_number": str(s.get("batch_number", "") or ""),
+            }
 
     enriched = []
     for item in items:
@@ -213,9 +200,7 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
             item = dict(item)
         item_id = _int(item.get("item_id", 0))
         stock_id = _int(item.get("stock_id", 0))
-
         qty = _int(item.get("transferred_out_quantity", item.get("transfer_quantity", 0)))
-
         stock_info = stock_map.get(stock_id, {})
 
         enriched.append({
@@ -231,6 +216,17 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
     return enriched
 
 
+def _enrich_transfers_batch(transfer_list: list, hospital_code: str, branch_code: str) -> list:
+    if not transfer_list:
+        return transfer_list
+    for row in transfer_list:
+        raw_items = row.get("items", [])
+        parsed_items = parse_transfer_items(raw_items)
+        row["items"] = enrich_items_with_medicine_name(parsed_items, hospital_code, branch_code)
+        row["from_outlet"] = row.get("outlet_code", "")
+    return transfer_list
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PHARMACY STOCK VIEW
 # GET params: item_id, outlet_code, search (item_name prefix)
@@ -242,16 +238,14 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
 def pharmacy_stock_view(request, pk=None):
 
     if request.method == "GET":
-
         if pk:
             try:
-                stock = PharmacyStock.objects.get(stock_id=pk)
+                stock = PharmacyStock.objects.get(stock_id=_int(pk))
+                return Response(PharmacyStockSerializer(stock).data)
             except PharmacyStock.DoesNotExist:
                 return Response({"error": "Stock record not found"}, status=404)
-            return Response(PharmacyStockSerializer(stock).data)
 
         try:
-            # ── Read auth context from headers ────────────────────────────
             hospital_code = (
                 request.data.get("auth-hospital-code") or
                 request.headers.get("auth-hospital-code") or "system"
@@ -264,87 +258,55 @@ def pharmacy_stock_view(request, pk=None):
             grn_number        = request.query_params.get("grn_number")
             item_id           = request.query_params.get("item_id")
             outlet_code_param = request.query_params.get("outlet_code", None)
-            search            = request.query_params.get("search", "").strip().lower()
+            search            = request.query_params.get("search", "").strip()
 
-            # ── Search: resolve matching item_ids ─────────────────────────
-            matching_item_ids = None
+            filter_q = {}
+            if hospital_code and hospital_code != "system":
+                filter_q["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                filter_q["branch_code"] = branch_code
+
+            if grn_number:
+                filter_q["grn_number"] = grn_number
+            if item_id:
+                filter_q["item_id"] = _int(item_id)
+
+            if outlet_code_param is not None:
+                if outlet_code_param in ("", "None", "null", "system"):
+                    filter_q["$or"] = [{"outlet_code": ""}, {"outlet_code": None}]
+                else:
+                    filter_q["outlet_code"] = outlet_code_param
+
+            client, hms_db = get_hms_db()
             if search:
-                try:
-                    all_items = list(PharmacyItem.objects.all())
-                except Exception as e:
-                    logger.error(f"[pharmacy_stock_view] PharmacyItem query failed: {e}")
-                    return Response({"error": "Failed to query items"}, status=500)
+                matching_ids = [
+                    d["item_id"] for d in hms_db["hospital_pharmacyitem"].find(
+                        {"item_name": {"$regex": re.escape(search), "$options": "i"}},
+                        {"item_id": 1}
+                    )
+                ]
+                if not matching_ids:
+                    return Response({
+                        "success": True, "count": 0, "total_records": 0, "total_pages": 1,
+                        "current_page": 1, "page_size": 10, "has_next": False, "has_previous": False,
+                        "data": [], "results": []
+                    })
+                filter_q["item_id"] = {"$in": matching_ids}
 
-                matching_item_ids = {
-                    str(i.item_id)
-                    for i in all_items
-                    if search in str(getattr(i, "item_name", "") or "").lower()
-                }
-                if not matching_item_ids:
-                    return Response([])
+            # Enrich helper
+            def _enrich_stocks(stock_docs):
+                if not stock_docs:
+                    return stock_docs
+                iids = list({s.get("item_id") for s in stock_docs if s.get("item_id") is not None})
+                imap = {}
+                if iids:
+                    for itm in hms_db["hospital_pharmacyitem"].find({"item_id": {"$in": iids}}, {"item_id": 1, "item_name": 1}):
+                        imap[itm.get("item_id")] = itm.get("item_name", "")
 
-            # ── Fetch stocks ──────────────────────────────────────────────
-            try:
-                all_stocks = list(PharmacyStock.objects.all().order_by("-stock_id"))
-            except Exception as e:
-                logger.error(f"[pharmacy_stock_view] PharmacyStock query failed: {e}")
-                return Response({"error": "Failed to query stock"}, status=500)
-
-            # ── Filter ────────────────────────────────────────────────────
-            results = []
-            for s in all_stocks:
-                try:
-                    if hospital_code and str(getattr(s, "hospital_code", "") or "") != str(hospital_code):
-                        continue
-                    if branch_code and str(getattr(s, "branch_code", "") or "") != str(branch_code):
-                        continue
-                    if grn_number and str(getattr(s, "grn_number", "") or "") != str(grn_number):
-                        continue
-                    if item_id and str(getattr(s, "item_id", "") or "") != str(item_id):
-                        continue
-
-                    if outlet_code_param is not None:
-                        row_outlet = str(getattr(s, "outlet_code", "") or "")
-                        if outlet_code_param == "":
-                            if row_outlet != "":
-                                continue
-                        else:
-                            if row_outlet != outlet_code_param:
-                                continue
-
-                    if matching_item_ids is not None:
-                        if str(getattr(s, "item_id", "") or "") not in matching_item_ids:
-                            continue
-
-                    results.append(s)
-
-                except Exception as e:
-                    logger.warning(f"[pharmacy_stock_view] Skipping stock record due to error: {e}")
-                    continue
-
-            # ── Build item_name lookup ────────────────────────────────────
-            try:
-                all_items_map = {
-                    str(itm.item_id): getattr(itm, "item_name", "") or ""
-                    for itm in PharmacyItem.objects.all()
-                }
-            except Exception as e:
-                logger.error(f"[pharmacy_stock_view] item_name lookup failed: {e}")
-                all_items_map = {}
-
-            # ── Serialize ─────────────────────────────────────────────────
-            try:
-                serialized = PharmacyStockSerializer(results, many=True).data
-            except Exception as e:
-                logger.error(f"[pharmacy_stock_view] Serialization failed: {e}", exc_info=True)
-                return Response({"error": f"Serialization error: {str(e)}"}, status=500)
-
-            # ── Enrich rows ───────────────────────────────────────────────
-            enriched = []
-            for idx, row in enumerate(serialized):
-                try:
-                    iid = str(row.get("item_id", "") or "")
-                    row["item_name"]                = all_items_map.get(iid, f"Item #{iid}")
+                enriched = []
+                for row in stock_docs:
+                    iid = row.get("item_id")
+                    row["item_name"]                = imap.get(iid, f"Item #{iid}")
                     row["mrp"]                      = str(_dec(row.get("mrp", 0)))
                     row["Selling_Price"]            = str(_dec(
                         row.get("Selling_Price") or row.get("selling_price") or row.get("mrp") or 0
@@ -368,11 +330,15 @@ def pharmacy_stock_view(request, pk=None):
                         + row["sales_return_quantity"]
                     )
                     enriched.append(row)
-                except Exception as e:
-                    logger.warning(f"[pharmacy_stock_view] Skipping row {idx} during enrichment: {e}")
-                    continue
+                return enriched
 
-            return Response(enriched)
+            return Response(paginate_mongo_query(
+                "hospital_pharmacystock",
+                filter_q,
+                sort=[("stock_id", DESCENDING)],
+                request=request,
+                enrich_fn=_enrich_stocks
+            ))
 
         except Exception as e:
             logger.error(f"[pharmacy_stock_view] Unhandled error: {e}", exc_info=True)
@@ -394,13 +360,13 @@ def stock_transfer_view(request, pk=None):
     hospital_code = (
         request_data.get("auth-hospital-code")
         or request.headers.get("auth-hospital-code")
-        or None
+        or "system"
     )
     branch_code = (
         request_data.get("auth-branch-code")
         or request.headers.get("auth-branch-code")
         or request.headers.get("Branch-Code")
-        or None
+        or "system"
     )
     raw_outlet = (
         request_data.get("auth-outlet-code")
@@ -417,99 +383,68 @@ def stock_transfer_view(request, pk=None):
         or "system"
     )
 
-    # Determine if user is Drug Purchase context (no outlet)
     is_drug_purchase = (outlet_code == "")
 
     # ─────────────────────────────────────────────────────────────────────────
     # GET
     # ─────────────────────────────────────────────────────────────────────────
     if request.method == "GET":
-
         # ── SINGLE RECORD ─────────────────────────────────────────────────────
         if pk:
             try:
-                obj = StockTransfer.objects.get(transfer_ref_number=pk)
+                st = StockTransfer.objects.get(
+                    transfer_ref_number=pk,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+                data = StockTransferSerializer(st).data
+                raw_items = data.get("items", [])
+                parsed_items = parse_transfer_items(raw_items)
+                data["items"] = enrich_items_with_medicine_name(parsed_items, hospital_code, branch_code)
+                data["from_outlet"] = data.get("outlet_code", "")
+                return Response({"success": True, "data": data})
             except StockTransfer.DoesNotExist:
                 return Response({"success": False, "error": "Transfer not found"}, status=404)
 
-            if (
-                str(getattr(obj, "hospital_code", "")) != str(hospital_code)
-                or str(getattr(obj, "branch_code", "")) != str(branch_code)
-            ):
-                return Response({"success": False, "error": "Transfer not found"}, status=404)
-
-            data = StockTransferSerializer(obj).data
-            raw_items = getattr(obj, "items", [])
-            parsed_items = parse_transfer_items(raw_items)
-            data["items"] = enrich_items_with_medicine_name(parsed_items, hospital_code, branch_code)
-            data["from_outlet"] = data.get("outlet_code", "")
-
-            return Response({"success": True, "data": data})
-
         # ── LIST RECORDS ──────────────────────────────────────────────────────
-        from_date_f = request.GET.get("from_date", "")
-        to_date_f   = request.GET.get("to_date", "")
-        # Optional: filter by specific ref number
-        ref_number  = request.GET.get("transfer_ref_number", "")
+        filter_q = {}
+        if hospital_code and hospital_code != "system":
+            filter_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            filter_q["branch_code"] = branch_code
 
-        results = []
+        ref_number = request.GET.get("transfer_ref_number", "").strip()
+        if ref_number:
+            filter_q["transfer_ref_number"] = ref_number
 
-        for row in StockTransfer.objects.all():
+        if is_drug_purchase:
+            filter_q["$or"] = [{"to_outlet": ""}, {"to_outlet": None}]
+        else:
+            if outlet_code:
+                filter_q["to_outlet"] = outlet_code
 
-            # Hospital + branch scope
-            if str(getattr(row, "hospital_code", "")) != str(hospital_code):
-                continue
-            if str(getattr(row, "branch_code", "")) != str(branch_code):
-                continue
+        search = request.GET.get("search", "").strip()
+        if search:
+            reg = {"$regex": re.escape(search), "$options": "i"}
+            filter_q["$or"] = [
+                {"transfer_ref_number": reg},
+                {"is_verified": reg},
+                {"remarks": reg},
+                {"outlet_code": reg}
+            ]
 
-            # Ref number filter (for print slip fetch)
-            if ref_number:
-                if str(getattr(row, "transfer_ref_number", "")) != ref_number:
-                    continue
+        filter_q = apply_date_filter(filter_q, request, "created_date")
 
-            # Outlet scope:
-            # Drug Purchase (outlet_code="") → sees all transfers for the hospital+branch
-            # Real outlet → sees only transfers involving that outlet (from or to)
-            row_to = str(getattr(row, "to_outlet", "") or "")
-            if is_drug_purchase:
-                if row_to != "":
-                    continue
-            else:
-                if row_to != outlet_code:
-                    continue
+        def _enrich_page(data_list):
+            return _enrich_transfers_batch(data_list, hospital_code, branch_code)
 
-            # Date range filter
-            if from_date_f or to_date_f:
-                created = getattr(row, "created_date", None)
-                if created:
-                    created_str = (
-                        created.strftime("%Y-%m-%d")
-                        if hasattr(created, "strftime")
-                        else str(created)[:10]
-                    )
-                    if from_date_f and created_str < from_date_f:
-                        continue
-                    if to_date_f and created_str > to_date_f:
-                        continue
-
-            results.append(row)
-
-        # Newest first
-        results.sort(
-            key=lambda x: getattr(x, "created_date", timezone.now()),
-            reverse=True
-        )
-
-        rows = StockTransferSerializer(results, many=True).data
-
-        for idx, row in enumerate(rows):
-            original_obj = results[idx]
-            raw_items = getattr(original_obj, "items", [])
-            parsed_items = parse_transfer_items(raw_items)
-            row["items"] = enrich_items_with_medicine_name(parsed_items, hospital_code, branch_code)
-            row["from_outlet"] = row.get("outlet_code", "")
-
-        return Response({"success": True, "count": len(rows), "data": rows})
+        return Response(paginate_mongo_query(
+            "hospital_stocktransfer",
+            filter_q,
+            sort=[("created_date", DESCENDING)],
+            request=request,
+            enrich_fn=_enrich_page
+        ))
 
     # ─────────────────────────────────────────────────────────────────────────
     # POST — Create Draft Transfer
