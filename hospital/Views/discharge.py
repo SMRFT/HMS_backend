@@ -147,15 +147,56 @@ def _parse_dt(val):
 # Raw PyMongo — InvestBilling ONLY
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# High Performance MongoDB Pool & Indexing
+# ─────────────────────────────────────────────────────────────────────────────
+from .mongo_utils import get_hms_db
+
+_discharge_indexes_ensured = False
+
+def ensure_discharge_indexes():
+    global _discharge_indexes_ensured
+    if _discharge_indexes_ensured:
+        return
+    try:
+        _, db = get_hms_db()
+        def _idx(coll, keys):
+            try:
+                db[coll].create_index(keys, background=True)
+            except Exception:
+                pass
+
+        _idx("hospital_dischargebilling", [("status", 1), ("bill_date", -1)])
+        _idx("hospital_dischargebilling", [("discharge_id", 1)])
+        _idx("hospital_dischargebilling", [("ip_number", 1), ("status", 1)])
+        _idx("hospital_dischargebilling", [("uhid", 1)])
+        _idx("hospital_dischargebilling", [("bill_no", 1)])
+        _idx("hospital_dischargebilling", [("estimate_number", 1)])
+        _idx("hospital_dischargebilling", [("created_date", -1)])
+
+        _idx("hospital_admission", [("ipNumber", 1)])
+        _idx("hospital_admission", [("uhid", 1), ("is_admitted", 1)])
+        _idx("hospital_patient", [("uhid", 1)])
+        _idx("hospital_investbilling", [("ipNumber", 1), ("paymentMethod", 1), ("paymentStatus", 1)])
+        _idx("hospital_pharmacybilling", [("inpatient_number", 1), ("is_deleted", 1)])
+        _idx("hospital_pharmacybilling", [("ipNumber", 1)])
+        _idx("hospital_salesreturn", [("inpatient_number", 1)])
+        _idx("hospital_surgeryschedule", [("ip_number", 1), ("status", 1)])
+        _idx("hospital_patientdietorder", [("inpatient_number", 1), ("status", 1)])
+        _idx("hospital_laundrywardrequest", [("ipNumber", 1), ("status", 1)])
+        _idx("hospital_room", [("room_number", 1)])
+        _discharge_indexes_ensured = True
+    except Exception:
+        pass
+
+
 def _invest_col():
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    db = client.HMS
-    collection = db.hospital_investbilling
-    return collection
+    _, db = get_hms_db()
+    return db["hospital_investbilling"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Number generators  (Djongo-safe: fetch ALL, filter in Python)
+# High-Speed Number generators (Native PyMongo index-sorted queries)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _financial_year():
@@ -167,43 +208,39 @@ def _financial_year():
 
 
 def generate_estimate_number():
-    """EST/YYMM/000001 — resets each calendar month."""
+    """EST/YYMM/000001 — resets each calendar month (sub-millisecond indexed query)."""
     today  = _date.today()
     prefix = f"EST/{str(today.year)[2:]}{str(today.month).zfill(2)}/"
     seq = 1
     try:
-        all_nums = DischargeBilling.objects.all().values_list("estimate_number", flat=True)
-        matching = [n for n in all_nums if n and n.startswith(prefix)]
-        if matching:
-            seqs = []
-            for n in matching:
-                try:
-                    seqs.append(int(n.split("/")[-1]))
-                except Exception:
-                    pass
-            if seqs:
-                seq = max(seqs) + 1
+        _, db = get_hms_db()
+        latest = db["hospital_dischargebilling"].find_one(
+            {"estimate_number": {"$regex": f"^{re.escape(prefix)}"}},
+            projection={"estimate_number": 1},
+            sort=[("estimate_number", -1)]
+        )
+        if latest and latest.get("estimate_number"):
+            seq_str = str(latest["estimate_number"]).split("/")[-1]
+            seq = int(seq_str) + 1
     except Exception:
         seq = 1
     return f"{prefix}{str(seq).zfill(6)}"
 
 
 def generate_bill_number():
-    """YYYY-YY/DCH/000001 — resets each financial year."""
+    """YYYY-YY/DCH/000001 — resets each financial year (sub-millisecond indexed query)."""
     prefix = f"{_financial_year()}/DCH/"
     seq = 1
     try:
-        all_nums = DischargeBilling.objects.all().values_list("bill_no", flat=True)
-        matching = [n for n in all_nums if n and n.startswith(prefix)]
-        if matching:
-            seqs = []
-            for n in matching:
-                try:
-                    seqs.append(int(n.split("/")[-1]))
-                except Exception:
-                    pass
-            if seqs:
-                seq = max(seqs) + 1
+        _, db = get_hms_db()
+        latest = db["hospital_dischargebilling"].find_one(
+            {"bill_no": {"$regex": f"^{re.escape(prefix)}"}},
+            projection={"bill_no": 1},
+            sort=[("bill_no", -1)]
+        )
+        if latest and latest.get("bill_no"):
+            seq_str = str(latest["bill_no"]).split("/")[-1]
+            seq = int(seq_str) + 1
     except Exception:
         seq = 1
     return f"{prefix}{str(seq).zfill(6)}"
@@ -216,26 +253,30 @@ def generate_bill_number():
 def _resolve_pk(discharge_id):
     """
     Return DischargeBilling or None, looked up by discharge_id.
-
-    discharge_id is an IntegerField PK — always cast to int.
-    Falls back to a full-scan string match for safety (ObjectId edge cases).
+    Uses indexed integer PK or fast Mongo lookup fallback.
     """
-    # Attempt 1: integer PK (normal path)
-    try:
-        obj = DischargeBilling.objects.get(discharge_id=int(discharge_id))
-        return obj
-    except (ValueError, TypeError):
-        pass
-    except DischargeBilling.DoesNotExist:
+    if discharge_id is None:
         return None
+    try:
+        d_id = int(discharge_id)
+        return DischargeBilling.objects.get(discharge_id=d_id)
+    except (ValueError, TypeError, DischargeBilling.DoesNotExist):
+        pass
     except Exception:
         pass
 
-    # Attempt 2: string scan fallback
     try:
-        for obj in DischargeBilling.objects.all():
-            if str(obj.discharge_id) == str(discharge_id):
-                return obj
+        _, db = get_hms_db()
+        doc = db["hospital_dischargebilling"].find_one({
+            "$or": [
+                {"discharge_id": int(discharge_id) if str(discharge_id).isdigit() else discharge_id},
+                {"discharge_id": str(discharge_id)},
+                {"id": int(discharge_id) if str(discharge_id).isdigit() else discharge_id},
+                {"id": str(discharge_id)},
+            ]
+        }, projection={"discharge_id": 1})
+        if doc and "discharge_id" in doc:
+            return DischargeBilling.objects.get(discharge_id=int(doc["discharge_id"]))
     except Exception:
         pass
     return None
@@ -296,8 +337,7 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
     if not obj_or_id:
         return
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        _, db = get_hms_db()
 
         if isinstance(obj_or_id, DischargeBilling):
             obj = obj_or_id
@@ -352,10 +392,6 @@ _DECIMAL_FIELDS = [
 
 
 def _normalise_decimals(obj):
-    """
-    Re-write every DecimalField through _to_float so Djongo never receives
-    a Decimal128 / smart-quoted string when validating on save().
-    """
     for field in _DECIMAL_FIELDS:
         if hasattr(obj, field):
             setattr(obj, field, _to_float(getattr(obj, field, None)))
@@ -372,7 +408,7 @@ def _resolve_employee_name(emp_id):
     if emp_str in _employee_name_cache:
         return _employee_name_cache[emp_str]
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client, _ = get_hms_db()
         db = client["Global"]
         profile = db["backend_diagnostics_profile"].find_one(
             {"employeeId": emp_str},
@@ -388,26 +424,179 @@ def _resolve_employee_name(emp_id):
     return emp_str
 
 
+def _batch_resolve_employees(emp_ids):
+    if not emp_ids:
+        return
+    missing = [str(e).strip() for e in emp_ids if e and str(e).strip() and str(e).strip() not in _employee_name_cache]
+    if not missing:
+        return
+    try:
+        client, _ = get_hms_db()
+        db_global = client["Global"]
+        profiles = list(db_global["backend_diagnostics_profile"].find(
+            {"employeeId": {"$in": missing}},
+            {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1}
+        ))
+        for p in profiles:
+            eid = str(p.get("employeeId", "")).strip()
+            name = p.get("employeeName") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+            if eid and name:
+                _employee_name_cache[eid] = name
+    except Exception:
+        pass
+
+
+def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
+    """
+    Ultra-fast in-memory serializer for DischargeBilling raw MongoDB document.
+    Uses pre-fetched patient_map and adm_map for zero additional database queries.
+    """
+    discharge_id = doc.get("discharge_id") or doc.get("id")
+    uhid = str(doc.get("uhid") or "").strip()
+    ip_number = str(doc.get("ip_number") or "").strip()
+
+    patient_details = {}
+    if uhid:
+        p = patient_map.get(uhid) if patient_map else None
+        if not p:
+            try:
+                _, db = get_hms_db()
+                p = db["hospital_patient"].find_one({"uhid": uhid})
+            except Exception:
+                p = None
+
+        if p:
+            addr_parts = [p.get("permanent_address"), p.get("area"), p.get("city"), p.get("state"), p.get("zipcode")]
+            full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
+
+            adm = (adm_map.get(ip_number) if adm_map else None) if ip_number else None
+            if not adm and ip_number:
+                try:
+                    _, db = get_hms_db()
+                    adm = db["hospital_admission"].find_one({"ipNumber": ip_number})
+                except Exception:
+                    adm = None
+
+            adm_dt = adm.get("admissionDateTime") if adm else None
+            if isinstance(adm_dt, _datetime):
+                adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
+            elif isinstance(adm_dt, _date):
+                adm_str = adm_dt.strftime("%d-%m-%Y")
+            elif isinstance(adm_dt, str) and adm_dt:
+                try:
+                    p_dt = _datetime.fromisoformat(adm_dt.replace("Z", "+00:00"))
+                    adm_str = p_dt.strftime("%d-%m-%Y %I:%M %p")
+                except Exception:
+                    adm_str = adm_dt
+            else:
+                adm_str = ""
+
+            current_room = ""
+            if adm:
+                rd = adm.get("room_details", [])
+                if isinstance(rd, str):
+                    try: rd = _json.loads(rd)
+                    except Exception: rd = []
+                if isinstance(rd, list) and len(rd) > 0:
+                    last_room = rd[-1]
+                    if isinstance(last_room, dict):
+                        current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
+
+            doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
+            doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+
+            patient_details = {
+                "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
+                "age":            p.get("age", ""),
+                "gender":         p.get("gender", ""),
+                "mobile":         p.get("mobilePhone", ""),
+                "mobilePhone":    p.get("mobilePhone", ""),
+                "phone":          p.get("mobilePhone", ""),
+                "address":        full_address,
+                "guardian":       p.get("spouse_name", "") or p.get("emergency_contact", "") or "",
+                "doctor":         doc_name or doc_id,
+                "doctor_id":      doc_id,
+                "admission_date": adm_str,
+                "room_no":        current_room,
+            }
+
+    created_by_val = doc.get("created_by")
+    created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
+
+    bd = doc.get("bill_date")
+    bd_str = bd.isoformat() if isinstance(bd, (_datetime, _date)) else (str(bd)[:10] if bd else None)
+
+    return {
+        "id":                discharge_id,
+        "discharge_id":      discharge_id,
+        "status":            doc.get("status"),
+        "estimate_number":   doc.get("estimate_number"),
+        "bill_no":           doc.get("bill_no"),
+        "uhid":              doc.get("uhid"),
+        "ip_number":         doc.get("ip_number"),
+        "bill_date":         bd_str,
+        "items":             _parse_items(doc.get("items")),
+        "total_amount":      _to_float(doc.get("total_amount")),
+        "advance_amount":    _to_float(doc.get("advance_amount")),
+        "sales_return":      _to_float(doc.get("sales_return")),
+        "medicines_amount":  _to_float(doc.get("medicines_amount")),
+        "taxable_amount":    _to_float(doc.get("taxable_amount")),
+        "non_tax_amount":    _to_float(doc.get("non_tax_amount")),
+        "gst_amount":        _to_float(doc.get("gst_amount")),
+        "room_tax":          _to_float(doc.get("room_tax", 0)),
+        "discount_percent":  _to_float(doc.get("discount_percent")),
+        "discount_amount":   _to_float(doc.get("discount_amount")),
+        "disc_reason":       doc.get("disc_reason") or "",
+        "net_amount":        _to_float(doc.get("net_amount")),
+        "remarks":           doc.get("remarks") or "",
+        "next_visit_date":   _safe_isoformat(doc.get("next_visit_date")),
+        "created_by":        created_by_val,
+        "created_by_name":   created_by_name,
+        "created_date":      _safe_isoformat(doc.get("created_date")),
+        "lastmodified_by":   doc.get("lastmodified_by"),
+        "lastmodified_date": _safe_isoformat(doc.get("lastmodified_date")),
+        "branch_code":       doc.get("branch_code"),
+        "outlet_code":       doc.get("outlet_code"),
+        "hospital_code":     doc.get("hospital_code"),
+        "shiftno":           doc.get("shiftno", "") or "",
+        "patient_details":   patient_details,
+    }
+
+
 def _obj_to_dict(obj):
     """Serialise a DischargeBilling instance to a JSON-safe dict."""
-    # discharge_id is the PK — always an int (set by model.save())
+    if isinstance(obj, dict):
+        return _format_raw_bill_doc(obj)
+
     discharge_id = obj.discharge_id
 
     patient_details = {}
     if obj.uhid:
         try:
-            p = Patient.objects.get(uhid=obj.uhid)
-            addr_parts = [p.permanent_address, p.area, p.city, p.state, p.zipcode]
+            _, db = get_hms_db()
+            p = db["hospital_patient"].find_one({"uhid": str(obj.uhid).strip()})
+            if not p:
+                p = Patient.objects.get(uhid=obj.uhid)
+                p = {
+                    "firstName": p.firstName, "lastName": p.lastName, "age": p.age,
+                    "gender": p.gender, "mobilePhone": p.mobilePhone,
+                    "permanent_address": p.permanent_address, "area": p.area,
+                    "city": p.city, "state": p.state, "zipcode": p.zipcode,
+                    "spouse_name": getattr(p, "spouse_name", ""),
+                    "emergency_contact": getattr(p, "emergency_contact", ""),
+                }
+
+            addr_parts = [p.get("permanent_address"), p.get("area"), p.get("city"), p.get("state"), p.get("zipcode")]
             full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
 
             adm = None
             if obj.ip_number:
                 try:
-                    adm = Admission.objects.filter(ipNumber=obj.ip_number).first()
+                    adm = db["hospital_admission"].find_one({"ipNumber": str(obj.ip_number).strip()})
                 except Exception:
                     pass
 
-            adm_dt = getattr(adm, "admissionDateTime", None) if adm else None
+            adm_dt = adm.get("admissionDateTime") if adm else None
             if isinstance(adm_dt, _datetime):
                 adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
             elif isinstance(adm_dt, _date):
@@ -418,23 +607,28 @@ def _obj_to_dict(obj):
                 adm_str = ""
 
             current_room = ""
-            if adm and adm.room_details and isinstance(adm.room_details, list):
-                last_room = adm.room_details[-1]
-                if isinstance(last_room, dict):
-                    current_room = last_room.get("roomNumber", "") or last_room.get("room_number", "")
+            if adm:
+                rd = adm.get("room_details", [])
+                if isinstance(rd, str):
+                    try: rd = _json.loads(rd)
+                    except Exception: rd = []
+                if isinstance(rd, list) and len(rd) > 0:
+                    last_room = rd[-1]
+                    if isinstance(last_room, dict):
+                        current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
 
-            doc_id = getattr(adm, "admittingDoctor", "") if adm else ""
+            doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             doc_name = _resolve_employee_name(doc_id) if doc_id else ""
 
             patient_details = {
-                "patient_name":   f"{p.firstName} {p.lastName}".strip(),
-                "age":            p.age,
-                "gender":         p.gender,
-                "mobile":         p.mobilePhone,
-                "mobilePhone":    p.mobilePhone,
-                "phone":          p.mobilePhone,
+                "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
+                "age":            p.get("age", ""),
+                "gender":         p.get("gender", ""),
+                "mobile":         p.get("mobilePhone", ""),
+                "mobilePhone":    p.get("mobilePhone", ""),
+                "phone":          p.get("mobilePhone", ""),
                 "address":        full_address,
-                "guardian":       getattr(p, "spouse_name", "") or getattr(p, "emergency_contact", "") or "",
+                "guardian":       p.get("spouse_name", "") or p.get("emergency_contact", "") or "",
                 "doctor":         doc_name or doc_id,
                 "doctor_id":      doc_id,
                 "admission_date": adm_str,
@@ -447,20 +641,15 @@ def _obj_to_dict(obj):
     created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
 
     return {
-        # Expose both "id" (frontend compat) and "discharge_id" (canonical)
         "id":                discharge_id,
         "discharge_id":      discharge_id,
-
         "status":            obj.status,
         "estimate_number":   obj.estimate_number,
         "bill_no":           obj.bill_no,
-
         "uhid":              obj.uhid,
         "ip_number":         obj.ip_number,
-
         "bill_date":         _safe_isoformat(obj.bill_date),
         "items":             _parse_items(obj.items),
-
         "total_amount":      _to_float(obj.total_amount),
         "advance_amount":    _to_float(obj.advance_amount),
         "sales_return":      _to_float(obj.sales_return),
@@ -475,7 +664,6 @@ def _obj_to_dict(obj):
         "net_amount":        _to_float(obj.net_amount),
         "remarks":           obj.remarks or "",
         "next_visit_date":   _safe_isoformat(getattr(obj, "next_visit_date", None)),
-
         "created_by":        created_by_val,
         "created_by_name":   created_by_name,
         "created_date":      _safe_isoformat(getattr(obj, "created_date", None)),
@@ -485,7 +673,6 @@ def _obj_to_dict(obj):
         "outlet_code":       getattr(obj, "outlet_code", None),
         "hospital_code":     getattr(obj, "hospital_code", None),
         "shiftno":           getattr(obj, "shiftno", "") or "",
-
         "patient_details":   patient_details,
     }
 
@@ -910,9 +1097,17 @@ def _revert_admission_discharge(ip_number):
 # GET /search-discharge-patient/?uhid=… OR ?ipNumber=…
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Search Discharge Patient
+# GET /search-discharge-patient/?uhid=… OR ?ipNumber=…
+# ─────────────────────────────────────────────────────────────────────────────
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def search_discharge_patient(request):
+    ensure_discharge_indexes()
+    client, db = get_hms_db()
+
     uhid      = request.GET.get("uhid",     "").strip()
     ip_number = request.GET.get("ipNumber", "").strip()
 
@@ -922,45 +1117,36 @@ def search_discharge_patient(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    patient   = None
-    admission = None
+    patient_doc   = None
+    admission_doc = None
 
     try:
         if uhid:
-            try:
-                patient = Patient.objects.get(uhid=uhid)
-            except Patient.DoesNotExist:
+            patient_doc = db["hospital_patient"].find_one({"uhid": uhid})
+            if not patient_doc:
                 return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            all_admissions = [a for a in Admission.objects.all() if a.uhid == uhid]
-            active_admissions = [
-                a for a in all_admissions
-                if getattr(a, "is_admitted", False) is True and not getattr(a, "is_cancelled", False)
-            ]
-            if not active_admissions:
-                return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
-
-            active_admissions.sort(
-                key=lambda a: a.admissionDateTime or _datetime.min,
-                reverse=True,
+            admission_doc = db["hospital_admission"].find_one(
+                {"uhid": uhid, "is_admitted": True, "is_cancelled": {"$ne": True}},
+                sort=[("admissionDateTime", -1)]
             )
-            admission = active_admissions[0]
+            if not admission_doc:
+                admission_doc = db["hospital_admission"].find_one(
+                    {"uhid": uhid},
+                    sort=[("admissionDateTime", -1)]
+                )
+            if not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled"):
+                return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
 
         else:
-            all_admissions = list(Admission.objects.all())
-            matched = [a for a in all_admissions if a.ipNumber == ip_number]
-            if not matched:
-                return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
-            
-            admission = matched[0]
-            if not getattr(admission, "is_admitted", False) or getattr(admission, "is_cancelled", False):
+            admission_doc = db["hospital_admission"].find_one({"ipNumber": ip_number})
+            if not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled"):
                 return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
 
-            all_patients = list(Patient.objects.all())
-            matched_p = [p for p in all_patients if p.uhid == admission.uhid]
-            if not matched_p:
+            p_uhid = admission_doc.get("uhid")
+            patient_doc = db["hospital_patient"].find_one({"uhid": p_uhid}) if p_uhid else None
+            if not patient_doc:
                 return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
-            patient = matched_p[0]
 
     except Exception as e:
         return Response(
@@ -969,9 +1155,9 @@ def search_discharge_patient(request):
         )
 
     # Verify patient discharge state: if already discharged, disallow billing again
-    ward_status = str(getattr(admission, "ward_status", "") or "").strip()
-    adm_status = str(getattr(admission, "status", "") or "").strip()
-    is_discharged = getattr(admission, "is_discharged", False)
+    ward_status = str(admission_doc.get("ward_status") or "").strip()
+    adm_status = str(admission_doc.get("status") or "").strip()
+    is_discharged = bool(admission_doc.get("is_discharged", False))
 
     if ward_status.lower() in ["discharged", "already discharged"] or adm_status.lower() == "discharged" or is_discharged is True:
         return Response(
@@ -979,18 +1165,20 @@ def search_discharge_patient(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Check if an active Billed DischargeBilling record exists for this IP number
-    existing_billed = [
-        b for b in DischargeBilling.objects.all()
-        if b.ip_number == admission.ipNumber and b.status == "Billed" and not getattr(b, "is_cancelled", False)
-    ]
+    # Check if an active Billed DischargeBilling record exists for this IP number (indexed fast query)
+    ip_num_str = str(admission_doc.get("ipNumber") or "").strip()
+    existing_billed = db["hospital_dischargebilling"].find_one({
+        "ip_number": ip_num_str,
+        "status": "Billed",
+        "is_cancelled": {"$ne": True}
+    })
     if existing_billed:
         return Response(
             {"error": "Already Discharged", "message": "Discharge bill already generated for this admission"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    adm_dt  = getattr(admission, "admissionDateTime", None) if admission else None
+    adm_dt = admission_doc.get("admissionDateTime")
     if isinstance(adm_dt, _datetime):
         adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
     elif isinstance(adm_dt, _date):
@@ -1005,7 +1193,7 @@ def search_discharge_patient(request):
         adm_str = ""
 
     # Resolve latest room / bed and room category
-    room_details = parse_json_field(getattr(admission, "room_details", [])) if admission else []
+    room_details = parse_json_field(admission_doc.get("room_details", []))
     current_room = ""
     current_bed = ""
     current_room_cat = "GENERAL WARD"
@@ -1015,7 +1203,7 @@ def search_discharge_patient(request):
             current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
             current_bed  = str(last_room.get("bedNo") or last_room.get("bedNumber") or last_room.get("bed_number") or "")
 
-    shiftings_details = parse_json_field(getattr(admission, "roomShitingDetails", [])) if admission else []
+    shiftings_details = parse_json_field(admission_doc.get("roomShitingDetails", []))
     if shiftings_details and isinstance(shiftings_details, list):
         active_shifts = [s for s in shiftings_details if isinstance(s, dict) and s.get("is_roomActive")]
         if active_shifts:
@@ -1026,7 +1214,7 @@ def search_discharge_patient(request):
     total_days = 0
     if adm_dt:
         try:
-            today    = _date.today()
+            today = _date.today()
             adm_date = adm_dt.date() if isinstance(adm_dt, _datetime) else (adm_dt if isinstance(adm_dt, _date) else _parse_dt(adm_dt).date())
             total_days = max(1, (today - adm_date).days)
         except Exception:
@@ -1036,7 +1224,7 @@ def search_discharge_patient(request):
 
     # Advance Payments calculation
     total_advance = 0.0
-    adv_payments = parse_json_field(getattr(admission, "advance_payments", [])) if admission else []
+    adv_payments = parse_json_field(admission_doc.get("advance_payments", []))
     for adv in adv_payments:
         if isinstance(adv, dict) and adv.get("is_advanceActive") and str(adv.get("status", "")).lower() != "cancelled":
             amt = _to_float(adv.get("advance_amount", 0))
@@ -1048,46 +1236,40 @@ def search_discharge_patient(request):
                         ref_amt += _to_float(r.get("refunded_amount", 0))
             total_advance += max(0.0, amt - ref_amt)
 
-    addr_parts = [getattr(patient, "permanent_address", ""), getattr(patient, "area", ""), getattr(patient, "city", ""), getattr(patient, "state", ""), getattr(patient, "zipcode", "")]
+    addr_parts = [patient_doc.get("permanent_address", ""), patient_doc.get("area", ""), patient_doc.get("city", ""), patient_doc.get("state", ""), patient_doc.get("zipcode", "")]
     full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
 
-    doc_id = getattr(admission, "admittingDoctor", "") if admission else ""
+    doc_id = str(admission_doc.get("admittingDoctor") or "")
     doc_name = _resolve_employee_name(doc_id) if doc_id else ""
 
     # Resolve full insurance company name
-    raw_company = getattr(admission, "company_code", "") or getattr(patient, "company_code", "") or getattr(admission, "insurance_company", "") or getattr(patient, "company_name", "") or ""
+    raw_company = admission_doc.get("company_code") or patient_doc.get("company_code") or admission_doc.get("insurance_company") or patient_doc.get("company_name") or ""
     company_name = ""
     if raw_company:
         try:
-            from ..models import InsuranceProvider
-            prov = InsuranceProvider.objects.filter(company_code=str(raw_company)).first()
-            if prov and prov.company_name:
-                company_name = prov.company_name
+            ins_doc = db["hospital_insuranceprovider"].find_one({
+                "$or": [
+                    {"company_code": str(raw_company)},
+                    {"company_name": str(raw_company)},
+                ]
+            })
+            if ins_doc and ins_doc.get("company_name"):
+                company_name = ins_doc.get("company_name")
             else:
-                prov2 = InsuranceProvider.objects.filter(company_name__iexact=str(raw_company)).first()
-                if prov2 and prov2.company_name:
-                    company_name = prov2.company_name
-                else:
-                    client_temp = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-                    db_temp = client_temp[os.getenv("HMS_DB_NAME", "HMS")]
-                    ins_doc = db_temp["hospital_insuranceprovider"].find_one({"company_code": str(raw_company)})
-                    if ins_doc and ins_doc.get("company_name"):
-                        company_name = ins_doc.get("company_name")
-                    else:
-                        company_name = str(raw_company)
+                company_name = str(raw_company)
         except Exception:
             company_name = str(raw_company)
 
     patient_info = {
-        "uhid":                 patient.uhid,
-        "patient_name":         f"{patient.firstName} {patient.lastName}".strip(),
-        "age":                  patient.age,
-        "gender":               patient.gender,
-        "mobile":               patient.mobilePhone,
-        "ip_number":            admission.ipNumber if admission else None,
-        "ipNumber":             admission.ipNumber if admission else None,
+        "uhid":                 patient_doc.get("uhid"),
+        "patient_name":         f"{patient_doc.get('firstName', '')} {patient_doc.get('lastName', '')}".strip(),
+        "age":                  patient_doc.get("age"),
+        "gender":               patient_doc.get("gender"),
+        "mobile":               patient_doc.get("mobilePhone"),
+        "ip_number":            admission_doc.get("ipNumber"),
+        "ipNumber":             admission_doc.get("ipNumber"),
         "admission_date":       adm_str,
-        "patient_type":         getattr(patient, "customer_type", "") or getattr(admission, "patient_type", ""),
+        "patient_type":         patient_doc.get("customer_type") or admission_doc.get("patient_type", ""),
         "company":              company_name,
         "company_code":         raw_company,
         "room_no":              current_room,
@@ -1098,20 +1280,17 @@ def search_discharge_patient(request):
         "doctor":               doc_name or doc_id,
         "doctor_id":            doc_id,
         "address":              full_address,
-        "guardian":             getattr(patient, "spouse_name", "") or getattr(patient, "emergency_contact", "") or "",
+        "guardian":             patient_doc.get("spouse_name") or patient_doc.get("emergency_contact") or "",
         "ward_status":          ward_status,
         "is_ready_for_billing": ward_status == "Sent for billing",
     }
 
-    effective_ip   = ip_number or (admission.ipNumber if admission else None)
-    effective_uhid = patient.uhid if patient else (uhid or (admission.uhid if admission else None))
+    effective_ip   = ip_number or admission_doc.get("ipNumber")
+    effective_uhid = patient_doc.get("uhid") or uhid
 
     invest_items = []
 
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client[os.getenv("HMS_DB_NAME", "HMS")]
-
         # ── 0. Room Charges (Services & Room Kits) ───────────────────────────
         try:
             raw_movements = []
@@ -1147,7 +1326,6 @@ def search_discharge_patient(request):
 
             raw_movements.sort(key=lambda x: x["start_dt"] or adm_start_dt)
 
-            # Merge contiguous movements in the same room (e.g. bed shifting inside the same room)
             room_stays = []
             for mov in raw_movements:
                 if room_stays and room_stays[-1]["room_no"] == mov["room_no"]:
@@ -1159,7 +1337,6 @@ def search_discharge_patient(request):
             now_dt = _datetime.now()
             accumulated_days = 0
 
-            # If no room stays were in room_details or shifts, but current_room exists:
             if not room_stays and current_room:
                 room_stays.append({
                     "room_no": current_room,
@@ -1168,26 +1345,28 @@ def search_discharge_patient(request):
                     "end_dt": now_dt,
                 })
 
+            # Batch pre-fetch all room documents in ONE query!
+            room_numbers_set = list({s["room_no"] for s in room_stays if s.get("room_no")})
+            room_docs_cursor = list(db["hospital_room"].find({"room_number": {"$in": room_numbers_set}})) if room_numbers_set else []
+            room_doc_map = {str(rd.get("room_number")).strip(): rd for rd in room_docs_cursor if rd.get("room_number")}
+
             for stay in room_stays:
                 r_no = stay["room_no"]
                 s_dt = stay["start_dt"] or adm_start_dt
                 e_dt = stay["end_dt"] or now_dt
 
-                # Stay calculation: calculate days patient stayed; minimum 1 day even if vacated within an hour
                 days_diff = (e_dt.date() - s_dt.date()).days
                 stay_days = max(1, days_diff)
                 accumulated_days += stay_days
 
-                room_doc = db["hospital_room"].find_one({"room_number": r_no})
-                if not room_doc:
-                    room_doc = db["hospital_room"].find_one({"room_number": str(r_no)})
+                room_doc = room_doc_map.get(str(r_no).strip())
 
                 if room_doc:
                     room_cat = room_doc.get("room_category", "")
                     if room_cat:
                         patient_info["room_category"] = room_cat
 
-                    # A. Room Services (e.g. ROOM RENT, NURSING CHARGES)
+                    # A. Room Services
                     services = room_doc.get("services", [])
                     if isinstance(services, str):
                         try:
@@ -1218,7 +1397,7 @@ def search_discharge_patient(request):
                                 "source":         "hospital_room_services",
                             })
 
-                    # B. Room Kits (e.g. Bed Sheet, etc.)
+                    # B. Room Kits
                     kits = room_doc.get("room_kits", [])
                     if isinstance(kits, str):
                         try:
@@ -1273,7 +1452,6 @@ def search_discharge_patient(request):
             return match_clause
 
         # ── 1. hospital_investbilling ─────────────────────────────────────────
-        # get if ipNumber exists and paymentMethod: "Credit", paymentStatus: "Pending"
         inv_q = get_query(
             ["ipNumber", "inpatient_number", "ip_number"],
             {"paymentMethod": "Credit", "paymentStatus": "Pending", "is_active": {"$ne": False}}
@@ -1312,7 +1490,6 @@ def search_discharge_patient(request):
                     })
 
         # ── 2. hospital_patientdietorder ──────────────────────────────────────
-        # get if ipNumber exists and status: "Delivered"
         diet_q = get_query(
             ["inpatient_number", "ipNumber", "ip_number"],
             {"status": "Delivered"}
@@ -1345,7 +1522,6 @@ def search_discharge_patient(request):
                 })
 
         # ── 3. hospital_laundrywardrequest ────────────────────────────────────
-        # get if ipNumber exists and status: "Completed"
         laundry_q = get_query(
             ["ipNumber", "inpatient_number", "ip_number"],
             {"status": "Completed"}
@@ -1372,14 +1548,15 @@ def search_discharge_patient(request):
                 })
 
         # ── 4. hospital_pharmacybilling ────────────────────────────────────────
-        # Calculate Medicine Charges from pharmacy bills for this IP stay
         pharm_q = get_query(
             ["inpatient_number", "ipNumber", "ip_number"],
             {"is_deleted": {"$ne": True}}
         )
         total_pharm_amt = 0.0
         if pharm_q:
-            pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q))
+            pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
+                "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1, "medicine_particulars": 1
+            }))
             for doc in pharm_docs:
                 tot_amt = _to_float(
                     doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
@@ -1399,14 +1576,15 @@ def search_discharge_patient(request):
         patient_info["medicines_amount"] = total_pharm_amt
 
         # ── 5. hospital_salesreturn ───────────────────────────────────────────
-        # Calculate Sales Return amount from pharmacy returns for this IP stay
         sr_q = get_query(
             ["inpatient_number", "ipNumber", "ip_number"],
             {"is_deleted": {"$ne": True}}
         )
         total_sales_return = 0.0
         if sr_q:
-            sr_docs = list(db["hospital_salesreturn"].find(sr_q))
+            sr_docs = list(db["hospital_salesreturn"].find(sr_q, {
+                "return_amount": 1, "refund_amount": 1, "net_amount": 1, "total_amount": 1
+            }))
             for doc in sr_docs:
                 sr_amt = _to_float(
                     doc.get("return_amount") or doc.get("refund_amount") or doc.get("net_amount") or doc.get("total_amount") or 0
@@ -1416,7 +1594,6 @@ def search_discharge_patient(request):
         patient_info["sales_return"] = total_sales_return
 
         # ── 6. hospital_surgeryschedule ────────────────────────────────────────
-        # get if ip_number exists and status: "Confirmed"
         surgery_q = get_query(
             ["ip_number", "ipNumber", "inpatient_number"],
             {"status": "Confirmed", "is_active": {"$ne": False}}
@@ -1429,7 +1606,6 @@ def search_discharge_patient(request):
                 disc      = _to_float(doc.get("discount", 0))
                 amt       = _to_float(doc.get("amount")) or max(0.0, price * qty - disc)
                 
-                # Build doctors list with surgeon_id, anaesthetist_id, and doctor_id keys
                 doctors_list = []
                 seen_ids = set()
 
@@ -1525,6 +1701,8 @@ def search_discharge_patient(request):
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 def discharge_billing_list_create(request):
+    ensure_discharge_indexes()
+    client, db = get_hms_db()
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
@@ -1533,48 +1711,104 @@ def discharge_billing_list_create(request):
         ip_f     = request.GET.get("ip_number")
         from_f   = request.GET.get("from_date")
         to_f     = request.GET.get("to_date")
+        search_f = request.GET.get("search") or request.GET.get("q")
 
-        all_records = list(DischargeBilling.objects.all())
+        q = {"is_cancelled": {"$ne": True}}
+        if status_f:
+            q["status"] = status_f
+        if uhid_f:
+            q["uhid"] = str(uhid_f).strip()
+        if ip_f:
+            q["ip_number"] = str(ip_f).strip()
 
-        filtered = []
-        for obj in all_records:
-            if status_f and obj.status != status_f:
-                continue
-            if uhid_f and obj.uhid != uhid_f:
-                continue
-            if ip_f and obj.ip_number != ip_f:
-                continue
+        if from_f or to_f:
+            date_filter = {}
             if from_f:
                 try:
-                    from_date = _date.fromisoformat(from_f)
-                    bd = obj.bill_date
-                    if bd and (bd if isinstance(bd, _date) else bd.date()) < from_date:
-                        continue
-                except ValueError:
-                    pass
+                    from_dt = datetime.strptime(str(from_f).strip(), "%Y-%m-%d")
+                    date_filter["$gte"] = from_dt
+                except Exception:
+                    date_filter["$gte"] = str(from_f).strip()
             if to_f:
                 try:
-                    to_date = _date.fromisoformat(to_f)
-                    bd = obj.bill_date
-                    if bd and (bd if isinstance(bd, _date) else bd.date()) > to_date:
-                        continue
-                except ValueError:
-                    pass
-            filtered.append(obj)
+                    to_dt = datetime.strptime(str(to_f).strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                    date_filter["$lte"] = to_dt
+                except Exception:
+                    date_filter["$lte"] = str(to_f).strip()
+            if date_filter:
+                q["bill_date"] = date_filter
 
-        def _sort_key(o):
-            bd = o.bill_date
-            if bd is None:
-                bd = _date.min
-            if isinstance(bd, _datetime):
-                bd = bd.date()
-            # discharge_id is always an int — safe to sort directly
-            return (bd, o.discharge_id or 0)
+        if search_f:
+            s = str(search_f).strip()
+            # Match patients by name or mobile or uhid
+            p_matches = list(db["hospital_patient"].find({
+                "$or": [
+                    {"patient_name": {"$regex": s, "$options": "i"}},
+                    {"mobile": {"$regex": s, "$options": "i"}},
+                    {"uhid": {"$regex": s, "$options": "i"}},
+                ]
+            }, {"uhid": 1}).limit(100))
+            matched_uhids = [str(p["uhid"]).strip() for p in p_matches if p.get("uhid")]
 
-        filtered.sort(key=_sort_key, reverse=True)
+            or_clauses = [
+                {"bill_no": {"$regex": s, "$options": "i"}},
+                {"estimate_number": {"$regex": s, "$options": "i"}},
+                {"uhid": {"$regex": s, "$options": "i"}},
+                {"ip_number": {"$regex": s, "$options": "i"}},
+                {"doctor": {"$regex": s, "$options": "i"}},
+            ]
+            if s.isdigit() and 1990 <= int(s) <= 2100:
+                yr = int(s)
+                or_clauses.append({
+                    "bill_date": {
+                        "$gte": datetime(yr, 1, 1, 0, 0, 0),
+                        "$lte": datetime(yr, 12, 31, 23, 59, 59)
+                    }
+                })
+            if matched_uhids:
+                or_clauses.append({"uhid": {"$in": matched_uhids}})
+            q["$or"] = or_clauses
+
+        # Limit to 300 if no date range and no search is specified for instant response
+        limit_val = 0
+        if not (from_f or to_f or search_f or uhid_f or ip_f):
+            limit_val = 300
+
+        cursor = db["hospital_dischargebilling"].find(q).sort([("discharge_id", -1)])
+        if limit_val > 0:
+            cursor = cursor.limit(limit_val)
+        raw_bills = list(cursor)
+
+        if not raw_bills:
+            return Response({
+                "success": True,
+                "data": []
+            })
+
+        # Batch prefetch Patients, Admissions, and Employees to eliminate N+1 queries!
+        uhids = list({str(b.get("uhid")).strip() for b in raw_bills if b.get("uhid")})
+        ip_numbers = list({str(b.get("ip_number")).strip() for b in raw_bills if b.get("ip_number")})
+
+        patient_docs = list(db["hospital_patient"].find({"uhid": {"$in": uhids}})) if uhids else []
+        patient_map = {str(p.get("uhid")).strip(): p for p in patient_docs if p.get("uhid")}
+
+        adm_docs = list(db["hospital_admission"].find({"ipNumber": {"$in": ip_numbers}})) if ip_numbers else []
+        adm_map = {str(a.get("ipNumber")).strip(): a for a in adm_docs if a.get("ipNumber")}
+
+        emp_ids = set()
+        for b in raw_bills:
+            if b.get("created_by"):
+                emp_ids.add(str(b.get("created_by")).strip())
+        for a in adm_docs:
+            if a.get("admittingDoctor"):
+                emp_ids.add(str(a.get("admittingDoctor")).strip())
+        _batch_resolve_employees(list(emp_ids))
+
+        results = [_format_raw_bill_doc(b, patient_map, adm_map) for b in raw_bills]
+
         return Response({
             "success": True,
-            "data": [_obj_to_dict(o) for o in filtered]
+            "data": results
         })
 
     # ── POST ──────────────────────────────────────────────────────────────────
@@ -1593,10 +1827,11 @@ def discharge_billing_list_create(request):
         if billing_status == "Billed":
             ip_num = data.get("ip_number") or data.get("ipNumber")
             if ip_num:
-                existing_billed = [
-                    b for b in DischargeBilling.objects.all()
-                    if b.ip_number == ip_num and b.status == "Billed" and not getattr(b, "is_cancelled", False)
-                ]
+                existing_billed = db["hospital_dischargebilling"].find_one({
+                    "ip_number": str(ip_num).strip(),
+                    "status": "Billed",
+                    "is_cancelled": {"$ne": True}
+                })
                 if existing_billed:
                     return Response(
                         {"error": "Already Discharged", "message": "Discharge bill already exists for this admission"},

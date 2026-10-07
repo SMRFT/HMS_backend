@@ -206,9 +206,11 @@ PAGE_MAPPING = {
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
     r'^/_b_a_c_k_e_n_d/HMS/discharge/?(\?.*)?$': 'HMS-P-DIS',
-    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-IB',
-    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/?(\?.*)?$': 'HMS-P-IB',
-    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/.+$': 'HMS-P-IB',
+    r'^/_b_a_c_k_e_n_d/HMS/search-discharge-patient/?(\?.*)?$': 'HMS-P-SDP',
+    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/?(\?.*)?$': 'HMS-P-DB',
+    r'^/_b_a_c_k_e_n_d/HMS/discharge-billing/.+$': 'HMS-P-DB',
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-packages/?(\?.*)?$': 'HMS-P-IPDB',                 
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-packages/.+$': 'HMS-P-IPDB',     
 
     # ==================== NURSING ======================
     r'^/_b_a_c_k_e_n_d/HMS/admission-by-uhid/[^/]+/?(\?.*)?$': 'HMS-P-AUHID',
@@ -231,7 +233,7 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
-    r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                 
+    r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                             
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
     '/_b_a_c_k_e_n_d/HMS/investBilling/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investBillingGet/?(\?.*)?$': 'HMS-P-IB',                 

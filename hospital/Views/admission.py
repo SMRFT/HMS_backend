@@ -419,49 +419,76 @@ def _get_current_room(adm):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET /admission-ip-preview/ (and next IP generator)
+# Next IP Generator & Helper
 # ─────────────────────────────────────────────────────────────────────────────
+def _compute_next_ip_number(hms_db):
+    """
+    Computes the next sequential IP number (e.g. S026/001692) for the current financial year.
+    Queries the indexed ipNumber field descending and continues seamlessly from migrated data,
+    excluding legacy dummy test offset >= 500000.
+    """
+    now_dt = datetime.now()
+    fy = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
+    prefix = f"S{fy:03d}"
+    
+    top_ips = list(hms_db["hospital_admission"].find(
+        {"ipNumber": {"$regex": f"^{prefix}/"}},
+        {"ipNumber": 1}
+    ).sort("ipNumber", -1).limit(50))
+    
+    max_num = 0
+    for a in top_ips:
+        ip = str(a.get("ipNumber") or "").strip()
+        if "/" in ip:
+            try:
+                p, n_str = ip.split("/", 1)
+                if p == prefix:
+                    n = int(n_str)
+                    if n < 500000:
+                        if n > max_num:
+                            max_num = n
+            except Exception:
+                continue
+
+    if max_num == 0 and top_ips:
+        for a in top_ips:
+            ip = str(a.get("ipNumber") or "").strip()
+            if "/" in ip:
+                try:
+                    p, n_str = ip.split("/", 1)
+                    if p == prefix:
+                        n = int(n_str)
+                        if n > max_num:
+                            max_num = n
+                except Exception:
+                    continue
+
+    return f"{prefix}/{max_num + 1:06d}"
+
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def get_next_ip_number(request):
     try:
-        hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
-        branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
-        outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
-        now     = datetime.now()
-        fy      = (now.year - 2001) if now.month < 4 else (now.year - 2000)
-        prefix  = f"S{fy:03d}"
-        max_num = 500000
-
-        q = {"ipNumber": {"$regex": f"^{prefix}/"}}
-        if hospital_code and hospital_code != "system":
-            q["hospital_code"] = hospital_code
-        if branch_code and branch_code != "system":
-            q["branch_code"] = branch_code
-        if outlet_code and outlet_code != "system":
-            q["outlet_code"] = outlet_code
-
         client, hms_db = _get_hms_db()
         try:
-            top_adms = list(hms_db["hospital_admission"].find(q, {"ipNumber": 1}).sort("ipNumber", -1).limit(20))
-            for adm in top_adms:
-                ip = adm.get("ipNumber") or ""
-                if "/" in ip:
-                    try:
-                        p, n = ip.split("/")
-                        if p == prefix:
-                            max_num = max(max_num, int(n))
-                    except Exception:
-                        continue
+            next_ip = _compute_next_ip_number(hms_db)
         finally:
             if client:
                 client.close()
 
-        return JsonResponse({"success": True, "next_ipNumber": f"{prefix}/{max_num + 1:06d}"})
+        return JsonResponse({
+            "success": True,
+            "next_ipNumber": next_ip,
+            "ipNumber": next_ip,
+            "bill_number": next_ip,
+            "bill_no": next_ip
+        })
     except Exception as e:
         traceback.print_exc()
         return JsonResponse({"success": False, "error": str(e)}, status=500)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -934,30 +961,8 @@ def admission_view(request):
                         "bedNo":  cur_room.get("bedNo",  ""),
                     }, status=400)
 
-                # ── Fast Next IP calculation with index ──
-                now_dt  = datetime.now()
-                fy      = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
-                prefix  = f"S{fy:03d}"
-                max_num = 500000
-                top_ips = list(hms_db["hospital_admission"].find(
-                    {
-                        "hospital_code": hospital_code,
-                        "branch_code": branch_code,
-                        "outlet_code": outlet_code,
-                        "ipNumber": {"$regex": f"^{prefix}/"}
-                    },
-                    {"ipNumber": 1}
-                ).sort("ipNumber", -1).limit(20))
-                for a in top_ips:
-                    ip = a.get("ipNumber") or ""
-                    if "/" in ip:
-                        try:
-                            p, n = ip.split("/")
-                            if p == prefix:
-                                max_num = max(max_num, int(n))
-                        except Exception:
-                            pass
-                ip_number = f"{prefix}/{max_num + 1:06d}"
+                # ── Fast Next IP calculation from database sequence ──
+                ip_number = _compute_next_ip_number(hms_db)
 
                 # ── Patient info lookup ──
                 patient_obj = hms_db["hospital_patient"].find_one({
@@ -1065,6 +1070,8 @@ def admission_view(request):
                 lastmodified_by=employee_id, lastmodified_date=timezone.now(),
             )
             _sync_to_mongo(ip_number, room_details, [], [], {
+                "bill_number": ip_number,
+                "bill_no": ip_number,
                 "customer_type": customer_type,
                 "company_code": company_code,
                 "insurance_company": insurance_company,
@@ -1088,6 +1095,7 @@ def admission_view(request):
             })
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
+                "bill_number": adm.ipNumber, "bill_no": adm.ipNumber,
                 "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
                 "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
@@ -1443,48 +1451,63 @@ def _max_sequence_for_prefix(bill_numbers, prefix):
     return max_seq
 
 
-def _generate_advance_bill_no(hospital_code, branch_code, outlet_code):
+def _generate_advance_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
     """
-    Continuous, FY-scoped bill number across admissions for this outlet.
-    Optimized to fetch latest matching bill numbers without full table scan.
+    Continuous, FY-scoped bill number across admissions for IP Advances (e.g. 2627/028226).
+    Uses high-performance aggregation across huge migrated data without arbitrary 50-item limit.
     """
-    prefix = _financial_year_prefix()
-    bill_numbers = []
+    prefix = _financial_year_prefix()  # e.g. "2627/"
     client, hms_db = _get_hms_db()
+    max_seq = 0
     try:
-        q = {
-            "advance_payments.bill_no": {"$regex": f"^{prefix}"}
-        }
-        if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
-        if branch_code and branch_code != "system": q["branch_code"] = branch_code
-        if outlet_code and outlet_code != "system": q["outlet_code"] = outlet_code
-        
-        top_adms = list(hms_db["hospital_admission"].find(q, {"advance_payments": 1}).sort("created_date", -1).limit(50))
-        for adm in top_adms:
-            for p in _safe_list(adm.get("advance_payments")):
-                if isinstance(p, dict) and p.get('bill_no'):
-                    bill_numbers.append(p['bill_no'])
+        pipeline = [
+            {"$match": {"advance_payments.bill_no": {"$regex": f"^{prefix}"}}},
+            {"$unwind": "$advance_payments"},
+            {"$match": {"advance_payments.bill_no": {"$regex": f"^{prefix}"}}},
+            {"$project": {"bill_no": "$advance_payments.bill_no"}},
+            {"$sort": {"bill_no": -1}},
+            {"$limit": 10}
+        ]
+        results = list(hms_db["hospital_admission"].aggregate(pipeline))
+        for r in results:
+            bn = r.get("bill_no", "")
+            if isinstance(bn, str) and "/" in bn:
+                try:
+                    num = int(bn.split("/")[-1])
+                    if num > max_seq:
+                        max_seq = num
+                except (ValueError, IndexError):
+                    pass
     except Exception as e:
         print(f"[_generate_advance_bill_no] Error: {e}")
     finally:
         if client:
             client.close()
 
-    next_seq = _max_sequence_for_prefix(bill_numbers, prefix) + 1
+    next_seq = max_seq + 1
     return f"{prefix}{next_seq:06d}"
 
 
-def _generate_refund_bill_no(hospital_code, branch_code, outlet_code):
+def _generate_refund_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
     """Separate, independent FY-scoped sequence for refund bill numbers."""
     prefix = _financial_year_prefix()
-    bill_numbers = list(
-        IpAdvance_Refund.objects.filter(
-            hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
-            refund_bill_no__startswith=prefix,
-        ).values_list('refund_bill_no', flat=True)
-    )
-    next_seq = _max_sequence_for_prefix(bill_numbers, prefix) + 1
-    return f"{prefix}{next_seq:06d}"
+    max_seq = 0
+    client, hms_db = _get_hms_db()
+    try:
+        latest = hms_db["hospital_ipadvance_refund"].find_one(
+            {"refund_bill_no": {"$regex": f"^{prefix}"}},
+            projection={"refund_bill_no": 1},
+            sort=[("refund_bill_no", -1)]
+        )
+        if latest and latest.get("refund_bill_no"):
+            seq_str = str(latest["refund_bill_no"]).split("/")[-1]
+            max_seq = int(seq_str)
+    except Exception:
+        pass
+    finally:
+        if client:
+            client.close()
+    return f"{prefix}{max_seq + 1:06d}"
 
 
 def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
@@ -1653,9 +1676,11 @@ def admission_advance(request, ipNumber=None):
             if bill_type is None or not bill_type_no:
                 return JsonResponse({'success': False, 'error': 'bill_type and billTypeNo are required'}, status=400)
 
+            adv_bill_no = _generate_advance_bill_no(hospital_code, branch_code, outlet_code)
             new_entry = {
                 "advance_id":       f"ADV{len(ap) + 1}",
-                "bill_no":          _generate_advance_bill_no(hospital_code, branch_code, outlet_code),
+                "bill_no":          adv_bill_no,
+                "bill_number":      adv_bill_no,
                 "bill_type":        bill_type,
                 "billTypeNo":       bill_type_no,
                 "date":             request.data.get('date', now_iso[:10]),

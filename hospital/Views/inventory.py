@@ -467,7 +467,39 @@ def pharmacy_item_view(request, pk=None):
             search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
             if search:
                 reg = {"$regex": re.escape(search), "$options": "i"}
-                filter_q["$or"] = [
+                _, db = get_hms_db()
+
+                # Look up matching categories in hospital_pharmacycategory by name
+                matched_cats = list(db["hospital_pharmacycategory"].find(
+                    {"category_name": reg},
+                    {"category_id": 1, "category_name": 1}
+                ))
+                cat_ids_for_search = []
+                for mc in matched_cats:
+                    cid = mc.get("category_id")
+                    if cid is not None:
+                        cat_ids_for_search.append(str(cid).strip())
+                        if str(cid).strip().isdigit():
+                            cat_ids_for_search.append(int(str(cid).strip()))
+                    if mc.get("category_name"):
+                        cat_ids_for_search.append(mc.get("category_name"))
+
+                # Look up matching compositions in hospital_chemicalcomposition by name
+                matched_comps = list(db["hospital_chemicalcomposition"].find(
+                    {"composition_name": reg},
+                    {"composition_id": 1, "composition_name": 1}
+                ))
+                comp_ids_for_search = []
+                for mcp in matched_comps:
+                    cpid = mcp.get("composition_id")
+                    if cpid is not None:
+                        comp_ids_for_search.append(str(cpid).strip())
+                        if str(cpid).strip().isdigit():
+                            comp_ids_for_search.append(int(str(cpid).strip()))
+                    if mcp.get("composition_name"):
+                        comp_ids_for_search.append(mcp.get("composition_name"))
+
+                or_clauses = [
                     {"item_name": reg},
                     {"item_last_name": reg},
                     {"brand_name": reg},
@@ -475,17 +507,106 @@ def pharmacy_item_view(request, pk=None):
                     {"category": reg},
                     {"hsn": reg}
                 ]
+                if cat_ids_for_search:
+                    or_clauses.append({"category": {"$in": list(set(cat_ids_for_search))}})
+                if comp_ids_for_search:
+                    or_clauses.append({"chemical_composition": {"$in": list(set(comp_ids_for_search))}})
 
-            category = str(request.GET.get("category", "")).strip()
-            if category:
-                filter_q["category"] = category
+                filter_q["$or"] = or_clauses
 
-            filter_q = apply_date_filter(filter_q, request, "created_date")
+            category_param = str(request.GET.get("category", "")).strip()
+            if category_param:
+                cat_match_values = [category_param]
+                if category_param.isdigit():
+                    cat_match_values.append(int(category_param))
+                _, db = get_hms_db()
+                matched_cats = list(db["hospital_pharmacycategory"].find({
+                    "$or": [
+                        {"category_id": int(category_param) if category_param.isdigit() else category_param},
+                        {"category_id": category_param},
+                        {"category_name": {"$regex": f"^{re.escape(category_param)}$", "$options": "i"}}
+                    ]
+                }))
+                for mc in matched_cats:
+                    cid = mc.get("category_id")
+                    cname = mc.get("category_name")
+                    if cid is not None:
+                        cat_match_values.append(str(cid).strip())
+                        if str(cid).strip().isdigit():
+                            cat_match_values.append(int(str(cid).strip()))
+                    if cname:
+                        cat_match_values.append(cname)
+                filter_q["category"] = {"$in": list(set(cat_match_values))}
+
+            def _enrich_pharmacy_items(docs):
+                if not docs:
+                    return docs
+                client, db = get_hms_db()
+
+                cat_ids = set()
+                for it in docs:
+                    c = it.get("category")
+                    if c is not None and str(c).strip():
+                        s = str(c).strip()
+                        if s.isdigit():
+                            cat_ids.add(int(s))
+                        cat_ids.add(s)
+
+                comp_ids = set()
+                for it in docs:
+                    comp = it.get("chemical_composition")
+                    if comp is not None and str(comp).strip():
+                        s = str(comp).strip()
+                        if s.isdigit():
+                            comp_ids.add(int(s))
+                        comp_ids.add(s)
+
+                cat_map = {}
+                if cat_ids:
+                    cat_docs = list(db["hospital_pharmacycategory"].find({
+                        "$or": [
+                            {"category_id": {"$in": list(cat_ids)}},
+                            {"category_id": {"$in": [str(x) for x in cat_ids]}}
+                        ]
+                    }))
+                    for c in cat_docs:
+                        cid = str(c.get("category_id", "")).strip()
+                        cname = c.get("category_name", "")
+                        if cid:
+                            cat_map[cid] = cname
+                        if cname:
+                            cat_map[cname.lower()] = cname
+
+                comp_map = {}
+                if comp_ids:
+                    comp_docs = list(db["hospital_chemicalcomposition"].find({
+                        "$or": [
+                            {"composition_id": {"$in": list(comp_ids)}},
+                            {"composition_id": {"$in": [str(x) for x in comp_ids]}}
+                        ]
+                    }))
+                    for c in comp_docs:
+                        cid = str(c.get("composition_id", "")).strip()
+                        cname = c.get("composition_name", "")
+                        if cid:
+                            comp_map[cid] = cname
+                        if cname:
+                            comp_map[cname.lower()] = cname
+
+                for it in docs:
+                    c_val = str(it.get("category") or "").strip()
+                    it["category_name"] = cat_map.get(c_val) or cat_map.get(c_val.lower()) or c_val
+
+                    comp_val = str(it.get("chemical_composition") or "").strip()
+                    it["chemical_composition_name"] = comp_map.get(comp_val) or comp_map.get(comp_val.lower()) or comp_val
+
+                return docs
 
             return Response(paginate_mongo_query(
                 "hospital_pharmacyitem",
                 filter_q,
                 sort=[("item_id", ASCENDING)],
+                enrich_fn=_enrich_pharmacy_items,
                 request=request
             ))
 

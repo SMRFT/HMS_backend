@@ -58,7 +58,8 @@ from .Views import (
     mrd,
     OPEMR,
     IPEMR,
-    Shanmuga360
+    Shanmuga360,
+    insurance_packages
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -398,6 +399,11 @@ urlpatterns = [
     path('packages/<int:package_no>/', package_crud.get_package, name='get_package'),
     path('packages/update/<int:package_no>/', package_crud.update_package, name='update_package'),
     path('packages/delete/<int:package_no>/', package_crud.delete_package, name='delete_package'),
+
+    # Insurance Packages Master & Items API
+    path('insurance-packages/schemes/', insurance_packages.get_insurance_package_schemes, name='get_insurance_package_schemes'),
+    path('insurance-packages/items/', insurance_packages.get_insurance_package_items, name='get_insurance_package_items'),
+    path('insurance-packages/', insurance_packages.insurance_packages_hub, name='insurance_packages_hub'),
 
     # Investigation Price Master
     path('investigation-prices_get/', investigation_price.get_investigation_prices, name='get_investigation_prices'),
