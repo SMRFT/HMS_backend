@@ -850,7 +850,7 @@ class Admission(AuditModel):
     ipNumber            = models.CharField(max_length=10, primary_key=True)
     ipserial_number     = models.IntegerField(blank=True, null=True)
     age_type            = models.CharField(max_length=10, default='Y', blank=True, null=True)
-    age     = models.IntegerField(blank=True, null=True)
+    age                 = models.IntegerField(blank=True, null=True)
     admissionDateTime   = models.DateTimeField(default=timezone.now)
     admittingDoctor     = models.CharField(max_length=100)
     consultingDoctor    = models.CharField(max_length=100, blank=True, null=True)
