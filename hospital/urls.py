@@ -775,6 +775,19 @@ urlpatterns = [
     path('360_report/', Shanmuga360.shanmuga360_report, name='360_report'),
     path('sample_collector/', Shanmuga360.get_sample_collector, name='sample_collector'),
 
+    # Insurance Member Master & Visits
+    path('insurance-claim/', insurance.insurance_claim_view, name='insurance_claim_list_create'),
+    path('insurance-claim/<str:claim_id>/', insurance.insurance_claim_view, name='insurance_claim_detail'),
+    path('insurance-claim-patient-details/', insurance.get_patient_admission_details, name='insurance_claim_patient_details'),
+    path('insurance-members/', insurance.insurance_member_view, name='insurance_members_list_create'),
+    path('insurance-members/<path:member_number>/', insurance.insurance_member_view, name='insurance_members_detail'),
+    path('insurance-dependents/', insurance.insurance_member_dependent_view, name='insurance_dependents_list_create'),
+    path('insurance-dependents/<path:member_number>/', insurance.insurance_member_dependent_view, name='insurance_dependents_by_member'),
+    path('insurance-dependents/detail/<int:dependent_id>/', insurance.insurance_member_dependent_view, name='insurance_dependents_detail'),
+    path('insurance-visits/', insurance.insurance_member_visit_view, name='insurance_visits_list_create'),
+    path('insurance-visits/<path:visit_ref>/', insurance.insurance_member_visit_view, name='insurance_visits_detail'),
+    path('insurance-search-patient/', insurance.search_patient_details_by_uhid, name='insurance_search_patient'),
+    path('insurance-search-member/', insurance.search_insurance_member_by_number, name='insurance_search_member'),
 ]
 
 

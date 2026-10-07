@@ -16,6 +16,7 @@ from .serializer import (
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
     StoresIndentReturnSerializer
 )
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from datetime import datetime, timedelta, date
 from pyauth.auth import HasRoleAndDataPermission
@@ -78,7 +79,22 @@ def item_master_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     if request.method == 'GET':
-        items = ItemMaster.objects.filter(is_active__in=[True]).order_by('-created_date')
+        search = request.query_params.get('search') or request.GET.get('search')
+        dept = request.query_params.get('department') or request.GET.get('department')
+        cat = request.query_params.get('category') or request.GET.get('category')
+        grp = request.query_params.get('group') or request.GET.get('group')
+        
+        items = ItemMaster.objects.filter(is_active__in=[True])
+        if search:
+            items = items.filter(Q(itemName__icontains=search) | Q(item_id__icontains=search) | Q(hsn__icontains=search) | Q(barcode__icontains=search))
+        if dept:
+            items = items.filter(department=dept)
+        if cat:
+            items = items.filter(category=cat)
+        if grp:
+            items = items.filter(group=grp)
+            
+        items = items.order_by('-created_date')
         serializer = ItemMasterSerializer(items, many=True)
         return Response(serializer.data)
 
@@ -958,22 +974,23 @@ def get_stores_intents(request):
 
     # ✅ Department mapping (from Global.backend_diagnostics_Departments and Department model)
     dept_map = {}
-    for doc in department_collection.find({'is_active': True}):
+    for doc in department_collection.find({'is_active': True}, {'department_code': 1, 'department_id': 1, 'department_name': 1}):
         code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
         name = doc.get('department_name')
         if code and name:
             dept_map[str(code)] = name
-    for d in Department.objects.filter(is_active__in=[True]):
+    for d in Department.objects.filter(is_active__in=[True]).only('department_id', 'department_name'):
         if d.department_id and d.department_name and str(d.department_id) not in dept_map:
             dept_map[str(d.department_id)] = d.department_name
 
-    # ✅ Item stock mapping
+    # ✅ Fast Item stock mapping using lean projection
     item_map = {
         i["item_id"]: {
             "total_quantity": i.get("total_quantity", 0),
             "approved_quantity": i.get("approved_quantity", 0)
         }
-        for i in item_collection.find({"is_active": True})
+        for i in item_collection.find({"is_active": True}, {"item_id": 1, "total_quantity": 1, "approved_quantity": 1, "_id": 0})
+        if "item_id" in i
     }
 
     data = list(intent_collection.find(query).sort("created_date", -1))
@@ -2541,19 +2558,16 @@ def stores_purchase_return_list_create(request):
             qs = qs.filter(return_date__lte=to_date)
         if vendor_id:
             qs = qs.filter(vendor_id=vendor_id)
+        if search_query:
+            qs = qs.filter(
+                Q(return_id__icontains=search_query) |
+                Q(grn_number__icontains=search_query) |
+                Q(vendor_name__icontains=search_query) |
+                Q(debit_note_no__icontains=search_query)
+            )
 
         serializer = StoresPurchaseReturnSerializer(qs, many=True)
         return_list = serializer.data
-
-        if search_query:
-            sq = search_query.lower()
-            return_list = [
-                r for r in return_list
-                if sq in str(r.get('return_id', '')).lower()
-                or sq in str(r.get('grn_number', '')).lower()
-                or sq in str(r.get('vendor_name', '')).lower()
-                or sq in str(r.get('debit_note_no', '')).lower()
-            ]
 
         total_return_value = sum(safe_float(r.get('total_return_amount')) for r in return_list)
 
@@ -3376,19 +3390,16 @@ def stores_item_rack_update(request):
             qs = qs.filter(shelf_no__iexact=shelf)
         if barcode:
             qs = qs.filter(barcode=barcode)
+        if search_query:
+            qs = qs.filter(
+                Q(itemName__icontains=search_query) |
+                Q(item_id__icontains=search_query) |
+                Q(barcode__icontains=search_query) |
+                Q(rack_no__icontains=search_query)
+            )
 
         serializer = ItemMasterSerializer(qs, many=True)
         items_list = serializer.data
-
-        if search_query:
-            sq = search_query.lower()
-            items_list = [
-                i for i in items_list
-                if sq in str(i.get('itemName', '')).lower()
-                or sq in str(i.get('item_id', '')).lower()
-                or sq in str(i.get('barcode', '')).lower()
-                or sq in str(i.get('rack_no', '')).lower()
-            ]
 
         # Distinct racks & shelves list for dropdowns (from Rack & Shelf masters + ItemMaster)
         master_racks = list(Rack.objects.filter(is_active__in=[True]).values_list('rack_name', flat=True))
