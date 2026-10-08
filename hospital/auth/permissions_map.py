@@ -227,8 +227,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/': 'HMS-P-HVCC',
 
      #Investigation Billing:
-    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/$': 'HMS-API-UHID',           
-    r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/$': 'HMS-P-IB',                 
+    r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-API-UHID',           
+    r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
@@ -375,8 +375,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/update(?:/[^/]+)+/$': 'HMS-P-VINE',     
     r'^/_b_a_c_k_e_n_d/HMS/velavan/invoices/approve(?:/[^/]+)+/$': 'HMS-P-VINA',   
     r'^/_b_a_c_k_e_n_d/HMS/implant/requests/report/?(\?.*)?$': 'HMS-P-OTIRV',   
-    '/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/': 'HMS-P-VIN', 
-    '/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/list/': 'HMS-P-VINR', 
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/?(\?.*)?$': 'HMS-P-VIN', 
+    r'^/_b_a_c_k_e_n_d/HMS/velavan/purchase-return/list/?(\?.*)?$': 'HMS-P-VINR', 
     
     # Velavan Sales
     '/_b_a_c_k_e_n_d/HMS/velavan/sales/': 'HMS-P-VS',               

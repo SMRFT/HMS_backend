@@ -30,25 +30,116 @@ import re
 @permission_classes([HasRoleAndDataPermission])
 def op_patient_detail_by_uhid(request, uhid):
     try:
-
         branch_code = request.data.get('auth-branch-code')
         hospital_code = request.data.get('auth-hospital-code')
 
-        # Build filter
-        query = {}
+        is_search = request.GET.get('search') == '1' or str(uhid).lower() == 'search'
+        uhid_param = request.GET.get('uhid') or ('' if str(uhid).lower() == 'search' else str(uhid))
+        name_param = (request.GET.get('name') or '').strip()
+        mobile_param = (request.GET.get('mobile') or '').strip()
+        admitted_filter = request.GET.get('admitted') == 'true' or request.GET.get('admitted') == '1'
 
-        if hospital_code:
+        if is_search or name_param or mobile_param:
+            query = Q()
+            if uhid_param:
+                u_clean = uhid_param.strip()
+                u_num = u_clean.lstrip('0')
+                u_q = Q(uhid__icontains=u_clean)
+                if u_num:
+                    u_q |= Q(uhid__icontains=u_num)
+                query &= u_q
+
+            if name_param:
+                query &= (
+                    Q(firstName__icontains=name_param) |
+                    Q(lastName__icontains=name_param) |
+                    Q(mobilePhone__icontains=name_param)
+                )
+            elif mobile_param:
+                query &= Q(mobilePhone__icontains=mobile_param)
+
+            if hospital_code and hospital_code != "system":
+                query &= Q(hospital_code=hospital_code)
+            if branch_code and branch_code != "system":
+                query &= Q(branch_code=branch_code)
+
+            patients = list(Patient.objects.filter(query).order_by('-created_date')[:100])
+            patient_serializer = PatientSerializer(patients, many=True)
+            patient_data = patient_serializer.data
+
+            uhid_list = [str(p.get("uhid") or "").strip() for p in patient_data if p.get("uhid")]
+            active_admissions = {}
+            if uhid_list:
+                try:
+                    adm_qs = Admission.objects.filter(uhid__in=uhid_list)
+                    for adm in adm_qs:
+                        adm_is_admitted = bool(getattr(adm, 'is_admitted', False))
+                        adm_is_discharged = bool(getattr(adm, 'is_discharged', False))
+                        adm_is_cancelled = bool(getattr(adm, 'is_cancelled', False))
+                        if adm_is_admitted and not adm_is_discharged and not adm_is_cancelled:
+                            u_key = str(adm.uhid or "").strip()
+                            active_admissions[u_key] = adm.ipNumber
+                            active_admissions[u_key.upper()] = adm.ipNumber
+                except Exception as ex:
+                    print("Admission check error:", ex)
+
+            company_codes = list({p.get('company_code') for p in patient_data if p.get('company_code')})
+            insurance_map = {}
+            if company_codes:
+                try:
+                    for ins in InsuranceProvider.objects.filter(company_code__in=company_codes):
+                        insurance_map[ins.company_code] = ins.company_name
+                except Exception:
+                    pass
+
+            for p in patient_data:
+                p_uhid = str(p.get("uhid") or "").strip()
+                if p_uhid in active_admissions or p_uhid.upper() in active_admissions:
+                    ip_no = active_admissions.get(p_uhid) or active_admissions.get(p_uhid.upper())
+                    p["ip_number"] = ip_no
+                    p["ipNumber"] = ip_no
+                    p["admitted"] = True
+                    p["is_admitted"] = True
+                    p["is_discharged"] = False
+                else:
+                    p["admitted"] = False
+                    p["is_admitted"] = False
+                    p["is_discharged"] = True
+
+                cc = (p.get('company_code') or '').strip()
+                if cc and cc in insurance_map:
+                    p['company_name'] = insurance_map[cc]
+
+            if admitted_filter:
+                patient_data = [p for p in patient_data if p.get('admitted')]
+
+            return Response({
+                "success": True,
+                "data": patient_data,
+                "results": patient_data
+            }, status=200)
+
+        # Direct single lookup
+        query = {}
+        if hospital_code and hospital_code != "system":
             query["hospital_code"] = hospital_code
-        if branch_code:
+        if branch_code and branch_code != "system":
             query["branch_code"] = branch_code
 
-        # Add UHID filter
         query["uhid"] = str(uhid)
 
-        print("PATIENT QUERY:", query)
-
-        # Direct query (NO LOOP ❌)
         patient = Patient.objects.filter(**query).first()
+        if not patient:
+            u_clean = str(uhid).strip()
+            u_num = u_clean.lstrip('0')
+            fallback_q = Q(uhid__icontains=u_clean)
+            if u_num:
+                fallback_q |= Q(uhid__icontains=u_num)
+            if hospital_code and hospital_code != "system":
+                fallback_q &= Q(hospital_code=hospital_code)
+            if branch_code and branch_code != "system":
+                fallback_q &= Q(branch_code=branch_code)
+            patient = Patient.objects.filter(fallback_q).first()
 
         if not patient:
             return Response({"error": "Patient not found"}, status=404)
@@ -56,17 +147,10 @@ def op_patient_detail_by_uhid(request, uhid):
         serializer = PatientSerializer(patient)
         data = dict(serializer.data)
 
-        # Insurance name
         company_code = (data.get('company_code') or "").strip()
-
         if company_code:
-            insurance = InsuranceProvider.objects.filter(
-                company_code=company_code
-            ).first()
-
-            data['company_name'] = (
-                insurance.company_name if insurance else None
-            )
+            insurance = InsuranceProvider.objects.filter(company_code=company_code).first()
+            data['company_name'] = insurance.company_name if insurance else None
         else:
             data['company_name'] = None
 
@@ -79,21 +163,111 @@ def op_patient_detail_by_uhid(request, uhid):
 @permission_classes([HasRoleAndDataPermission])
 def ip_patient_detail_by_ipNumber(request, ipNumber):
     try:
-        # ✅ Get auth codes (reuse helper)
         branch_code = request.data.get('auth-branch-code')
         hospital_code = request.data.get('auth-hospital-code')
 
-        # ✅ Build admission query
+        is_search = request.GET.get('search') == '1' or str(ipNumber).lower() == 'search'
+        ip_param = request.GET.get('ip_number') or ('' if str(ipNumber).lower() == 'search' else str(ipNumber))
+        name_param = (request.GET.get('name') or '').strip()
+
+        if is_search or name_param:
+            query = Q()
+            if ip_param:
+                ip_clean = ip_param.strip()
+                ip_num = ip_clean.lstrip('0')
+                i_q = Q(ipNumber__icontains=ip_clean)
+                if ip_num:
+                    i_q |= Q(ipNumber__icontains=ip_num)
+                query &= i_q
+
+            if hospital_code and hospital_code != "system":
+                query &= Q(hospital_code=hospital_code)
+            if branch_code and branch_code != "system":
+                query &= Q(branch_code=branch_code)
+
+            admissions = list(Admission.objects.filter(query).order_by('-created_date')[:100])
+            adm_uhids = [a.uhid for a in admissions if a.uhid]
+            patients_map = {}
+            if adm_uhids:
+                p_qs = Patient.objects.filter(uhid__in=adm_uhids)
+                for p in p_qs:
+                    patients_map[p.uhid] = p
+
+            results_list = []
+            for adm in admissions:
+                pt = patients_map.get(adm.uhid)
+                if not pt:
+                    continue
+
+                if name_param:
+                    full_name = f"{pt.salutation or ''} {pt.firstName or ''} {pt.lastName or ''}".lower()
+                    if name_param.lower() not in full_name and name_param.lower() not in (pt.mobilePhone or ''):
+                        continue
+
+                room_no = None
+                bed_no = None
+                if adm.roomShitingDetails:
+                    active_shift_rooms = [r for r in adm.roomShitingDetails if r.get("is_roomActive") is True]
+                    if active_shift_rooms:
+                        room_no = active_shift_rooms[-1].get("newRoomNo")
+                        bed_no = active_shift_rooms[-1].get("newBedNo")
+
+                if room_no is None and adm.room_details:
+                    active_rooms = [r for r in adm.room_details if r.get("is_roomActive") is True]
+                    latest_room = active_rooms[-1] if active_rooms else adm.room_details[-1]
+                    room_no = latest_room.get("roomNo")
+                    bed_no = latest_room.get("bedNo")
+
+                results_list.append({
+                    'ipNumber': adm.ipNumber,
+                    'ip_number': adm.ipNumber,
+                    'uhid': adm.uhid,
+                    'salutation': getattr(pt, 'salutation', ''),
+                    'firstName': pt.firstName,
+                    'lastName': pt.lastName,
+                    'age': adm.age or pt.age,
+                    'age_type': adm.age_type or pt.age_type,
+                    'gender': pt.gender,
+                    'dob': pt.dob,
+                    'mobilePhone': pt.mobilePhone,
+                    'area': pt.area,
+                    'city': pt.city,
+                    'state': pt.state,
+                    'zipcode': pt.zipcode,
+                    'customer_type': pt.customer_type,
+                    'company_code': pt.company_code,
+                    'room_no': room_no,
+                    'bed_no': bed_no,
+                    'is_admitted': getattr(adm, 'is_admitted', False),
+                    'is_discharged': adm.is_discharged,
+                    'admitted': getattr(adm, 'is_admitted', False) and not adm.is_discharged,
+                })
+
+            return Response({
+                "success": True,
+                "data": results_list,
+                "results": results_list
+            }, status=200)
+
+        # Single direct lookup
         admission_query = {"ipNumber": ipNumber}
-
-        if hospital_code:
+        if hospital_code and hospital_code != "system":
             admission_query["hospital_code"] = hospital_code
-        if branch_code:
+        if branch_code and branch_code != "system":
             admission_query["branch_code"] = branch_code
-        print("ADMISSION QUERY:", admission_query)
 
-        # ✅ Fetch admission (NO .get ❌)
         admission = Admission.objects.filter(**admission_query).first()
+        if not admission:
+            ip_clean = str(ipNumber).strip()
+            ip_num = ip_clean.lstrip('0')
+            f_q = Q(ipNumber__icontains=ip_clean)
+            if ip_num:
+                f_q |= Q(ipNumber__icontains=ip_num)
+            if hospital_code and hospital_code != "system":
+                f_q &= Q(hospital_code=hospital_code)
+            if branch_code and branch_code != "system":
+                f_q &= Q(branch_code=branch_code)
+            admission = Admission.objects.filter(f_q).first()
 
         if not admission:
             return Response(
@@ -101,44 +275,34 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # ✅ Build patient query
         patient_query = {"uhid": admission.uhid}
-
-        if hospital_code:
+        if hospital_code and hospital_code != "system":
             patient_query["hospital_code"] = hospital_code
-        if branch_code:
+        if branch_code and branch_code != "system":
             patient_query["branch_code"] = branch_code
 
-        print("PATIENT QUERY:", patient_query)
-
         patient = Patient.objects.filter(**patient_query).first()
-
         if not patient:
             return Response(
                 {"error": "Patient not found for the given UHID"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # ── Company Name ─────────────────────────────
         company_name = None
         if patient.company_code:
             insurance = InsuranceProvider.objects.filter(
                 company_code=patient.company_code
             ).first()
-
             if insurance:
                 company_name = insurance.company_name
 
-        # ── Latest Room / Bed Details ───────────────
         room_no = None
         bed_no = None
-
         if admission.roomShitingDetails:
             active_shift_rooms = [
                 r for r in admission.roomShitingDetails
                 if r.get("is_roomActive") is True
             ]
-
             if active_shift_rooms:
                 latest_shift = active_shift_rooms[-1]
                 room_no = latest_shift.get("newRoomNo")
@@ -149,13 +313,10 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 r for r in admission.room_details
                 if r.get("is_roomActive") is True
             ]
-
             latest_room = active_rooms[-1] if active_rooms else admission.room_details[-1]
-
             room_no = latest_room.get("roomNo")
             bed_no = latest_room.get("bedNo")
 
-        # ── IST (UTC+5:30) conversion for admissionDateTime ──
         from datetime import timezone as py_timezone, timedelta as py_timedelta
         IST = py_timezone(py_timedelta(hours=5, minutes=30))
 
@@ -175,27 +336,22 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 adm_date = dt_ist.strftime("%Y-%m-%d")
                 adm_time = dt_ist.strftime("%H:%M")
 
-        # ── Response ───────────────────────────────
         response_data = {
             'ipNumber': admission.ipNumber,
             'ipserial_number': admission.ipserial_number,
             'uhid': admission.uhid,
-
             'roomNo': room_no,
             'bedNo': bed_no,
             'room_details': admission.room_details,
             'roomShitingDetails': getattr(admission, 'roomShitingDetails', []),
-
             'admissionDate': adm_date,
             'admissionTime': adm_time,
             'admittingDoctor': admission.admittingDoctor,
             'consultingDoctor': admission.consultingDoctor,
             'packageName': admission.packageName,
             'reasonForAdmission': admission.reasonForAdmission,
-
             'is_discharged': admission.is_discharged,
             'is_admitted': getattr(admission, 'is_admitted', False),
-
             'salutation': getattr(patient, 'salutation', ''),
             'firstName': patient.firstName,
             'lastName': patient.lastName,
@@ -208,7 +364,6 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'city': patient.city,
             'state': patient.state,
             'zipcode': patient.zipcode,
-
             'customer_type': patient.customer_type,
             'company_code': patient.company_code,
             'company_name': company_name,

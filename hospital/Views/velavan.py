@@ -3015,19 +3015,23 @@ def get_velavan_dashboard_stats(request):
                 return 0.0
 
         def parse_doc_date(dt_val):
+            if dt_val is None:
+                return None
             if isinstance(dt_val, (datetime, date)):
                 if isinstance(dt_val, datetime):
                     return dt_val.date()
                 return dt_val
             if isinstance(dt_val, str) and dt_val.strip():
+                clean_str = dt_val.strip()
                 try:
-                    return datetime.fromisoformat(dt_val.replace('Z', '')).date()
+                    return datetime.fromisoformat(clean_str.replace('Z', '').split('+')[0]).date()
                 except:
                     pass
-                try:
-                    return datetime.strptime(dt_val[:10], '%Y-%m-%d').date()
-                except:
-                    pass
+                for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y %H:%M:%S'):
+                    try:
+                        return datetime.strptime(clean_str[:10], fmt).date()
+                    except:
+                        pass
             return None
 
         # Fetch all collections
@@ -3123,27 +3127,110 @@ def get_velavan_dashboard_stats(request):
 
         # ── KPI Calculations ──
         gross_sales_amt = sum(to_f(s.get('total_amount')) for s in filtered_sales)
-        sales_returns_amt = sum(to_f(r.get('total_amount')) for r in filtered_sr)
-        net_sales_amt = max(0.0, gross_sales_amt - sales_returns_amt)
+        # Calculate sales returns taxable amounts from item-level values
+        sales_returns_taxable_amt = 0.0
+        for sr in filtered_sr:
+            raw_items = normalize_items_payload(sr.get('items', []))
+            sr_tax = 0.0
+            if raw_items:
+                for itm in raw_items:
+                    it_taxable = to_f(
+                        itm.get('sellingCostBeforeGst') or 
+                        itm.get('taxableAmount') or 
+                        itm.get('taxable_amount') or 
+                        itm.get('purchaseCostBeforeGst') or 
+                        itm.get('costBeforeGst')
+                    )
+                    if it_taxable == 0.0:
+                        sc = to_f(itm.get('sellingCost') or itm.get('totalAmount') or itm.get('total_amount'))
+                        tax_p = to_f(itm.get('sellingTax') or itm.get('tax') or (to_f(itm.get('sellingCgstPercent')) + to_f(itm.get('sellingsgstPercent'))))
+                        if sc > 0:
+                            it_taxable = sc / (1.0 + tax_p / 100.0) if tax_p > 0 else sc
+                    sr_tax += it_taxable
+            if sr_tax == 0.0:
+                sr_tax = to_f(sr.get('taxable_amount') or sr.get('taxableAmount'))
+            if sr_tax == 0.0:
+                sr_tot = to_f(sr.get('total_amount') or sr.get('totalAmount'))
+                sr_gst = to_f(sr.get('cgst')) + to_f(sr.get('sgst'))
+                sr_tax = (sr_tot - sr_gst) if sr_tot > sr_gst else sr_tot
+            sales_returns_taxable_amt += sr_tax
 
-        sales_taxable_amt = sum(to_f(s.get('taxable_amount')) for s in filtered_sales)
+        net_sales_without_gst = max(0.0, sales_taxable_amt - sales_returns_taxable_amt)
+
         sales_cgst = sum(to_f(s.get('cgst')) for s in filtered_sales)
         sales_sgst = sum(to_f(s.get('sgst')) for s in filtered_sales)
         sales_gst_total = sales_cgst + sales_sgst
 
         gross_purchases_amt = sum(to_f(i.get('net_invoice_amount') or i.get('total_amount')) for i in filtered_invs)
-        purchase_returns_amt = sum(to_f(r.get('total_amount')) for r in filtered_pr)
+        purchase_returns_amt = sum(to_f(r.get('total_amount') or r.get('totalAmount')) for r in filtered_pr)
         net_purchases_amt = max(0.0, gross_purchases_amt - purchase_returns_amt)
 
-        purchase_taxable_amt = sum(to_f(i.get('taxable_amount')) for i in filtered_invs)
+        # Calculate purchase taxable amounts from item-level pre-tax values
+        purchase_taxable_amt = 0.0
+        for inv in filtered_invs:
+            raw_items = normalize_items_payload(inv.get('items', []))
+            if raw_items:
+                inv_tax = 0.0
+                for itm in raw_items:
+                    it_taxable = to_f(itm.get('purchaseCostBeforeGst'))
+                    if it_taxable == 0.0 and itm.get('taxable_amount') not in (None, ''):
+                        it_taxable = to_f(itm.get('taxable_amount'))
+                    if it_taxable == 0.0 and itm.get('taxableAmount') not in (None, ''):
+                        it_taxable = to_f(itm.get('taxableAmount'))
+                    if it_taxable == 0.0:
+                        pc = to_f(itm.get('purchaseCost') or itm.get('totalAmount') or itm.get('total_amount'))
+                        tax_p = to_f(itm.get('tax') or (to_f(itm.get('cgstPercent')) + to_f(itm.get('sgstPercent')) + to_f(itm.get('igstPercent'))))
+                        if pc > 0:
+                            it_taxable = pc / (1.0 + tax_p / 100.0) if tax_p > 0 else pc
+                        else:
+                            up = to_f(itm.get('unitPrice'))
+                            qty = to_f(itm.get('quantity') or 1)
+                            disc = to_f(itm.get('discountedAmt'))
+                            it_taxable = (up * qty) - disc
+                    inv_tax += it_taxable
+                purchase_taxable_amt += inv_tax
+            else:
+                i_tot = to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+                i_gst = to_f(inv.get('cgst')) + to_f(inv.get('sgst')) + to_f(inv.get('igst'))
+                purchase_taxable_amt += (i_tot - i_gst) if i_tot > i_gst else to_f(inv.get('taxable_amount'))
+
+        # Calculate purchase returns taxable amounts from item-level values
+        purchase_returns_taxable_amt = 0.0
+        for pr in filtered_pr:
+            raw_items = normalize_items_payload(pr.get('items', []))
+            pr_tax = 0.0
+            if raw_items:
+                for itm in raw_items:
+                    it_taxable = to_f(
+                        itm.get('taxableAmount') or 
+                        itm.get('taxable_amount') or 
+                        itm.get('purchaseCostBeforeGst') or 
+                        itm.get('costBeforeGst')
+                    )
+                    if it_taxable == 0.0:
+                        pc = to_f(itm.get('totalAmount') or itm.get('total_amount') or itm.get('purchaseCost'))
+                        tax_p = to_f(itm.get('tax') or itm.get('taxRate') or (to_f(itm.get('cgstPercent')) + to_f(itm.get('sgstPercent')) + to_f(itm.get('igstPercent'))))
+                        if pc > 0:
+                            it_taxable = pc / (1.0 + tax_p / 100.0) if tax_p > 0 else pc
+                    pr_tax += it_taxable
+            if pr_tax == 0.0:
+                pr_tax = to_f(pr.get('taxable_amount') or pr.get('taxableAmount'))
+            if pr_tax == 0.0:
+                pr_tot = to_f(pr.get('total_amount') or pr.get('totalAmount'))
+                pr_gst = to_f(pr.get('cgst')) + to_f(pr.get('sgst')) + to_f(pr.get('igst'))
+                pr_tax = (pr_tot - pr_gst) if pr_tot > pr_gst else pr_tot
+            purchase_returns_taxable_amt += pr_tax
+
+        net_purchases_without_gst = max(0.0, purchase_taxable_amt - purchase_returns_taxable_amt)
+
         purchase_cgst = sum(to_f(i.get('cgst')) for i in filtered_invs)
         purchase_sgst = sum(to_f(i.get('sgst')) for i in filtered_invs)
         purchase_igst = sum(to_f(i.get('igst')) for i in filtered_invs)
         purchase_gst_total = purchase_cgst + purchase_sgst + purchase_igst
         purchase_discount_total = sum(to_f(i.get('total_discount')) for i in filtered_invs)
 
-        gross_profit = net_sales_amt - net_purchases_amt
-        profit_margin = round((gross_profit / net_sales_amt * 100.0), 2) if net_sales_amt > 0 else 0.0
+        gross_profit_without_gst = net_sales_without_gst - net_purchases_without_gst
+        profit_margin_without_gst = round((gross_profit_without_gst / net_sales_without_gst * 100.0), 2) if net_sales_without_gst > 0 else 0.0
 
         net_gst_liability = sales_gst_total - purchase_gst_total
 
@@ -3278,7 +3365,7 @@ def get_velavan_dashboard_stats(request):
                 d_key = s_date.strftime('%Y-%m-%d')
                 if d_key not in timeline_dict:
                     timeline_dict[d_key] = {'date': d_key, 'sales': 0.0, 'purchases': 0.0, 'sales_count': 0, 'purchase_count': 0}
-                timeline_dict[d_key]['sales'] += to_f(s.get('total_amount'))
+                timeline_dict[d_key]['sales'] += to_f(s.get('taxable_amount') or s.get('total_amount'))
                 timeline_dict[d_key]['sales_count'] += 1
 
         for inv in filtered_invs:
@@ -3287,7 +3374,7 @@ def get_velavan_dashboard_stats(request):
                 d_key = i_date.strftime('%Y-%m-%d')
                 if d_key not in timeline_dict:
                     timeline_dict[d_key] = {'date': d_key, 'sales': 0.0, 'purchases': 0.0, 'sales_count': 0, 'purchase_count': 0}
-                timeline_dict[d_key]['purchases'] += to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+                timeline_dict[d_key]['purchases'] += to_f(inv.get('taxable_amount') or inv.get('net_invoice_amount') or inv.get('total_amount'))
                 timeline_dict[d_key]['purchase_count'] += 1
 
         # Sort timeline
@@ -3320,7 +3407,7 @@ def get_velavan_dashboard_stats(request):
                 m_key = s_date.strftime('%Y-%m')
                 if m_key not in monthly_map:
                     monthly_map[m_key] = {'month': m_key, 'sales': 0.0, 'purchases': 0.0}
-                monthly_map[m_key]['sales'] += to_f(s.get('total_amount'))
+                monthly_map[m_key]['sales'] += to_f(s.get('taxable_amount') or s.get('total_amount'))
 
         for inv in all_invs:
             i_date = parse_doc_date(inv.get('invoice_date')) or parse_doc_date(inv.get('date')) or parse_doc_date(inv.get('created_date'))
@@ -3328,7 +3415,7 @@ def get_velavan_dashboard_stats(request):
                 m_key = i_date.strftime('%Y-%m')
                 if m_key not in monthly_map:
                     monthly_map[m_key] = {'month': m_key, 'sales': 0.0, 'purchases': 0.0}
-                monthly_map[m_key]['purchases'] += to_f(inv.get('net_invoice_amount') or inv.get('total_amount'))
+                monthly_map[m_key]['purchases'] += to_f(inv.get('taxable_amount') or inv.get('net_invoice_amount') or inv.get('total_amount'))
 
         monthly_overview = []
         for m_key in sorted(monthly_map.keys()):
@@ -3480,6 +3567,43 @@ def get_velavan_dashboard_stats(request):
                 'items_count': len(normalize_items_payload(inv.get('items', []))),
             })
 
+        # ── Purchase Returns List ──
+        purchase_returns_list = []
+        for pr in filtered_pr:
+            pr_date = parse_doc_date(pr.get('return_date')) or parse_doc_date(pr.get('created_date'))
+            vid = str(pr.get('vendor_id') or '')
+            purchase_returns_list.append({
+                'return_number': pr.get('return_number', ''),
+                'grn_number': pr.get('grn_number', ''),
+                'vendor_id': vid,
+                'vendor_name': vendor_map.get(vid) or f"Vendor #{vid}",
+                'return_date': pr_date.strftime('%d/%m/%Y') if pr_date else '',
+                'items_count': len(normalize_items_payload(pr.get('items', []))),
+                'taxable_amount': to_f(pr.get('taxable_amount') or pr.get('taxableAmount')),
+                'cgst': to_f(pr.get('cgst')),
+                'sgst': to_f(pr.get('sgst')),
+                'total_amount': to_f(pr.get('total_amount') or pr.get('totalAmount')),
+                'remarks': pr.get('remarks', '')
+            })
+
+        # ── Sales Returns List ──
+        sales_returns_list = []
+        for sr in filtered_sr:
+            sr_date = parse_doc_date(sr.get('return_date')) or parse_doc_date(sr.get('created_date'))
+            cid = str(sr.get('customer_id') or '')
+            sales_returns_list.append({
+                'return_number': sr.get('return_number', ''),
+                'bill_number': sr.get('bill_number', ''),
+                'patient_name': sr.get('patient_name', '') or customer_map.get(cid) or 'General Patient',
+                'return_date': sr_date.strftime('%d/%m/%Y') if sr_date else '',
+                'items_count': len(normalize_items_payload(sr.get('items', []))),
+                'taxable_amount': to_f(sr.get('taxable_amount') or sr.get('taxableAmount')),
+                'cgst': to_f(sr.get('cgst')),
+                'sgst': to_f(sr.get('sgst')),
+                'total_amount': to_f(sr.get('total_amount') or sr.get('totalAmount')),
+                'remarks': sr.get('remarks', '')
+            })
+
         response_data = {
             'status': 'success',
             'date_range': {
@@ -3488,16 +3612,18 @@ def get_velavan_dashboard_stats(request):
                 'period': period
             },
             'kpis': {
-                'total_sales': round(net_sales_amt, 2),
-                'gross_sales': round(gross_sales_amt, 2),
-                'sales_returns': round(sales_returns_amt, 2),
+                'total_sales': round(net_sales_without_gst, 2),
+                'gross_sales': round(sales_taxable_amt, 2),
+                'sales_returns': round(sales_returns_taxable_amt, 2),
+                'sales_returns_count': len(filtered_sr),
                 'sales_count': len(filtered_sales),
-                'total_purchases': round(net_purchases_amt, 2),
-                'gross_purchases': round(gross_purchases_amt, 2),
-                'purchase_returns': round(purchase_returns_amt, 2),
+                'total_purchases': round(net_purchases_without_gst, 2),
+                'gross_purchases': round(purchase_taxable_amt, 2),
+                'purchase_returns': round(purchase_returns_taxable_amt, 2),
+                'purchase_returns_count': len(filtered_pr),
                 'purchase_count': len(filtered_invs),
-                'gross_profit': round(gross_profit, 2),
-                'profit_margin': profit_margin,
+                'gross_profit': round(gross_profit_without_gst, 2),
+                'profit_margin': profit_margin_without_gst,
                 'sales_taxable': round(sales_taxable_amt, 2),
                 'sales_gst': round(sales_gst_total, 2),
                 'sales_cgst': round(sales_cgst, 2),
@@ -3511,8 +3637,8 @@ def get_velavan_dashboard_stats(request):
                 'total_discount': round(purchase_discount_total, 2),
                 'total_items_sold': items_sold_count,
                 'total_items_purchased': items_purchased_count,
-                'avg_sales_value': round(gross_sales_amt / len(filtered_sales), 2) if filtered_sales else 0.0,
-                'avg_purchase_value': round(gross_purchases_amt / len(filtered_invs), 2) if filtered_invs else 0.0,
+                'avg_sales_value': round(sales_taxable_amt / len(filtered_sales), 2) if filtered_sales else 0.0,
+                'avg_purchase_value': round(purchase_taxable_amt / len(filtered_invs), 2) if filtered_invs else 0.0,
                 'active_vendors_count': len(vendor_map),
                 'active_customers_count': len(customer_map),
                 'total_item_catalog_count': len(item_map),
@@ -3545,6 +3671,8 @@ def get_velavan_dashboard_stats(request):
             'markup_markdown_variances': markup_markdown_variances,
             'recent_sales': recent_sales,
             'recent_purchases': recent_purchases,
+            'purchase_returns_list': purchase_returns_list,
+            'sales_returns_list': sales_returns_list,
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
