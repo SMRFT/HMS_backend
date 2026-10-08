@@ -130,6 +130,8 @@ def doctor_schedule_list(request):
                 "mobileNumber": doc.get('mobileNumber', ''),
                 "specialty": doc.get('specialty', 'General'),
                 "consulting_fee": 0,
+                "insurance_consulting_fee": 0,
+                "review_fee": 0,
                 "registration_fee": 0,
                 "day_schedule": [],
                 "time_schedule": [],
@@ -140,6 +142,8 @@ def doctor_schedule_list(request):
             if schedule:
                 doc_data.update({
                     "consulting_fee": schedule.get("consulting_fee", 0),
+                    "insurance_consulting_fee": schedule.get("insurance_consulting_fee", 0),
+                    "review_fee": schedule.get("review_fee", 0),
                     "registration_fee": schedule.get("registration_fee", 0),
                     "day_schedule": schedule.get("day_schedule", []),
                     "time_schedule": schedule.get("time_schedule", []),
@@ -196,6 +200,8 @@ def doctor_schedule_detail(request, employee_id):
             "department": resolved_dept,
             "designation": resolved_desig,
             "consulting_fee": "",
+            "insurance_consulting_fee": "",
+            "review_fee": "",
             "registration_fee": "",
             "day_schedule": [],
             "time_schedule": []
@@ -204,6 +210,8 @@ def doctor_schedule_detail(request, employee_id):
         if doctor_schedule:
             response_data.update({
                 "consulting_fee": doctor_schedule.get("consulting_fee", ""),
+                "insurance_consulting_fee": doctor_schedule.get("insurance_consulting_fee", ""),
+                "review_fee": doctor_schedule.get("review_fee", ""),
                 "registration_fee": doctor_schedule.get("registration_fee", ""),
                 "day_schedule": doctor_schedule.get("day_schedule", []),
                 "time_schedule": doctor_schedule.get("time_schedule", [])
@@ -244,6 +252,8 @@ def doctor_schedule_upsert(request, employee_id):
         schedule_data = {
             "employeeId": employee_id,
             "consulting_fee": request.data.get("consulting_fee", ""),
+            "insurance_consulting_fee": request.data.get("insurance_consulting_fee", ""),
+            "review_fee": request.data.get("review_fee", ""),
             "registration_fee": request.data.get("registration_fee", ""),
             "day_schedule": request.data.get("day_schedule", []),
             "time_schedule": request.data.get("time_schedule", []),
