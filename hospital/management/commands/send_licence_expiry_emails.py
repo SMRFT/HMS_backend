@@ -155,21 +155,31 @@ def run_licence_expiry_check():
                 respective_person_emails, respective_depts = get_employee_emails_and_departments(record.get("respective_person"))
 
                 incharge_emails = list(dict.fromkeys(incharge_emails))
+                respective_person_emails = list(dict.fromkeys(respective_person_emails))
 
                 all_dept_codes = list(set(incharge_depts + respective_depts))
                 dept_emails = get_department_emails(all_dept_codes)
 
+                # ✅ respective_person goes to 'To'
+                to_emails = list(dict.fromkeys(respective_person_emails))
+
+                # ✅ incharge & departments go to 'CC'
                 cc_emails = []
-                for mail in respective_person_emails + dept_emails:
-                    if mail not in incharge_emails and mail not in cc_emails:
+                for mail in incharge_emails + dept_emails:
+                    if mail not in to_emails and mail not in cc_emails:
                         cc_emails.append(mail)
 
-                print("Incharge Emails:", incharge_emails)
-                print("CC Emails:", cc_emails)
+                # Fallback: if no respective_person email, use incharge as 'To'
+                if not to_emails and incharge_emails:
+                    to_emails = list(dict.fromkeys(incharge_emails))
+                    cc_emails = [m for m in cc_emails if m not in to_emails]
 
-                if not incharge_emails:
+                print("To Emails (Respective Person):", to_emails)
+                print("CC Emails (Incharge & Dept):", cc_emails)
+
+                if not to_emails:
                     now_dt = timezone.now()
-                    skip_reason = "No incharge email"
+                    skip_reason = "No recipient email (no respective person or incharge email)"
                     skipped.append({
                         "licence": record.get("licence_name"),
                         "reason": skip_reason,
@@ -188,7 +198,7 @@ def run_licence_expiry_check():
                         "threshold_days": days_before,
                         "threshold_flag": flag_field,
                         "days_left": diff_days,
-                        "to_emails": [],
+                        "to_emails": to_emails,
                         "cc_emails": cc_emails,
                         "status": "Skipped",
                         "error_message": skip_reason,
@@ -226,7 +236,7 @@ def run_licence_expiry_check():
                         subject=subject,
                         body=email_body,
                         from_email=cs_email,
-                        to=incharge_emails,
+                        to=to_emails,
                         cc=cc_emails,
                         connection=cs_connection,
                     )
@@ -251,7 +261,7 @@ def run_licence_expiry_check():
                         "threshold_flag": flag_field,
                         "days_left": diff_days,
                         "from_email": cs_email,
-                        "to_emails": incharge_emails,
+                        "to_emails": to_emails,
                         "cc_emails": cc_emails,
                         "subject": subject,
                         "body": email_body,
@@ -274,7 +284,7 @@ def run_licence_expiry_check():
                                     "threshold_flag": flag_field,
                                     "days_left": diff_days,
                                     "from_email": cs_email,
-                                    "to_emails": incharge_emails,
+                                    "to_emails": to_emails,
                                     "cc_emails": cc_emails,
                                     "subject": subject,
                                     "status": "Sent",
@@ -309,7 +319,7 @@ def run_licence_expiry_check():
                         "threshold_flag": flag_field,
                         "days_left": diff_days,
                         "from_email": cs_email if 'cs_email' in locals() else None,
-                        "to_emails": incharge_emails,
+                        "to_emails": to_emails,
                         "cc_emails": cc_emails,
                         "subject": subject if 'subject' in locals() else f"Licence Expiry Reminder - {record.get('licence_name')}",
                         "status": "Failed",
@@ -326,6 +336,8 @@ def run_licence_expiry_check():
                                     "threshold_days": days_before,
                                     "threshold_flag": flag_field,
                                     "days_left": diff_days,
+                                    "to_emails": to_emails,
+                                    "cc_emails": cc_emails,
                                     "status": "Failed",
                                     "error_message": err_msg,
                                     "sent_at": now_dt

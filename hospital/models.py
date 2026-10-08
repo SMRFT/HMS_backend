@@ -355,6 +355,7 @@ class PharmacyItem(AuditModel):
     is_blocked = models.BooleanField(default=False)
     blocked_reason = models.CharField(max_length=50, blank=True)
     is_active = models.BooleanField(default=True)
+    is_consumable_items = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
 

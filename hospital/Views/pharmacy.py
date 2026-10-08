@@ -24,6 +24,7 @@ from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPerm
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider,Admission
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
+from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -287,7 +288,27 @@ def get_pharmacy_stock(request):
                     "batch_number": 1,
                     "expiry_date": 1,
                     "total_stock": 1,
-                    "mrp": 1,
+                    "mrp": {
+                        "$cond": [
+                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
+                            "$Selling_Price",
+                            {"$ifNull": ["$mrp", 0]}
+                        ]
+                    },
+                    "Selling_Price": {
+                        "$cond": [
+                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
+                            "$Selling_Price",
+                            {"$ifNull": ["$mrp", 0]}
+                        ]
+                    },
+                    "price": {
+                        "$cond": [
+                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
+                            "$Selling_Price",
+                            {"$ifNull": ["$mrp", 0]}
+                        ]
+                    },
 
                     "available_stock": 1,
                     "reorder_level": 1,
@@ -383,6 +404,16 @@ def sanitize_medicines(medicines):
         if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
             bn_val = fallback_batch_map.get(item_id_val, "") or fallback_batch_map.get(str(item_id_val), "")
 
+        med_is_consumable = med.get("is_consumable_items")
+        if med_is_consumable is None:
+            try:
+                p_it = db["hospital_pharmacyitem"].find_one({"item_id": item_id_val}, {"is_consumable_items": 1})
+                med_is_consumable = bool(p_it.get("is_consumable_items", False)) if p_it else False
+            except Exception:
+                med_is_consumable = False
+        else:
+            med_is_consumable = bool(med_is_consumable)
+
         clean.append({
             "item_id": item_id_val,
             "item_name": med.get("item_name") or med.get("name") or "",
@@ -390,6 +421,7 @@ def sanitize_medicines(medicines):
             "qty": int(med.get("qty", 0)),
             "price": float(med.get("price", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
+            "is_consumable_items": med_is_consumable,
             "edit_history": med.get("edit_history", [])
         })
 
@@ -1677,688 +1709,213 @@ def parse_medicine_particulars(data):
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 def pharmacy_medicinechart(request):
-
     try:
-
-        print("\n===== API START: pharmacy_medicinechart =====")
-
-
         data = request.data
-
 
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
 
-
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
         print("outlet_code:", outlet_code)
 
-
-
         if not hospital_code or not branch_code or not outlet_code:
-
             return Response(
-                {
-                    "error":
-                    "hospital_code, branch_code, outlet_code required"
-                },
+                {"error": "hospital_code, branch_code, outlet_code required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-
-
         # =========================================
-        # GLOBAL DB
+        # 1. GET BILL DATA (Using PharmacyBilling model & serializer)
         # =========================================
-
-        client = MongoClient(
-            os.getenv("GLOBAL_DB_HOST")
-        )
-
-        global_db = client["Global"]
-
-        employee_collection = global_db[
-            "backend_diagnostics_profile"
-        ]
-
-
-
-        # =========================================
-        # PHARMACY MONGO
-        # =========================================
-
-        pharmacy_client = MongoClient(
-            os.getenv(
-                "PHARMACY_DB_HOST",
-                os.getenv("GLOBAL_DB_HOST")
-            )
-        )
-
-
-        pharmacy_db = pharmacy_client[
-            os.getenv(
-                "PHARMACY_DB_NAME",
-                "pharmacy"
-            )
-        ]
-
-
-        bill_collection = pharmacy_db[
-            "pharmacy_billing"
-        ]
-
-
-
-        # =========================================
-        # GET BILL DATA
-        # =========================================
-
         queryset = PharmacyBilling.objects.filter(
-
             hospital_code=hospital_code,
-
             branch_code=branch_code,
-
             outlet_code=outlet_code,
-
-            billing_status__in=[
-                "Pending",
-                "Processing"
-            ],
-
+            billing_status__in=["Pending", "Processing"],
             is_ward_request=True
-
         ).order_by('-created_date')
 
+        serialized_data = PharmacyBillingSerializer(queryset, many=True).data
 
-
-        serializer = PharmacyBillingSerializer(
-            queryset,
-            many=True
-        )
-
-
-        serialized_data = serializer.data
-
-
-
-        print(
-            "Total Bills:",
-            len(serialized_data)
-        )
-
-
-
-        final_data = []
-
-
+        if not serialized_data:
+            return Response(
+                {"status": "success", "count": 0, "data": []},
+                status=status.HTTP_200_OK
+            )
 
         # =========================================
-        # LOOP BILL
+        # 2. BULK PREFETCHING: Eliminate N+1 loop queries
         # =========================================
+        all_uhids = set()
+        all_doc_ids = set()
+        all_item_ids = set()
+        bill_items_map = {}
 
         for bill in serialized_data:
-
-
-
-            bill_id = bill.get("Bill_id")
-
-
-            print(
-                "\nProcessing Bill:",
-                bill_id
-            )
-
-
-
-            # =====================================
-            # GET MEDICINE FROM MONGO
-            # =====================================
-
-            mongo_doc = bill_collection.find_one(
-
-                {
-                    "Bill_id": bill_id,
-
-                    "hospital_code": hospital_code,
-
-                    "branch_code": branch_code,
-
-                    "outlet_code": outlet_code,
-
-                },
-
-                {
-
-                    "medicine_particulars":1,
-
-                    "billing_status":1,
-
-                    "_id":0
-
-                }
-
-            )
-
-
-
-            if mongo_doc:
-
-
-                bill["billing_status"] = mongo_doc.get(
-                    "billing_status",
-                    bill.get("billing_status")
-                )
-
-
-                raw_particulars = mongo_doc.get(
-                    "medicine_particulars",
-                    []
-                )
-
-
-            else:
-
-
-                raw_particulars = bill.get(
-                    "medicine_particulars",
-                    []
-                )
-
-
-
-
-            # =====================================
-            # PATIENT DETAILS
-            # =====================================
-
-
-            patient_data = {}
-
-
+            b_id = bill.get("Bill_id")
             uhid = bill.get("uhid")
-
-
             if uhid:
+                all_uhids.add(str(uhid).strip())
 
+            doc_id = bill.get("doctor_id")
+            if doc_id:
+                all_doc_ids.add(str(doc_id).strip())
 
-                patient = Patient.objects.filter(
-                    uhid=uhid
-                ).first()
-
-
-
-                if patient:
-
-
-                    patient_data = {
-
-
-                        "patient_name":
-                        f"{patient.firstName} {patient.lastName}",
-
-
-                        "address":
-                        patient.permanent_address,
-
-
-                        "mobile":
-                        patient.mobilePhone
-
-                    }
-
-
-
-
-            bill["patient_details"] = patient_data
-
-
-
-
-            # =====================================
-            # DOCTOR DETAILS
-            # =====================================
-
-
-            doctor_name = None
-
-
-            doctor_id = bill.get(
-                "doctor_id"
-            )
-
-
-            if doctor_id:
-
-
-                doctor = employee_collection.find_one(
-
-                    {
-                        "employeeId":
-                        str(doctor_id)
-                    },
-
-                    {
-                        "employeeName":1,
-                        "_id":0
-                    }
-
-                )
-
-
-                if doctor:
-
-                    doctor_name = doctor.get(
-                        "employeeName"
-                    )
-
-
-
-            bill["doctor_name"] = doctor_name
-
-
-
-
-
-            # =====================================
-            # MEDICINE ITEMS
-            # =====================================
-
-
-            items = parse_medicine_particulars(
-                raw_particulars
-            )
-
-
-            mapped_items = []
-
-
+            raw_particulars = bill.get("medicine_particulars", [])
+            items = parse_medicine_particulars(raw_particulars)
+            bill_items_map[b_id] = items
 
             for item in items:
-
-
-
-                if not isinstance(item,dict):
-
-                    continue
-
-
-
-                if item.get("is_deleted"):
-
-                    continue
-
-
-
-
-                item_id = item.get(
-                    "item_id"
-                )
-
-
-
-                req_batch = item.get(
-                    "batch_number"
-                )
-
-
-
-                print(
-                    "Item:",
-                    item_id,
-                    "Batch:",
-                    req_batch
-                )
-
-
-
-
-                # =================================
-                # ITEM NAME
-                # =================================
-
-
-                item_obj = PharmacyItem.objects.filter(
-
-                    item_id=item_id,
-
-                    hospital_code=hospital_code,
-
-                    branch_code=branch_code
-
-                ).first()
-
-
-
-                item_name = (
-
-                    item_obj.item_name
-
-                    if item_obj
-
-                    else
-
-                    item.get("item_name")
-
-                )
-
-
-
-
-                # =================================
-                # STOCK FIND
-                # =================================
-
-
-                if req_batch:
-
-
-                    stock_qs = PharmacyStock.objects.filter(
-
-                        hospital_code=hospital_code,
-
-                        branch_code=branch_code,
-
-                        outlet_code=outlet_code,
-
-                        item_id=item_id,
-
-                        batch_number=req_batch
-
-                    ).order_by('-stock_id')
-
-
-
-                else:
-
-
-                    stock_qs = PharmacyStock.objects.filter(
-
-                        hospital_code=hospital_code,
-
-                        branch_code=branch_code,
-
-                        outlet_code=outlet_code,
-
-                        item_id=item_id
-
-                    ).order_by('-stock_id')
-
-
-
-
-
-                latest_stock = stock_qs.first()
-
-
-
-
-                # if no batch from request
-                # take stock batch
-
-
-                if latest_stock:
-
-
-                    req_batch = latest_stock.batch_number
-
-
-
-                    print(
-
-                        "Stock Found:",
-
-                        req_batch
-
-                    )
-
-
-
-                else:
-
-
-                    print(
-
-                        "No Stock Found"
-
-                    )
-
-
-
-
-
-                # =================================
-                # AVAILABLE STOCK
-                # =================================
-
-
-                stock_agg = stock_qs.aggregate(
-
-                    total_stock=Sum(
-                        'total_stock'
-                    ),
-
-                    sold=Sum(
-                        'sold_quantity'
-                    ),
-
-                    transferred=Sum(
-                        'transferred_out_quantity'
-                    ),
-
-                    grn_return=Sum(
-                        'grn_return_quantity'
-                    )
-
-                )
-
-
-
-
-                available_stock = (
-
-                    (stock_agg.get("total_stock") or 0)
-
-                    -
-
-                    (stock_agg.get("sold") or 0)
-
-                    -
-
-                    (stock_agg.get("transferred") or 0)
-
-                    -
-
-                    (stock_agg.get("grn_return") or 0)
-
-                )
-
-
-
-
-
-                # =================================
-                # TAX + MRP
-                # =================================
-
-
-                if latest_stock:
-
-
-                    mrp = convert_decimal(
-
-                        latest_stock.mrp
-
-                    )
-
-
-                    cgst_per = convert_decimal(
-
-                        latest_stock.CGST_Percentage
-
-                    )
-
-
-                    sgst_per = convert_decimal(
-
-                        latest_stock.SGST_Percentage
-
-                    )
-
-
-                    cgst_amt = convert_decimal(
-
-                        latest_stock.CGST_Amt
-
-                    )
-
-
-                    sgst_amt = convert_decimal(
-
-                        latest_stock.SGST_Amt
-
-                    )
-
-
-                else:
-
-
-                    mrp = 0
-
-                    cgst_per = 0
-
-                    sgst_per = 0
-
-                    cgst_amt = 0
-
-                    sgst_amt = 0
-
-
-
-
-
-                # =================================
-                # FINAL ITEM
-                # =================================
-
-
-                mapped_items.append(
-
-                    {
-
-
-                        **item,
-
-
-                        "item_name":
-                        item_name,
-
-
-                        "batch_number":
-                        req_batch,
-
-
-                        "mrp":
-                        mrp,
-
-
-                        "available_stock":
-                        available_stock,
-
-
-                        "CGST_Percentage":
-                        cgst_per,
-
-
-                        "SGST_Percentage":
-                        sgst_per,
-
-
-                        "CGST_Amt":
-                        cgst_amt,
-
-
-                        "SGST_Amt":
-                        sgst_amt
-
-
+                if isinstance(item, dict) and not item.get("is_deleted"):
+                    iid = item.get("item_id")
+                    if iid is not None:
+                        try:
+                            all_item_ids.add(int(iid))
+                        except (ValueError, TypeError):
+                            all_item_ids.add(str(iid).strip())
+
+        # 3. Bulk fetch Patients
+        patient_map = {}
+        if all_uhids:
+            try:
+                for p in Patient.objects.filter(uhid__in=list(all_uhids)):
+                    p_name = f"{p.firstName or ''} {p.lastName or ''}".strip()
+                    patient_map[str(p.uhid).strip()] = {
+                        "patient_name": p_name,
+                        "address": p.permanent_address or "",
+                        "mobile": p.mobilePhone or ""
                     }
+            except Exception as e:
+                print("Patient bulk prefetch error:", e)
 
-                )
+        # 3b. Bulk fetch Admissions using Admission Django model
+        admission_map = {}
+        if all_uhids:
+            try:
+                admissions = Admission.objects.filter(
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    uhid__in=list(all_uhids),
+                    is_admitted=True
+                ).order_by('-admissionDateTime')
 
+                for adm in admissions:
+                    u = str(adm.uhid or "").strip()
+                    if u in admission_map:
+                        continue  # Already captured latest active admission
 
+                    cust_type = str(adm.customer_type or "General").strip()
+                    adv_list = adm.advance_payments or []
+                    total_adv = 0.0
 
+                    if isinstance(adv_list, list):
+                        for ap in adv_list:
+                            if isinstance(ap, dict) and (
+                                ap.get("is_advanceActive") is not False
+                                and str(ap.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                                and not ap.get("is_refund")
+                            ):
+                                try:
+                                    total_adv += float(ap.get("ip_advance") or 0)
+                                except (ValueError, TypeError):
+                                    pass
+                    elif isinstance(adv_list, dict):
+                        if (
+                            adv_list.get("is_advanceActive") is not False
+                            and str(adv_list.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                            and not adv_list.get("is_refund")
+                        ):
+                            try:
+                                total_adv += float(adv_list.get("ip_advance") or 0)
+                            except (ValueError, TypeError):
+                                pass
+
+                    admission_map[u] = {
+                        "customer_type": cust_type,
+                        "is_insurance": cust_type.lower() == "insurance",
+                        "insurance_company": adm.insurance_company or "",
+                        "total_ip_advance": round(total_adv, 2),
+                        "ipNumber": adm.ipNumber or ""
+                    }
+            except Exception as e:
+                print("Admission model bulk prefetch error:", e)
+
+        # 4. Bulk fetch Doctors from profile_collection (dbcollection.py)
+        doctor_map = {}
+        if all_doc_ids:
+            try:
+                for emp in profile_collection.find(
+                    {"employeeId": {"$in": list(all_doc_ids)}},
+                    {"employeeId": 1, "employeeName": 1, "_id": 0}
+                ):
+                    doctor_map[str(emp.get("employeeId")).strip()] = emp.get("employeeName")
+            except Exception as e:
+                print("profile_collection error:", e)
+
+        # 5. Bulk fetch Pharmacy items & stock via common optimized function in dbcollection.py
+        items_stock_data = get_pharmacy_items_with_stock(
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            outlet_code=outlet_code,
+            item_ids=all_item_ids
+        )
+
+        # =========================================
+        # 6. IN-MEMORY ASSEMBLY (Instant)
+        # =========================================
+        final_data = []
+        for bill in serialized_data:
+            b_id = bill.get("Bill_id")
+            uhid_str = str(bill.get("uhid") or "").strip()
+            doc_id_str = str(bill.get("doctor_id") or "").strip()
+
+            bill["patient_details"] = patient_map.get(uhid_str, {})
+            bill["doctor_name"] = doctor_map.get(doc_id_str)
+
+            adm_info = admission_map.get(uhid_str, {})
+            bill["customer_type"] = adm_info.get("customer_type", bill.get("customer_type", "General"))
+            bill["is_insurance"] = adm_info.get("is_insurance", False)
+            bill["insurance_company"] = adm_info.get("insurance_company", "")
+            bill["total_ip_advance"] = adm_info.get("total_ip_advance", 0.0)
+            if not bill.get("inpatient_number") and adm_info.get("ipNumber"):
+                bill["inpatient_number"] = adm_info.get("ipNumber")
+
+            items = bill_items_map.get(b_id, [])
+            mapped_items = []
+
+            for item in items:
+                if not isinstance(item, dict) or item.get("is_deleted"):
+                    continue
+
+                stock_info = resolve_medicine_stock_details(item, items_stock_data)
+                mapped_items.append({
+                    **item,
+                    **stock_info
+                })
 
             bill["medicine_items"] = mapped_items
-
-
-
-            final_data.append(
-                bill
-            )
-
-
-
-
-
-        print(
-            "\n===== API SUCCESS ====="
-        )
-
-
+            final_data.append(bill)
 
         return Response(
-
             {
-
-                "status":
-                "success",
-
-                "count":
-                len(final_data),
-
-                "data":
-                final_data
-
+                "status": "success",
+                "count": len(final_data),
+                "data": final_data
             },
-
             status=status.HTTP_200_OK
-
         )
-
-
 
     except Exception as e:
-
-
-        print(
-            "ERROR:",
-            str(e)
-        )
-
-
         import traceback
-
         traceback.print_exc()
-
-
-
         return Response(
-
             {
-
-                "error":
-                "Something went wrong",
-
-                "details":
-                str(e)
-
+                "error": "Something went wrong",
+                "details": str(e)
             },
-
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
-
         )
 
 
@@ -2688,100 +2245,155 @@ def finalize_bill(request):
 
         if inpatient_number:
             ip_advance = 0.0
-            advance_check_blocked = False  # True = block billing (no Paid advance found)
+            advance_check_blocked = False  # True = block billing (no active advance found)
+            customer_type = "General"
 
             try:
                 admission = Admission.objects.filter(
                     ipNumber=inpatient_number
                 ).first()
 
-                if admission:
-                    advance_payments = admission.advance_payments or []
+                admission_doc = None
+                if not admission:
+                    admission_doc = mongo_db["hospital_admission"].find_one({
+                        "ipNumber": inpatient_number,
+                        "hospital_code": hospital_code
+                    })
+
+                if admission or admission_doc:
+                    if admission:
+                        customer_type = getattr(admission, "customer_type", "") or "General"
+                        advance_payments = getattr(admission, "advance_payments", []) or []
+                    else:
+                        customer_type = admission_doc.get("customer_type", "General") or "General"
+                        advance_payments = admission_doc.get("advance_payments", []) or []
 
                     if isinstance(advance_payments, list):
-                        # ✅ FIX 2: Only sum ip_advance from entries where status == "Paid"
-                        paid_entries = [
+                        # Active advance entries not cancelled or refunded
+                        valid_entries = [
                             ap for ap in advance_payments
-                            if str(ap.get("status", "")).strip().lower() == "paid"
+                            if ap.get("is_advanceActive") is not False
+                            and str(ap.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                            and not ap.get("is_refund")
                         ]
 
-                        if not paid_entries:
-                            # No Paid advance at all — block billing
+                        if not valid_entries:
                             advance_check_blocked = True
                         else:
                             ip_advance = sum(
                                 float(ap.get("ip_advance", 0) or 0)
-                                for ap in paid_entries
+                                for ap in valid_entries
                             )
 
                     elif isinstance(advance_payments, dict):
-                        if str(advance_payments.get("status", "")).strip().lower() != "paid":
-                            advance_check_blocked = True
-                        else:
+                        if (
+                            advance_payments.get("is_advanceActive") is not False
+                            and str(advance_payments.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                            and not advance_payments.get("is_refund")
+                        ):
                             ip_advance = float(advance_payments.get("ip_advance", 0) or 0)
+                        else:
+                            advance_check_blocked = True
 
                 else:
-                    # No admission record found — block billing
                     advance_check_blocked = True
 
             except Exception as adm_err:
                 print("Warning: could not fetch admission advance —", adm_err)
-                ip_advance = None  # skip check on lookup failure
+                ip_advance = None
 
-            # Block if no Paid advance entry exists at all
-            if advance_check_blocked:
-                return Response(
-                    {
-                        "error": "No Paid IP Advance found for this patient. Billing not allowed.",
-                    },
-                    status=400
-                )
+            is_insurance_patient = str(customer_type).strip().lower() == "insurance"
 
-            if ip_advance is not None and ip_advance > 0:
-                # ✅ FIX 1: Sum total_amount of ALL other "Billed" docs for this
-                # inpatient_number (exclude current bill to avoid double-counting)
-                existing_billed_cursor = bill_collection.find({
-                    "inpatient_number": inpatient_number,
-                    "billing_status":   "Billed",
-                    "is_deleted":       {"$ne": True},
-                    "Bill_id":          {"$ne": Bill_id},
-                })
-                existing_total = sum(
-                    float(b.get("total_amount", 0) or 0)
-                    for b in existing_billed_cursor
-                )
+            # ── Determine amount to check against IP Advance ─────────────────
+            # Rule: For Insurance patients, ONLY consumable items are payable by patient from IP Advance.
+            if is_insurance_patient:
+                consumable_amount = 0.0
+                for med in medicines_to_use:
+                    if not isinstance(med, dict) or med.get("is_deleted"):
+                        continue
+                    m_is_consumable = med.get("is_consumable_items")
+                    if m_is_consumable is None:
+                        try:
+                            m_id = int(med.get("item_id", 0))
+                        except (ValueError, TypeError):
+                            m_id = 0
+                        p_item = mongo_db["hospital_pharmacyitem"].find_one(
+                            {"item_id": m_id, "hospital_code": hospital_code},
+                            {"is_consumable_items": 1}
+                        )
+                        m_is_consumable = bool(p_item.get("is_consumable_items", False)) if p_item else False
 
-                # ✅ FIX 1: cumulative = all previous billed + this bill's amount
-                cumulative_total = round(existing_total + total_amount_to_use, 2)
+                    if m_is_consumable:
+                        q = float(med.get("qty") or med.get("quantity") or 0)
+                        p = float(med.get("price") or med.get("mrp") or med.get("rate") or 0)
+                        consumable_amount += float(med.get("calculated_price") or (q * p))
 
-                print(
-                    f"IP Advance check | ip_advance={ip_advance} "
-                    f"| existing_billed_total={existing_total} "
-                    f"| current_bill_total={total_amount_to_use} "
-                    f"| cumulative={cumulative_total}"
-                )
+                consumable_amount = round(consumable_amount, 2)
+                amount_to_check = consumable_amount
+            else:
+                amount_to_check = total_amount_to_use
 
-                # ✅ FIX 1: Block if cumulative exceeds ip_advance
-                if cumulative_total > ip_advance:
+            # If Insurance patient has 0 consumable items, no IP advance deduction is needed
+            if is_insurance_patient and amount_to_check == 0:
+                pass
+            else:
+                if advance_check_blocked:
                     return Response(
                         {
-                            "error":             "Billing Exceeds From IP Advance",
-                            "ip_advance":         ip_advance,
-                            "existing_billed":    existing_total,
-                            "current_bill_total": total_amount_to_use,
-                            "cumulative_total":   cumulative_total,
+                            "error": "No Active IP Advance found for this patient. Billing not allowed.",
                         },
                         status=400
                     )
 
-            elif ip_advance == 0:
-                # ip_advance field is 0 — no advance allocated for pharmacy
-                return Response(
-                    {
-                        "error": "IP Advance amount is 0. Billing not allowed.",
-                    },
-                    status=400
-                )
+                if ip_advance is not None and ip_advance > 0:
+                    existing_billed_cursor = bill_collection.find({
+                        "inpatient_number": inpatient_number,
+                        "billing_status":   "Billed",
+                        "is_deleted":       {"$ne": True},
+                        "Bill_id":          {"$ne": Bill_id},
+                    })
+                    existing_total = 0.0
+                    for b in existing_billed_cursor:
+                        if is_insurance_patient:
+                            past_meds = b.get("medicine_particulars", [])
+                            for pm in past_meds:
+                                if isinstance(pm, dict) and pm.get("is_consumable_items"):
+                                    q = float(pm.get("qty") or pm.get("quantity") or 0)
+                                    p = float(pm.get("price") or pm.get("mrp") or 0)
+                                    existing_total += float(pm.get("calculated_price") or (q * p))
+                        else:
+                            existing_total += float(b.get("total_amount", 0) or 0)
+
+                    cumulative_total = round(existing_total + amount_to_check, 2)
+
+                    print(
+                        f"IP Advance check | customer_type={customer_type} | is_insurance={is_insurance_patient} "
+                        f"| ip_advance={ip_advance} | existing_billed={existing_total} "
+                        f"| current_payable={amount_to_check} | cumulative={cumulative_total}"
+                    )
+
+                    if cumulative_total > ip_advance:
+                        err_msg = "Payable Consumables Exceed IP Advance" if is_insurance_patient else "Billing Exceeds From IP Advance"
+                        return Response(
+                            {
+                                "error":             err_msg,
+                                "customer_type":      customer_type,
+                                "is_insurance":       is_insurance_patient,
+                                "ip_advance":         ip_advance,
+                                "existing_billed":    existing_total,
+                                "current_payable":    amount_to_check,
+                                "cumulative_total":   cumulative_total,
+                            },
+                            status=400
+                        )
+
+                elif ip_advance == 0:
+                    return Response(
+                        {
+                            "error": "IP Advance amount is 0. Billing not allowed.",
+                        },
+                        status=400
+                    )
 
         # =====================================================
         # ✅ GENERATE BILL NO
@@ -2889,6 +2501,16 @@ def finalize_bill(request):
                 except Exception:
                     pass
 
+            med_is_consumable = med.get("is_consumable_items")
+            if med_is_consumable is None:
+                p_item = mongo_db["hospital_pharmacyitem"].find_one(
+                    {"item_id": item_id, "hospital_code": hospital_code},
+                    {"is_consumable_items": 1}
+                )
+                med_is_consumable = bool(p_item.get("is_consumable_items", False)) if p_item else False
+            else:
+                med_is_consumable = bool(med_is_consumable)
+
             med_entry = {
                 "item_id":          item_id,
                 "item_name":        med.get("item_name") or med.get("name"),
@@ -2900,6 +2522,7 @@ def finalize_bill(request):
                 "tax":              med.get("tax", 0),
                 "mrp":              med.get("mrp"),
                 "expiry_date":      med.get("expiry_date"),
+                "is_consumable_items": med_is_consumable,
                 "action":           "finalized",
                 "edited_by":        employee_id,
                 "edited_at":        now_ts,
