@@ -703,25 +703,9 @@ def _current_fin_year():
 
 
 def _next_draft_number():
-    """DRAFT/<FINYEAR>/<SEQ5> using high-speed indexed Mongo query"""
-    fin_year = _current_fin_year()
-    prefix = f"DRAFT/{fin_year}/"
-
-    client, hms_db = get_hms_db()
-    top_doc = list(hms_db["hospital_grn"].find(
-        {"draft_number": {"$regex": f"^{prefix}"}},
-        {"draft_number": 1}
-    ).sort("draft_number", DESCENDING).limit(1))
-
-    max_seq = 0
-    if top_doc:
-        d_val = top_doc[0].get("draft_number", "")
-        try:
-            max_seq = int(d_val.split("/")[-1])
-        except (ValueError, IndexError):
-            pass
-
-    return f"{prefix}{str(max_seq + 1).zfill(5)}"
+    """DRAFT/<FINYEAR>/<SEQ5> using atomic counter service from MongoDB 'counters' collection."""
+    from ..counter_service import get_next_grn_draft_number
+    return get_next_grn_draft_number()
 
 
 def _grn_number_from_draft(draft_number, purchase_category):

@@ -421,49 +421,13 @@ def _get_current_room(adm):
 # ─────────────────────────────────────────────────────────────────────────────
 # Next IP Generator & Helper
 # ─────────────────────────────────────────────────────────────────────────────
-def _compute_next_ip_number(hms_db):
+def _compute_next_ip_number(hms_db=None):
     """
-    Computes the next sequential IP number (e.g. S026/001692) for the current financial year.
-    Queries the indexed ipNumber field descending and continues seamlessly from migrated data,
-    excluding legacy dummy test offset >= 500000.
+    Computes the next sequential IP number (e.g. S026/001692) for the current financial year
+    using the centralized atomic MongoDB counter service.
     """
-    now_dt = datetime.now()
-    fy = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
-    prefix = f"S{fy:03d}"
-    
-    top_ips = list(hms_db["hospital_admission"].find(
-        {"ipNumber": {"$regex": f"^{prefix}/"}},
-        {"ipNumber": 1}
-    ).sort("ipNumber", -1).limit(50))
-    
-    max_num = 0
-    for a in top_ips:
-        ip = str(a.get("ipNumber") or "").strip()
-        if "/" in ip:
-            try:
-                p, n_str = ip.split("/", 1)
-                if p == prefix:
-                    n = int(n_str)
-                    if n < 500000:
-                        if n > max_num:
-                            max_num = n
-            except Exception:
-                continue
-
-    if max_num == 0 and top_ips:
-        for a in top_ips:
-            ip = str(a.get("ipNumber") or "").strip()
-            if "/" in ip:
-                try:
-                    p, n_str = ip.split("/", 1)
-                    if p == prefix:
-                        n = int(n_str)
-                        if n > max_num:
-                            max_num = n
-                except Exception:
-                    continue
-
-    return f"{prefix}/{max_num + 1:06d}"
+    from ..counter_service import get_next_admission_ip
+    return get_next_admission_ip()
 
 
 @api_view(['GET'])
@@ -1453,61 +1417,17 @@ def _max_sequence_for_prefix(bill_numbers, prefix):
 
 def _generate_advance_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
     """
-    Continuous, FY-scoped bill number across admissions for IP Advances (e.g. 2627/028226).
-    Uses high-performance aggregation across huge migrated data without arbitrary 50-item limit.
+    Continuous, FY-scoped bill number across admissions for IP Advances (e.g. 2627/028226)
+    using the centralized atomic MongoDB counter service.
     """
-    prefix = _financial_year_prefix()  # e.g. "2627/"
-    client, hms_db = _get_hms_db()
-    max_seq = 0
-    try:
-        pipeline = [
-            {"$match": {"advance_payments.bill_no": {"$regex": f"^{prefix}"}}},
-            {"$unwind": "$advance_payments"},
-            {"$match": {"advance_payments.bill_no": {"$regex": f"^{prefix}"}}},
-            {"$project": {"bill_no": "$advance_payments.bill_no"}},
-            {"$sort": {"bill_no": -1}},
-            {"$limit": 10}
-        ]
-        results = list(hms_db["hospital_admission"].aggregate(pipeline))
-        for r in results:
-            bn = r.get("bill_no", "")
-            if isinstance(bn, str) and "/" in bn:
-                try:
-                    num = int(bn.split("/")[-1])
-                    if num > max_seq:
-                        max_seq = num
-                except (ValueError, IndexError):
-                    pass
-    except Exception as e:
-        print(f"[_generate_advance_bill_no] Error: {e}")
-    finally:
-        if client:
-            client.close()
-
-    next_seq = max_seq + 1
-    return f"{prefix}{next_seq:06d}"
+    from ..counter_service import get_next_advance_bill_no
+    return get_next_advance_bill_no()
 
 
 def _generate_refund_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
-    """Separate, independent FY-scoped sequence for refund bill numbers."""
-    prefix = _financial_year_prefix()
-    max_seq = 0
-    client, hms_db = _get_hms_db()
-    try:
-        latest = hms_db["hospital_ipadvance_refund"].find_one(
-            {"refund_bill_no": {"$regex": f"^{prefix}"}},
-            projection={"refund_bill_no": 1},
-            sort=[("refund_bill_no", -1)]
-        )
-        if latest and latest.get("refund_bill_no"):
-            seq_str = str(latest["refund_bill_no"]).split("/")[-1]
-            max_seq = int(seq_str)
-    except Exception:
-        pass
-    finally:
-        if client:
-            client.close()
-    return f"{prefix}{max_seq + 1:06d}"
+    """Separate, independent FY-scoped sequence for refund bill numbers using atomic counter."""
+    from ..counter_service import get_next_advance_refund_bill_no
+    return get_next_advance_refund_bill_no()
 
 
 def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
