@@ -267,8 +267,8 @@ class ChemicalComposition(AuditModel):
  
     def save(self, *args, **kwargs):
         if self.composition_id is None:
-            last = ChemicalComposition.objects.order_by('-composition_id').first()
-            self.composition_id = (last.composition_id + 1) if last else 1
+            from .counter_service import get_next_chemical_composition_id
+            self.composition_id = get_next_chemical_composition_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -281,8 +281,8 @@ class PharmacyCategory(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.category_id is None:
-            last = PharmacyCategory.objects.order_by('-category_id').first()
-            self.category_id = (last.category_id + 1) if last else 1
+            from .counter_service import get_next_pharmacy_category_id
+            self.category_id = get_next_pharmacy_category_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -316,16 +316,8 @@ class Vendor(AuditModel):
 
     def save(self, *args, **kwargs):
         if not self.vendor_id:
-            try:
-                # Get all vendor IDs, find the max numerical one
-                vendors = Vendor.objects.all()
-                max_id = 0
-                for v in vendors:
-                    if v.vendor_id and str(v.vendor_id).isdigit():
-                        max_id = max(max_id, int(v.vendor_id))
-                self.vendor_id = str(max_id + 1)
-            except Exception:
-                self.vendor_id = "1"
+            from .counter_service import get_next_vendor_id
+            self.vendor_id = get_next_vendor_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -359,10 +351,10 @@ class PharmacyItem(AuditModel):
 
     def save(self, *args, **kwargs):
 
-        # Auto generate item_id
+        # Auto generate item_id via atomic counter
         if self.item_id is None:
-            last = PharmacyItem.objects.order_by("-item_id").first()
-            self.item_id = (last.item_id + 1) if last else 1
+            from .counter_service import get_next_pharmacy_item_id
+            self.item_id = get_next_pharmacy_item_id()
 
         # Auto generate HSN
         if not self.hsn:
@@ -731,8 +723,8 @@ class NursingStation(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.ward_id is None:
-            last = NursingStation.objects.order_by('-ward_id').first()
-            self.ward_id = (last.ward_id + 1) if last else 1
+            from .counter_service import get_next_ward_id
+            self.ward_id = get_next_ward_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -745,8 +737,8 @@ class Block(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.block_id is None:
-            last = Block.objects.order_by('-block_id').first()
-            self.block_id = (last.block_id + 1) if last else 1
+            from .counter_service import get_next_block_id
+            self.block_id = get_next_block_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -759,8 +751,8 @@ class RoomCategory(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.room_category_id is None:
-            last = RoomCategory.objects.order_by('-room_category_id').first()
-            self.room_category_id = (last.room_category_id + 1) if last else 1
+            from .counter_service import get_next_room_category_id
+            self.room_category_id = get_next_room_category_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -773,8 +765,8 @@ class RoomServiceDescription(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.description_id is None:
-            last = RoomServiceDescription.objects.order_by('-description_id').first()
-            self.description_id = (last.description_id + 1) if last else 1
+            from .counter_service import get_next_room_service_description_id
+            self.description_id = get_next_room_service_description_id()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -787,8 +779,8 @@ class RoomKitItems(AuditModel):
 
     def save(self, *args, **kwargs):
         if self.kit_id is None:
-            last = RoomKitItems.objects.order_by('-kit_id').first()
-            self.kit_id = (last.kit_id + 1) if last else 1
+            from .counter_service import get_next_room_kit_id
+            self.kit_id = get_next_room_kit_id()
         super().save(*args, **kwargs)
 
     def __str__(self):

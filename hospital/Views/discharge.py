@@ -228,22 +228,9 @@ def generate_estimate_number():
 
 
 def generate_bill_number():
-    """YYYY-YY/DCH/000001 — resets each financial year (sub-millisecond indexed query)."""
-    prefix = f"{_financial_year()}/DCH/"
-    seq = 1
-    try:
-        _, db = get_hms_db()
-        latest = db["hospital_dischargebilling"].find_one(
-            {"bill_no": {"$regex": f"^{re.escape(prefix)}"}},
-            projection={"bill_no": 1},
-            sort=[("bill_no", -1)]
-        )
-        if latest and latest.get("bill_no"):
-            seq_str = str(latest["bill_no"]).split("/")[-1]
-            seq = int(seq_str) + 1
-    except Exception:
-        seq = 1
-    return f"{prefix}{str(seq).zfill(6)}"
+    """Continuous sequential bill number via atomic counter service, continuing seamlessly from migrated data (e.g. 2627/005691)."""
+    from ..counter_service import get_next_discharge_bill_no
+    return get_next_discharge_bill_no()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
