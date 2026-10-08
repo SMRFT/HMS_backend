@@ -1,3 +1,4 @@
+import re
 import datetime
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -102,6 +103,22 @@ def mhc_save_details(request):
             employee_id = data.get('auth-user-id')
             data['lastmodified_by'] = employee_id
 
+            # Sanitize age
+            if 'age' in data:
+                age_val = data.get('age')
+                if age_val in [None, '', 'null', 'None', 'undefined']:
+                    data['age'] = None
+                elif isinstance(age_val, str):
+                    digits = re.findall(r'\d+', age_val)
+                    data['age'] = int(digits[0]) if digits else None
+                elif isinstance(age_val, (int, float)):
+                    data['age'] = int(age_val)
+
+            # Sanitize fee decimal fields
+            for field in ['package_fee', 'doctor_fee', 'add_tests', 'pharmacy', 'ip', 'total_fees']:
+                if field in data and data.get(field) in ['', None, 'null', 'None', 'undefined']:
+                    data[field] = None
+
             # Strip description if empty/whitespace
             if 'description' in data and not str(data.get('description', '')).strip():
                 data.pop('description', None)
@@ -151,6 +168,22 @@ def mhc_save_details(request):
         # 1. Store created_by and created_date
         data['created_by'] = employee_id
         data['created_date'] = timezone.now()
+
+        # Sanitize age
+        if 'age' in data:
+            age_val = data.get('age')
+            if age_val in [None, '', 'null', 'None', 'undefined']:
+                data['age'] = None
+            elif isinstance(age_val, str):
+                digits = re.findall(r'\d+', age_val)
+                data['age'] = int(digits[0]) if digits else None
+            elif isinstance(age_val, (int, float)):
+                data['age'] = int(age_val)
+
+        # Sanitize fee decimal fields
+        for field in ['package_fee', 'doctor_fee', 'add_tests', 'pharmacy', 'ip', 'total_fees']:
+            if field in data and data.get(field) in ['', None, 'null', 'None', 'undefined']:
+                data[field] = None
 
         # 3. Only store description if it has a value, and store telecaller info only if description exists
         if not data.get('description', '').strip():
