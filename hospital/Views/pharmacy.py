@@ -3,7 +3,7 @@ from pymongo import MongoClient
 import os
 import json
 import pytz
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from django.utils.dateparse import parse_datetime
 from decimal import Decimal, InvalidOperation
 
@@ -19,12 +19,13 @@ from django.db.models import Max, Q
 
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission, HasDataPermission
+from rest_framework.permissions import AllowAny
 
 # Models & Serializers
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider,Admission
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
-from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details
+from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details, get_employee_name_by_id
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -368,46 +369,44 @@ import os
 # ----------------------------------------------------------
 def sanitize_medicines(medicines):
     clean = []
-
-    # Fallback map for batch numbers if missing
-    fallback_batch_map = {}
-    try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client["HMS"]
-        for s in db["hospital_pharmacystock"].find():
-            iid = s.get("item_id")
-            bn = s.get("batch_number")
-            if iid is not None and bn and iid not in fallback_batch_map:
-                fallback_batch_map[iid] = str(bn).strip()
-                try:
-                    fallback_batch_map[int(iid)] = str(bn).strip()
-                except Exception:
-                    pass
-        for v in db["hospital_velavan_stock"].find():
-            iid = v.get("item_id")
-            bn = v.get("batch_no")
-            if iid is not None and bn and iid not in fallback_batch_map:
-                fallback_batch_map[iid] = str(bn).strip()
-                try:
-                    fallback_batch_map[int(iid)] = str(bn).strip()
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    if not medicines:
+        return clean
 
     for med in medicines:
         if not med:
             continue
 
-        item_id_val = int(med.get("item_id"))
+        try:
+            item_id_val = int(med.get("item_id"))
+        except (ValueError, TypeError):
+            continue
+
         bn_val = str(med.get("batch_number") or med.get("batch_no") or "").strip()
-        if not bn_val or bn_val.lower() == "none" or bn_val.lower() == "null" or bn_val == "N/A":
-            bn_val = fallback_batch_map.get(item_id_val, "") or fallback_batch_map.get(str(item_id_val), "")
+        if not bn_val or bn_val.lower() in ["none", "null", "n/a", ""]:
+            # On-demand lookup for ONLY this specific item_id
+            st = stock_collection.find_one(
+                {"item_id": item_id_val, "batch_number": {"$exists": True, "$ne": ""}},
+                {"batch_number": 1}
+            )
+            if st and st.get("batch_number"):
+                bn_val = str(st["batch_number"]).strip()
+            else:
+                v_st = mongo_db["hospital_velavan_stock"].find_one(
+                    {"item_id": item_id_val, "batch_no": {"$exists": True, "$ne": ""}},
+                    {"batch_no": 1}
+                )
+                if v_st and v_st.get("batch_no"):
+                    bn_val = str(v_st["batch_no"]).strip()
+                else:
+                    bn_val = ""
 
         med_is_consumable = med.get("is_consumable_items")
         if med_is_consumable is None:
             try:
-                p_it = db["hospital_pharmacyitem"].find_one({"item_id": item_id_val}, {"is_consumable_items": 1})
+                p_it = mongo_db["hospital_pharmacyitem"].find_one(
+                    {"item_id": item_id_val},
+                    {"is_consumable_items": 1}
+                )
                 med_is_consumable = bool(p_it.get("is_consumable_items", False)) if p_it else False
             except Exception:
                 med_is_consumable = False
@@ -418,8 +417,8 @@ def sanitize_medicines(medicines):
             "item_id": item_id_val,
             "item_name": med.get("item_name") or med.get("name") or "",
             "batch_number": bn_val,
-            "qty": int(med.get("qty", 0)),
-            "price": float(med.get("price", 0)),
+            "qty": int(med.get("qty", 0) or med.get("quantity", 0)),
+            "price": float(med.get("price", 0) or med.get("mrp", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
             "is_consumable_items": med_is_consumable,
             "edit_history": med.get("edit_history", [])
@@ -433,12 +432,8 @@ def sanitize_medicines(medicines):
 # ----------------------------------------------------------
 def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_code):
 
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    db = client["HMS"]
-    stock_collection = db["hospital_pharmacystock"]
-
-    old_map = {(m["item_id"], m["batch_number"]): m for m in old_meds}
-    new_map = {(m["item_id"], m["batch_number"]): m for m in new_meds}
+    old_map = {(m.get("item_id"), m.get("batch_number")): m for m in (old_meds or [])}
+    new_map = {(m.get("item_id"), m.get("batch_number")): m for m in (new_meds or [])}
 
     keys = set(old_map.keys()).union(new_map.keys())
 
@@ -452,13 +447,20 @@ def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_
             continue
 
         item_id, batch_number = key
+        if item_id is None:
+            continue
+
+        try:
+            item_id_val = int(item_id)
+        except (ValueError, TypeError):
+            item_id_val = item_id
 
         stock_collection.update_one(
             {
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
                 "outlet_code": outlet_code,
-                "item_id": int(item_id),
+                "item_id": item_id_val,
                 "batch_number": str(batch_number)
             },
             {
@@ -591,10 +593,6 @@ def save_pharmacy_bill(request):
     if not uhid:
         fields["patient_name"] = data.get("patient_name")
 
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    db = client["HMS"]
-    bill_collection = db["hospital_pharmacybilling"]
-
     # ======================================================
     # 🔁 PATCH (UPDATE / CONVERT)
     # ======================================================
@@ -603,18 +601,17 @@ def save_pharmacy_bill(request):
         if not Bill_id:
             return Response({"success": False, "error": "Bill_id required"})
 
-        try:
-            record = PharmacyBilling.objects.get(Bill_id=int(Bill_id))
-        except PharmacyBilling.DoesNotExist:
+        record = bill_collection.find_one({"Bill_id": int(Bill_id)})
+        if not record:
             return Response({"success": False, "error": "Record not found"})
 
-        old_meds = record.medicine_particulars or []
+        old_meds = record.get("medicine_particulars") or []
         updated_meds = build_edit_history(old_meds, medicines, employee_id)
 
         qty_changed = old_meds != medicines
 
         is_estimate_to_bill = (
-            record.billing_status == "Estimate" and status == "Billed"
+            record.get("billing_status") == "Estimate" and status == "Billed"
         )
 
         # ✅ STOCK UPDATE CONTROL
@@ -643,7 +640,7 @@ def save_pharmacy_bill(request):
 
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
-            if not record.bill_no:
+            if not record.get("bill_no"):
                 update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
 
             update_data["billing_status"] = "Billed"
@@ -655,15 +652,32 @@ def save_pharmacy_bill(request):
             {"$set": update_data}
         )
 
-        # FIX 3: return bill_no + age immediately in PATCH response
+        doc_id = data.get("doctor_id") or record.get("doctor_id")
+        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
+        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
+            doc_name = f"Dr. {doc_name}"
+        elif doc_name == "Unknown":
+            doc_name = ""
+
+        emp_id = employee_id or record.get("created_by")
+        emp_name = get_employee_name_by_id(emp_id) if emp_id else ""
+        if emp_name == "Unknown":
+            emp_name = ""
+
+        # Return bill_no + age immediately in PATCH response
         return Response({
-            "success":     True,
-            "Bill_id":     record.Bill_id,
-            "bill_no":     update_data.get("bill_no") or record.bill_no,
-            "estimate_no": record.estimate_no,
-            "age":         update_data.get("age", record.age or 0),   # ✅ FIX 3
-            "edit_reason": update_data.get("edit_reason"),
-            "edited_by":   update_data.get("edited_by"),
+            "success":         True,
+            "Bill_id":         record.get("Bill_id"),
+            "bill_no":         update_data.get("bill_no") or record.get("bill_no"),
+            "estimate_no":     record.get("estimate_no"),
+            "age":             update_data.get("age", record.get("age") or 0),
+            "edit_reason":     update_data.get("edit_reason"),
+            "edited_by":       update_data.get("edited_by"),
+            "doctor_id":       doc_id,
+            "doctor_name":     doc_name,
+            "created_by":      emp_id,
+            "created_by_name": emp_name,
+            "employee_name":   emp_name,
         })
 
     # ======================================================
@@ -671,8 +685,8 @@ def save_pharmacy_bill(request):
     # ======================================================
     if request.method == "POST":
 
-        last = PharmacyBilling.objects.order_by('-Bill_id').first()
-        next_Bill_id = (last.Bill_id + 1) if last else 1
+        last_doc = bill_collection.find_one({}, sort=[("Bill_id", -1)], projection={"Bill_id": 1})
+        next_Bill_id = (int(last_doc["Bill_id"]) + 1) if (last_doc and "Bill_id" in last_doc) else 1
 
         record_doc = {
             "Bill_id":              next_Bill_id,
@@ -688,6 +702,18 @@ def save_pharmacy_bill(request):
             "pending_returns":      [],     
             **fields
         }
+
+        # Resolve doctor & cashier names
+        doc_id = data.get("doctor_id")
+        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
+        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
+            doc_name = f"Dr. {doc_name}"
+        elif doc_name == "Unknown":
+            doc_name = ""
+
+        emp_name = get_employee_name_by_id(employee_id) if employee_id else ""
+        if emp_name == "Unknown":
+            emp_name = ""
 
         # 🔥 DIRECT BILL
         if status == "Billed":
@@ -709,12 +735,17 @@ def save_pharmacy_bill(request):
                 outlet_code
             )
 
-            # FIX 3: return bill_no + age immediately
+            # Return bill_no + age immediately
             return Response({
-                "success": True,
-                "bill_no": bill_no,
-                "Bill_id": next_Bill_id,
-                "age":     record_doc.get("age", 0),   # ✅ FIX 3
+                "success":         True,
+                "bill_no":         bill_no,
+                "Bill_id":         next_Bill_id,
+                "age":             record_doc.get("age", 0),
+                "doctor_id":       doc_id,
+                "doctor_name":     doc_name,
+                "created_by":      employee_id,
+                "created_by_name": emp_name,
+                "employee_name":   emp_name,
             })
 
         # 🔥 ESTIMATE
@@ -737,15 +768,36 @@ def save_pharmacy_bill(request):
                 outlet_code
             )
 
-            # FIX 3: return estimate_no + age immediately
+            # Return estimate_no + age immediately
             return Response({
-                "success":     True,
-                "estimate_no": estimate_no,
-                "Bill_id":     next_Bill_id,
-                "age":         record_doc.get("age", 0),   # ✅ FIX 3
+                "success":         True,
+                "estimate_no":     estimate_no,
+                "Bill_id":         next_Bill_id,
+                "age":             record_doc.get("age", 0),
+                "doctor_id":       doc_id,
+                "doctor_name":     doc_name,
+                "created_by":      employee_id,
+                "created_by_name": emp_name,
+                "employee_name":   emp_name,
             })
 
     return Response({"success": False, "error": "Invalid request"})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def get_employee_name_api(request):
+    """Resolve employee name by ID (doctor or cashier) using get_employee_name_by_id."""
+    emp_id = request.GET.get("employee_id") or request.GET.get("id") or request.GET.get("user_id")
+    if not emp_id:
+        return Response({"success": False, "error": "employee_id required", "name": ""})
+    raw_name = get_employee_name_by_id(emp_id)
+    name = "" if raw_name == "Unknown" else raw_name.strip()
+    return Response({
+        "success": True,
+        "employee_id": str(emp_id),
+        "name": name,
+    })
 
 
 
@@ -806,20 +858,21 @@ def get_financial_year():
 # HELPER: GET LAST BILL NO
 
 def get_last_oppharmacy_billno(fy):
-    last_bill = (
-        PharmacyBilling.objects
-        .filter(bill_no__startswith=f"{fy}/")
-        .order_by("-bill_no")
-        .first()
+    last_bill = bill_collection.find_one(
+        {"bill_no": {"$regex": f"^{fy}/"}},
+        sort=[("bill_no", -1)],
+        projection={"bill_no": 1}
     )
 
-    if not last_bill:
+    if not last_bill or not last_bill.get("bill_no"):
         return f"{fy}/000001"
 
-    last_no = int(last_bill.bill_no.split("/")[-1])
-    next_no = last_no + 1
-
-    return f"{fy}/{next_no:06d}"
+    try:
+        last_no = int(str(last_bill["bill_no"]).split("/")[-1])
+        next_no = last_no + 1
+        return f"{fy}/{next_no:06d}"
+    except (ValueError, IndexError):
+        return f"{fy}/000001"
 
 
 
@@ -914,12 +967,17 @@ def get_last_billed_uhid(request):
 
 
 def generate_estimate_no():
-    last = PharmacyBilling.objects.aggregate(
-        Max("estimate_no")
-    )["estimate_no__max"]
+    last_doc = bill_collection.find_one(
+        {"estimate_no": {"$exists": True, "$ne": None, "$nin": ["", None]}},
+        sort=[("estimate_no", -1)],
+        projection={"estimate_no": 1}
+    )
 
-    if last:
-        next_no = int(last) + 1
+    if last_doc and last_doc.get("estimate_no"):
+        try:
+            next_no = int(last_doc["estimate_no"]) + 1
+        except (ValueError, TypeError):
+            next_no = 1
     else:
         next_no = 1
 
@@ -990,10 +1048,128 @@ def save_oppharmacy_estimate(request):
 
 
 
+def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_code=None):
+    """
+    Deletes estimate bills older than 24 hours from their actual billing time,
+    releases blocked stock in hospital_pharmacystock, and writes audit records to hospital_pharmacy_deleted_logs.
+    """
+    try:
+        now_utc = datetime.utcnow()
+        expiry_cutoff = now_utc - timedelta(hours=24)
+
+        query = {"billing_status": "Estimate"}
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        cursor = bill_collection.find(query)
+        deleted_count = 0
+
+        for bill in list(cursor):
+            Bill_id = bill.get("Bill_id")
+            raw_date = bill.get("bill_date") or bill.get("created_date")
+            if not raw_date:
+                continue
+
+            if isinstance(raw_date, datetime):
+                bill_time_utc = raw_date.astimezone(timezone.utc).replace(tzinfo=None) if raw_date.tzinfo else raw_date
+            elif isinstance(raw_date, str):
+                try:
+                    dt = parse_datetime(raw_date) or datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                    bill_time_utc = dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+                except Exception:
+                    continue
+            else:
+                continue
+
+            # Verify 24-hour expiry based on actual billing timestamp
+            if bill_time_utc > expiry_cutoff:
+                continue
+
+            h_code = bill.get("hospital_code")
+            b_code = bill.get("branch_code")
+            o_code = bill.get("outlet_code")
+            medicines = bill.get("medicine_particulars", [])
+            if isinstance(medicines, str):
+                try:
+                    medicines = json.loads(medicines)
+                except Exception:
+                    medicines = []
+
+            # 1. Release blocked stock
+            for med in medicines:
+                if not isinstance(med, dict):
+                    continue
+                item_id = med.get("item_id")
+                batch_number = med.get("batch_number")
+                qty = float(med.get("qty", 0) or med.get("quantity", 0) or 0)
+                if not item_id or qty <= 0:
+                    continue
+
+                try:
+                    item_id_val = int(item_id)
+                except (ValueError, TypeError):
+                    item_id_val = item_id
+
+                stock_filter = {
+                    "item_id": item_id_val,
+                    "hospital_code": h_code,
+                    "branch_code": b_code,
+                    "outlet_code": o_code,
+                }
+                if batch_number and str(batch_number).strip().lower() not in ["", "none", "null", "n/a"]:
+                    stock_filter["batch_number"] = str(batch_number).strip()
+
+                stock = stock_collection.find_one(stock_filter)
+                if stock:
+                    current_blocked = float(stock.get("blocked_quantity", 0) or 0)
+                    release_qty = min(qty, current_blocked)
+                    if release_qty > 0:
+                        stock_collection.update_one(
+                            {"_id": stock["_id"]},
+                            {"$inc": {"blocked_quantity": -release_qty}}
+                        )
+
+            # 2. Write to deletion logs
+            mongo_db["hospital_pharmacy_deleted_logs"].insert_one({
+                "Bill_id": Bill_id,
+                "estimate_no": bill.get("estimate_no"),
+                "deleted_at": datetime.utcnow(),
+                "uhid": bill.get("uhid"),
+                "reason": "Estimate expired after 24 hours",
+                "medicine_particulars": medicines,
+                "hospital_code": h_code,
+                "branch_code": b_code,
+                "outlet_code": o_code,
+                "total_amount": float(bill.get("total_amount", 0) or 0),
+                "net_amount": float(bill.get("net_amount", 0) or 0),
+                "created_date": bill.get("created_date"),
+                "bill_date": bill.get("bill_date"),
+            })
+
+            # 3. Delete from hospital_pharmacybilling
+            bill_collection.delete_one({"Bill_id": Bill_id})
+            try:
+                PharmacyBilling.objects.filter(Bill_id=int(Bill_id)).delete()
+            except Exception:
+                pass
+
+            deleted_count += 1
+
+        return deleted_count
+
+    except Exception as e:
+        print("[ERROR] process_expired_estimate_bills:", e)
+        return 0
+
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_active_estimates(request):
-  
+    process_expired_estimate_bills()
     estimates = PharmacyBilling.objects.filter(billing_status="Estimate")
     serializer = PharmacyBillingSerializer(estimates, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1004,14 +1180,15 @@ def get_active_estimates(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
     try:
-
-      
         hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
         branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
         outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
 
+        # ── 1. Automatically purge and log any expired estimates (>24 hours from billing time) ──
+        process_expired_estimate_bills(hospital_code, branch_code, outlet_code)
+
         # =========================================================
-        # ✅ Fetch Estimate Bills
+        # ✅ Fetch Active Estimate Bills
         # =========================================================
         bills = PharmacyBilling.objects.filter(
             billing_status="Estimate",
@@ -2249,24 +2426,18 @@ def finalize_bill(request):
             customer_type = "General"
 
             try:
-                admission = Admission.objects.filter(
-                    ipNumber=inpatient_number
-                ).first()
-
-                admission_doc = None
-                if not admission:
+                admission_doc = mongo_db["hospital_admission"].find_one({
+                    "ipNumber": inpatient_number,
+                    "hospital_code": hospital_code
+                })
+                if not admission_doc:
                     admission_doc = mongo_db["hospital_admission"].find_one({
-                        "ipNumber": inpatient_number,
-                        "hospital_code": hospital_code
+                        "ipNumber": inpatient_number
                     })
 
-                if admission or admission_doc:
-                    if admission:
-                        customer_type = getattr(admission, "customer_type", "") or "General"
-                        advance_payments = getattr(admission, "advance_payments", []) or []
-                    else:
-                        customer_type = admission_doc.get("customer_type", "General") or "General"
-                        advance_payments = admission_doc.get("advance_payments", []) or []
+                if admission_doc:
+                    customer_type = admission_doc.get("customer_type", "General") or "General"
+                    advance_payments = admission_doc.get("advance_payments", []) or []
 
                     if isinstance(advance_payments, list):
                         # Active advance entries not cancelled or refunded
@@ -2626,18 +2797,41 @@ def finalize_bill(request):
             }
         )
 
+        # Resolve doctor name and employee name
+        doc_id = bill.get("doctor_id") or data.get("doctor_id")
+        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
+        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
+            doc_name = f"Dr. {doc_name}"
+        elif doc_name == "Unknown":
+            doc_name = ""
+
+        emp_id = employee_id or bill.get("created_by")
+        emp_name = get_employee_name_by_id(emp_id) if emp_id else ""
+        if emp_name == "Unknown":
+            emp_name = ""
+
         # =====================================================
         # ✅ RESPONSE
         # =====================================================
         return Response({
 
-            "status":   "success",
+            "status":          "success",
 
-            "message":  "Bill finalized, dispatched & stock updated",
+            "message":         "Bill finalized, dispatched & stock updated",
 
-            "bill_no":  new_bill_no,
+            "bill_no":         new_bill_no,
 
-            "bill_date": bill_date,
+            "bill_date":       bill_date,
+
+            "doctor_id":       doc_id,
+
+            "doctor_name":     doc_name,
+
+            "created_by":      emp_id,
+
+            "created_by_name": emp_name,
+
+            "employee_name":   emp_name,
 
         })
 
