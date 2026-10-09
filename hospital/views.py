@@ -1,5 +1,6 @@
 from django.shortcuts import render
 from datetime import datetime, time
+import re
 from django.db.models import Q
 from rest_framework.response import Response
 from django.http import JsonResponse
@@ -22,7 +23,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
     
-from .models import Billing, TempPatientRegistration, Refund, Patient, UHIDCounter
+from .models import Billing, TempPatientRegistration, Refund, Patient, UHIDCounter, Admission
 
 from .models import Billing
 from .serializers import PatientSerializer
@@ -65,22 +66,84 @@ def patientCreateView(request):
     
     
     if request.method == 'GET':
-        uhid = request.GET.get('uhid')
-        ip_number = request.GET.get('ip_number')
-        mobile = request.GET.get('mobile')
+        uhid = (request.GET.get('uhid') or '').strip()
+        ip_number = (request.GET.get('ip_number') or '').strip()
+        mobile = (request.GET.get('mobile') or '').strip()
+        search_query = (request.GET.get('q') or request.GET.get('search') or '').strip()
 
-        # Filter based on parameters
-        if uhid:
-            patients = Patient.objects.filter(uhid=uhid)
-        elif ip_number:
-            patients = Patient.objects.filter(ip_number=ip_number)
-        elif mobile:
-            patients = Patient.objects.filter(mobilePhone=mobile)
+        # Collect all query values provided by user
+        terms = []
+        for val in [search_query, uhid, ip_number, mobile]:
+            if val and val not in terms:
+                terms.append(val)
+
+        if terms:
+            query_filters = Q()
+            admitted_uhids = set()
+
+            for term in terms:
+                # 1. UHID Search (exact, substring, last 4 digits, suffix like /001)
+                term_q = (
+                    Q(uhid__iexact=term) |
+                    Q(uhid__icontains=term) |
+                    Q(uhid__iendswith=term) |
+                    Q(uhid__iendswith=f"/{term}")
+                )
+
+                # 2. Mobile Search (exact, substring, last 4 digits, +91 formatted)
+                digits_only = re.sub(r'\D', '', term)
+                term_q |= Q(mobilePhone__icontains=term) | Q(mobilePhone=term)
+                if digits_only:
+                    term_q |= Q(mobilePhone__icontains=digits_only)
+                    if len(digits_only) >= 4:
+                        term_q |= Q(mobilePhone__iendswith=digits_only)
+                    if len(digits_only) == 10:
+                        term_q |= (
+                            Q(mobilePhone=f"+91{digits_only}") |
+                            Q(mobilePhone=f"+91 {digits_only}") |
+                            Q(mobilePhone=f"0{digits_only}")
+                        )
+
+                # 3. IP Number Search via Admission (exact, substring, last 4 digits)
+                try:
+                    adm_uhid_list = Admission.objects.filter(
+                        Q(ipNumber__iexact=term) |
+                        Q(ipNumber__icontains=term) |
+                        Q(ipNumber__iendswith=term)
+                    ).values_list('uhid', flat=True)[:100]
+                    for au in adm_uhid_list:
+                        if au:
+                            admitted_uhids.add(au)
+                except Exception as adm_e:
+                    print(f"Error querying Admission by IP: {adm_e}")
+
+                query_filters |= term_q
+
+            if admitted_uhids:
+                query_filters |= Q(uhid__in=list(admitted_uhids)[:100])
+
+            patients = Patient.objects.filter(query_filters).distinct()[:50]
         else:
-            patients = Patient.objects.all()
+            patients = Patient.objects.all().order_by('-id')[:50]
 
         serializer = PatientSerializer(patients, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        serialized_data = list(serializer.data)
+
+        # Attach latest IP number to serialized patients
+        matched_uhids = [p.get('uhid') for p in serialized_data if p.get('uhid')]
+        if matched_uhids:
+            try:
+                admissions = Admission.objects.filter(uhid__in=matched_uhids).order_by('-admissionDateTime')
+                adm_map = {}
+                for adm in admissions:
+                    if adm.uhid not in adm_map:
+                        adm_map[adm.uhid] = adm.ipNumber
+                for p in serialized_data:
+                    p['ip_number'] = adm_map.get(p.get('uhid'), '')
+            except Exception as e:
+                print(f"Error mapping admissions to patients: {e}")
+
+        return Response(serialized_data, status=status.HTTP_200_OK)
 
     elif request.method == 'POST':
         print("Received POST data:", request.data)
@@ -279,7 +342,7 @@ def get_last_uhid(request):
             if max_number > 0:
                 counter.save()
 
-        latest_uhid = f"{prefix}/{counter.last_sequence:05d}" if counter.last_sequence > 0 else "None"
+        latest_uhid = f"{prefix}/{counter.last_sequence:06d}" if counter.last_sequence > 0 else "None"
         return Response({"uhid": latest_uhid}, status=200)
     except Exception as e:
         return Response({"error": str(e)}, status=500)

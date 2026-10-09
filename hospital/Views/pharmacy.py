@@ -2,6 +2,7 @@ from django.http import JsonResponse
 from pymongo import MongoClient
 import os
 import json
+import re
 import pytz
 from datetime import datetime, date
 from django.utils.dateparse import parse_datetime
@@ -2427,7 +2428,26 @@ def patient_details(request):
     elif ip_number:
         patients = Patient.objects.filter(ip_number=ip_number)
     elif mobile:
-        patients = Patient.objects.filter(mobilePhone=mobile)
+        mobile_str = str(mobile).strip()
+        digits_only = re.sub(r'\D', '', mobile_str)
+        ten_digit = digits_only
+        if len(digits_only) == 12 and digits_only.startswith('91'):
+            ten_digit = digits_only[2:]
+        elif len(digits_only) == 11 and digits_only.startswith('0'):
+            ten_digit = digits_only[1:]
+        elif len(digits_only) > 10:
+            ten_digit = digits_only[-10:]
+
+        mobile_q = Q(mobilePhone__icontains=mobile_str) | Q(mobilePhone=mobile_str)
+        if ten_digit:
+            mobile_q |= (
+                Q(mobilePhone__icontains=ten_digit) |
+                Q(mobilePhone=ten_digit) |
+                Q(mobilePhone=f"+91{ten_digit}") |
+                Q(mobilePhone=f"+91 {ten_digit}") |
+                Q(mobilePhone=f"0{ten_digit}")
+            )
+        patients = Patient.objects.filter(mobile_q)
     else:
         # ✅ FIX: Never return ALL patients — return empty instead
         return Response({
