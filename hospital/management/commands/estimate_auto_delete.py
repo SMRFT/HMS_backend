@@ -1,110 +1,44 @@
 from django.core.management.base import BaseCommand
-from datetime import datetime, timedelta
-from pymongo import MongoClient
-import os
+import time
+import datetime
+from hospital.Views.pharmacy import process_expired_estimate_bills
 
 
 class Command(BaseCommand):
-    help = "Delete expired estimate bills, release stock, and log deletion"
-    print("Delete expired estimate bills,")
+    help = "Delete expired estimate bills (>24 hours from billing time), release blocked stock, and log deletion"
 
-    def handle(self, *args, **kwargs):
+    def add_arguments(self, parser):
+        parser.add_argument('--daemon', action='store_true', help='Run continuously in background checking every 5 minutes')
+        parser.add_argument('--interval', type=int, default=300, help='Check interval in seconds for daemon mode (default: 300s / 5 mins)')
 
-        # =====================================
-        # ✅ MONGO CONFIG (YOUR PROVIDED SETUP)
-        # =====================================
-        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
-        DB_NAME = "HMS"
+    def handle(self, *args, **options):
+        is_daemon = options.get('daemon', False)
+        interval = options.get('interval', 300)
 
-        client = MongoClient(MONGO_URI)
-        mongo_db = client[DB_NAME]
-
-        stock_collection = mongo_db["hospital_pharmacystock"]
-        bill_collection = mongo_db["hospital_pharmacybilling"]
-        log_collection = mongo_db["hospital_pharmacy_deleted_logs"]  
-
-        now = datetime.utcnow()
-        expiry_time = now - timedelta(hours=24)
-        print("current time",now)
-
-        # =====================================
-        # ✅ FIND EXPIRED ESTIMATES
-        # =====================================
-        expired_bills = bill_collection.find({
-            "billing_status": "Estimate",
-            "created_date": {"$lte": expiry_time}
-        })
-
-        count = 0
-
-        for bill in expired_bills:
-            Bill_id = bill.get("Bill_id")
-
-            hospital_code = bill.get("hospital_code")
-            branch_code = bill.get("branch_code")
-            outlet_code = bill.get("outlet_code")
-            uhid = bill.get("uhid")
-
-
-            medicines = bill.get("medicine_particulars", [])
-
-            # =====================================
-            # ✅ STOCK RESET (STRICT MATCH)
-            # =====================================
-            for med in medicines:
-                item_id = med.get("item_id")
-                batch_number = med.get("batch_number")
-                qty = med.get("qty", 0)
-
-                stock = stock_collection.find_one({
-                    "item_id": item_id,
-                    "batch_number": batch_number,
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code,
-                    "outlet_code": outlet_code
-                })
-                print("stock",stock)
-
-                if not stock:
-                    print(
-                        f"[WARNING] Stock not found | "
-                        f"Bill: {Bill_id}, Item: {item_id}, Batch: {batch_number}"
-                    )
-                    continue
-
-                current_blocked = stock.get("blocked_quantity", 0)
-                print("current_blocked",current_blocked)
-
-                # ✅ SAFE RELEASE
-                release_qty = min(qty, current_blocked)
-
-                if release_qty > 0:
-                    stock_collection.update_one(
-                        {"_id": stock["_id"]},
-                        {"$inc": {"blocked_quantity": -release_qty}}
-                    )
-
-            # =====================================
-            # ✅ LOGGING
-            # =====================================
-            log_collection.insert_one({
-                "Bill_id": Bill_id,
-                "deleted_at": datetime.utcnow(),
-                "uhid":uhid,
-                "reason": "Estimate expired after 24 hours",
-                "medicine_particulars": medicines,
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code,
-            })
-
-            # =====================================
-            # ✅ DELETE BILL
-            # =====================================
-            bill_collection.delete_one({"Bill_id": Bill_id})
-
-            count += 1
+        if not is_daemon:
+            self.stdout.write("[START] Running 24-hour estimate auto-delete check...")
+            deleted_count = process_expired_estimate_bills()
+            self.stdout.write(
+                self.style.SUCCESS(f"[COMPLETED] {deleted_count} expired estimate bill(s) deleted, stock restored, and logged.")
+            )
+            return
 
         self.stdout.write(
-            self.style.SUCCESS(f"{count} expired bills deleted and stock restored")
+            self.style.SUCCESS(f"[DAEMON MODE] Starting 24-hour Estimate Auto-Delete service (checks every {interval}s)...")
         )
+
+        while True:
+            try:
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                deleted = process_expired_estimate_bills()
+                if deleted > 0:
+                    self.stdout.write(
+                        self.style.SUCCESS(f"[{now_str}] Deleted {deleted} expired estimate(s), restored stock, and created deletion logs.")
+                    )
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                self.stdout.write(self.style.WARNING("Stopping Estimate Auto-Delete daemon."))
+                break
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f"Error in estimate auto-delete daemon: {e}"))
+                time.sleep(interval)
