@@ -3,7 +3,7 @@ from pymongo import MongoClient
 import os
 import json
 import pytz
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import traceback
 from django.utils.dateparse import parse_datetime
 from decimal import Decimal, InvalidOperation
@@ -25,6 +25,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
 from ..models import Patient, SalesReturn
+from .dbcollection import get_employee_name_by_id
 
 
 @api_view(["GET"])
@@ -66,7 +67,7 @@ def get_salesreturn_details(request):
 
         # ✅ Collect IDs
         uhids = {r.uhid for r in records if r.uhid}
-        created_by_ids = {r.created_by for r in records if r.created_by}
+        created_by_ids = {r.created_by for r in records if r.created_by} | {r.pharmacist_id for r in records if r.pharmacist_id}
 
         # ✅ Patient Lookup
         patient_map = {}
@@ -98,30 +99,29 @@ def get_salesreturn_details(request):
                 clean_words.append(w)
             patient_map[p.uhid] = " ".join(clean_words).strip()
 
-        # ✅ User Lookup (MongoDB)
+        # ✅ User Lookup using get_employee_name_by_id from dbcollection.py
         user_map = {}
-        try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            global_db = client["GLOBAL"]
-
-            profiles = global_db["backend_diagnostics_profile"].find(
-                {"employeeId": {"$in": list(created_by_ids)}},
-                {"employeeId": 1, "employeeName": 1},
-            )
-
-            user_map = {
-                str(p["employeeId"]): p.get("employeeName", "")
-                for p in profiles
-            }
-
-            client.close()
-
-        except Exception as e:
-            print("MongoDB user lookup failed:", str(e))
+        for emp_id in created_by_ids:
+            if not emp_id:
+                continue
+            emp_str = str(emp_id).strip()
+            # If it's an employee ID, resolve to employeeName via profile_collection
+            name = get_employee_name_by_id(emp_str)
+            # If name is found in profile, use it; otherwise keep as-is ("appadiyae")
+            if name and name != "Unknown":
+                user_map[str(emp_id)] = name
+                user_map[emp_str] = name
+            else:
+                user_map[str(emp_id)] = emp_str
+                user_map[emp_str] = emp_str
 
         # ✅ Final Response Build
         data = []
         for r in records:
+            raw_user = r.created_by or r.pharmacist_id or ""
+            raw_user_str = str(raw_user).strip() if raw_user else ""
+            user_display = user_map.get(raw_user_str, raw_user_str) if raw_user_str else ""
+
             data.append({
                 "return_bill_no":   r.return_bill_no,
                 "return_bill_date": r.return_bill_date,
@@ -132,7 +132,9 @@ def get_salesreturn_details(request):
                 "bill_type":        r.bill_type,
                 "mode": "Cash Return" if r.PaymentType == "Cash" else "IP Credit",
                 "patient_name":     patient_map.get(r.uhid, ""),
-                "pharmacist_name":  user_map.get(str(r.created_by), r.created_by or ""),
+                "pharmacist_name":  user_display,
+                "created_by":       user_display,
+                "user":             user_display,
             })
 
 

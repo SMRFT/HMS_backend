@@ -27,9 +27,6 @@ Diagnostics_test_details          = Diagnostics_db["core_testdetails"]
 doctor_list                       = ER_db["doctors_list"]
 hms_billtype                      = hms_db["hospital_billtype"]
 hospital_investigationprice       = hms_db["hospital_investigationprice"]
-
-
-
 pharmacy_item_collection          = hms_db["hospital_pharmacyitem"]
 pharmacy_stock_collection         = hms_db["hospital_pharmacystock"]
 pharmacy_billing_collection       = hms_db["hospital_pharmacybilling"]
@@ -117,6 +114,25 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
         except (ValueError, TypeError):
             pass
 
+    # Fallback for any query_ids not found with hospital_code/branch_code filter
+    missing_ids = [qid for qid in query_ids if qid not in items_map]
+    if missing_ids:
+        for itm in pharmacy_item_collection.find(
+            {"item_id": {"$in": missing_ids}},
+            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
+        ):
+            raw_id = itm.get("item_id")
+            entry = {
+                "item_name": itm.get("item_name") or "",
+                "is_consumable_items": bool(itm.get("is_consumable_items", False))
+            }
+            items_map[raw_id] = entry
+            items_map[str(raw_id).strip()] = entry
+            try:
+                items_map[int(raw_id)] = entry
+            except (ValueError, TypeError):
+                pass
+
     # 2. Fetch from hospital_pharmacystock (hospital_code + branch_code + outlet_code + item_id)
     stock_by_item = {}
     stock_by_batch = {}
@@ -130,6 +146,7 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
         {
             "stock_id": 1,
             "item_id": 1,
+            "item_name": 1,
             "batch_number": 1,
             "mrp": 1,
             "Selling_Price": 1,
@@ -224,6 +241,8 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
     available_stock = total_stock - sold - transferred - grn_return
 
     if latest_stock:
+        if not item_name and latest_stock.get("item_name"):
+            item_name = latest_stock.get("item_name")
         mrp = _safe_float(latest_stock.get("mrp"))
         selling_price = _safe_float(latest_stock.get("Selling_Price"))
         cgst_per = _safe_float(latest_stock.get("CGST_Percentage"))
