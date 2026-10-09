@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 import os
+import re
 from datetime import datetime, timedelta
 from ..models import Admission, PharmacyBilling, PharmacyItem
 from ..serializers import AdmissionSerializer
@@ -45,9 +46,6 @@ def get_admission_list(request):
         from_date = request.GET.get("from_date")
         to_date = request.GET.get("to_date")
 
-        print("FROM DATE:", from_date)
-        print("TO DATE:", to_date)
-
         query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
 
         if from_date and to_date:
@@ -56,9 +54,6 @@ def get_admission_list(request):
             end_ist = ist.localize(datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1))
             start_utc = start_ist.astimezone(pytz.UTC)
             end_utc = end_ist.astimezone(pytz.UTC)
-            
-            print("START UTC:", start_utc)
-            print("END UTC:", end_utc)
             query["admissionDateTime"] = {"$gte": start_utc, "$lt": end_utc}
             
         raw_admissions = list(mongo_db["hospital_admission"].find(query).sort("admissionDateTime", -1))
@@ -66,136 +61,122 @@ def get_admission_list(request):
         # Serialize BSON properly
         data = serialize_doc(raw_admissions)
         
-        # Convert _id string to id
+        uhid_set = set()
+        doc_query_ids = set()
+        room_no_set = set()
+
+        # Phase 1: Pre-process items and extract active room shifting
         for item in data:
             if "_id" in item:
                 item["id"] = item["_id"]
 
-        print("TOTAL FILTERED RECORDS:", len(data))
+            if item.get("uhid") and not item.get("patient_details"):
+                uhid_set.add(item.get("uhid"))
 
-        # -----------------------------------------
-        # ADDITIONAL DATA ENRICHMENT
-        # -----------------------------------------
+            for doctor_field in ["admittingDoctor", "consultingDoctor"]:
+                d_id = item.get(doctor_field)
+                if d_id:
+                    s_id = str(d_id).strip()
+                    doc_query_ids.add(s_id)
+                    if s_id.isdigit():
+                        try:
+                            doc_query_ids.add(int(s_id))
+                        except ValueError:
+                            pass
+
+            room_no = item.get("roomNo")
+            for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                shifting = item.get(field, [])
+                if shifting and isinstance(shifting, list):
+                    active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                    if active_shift:
+                        item["roomNo"] = active_shift.get("newRoomNo", active_shift.get("roomNo", ""))
+                        item["bedNo"] = active_shift.get("newBedNo", active_shift.get("bedNo", ""))
+                        room_no = item["roomNo"]
+                        break
+            if room_no:
+                room_no_set.add(str(room_no).strip())
+
+        # Phase 2: Batch fetch patient details
+        patient_map = {}
+        if uhid_set:
+            pts = list(mongo_db.hospital_patient.find({"uhid": {"$in": list(uhid_set)}}))
+            for p in pts:
+                patient_map[p.get("uhid")] = serialize_doc(p)
+
+        # Phase 3: Batch fetch doctor names
+        doc_name_map = {}
+        if doc_query_ids:
+            docs = list(profile_collection.find(
+                {"$or": [{"employeeId": {"$in": list(doc_query_ids)}}, {"employeeName": {"$in": list(doc_query_ids)}}]},
+                {"employeeName": 1, "employeeId": 1, "_id": 0}
+            ))
+            for d in docs:
+                emp_name = d.get("employeeName")
+                emp_id = d.get("employeeId")
+                if emp_name:
+                    if emp_id is not None:
+                        doc_name_map[str(emp_id).strip()] = emp_name
+                    doc_name_map[emp_name.strip()] = emp_name
+
+        # Phase 4: Batch fetch room details
+        room_map = {}
+        if room_no_set:
+            rooms = list(room_collection.find(
+                {"room_number": {"$in": list(room_no_set)}},
+                {"_id": 0, "room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+            ))
+            for r in rooms:
+                room_map[str(r.get("room_number")).strip()] = r
+
+        # Phase 5: Fetch master mappings for block, category, ward IDs
+        block_map = {b.get("block_name"): str(b.get("block_id")) for b in mongo_db.hospital_block.find({}, {"block_name": 1, "block_id": 1}) if b.get("block_name")}
+        cat_map = {c.get("category_name"): str(c.get("room_category_id")) for c in mongo_db.hospital_roomcategory.find({}, {"category_name": 1, "room_category_id": 1}) if c.get("category_name")}
+        ward_map = {w.get("ward_name"): str(w.get("_id")) for w in mongo_db.hospital_Wards.find({}, {"ward_name": 1, "_id": 1}) if w.get("ward_name")}
+
+        # Phase 6: Populate item fields without nested queries
         for item in data:
+            p_details = item.get("patient_details", {})
+            if not p_details and item.get("uhid"):
+                p_details = patient_map.get(item.get("uhid"), {})
+                if p_details:
+                    item["patient_details"] = p_details
 
-            print("Processing item:", item.get("ipNumber"))
-
-            # -----------------------------
-            # PATIENT NAME MAPPING
-            # -----------------------------
-            patient_details = item.get("patient_details", {})
-            if not patient_details and item.get("uhid"):
-                patient_doc = mongo_db.hospital_patient.find_one({"uhid": item.get("uhid")})
-                if patient_doc:
-                    item["patient_details"] = serialize_doc(patient_doc)
-                    patient_details = item["patient_details"]
-
-            if patient_details:
-                fname = patient_details.get("firstName", "")
-                lname = patient_details.get("lastName", "")
+            if p_details:
+                fname = p_details.get("firstName", "")
+                lname = p_details.get("lastName", "")
                 item["patient_name"] = f"{fname} {lname}".strip()
             else:
                 item["patient_name"] = ""
 
-            # -----------------------------
-            # DOCTOR NAME MAPPING
-            # -----------------------------
             for doctor_field in ["admittingDoctor", "consultingDoctor"]:
-
                 doctor_id = item.get(doctor_field)
-
-                print("Doctor field:", doctor_field)
-                print("Doctor ID from API:", doctor_id)
-
                 if doctor_id:
-                    doctor_id = str(doctor_id)
+                    s_id = str(doctor_id).strip()
+                    if s_id in doc_name_map:
+                        item[doctor_field] = doc_name_map[s_id]
 
-                    print("Searching Mongo for employeeId:", doctor_id)
+            room_no = str(item.get("roomNo") or "").strip()
+            if room_no and room_no in room_map:
+                r = room_map[room_no]
+                r_cat = r.get("room_category")
+                b_name = r.get("block")
+                s_name = r.get("nursing_station")
 
-                    doc = profile_collection.find_one(
-                        {"employeeId": {"$in": [doctor_id, int(doctor_id)]}},
-                        {"employeeName": 1, "_id": 0}
-                    )
+                item["room_category"] = r_cat
+                item["block"] = b_name
+                item["nursing_station"] = s_name
 
-                    print("Mongo result:", doc)
-
-                    if doc:
-                        item[doctor_field] = doc.get("employeeName")
-                        print("Doctor name replaced:", doc.get("employeeName"))
-                    else:
-                        print("Doctor not found in Mongo")
-
-            # -----------------------------
-            # ROOM DETAILS MAPPING
-            # -----------------------------
-            room_no = item.get("roomNo")
-            bed_no = item.get("bedNo")
-
-            # --- Room/Bed Fallback Logic (Manual Mongo Fetch) ---
-            # Always check for active room in the arrays to get the latest room
-            raw_admission = mongo_db.hospital_admission.find_one({"ipNumber": item.get("ipNumber")})
-            if raw_admission:
-                active_found = False
-                for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
-                    shifting = raw_admission.get(field, [])
-                    if shifting and isinstance(shifting, list):
-                        active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
-                        if active_shift:
-                            item["roomNo"] = active_shift.get("newRoomNo", active_shift.get("roomNo", ""))
-                            item["bedNo"] = active_shift.get("newBedNo", active_shift.get("bedNo", ""))
-                            room_no = item["roomNo"]
-                            active_found = True
-                            break
-                if not active_found and (not room_no or not bed_no):
-                    pass # Fallback to existing roomNo if no active room found in arrays
-            
-            print("Final Room number for lookup:", room_no)
-
-            if room_no:
-                room = room_collection.find_one(
-                    {"room_number": room_no},
-                    {
-                        "_id": 0,
-                        "room_number": 1,
-                        "room_category": 1,
-                        "block": 1,
-                        "nursing_station": 1
-                    }
-                )
-
-                print("Room Mongo result:", room)
-
-                if room:
-                    room_cat_name = room.get("room_category")
-                    block_name = room.get("block")
-                    station_name = room.get("nursing_station")
-
-                    item["room_category"] = room_cat_name
-                    item["block"] = block_name
-                    item["nursing_station"] = station_name
-
-                    # --- Add IDs for Frontend Filtering ---
-                    if block_name:
-                        block_obj = mongo_db.hospital_block.find_one({"block_name": block_name}, {"block_id": 1})
-                        if block_obj:
-                            item["block_id"] = str(block_obj.get("block_id"))
-
-                    if room_cat_name:
-                        cat_obj = mongo_db.hospital_roomcategory.find_one({"category_name": room_cat_name}, {"room_category_id": 1})
-                        if cat_obj:
-                            item["room_category_id"] = str(cat_obj.get("room_category_id"))
-
-                    if station_name:
-                        station_obj = mongo_db.hospital_Wards.find_one({"ward_name": station_name}, {"_id": 1})
-                        if station_obj:
-                            item["nursing_station_id"] = str(station_obj.get("_id"))
-
-                    print("Room data and IDs added")
-                else:
-                    print("Room not found")
-                    item["room_category"] = None
-                    item["block"] = None
-                    item["nursing_station"] = None
+                if b_name and b_name in block_map:
+                    item["block_id"] = block_map[b_name]
+                if r_cat and r_cat in cat_map:
+                    item["room_category_id"] = cat_map[r_cat]
+                if s_name and s_name in ward_map:
+                    item["nursing_station_id"] = ward_map[s_name]
+            else:
+                item["room_category"] = item.get("room_category")
+                item["block"] = item.get("block")
+                item["nursing_station"] = item.get("nursing_station")
 
         return Response({
             "success": True,
@@ -204,7 +185,7 @@ def get_admission_list(request):
         })
 
     except Exception as e:
-        print("ERROR OCCURRED")
+        print("ERROR OCCURRED:", e)
         print(traceback.format_exc())
 
         return Response({

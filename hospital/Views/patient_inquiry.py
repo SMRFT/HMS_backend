@@ -404,10 +404,30 @@ def patient_inquiry_view(request):
         matched_uhid = None
 
         # ── 1. Search Patient by UHID / IP / Mobile in Django ORM and Mongo ──
+        mobile_str = str(raw_query).strip()
+        digits_only = re.sub(r'\D', '', mobile_str)
+        ten_digit = digits_only
+        if len(digits_only) == 12 and digits_only.startswith('91'):
+            ten_digit = digits_only[2:]
+        elif len(digits_only) == 11 and digits_only.startswith('0'):
+            ten_digit = digits_only[1:]
+        elif len(digits_only) > 10:
+            ten_digit = digits_only[-10:]
+
+        phone_q = Q(mobilePhone__icontains=mobile_str)
+        if ten_digit:
+            phone_q |= (
+                Q(mobilePhone__icontains=ten_digit) |
+                Q(mobilePhone=mobile_str) |
+                Q(mobilePhone=ten_digit) |
+                Q(mobilePhone=f"+91{ten_digit}") |
+                Q(mobilePhone=f"+91 {ten_digit}")
+            )
+
         patient = Patient.objects.filter(
             Q(uhid__iexact=raw_query) |
             Q(uhid__icontains=raw_query) |
-            Q(mobilePhone__icontains=raw_query) |
+            phone_q |
             Q(firstName__icontains=raw_query) |
             Q(lastName__icontains=raw_query)
         ).first()
@@ -426,14 +446,15 @@ def patient_inquiry_view(request):
 
         # Check in MongoDB hospital_patient collection directly
         if not patient and not matched_uhid:
-            mongo_pt = patient_coll.find_one({
-                "$or": [
-                    {"uhid": {"$regex": re.escape(raw_query), "$options": "i"}},
-                    {"mobilePhone": {"$regex": re.escape(raw_query), "$options": "i"}},
-                    {"firstName": {"$regex": re.escape(raw_query), "$options": "i"}},
-                    {"lastName": {"$regex": re.escape(raw_query), "$options": "i"}},
-                ]
-            })
+            mongo_or = [
+                {"uhid": {"$regex": re.escape(raw_query), "$options": "i"}},
+                {"mobilePhone": {"$regex": re.escape(raw_query), "$options": "i"}},
+                {"firstName": {"$regex": re.escape(raw_query), "$options": "i"}},
+                {"lastName": {"$regex": re.escape(raw_query), "$options": "i"}},
+            ]
+            if ten_digit:
+                mongo_or.append({"mobilePhone": {"$regex": re.escape(ten_digit), "$options": "i"}})
+            mongo_pt = patient_coll.find_one({"$or": mongo_or})
             if mongo_pt:
                 matched_uhid = mongo_pt.get("uhid")
                 patient = Patient.objects.filter(uhid=matched_uhid).first()

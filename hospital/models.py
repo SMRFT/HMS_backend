@@ -165,8 +165,8 @@ class Patient(AuditModel):
             counter.last_sequence = max_number + 1
             counter.save()
             
-            # Format with 5-digit padding (S026/00001)
-            self.uhid = f"{prefix}/{counter.last_sequence:05d}"
+            # Format with 6-digit padding (S026/000001)
+            self.uhid = f"{prefix}/{counter.last_sequence:06d}"
 
         super().save(*args, **kwargs)
 
