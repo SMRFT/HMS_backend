@@ -401,29 +401,44 @@ def sanitize_medicines(medicines):
                 else:
                     bn_val = ""
 
+        item_name = (med.get("item_name") or med.get("name") or "").strip()
         med_is_consumable = med.get("is_consumable_items")
-        if med_is_consumable is None:
+        if (med_is_consumable is None or not item_name) and item_id_val:
             try:
                 p_it = mongo_db["hospital_pharmacyitem"].find_one(
                     {"item_id": item_id_val},
-                    {"is_consumable_items": 1}
+                    {"item_name": 1, "is_consumable_items": 1}
                 )
-                med_is_consumable = bool(p_it.get("is_consumable_items", False)) if p_it else False
+                if not p_it and str(item_id_val).isdigit():
+                    p_it = mongo_db["hospital_pharmacyitem"].find_one(
+                        {"item_id": int(item_id_val)},
+                        {"item_name": 1, "is_consumable_items": 1}
+                    )
+                if p_it:
+                    if not item_name:
+                        item_name = p_it.get("item_name") or ""
+                    if med_is_consumable is None:
+                        med_is_consumable = bool(p_it.get("is_consumable_items", False))
             except Exception:
-                med_is_consumable = False
+                pass
+        if med_is_consumable is None:
+            med_is_consumable = False
         else:
             med_is_consumable = bool(med_is_consumable)
 
-        clean.append({
+        clean_item = {
             "item_id": item_id_val,
-            "item_name": med.get("item_name") or med.get("name") or "",
+            "item_name": item_name,
             "batch_number": bn_val,
             "qty": int(med.get("qty", 0) or med.get("quantity", 0)),
             "price": float(med.get("price", 0) or med.get("mrp", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
-            "is_consumable_items": med_is_consumable,
             "edit_history": med.get("edit_history", [])
-        })
+        }
+        if med_is_consumable:
+            clean_item["is_consumable_items"] = True
+
+        clean.append(clean_item)
 
     return clean
 
@@ -1134,12 +1149,30 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
                             {"$inc": {"blocked_quantity": -release_qty}}
                         )
 
+            # Resolve estimated_time (exact estimate creation/bill datetime)
+            estimated_time = raw_date if isinstance(raw_date, datetime) else bill_time_utc
+
+            # Resolve uhid with fallback to admission if inpatient_number exists
+            uhid = bill.get("uhid") or bill.get("UHID") or bill.get("patient_uhid") or bill.get("patient_id")
+            if not uhid and bill.get("inpatient_number"):
+                try:
+                    adm = mongo_db["hospital_admission"].find_one(
+                        {"ipNumber": bill.get("inpatient_number")},
+                        {"uhid": 1}
+                    )
+                    if adm:
+                        uhid = adm.get("uhid")
+                except Exception:
+                    pass
+
             # 2. Write to deletion logs
             mongo_db["hospital_pharmacy_deleted_logs"].insert_one({
                 "Bill_id": Bill_id,
                 "estimate_no": bill.get("estimate_no"),
+                "uhid": uhid,
+                "estimated_time": estimated_time,
+                "estimate_time": estimated_time,
                 "deleted_at": datetime.utcnow(),
-                "uhid": bill.get("uhid"),
                 "reason": "Estimate expired after 24 hours",
                 "medicine_particulars": medicines,
                 "hospital_code": h_code,
@@ -1149,6 +1182,7 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
                 "net_amount": float(bill.get("net_amount", 0) or 0),
                 "created_date": bill.get("created_date"),
                 "bill_date": bill.get("bill_date"),
+                "patient_name": bill.get("patient_name"),
             })
 
             # 3. Delete from hospital_pharmacybilling
@@ -2153,41 +2187,68 @@ def patient_details(request):
     ip_number = request.GET.get('ip_number')
     mobile    = request.GET.get('mobile')
 
-    # ── Step 1: Filter Patients ───────────────────────────────────────
-    if uhid:
-        patients = Patient.objects.filter(
-            Q(uhid__iexact=uhid) |           # full match  e.g. S026/0000001
-            Q(uhid__iendswith=f'/{uhid}')    # suffix match e.g. /0000001
-        )
-    elif ip_number:
-        patients = Patient.objects.filter(ip_number=ip_number)
-    elif mobile:
-        mobile_str = str(mobile).strip()
-        digits_only = re.sub(r'\D', '', mobile_str)
-        ten_digit = digits_only
-        if len(digits_only) == 12 and digits_only.startswith('91'):
-            ten_digit = digits_only[2:]
-        elif len(digits_only) == 11 and digits_only.startswith('0'):
-            ten_digit = digits_only[1:]
-        elif len(digits_only) > 10:
-            ten_digit = digits_only[-10:]
+    name      = request.GET.get('name')
 
-        mobile_q = Q(mobilePhone__icontains=mobile_str) | Q(mobilePhone=mobile_str)
-        if ten_digit:
-            mobile_q |= (
-                Q(mobilePhone__icontains=ten_digit) |
-                Q(mobilePhone=ten_digit) |
-                Q(mobilePhone=f"+91{ten_digit}") |
-                Q(mobilePhone=f"+91 {ten_digit}") |
-                Q(mobilePhone=f"0{ten_digit}")
+    query = Q()
+    has_filter = False
+
+    if uhid:
+        clean_uhid = str(uhid).strip()
+        if clean_uhid:
+            uhid_cond = (
+                Q(uhid__iexact=clean_uhid) |
+                Q(uhid__iendswith=clean_uhid) |
+                Q(uhid__iendswith=f'/{clean_uhid}')
             )
-        patients = Patient.objects.filter(mobile_q)
+
+            if '/' in clean_uhid:
+                parts = clean_uhid.split('/', 1)
+                prefix, num_part = parts[0].strip(), parts[1].strip()
+                if num_part.isdigit():
+                    padded_num = num_part.zfill(6)
+                    if prefix:
+                        uhid_cond |= Q(uhid__iexact=f'{prefix}/{padded_num}')
+                    else:
+                        uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+            elif clean_uhid.isdigit():
+                padded_num = clean_uhid.zfill(6)
+                uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+
+            query &= uhid_cond
+            has_filter = True
+
+    if ip_number:
+        clean_ip = str(ip_number).strip()
+        if clean_ip:
+            query &= Q(ip_number=clean_ip)
+            has_filter = True
+
+    name_str = (name or "").strip()
+    mobile_str = (mobile or "").strip()
+
+    if name_str and mobile_str and name_str == mobile_str:
+        # Unified Name/Phone field search
+        query &= (
+            Q(firstName__icontains=name_str) |
+            Q(lastName__icontains=name_str) |
+            Q(mobilePhone__icontains=name_str)
+        )
+        has_filter = True
     else:
-        # ✅ FIX: Never return ALL patients — return empty instead
+        if name_str:
+            query &= (Q(firstName__icontains=name_str) | Q(lastName__icontains=name_str))
+            has_filter = True
+        if mobile_str:
+            query &= Q(mobilePhone__icontains=mobile_str)
+            has_filter = True
+
+    if not has_filter:
         return Response({
             "success": False,
-            "message": "Please provide a search parameter (uhid, ip_number, or mobile)."
+            "message": "Please provide a search parameter (uhid, ip_number, mobile, or name)."
         }, status=status.HTTP_400_BAD_REQUEST)
+
+    patients = Patient.objects.filter(query).order_by('-id')[:50]
 
     # ── Step 2: MongoDB connection ────────────────────────────────────
     client      = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -2713,11 +2774,12 @@ def finalize_bill(request):
                 "tax":              med.get("tax", 0),
                 "mrp":              med.get("mrp"),
                 "expiry_date":      med.get("expiry_date"),
-                "is_consumable_items": med_is_consumable,
                 "action":           "finalized",
                 "edited_by":        employee_id,
                 "edited_at":        now_ts,
             }
+            if med_is_consumable:
+                med_entry["is_consumable_items"] = True
 
             # ✅ FIX 3: Only store edit_history inside medicine_particulars
             # if there were actual changes (qty edited before billing).
@@ -3554,6 +3616,21 @@ def pharmacy_view_bills(request):
         except (ValueError, TypeError):
             return 0.0
 
+    # Bulk fetch Pharmacy items & stock info via common optimized function in dbcollection.py
+    all_item_ids = set()
+    for bill in bills:
+        m_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
+        for it in m_list:
+            if isinstance(it, dict) and it.get("item_id"):
+                all_item_ids.add(it.get("item_id"))
+
+    items_stock_data = get_pharmacy_items_with_stock(
+        hospital_code=hospital_code,
+        branch_code=branch_code,
+        outlet_code=matched_outlet,
+        item_ids=list(all_item_ids)
+    ) if all_item_ids else {"items": {}, "stock_by_item": {}, "stock_by_batch": {}}
+
     # =========================================================
     # ✅ Build Bills Data (Fast direct serialization)
     # =========================================================
@@ -3586,13 +3663,41 @@ def pharmacy_view_bills(request):
 
         for item in medicine_list:
             it = dict(item)
-            it["CGST_Percentage"] = to_num(it.get("CGST_Percentage", 0))
-            it["SGST_Percentage"] = to_num(it.get("SGST_Percentage", 0))
-            it["CGST_Amt"]        = to_num(it.get("CGST_Amt", 0))
-            it["SGST_Amt"]        = to_num(it.get("SGST_Amt", 0))
-            it["price"]           = to_num(it.get("price", 0))
-            it["calculated_price"] = to_num(it.get("calculated_price", 0))
-            it["edit_history"]    = it.get("edit_history", [])
+            item_id_val = it.get("item_id")
+            stock_info = resolve_medicine_stock_details(it, items_stock_data) if (items_stock_data and item_id_val) else {}
+
+            raw_name = (it.get("item_name") or it.get("medicine_name") or it.get("name") or "").strip()
+            if not raw_name:
+                raw_name = (stock_info.get("item_name") or "").strip()
+
+            it["item_name"]     = raw_name
+            it["medicine_name"] = raw_name
+
+            cgst_pct = to_num(it.get("CGST_Percentage", 0))
+            sgst_pct = to_num(it.get("SGST_Percentage", 0))
+            if cgst_pct == 0.0 and stock_info.get("CGST_Percentage"):
+                cgst_pct = to_num(stock_info.get("CGST_Percentage"))
+            if sgst_pct == 0.0 and stock_info.get("SGST_Percentage"):
+                sgst_pct = to_num(stock_info.get("SGST_Percentage"))
+            it["CGST_Percentage"] = cgst_pct
+            it["SGST_Percentage"] = sgst_pct
+
+            price_val = to_num(it.get("price", 0))
+            qty_val   = to_num(it.get("qty", 0) or it.get("quantity", 0))
+            calc_val  = to_num(it.get("calculated_price", 0)) or (price_val * qty_val)
+
+            cgst_amt_val = to_num(it.get("CGST_Amt", 0))
+            sgst_amt_val = to_num(it.get("SGST_Amt", 0))
+            if cgst_amt_val == 0.0 and cgst_pct > 0:
+                cgst_amt_val = round((calc_val * cgst_pct) / 100.0, 2)
+            if sgst_amt_val == 0.0 and sgst_pct > 0:
+                sgst_amt_val = round((calc_val * sgst_pct) / 100.0, 2)
+
+            it["CGST_Amt"]         = cgst_amt_val
+            it["SGST_Amt"]         = sgst_amt_val
+            it["price"]            = price_val
+            it["calculated_price"] = calc_val
+            it["edit_history"]     = it.get("edit_history", [])
             updated_items.append(it)
 
         serialized["medicine_particulars"] = updated_items

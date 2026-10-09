@@ -652,6 +652,17 @@ class SalesReturnSerializer(serializers.ModelSerializer):
         model   = SalesReturn
         exclude = ['lastmodified_by', 'lastmodified_date']
 
+
+from .models import Ward_return_details
+class Ward_return_detailsSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+
+    class Meta:
+        model   = Ward_return_details
+        exclude = ['lastmodified_by', 'lastmodified_date']
+
+
+
 from .models import CashCounterCollection
 class CashCounterCollectionSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)

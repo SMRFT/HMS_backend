@@ -7,19 +7,22 @@ from datetime import datetime
 from ...models import SalesReturn, Patient, PharmacyBilling, PharmacyItem
 
 
+from ..dbcollection import get_employee_name_by_id
+
+
 def get_employee_mapping(client, employee_ids):
     if not employee_ids:
         return {}
-    try:
-        global_db = client['Global']
-        diagnostics_collection = global_db['backend_diagnostics_profile']
-        profiles = diagnostics_collection.find(
-            {"employeeId": {"$in": list(employee_ids)}},
-            {"employeeId": 1, "employeeName": 1, "_id": 0}
-        )
-        return {str(p['employeeId']): p.get('employeeName', '') for p in profiles}
-    except Exception:
-        return {}
+    res = {}
+    for eid in employee_ids:
+        if not eid:
+            continue
+        estr = str(eid).strip()
+        name = get_employee_name_by_id(estr)
+        val = name if (name and name != "Unknown") else estr
+        res[str(eid)] = val
+        res[estr] = val
+    return res
 
 
 @api_view(['GET'])

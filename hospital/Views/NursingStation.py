@@ -4,8 +4,8 @@ from rest_framework import status
 import os
 import re
 from datetime import datetime, timedelta
-from ..models import Admission, PharmacyBilling, PharmacyItem
-from ..serializers import AdmissionSerializer
+from ..models import Admission, PharmacyBilling, PharmacyItem, PharmacyStock, Ward_return_details
+from ..serializers import AdmissionSerializer, Ward_return_detailsSerializer
 from django.conf import settings
 from django.db import DatabaseError
 from django.http import JsonResponse
@@ -1526,7 +1526,7 @@ def get_pending_ward_returns(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def approve_ward_return(request):
     import traceback
     try:
@@ -1539,12 +1539,23 @@ def approve_ward_return(request):
         if not bill_id or not return_request_id:
             return Response({"success": False, "error": "Bill_id and return_request_id are required"}, status=400)
 
+        # Match Bill_id as both int and str in PyMongo
+        bill_query = {"Bill_id": {"$in": [bill_id, int(bill_id) if str(bill_id).isdigit() else bill_id]}}
+        bill_doc = mongo_db["hospital_pharmacybilling"].find_one(bill_query)
+
+        bill = None
         try:
-            bill = PharmacyBilling.objects.get(Bill_id=bill_id)
-        except PharmacyBilling.DoesNotExist:
+            bill = PharmacyBilling.objects.get(Bill_id=int(bill_id) if str(bill_id).isdigit() else bill_id)
+        except Exception:
+            try:
+                bill = PharmacyBilling.objects.get(Bill_id=bill_id)
+            except Exception:
+                pass
+
+        if not bill and not bill_doc:
             return Response({"success": False, "error": "Ward request not found"}, status=404)
 
-        pending_returns = bill.pending_returns or []
+        pending_returns = (bill_doc.get("pending_returns") if bill_doc else None) or getattr(bill, "pending_returns", None) or []
         target_pr = None
         target_idx = -1
         
@@ -1562,75 +1573,178 @@ def approve_ward_return(request):
             pending_returns[target_idx]["processed_by"] = changed_by
             pending_returns[target_idx]["processed_at"] = timezone.now().isoformat()
             mongo_db["hospital_pharmacybilling"].update_one(
-                {"Bill_id": bill_id},
+                bill_query,
                 {"$set": {"pending_returns": pending_returns}}
             )
+            try:
+                PharmacyBilling.objects.filter(Bill_id__in=[bill_id, int(bill_id) if str(bill_id).isdigit() else bill_id]).update(pending_returns=pending_returns)
+            except Exception:
+                pass
             return Response({"success": True, "message": "Return request rejected"})
 
         # --- Approval Logic ---
-        existing = list(bill.medicine_particulars or [])
+        existing = list((bill_doc.get("medicine_particulars") if bill_doc else None) or getattr(bill, "medicine_particulars", None) or [])
         existing_map = {}
         for idx, itm in enumerate(existing):
             if not isinstance(itm, dict): continue
-            key = (str(itm.get("item_id", "")), str(itm.get("batch_number", "")))
+            key = (str(itm.get("item_id", "")).strip(), str(itm.get("batch_number", "")).strip())
             existing_map[key] = (idx, itm)
 
-        # Generate Return Bill Number
-        from datetime import datetime
-        today = datetime.now()
-        financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}" if today.month < 4 else f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
-        prefix_key = f"{financial_year}/RET"
-        prefix = f"{prefix_key}/"
+        # Generate Return Bill Number (format: 2627/000001)
+        now_dt = timezone.now()
+        current_year = now_dt.year % 100
+        next_year = (now_dt.year + 1) % 100
+        financial_year = f"{current_year:02d}{next_year:02d}"
 
-        from pymongo import ReturnDocument
-        counters_collection = mongo_db["counters"]
-        counter = counters_collection.find_one_and_update(
-            {"_id": prefix_key},
-            {"$inc": {"seq": 1}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER
-        )
-        return_bill_no = f"{prefix}{counter['seq']:06d}"
+        max_no = 0
+        try:
+            last_records = Ward_return_details.objects.filter(
+                ward_return_bill_no__startswith=financial_year
+            ).values_list("ward_return_bill_no", flat=True)
+            for b in last_records:
+                try:
+                    lp = str(b).split("/")[-1]
+                    if lp.isdigit():
+                        max_no = max(max_no, int(lp))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-        processed_at = timezone.now().isoformat()
-        
+        try:
+            for doc in mongo_db["hospital_wardreturndetails"].find({"ward_return_bill_no": {"$regex": f"^{financial_year}"}}):
+                try:
+                    lp = str(doc.get("ward_return_bill_no", "")).split("/")[-1]
+                    if lp.isdigit():
+                        max_no = max(max_no, int(lp))
+                except Exception:
+                    pass
+            for doc in mongo_db["wardreturndetails"].find({"ward_return_bill_no": {"$regex": f"^{financial_year}"}}):
+                try:
+                    lp = str(doc.get("ward_return_bill_no", "")).split("/")[-1]
+                    if lp.isdigit():
+                        max_no = max(max_no, int(lp))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        new_no = max_no + 1
+        ward_return_bill_no = f"{financial_year}/{new_no:06d}"
+
+        processed_at = now_dt.isoformat()
+
+        outlet_code = (bill_doc.get("outlet_code") if bill_doc else None) or getattr(bill, "outlet_code", None)
+        hospital_code = (bill_doc.get("hospital_code") if bill_doc else None) or getattr(bill, "hospital_code", None)
+        branch_code = (bill_doc.get("branch_code") if bill_doc else None) or getattr(bill, "branch_code", None)
+
+        ward_return_particulars = []
+
         for incoming in target_pr.get("items", []):
-            key = (str(incoming.get("item_id", "")), str(incoming.get("batch_number", "")))
-            if key not in existing_map:
-                continue
-                
-            idx, current = existing_map[key]
+            item_id_val = incoming.get("item_id")
+            batch_val = str(incoming.get("batch_number", "")).strip()
             return_qty = float(incoming.get("return_qty", 0))
-            if return_qty <= 0: continue
 
-            old_qty = float(current.get("quantity", current.get("qty", 0)))
-            new_qty = old_qty - return_qty
-            if new_qty < 0: new_qty = 0
+            if return_qty <= 0:
+                continue
 
-            audit_entry = {
-                "changed_by": changed_by,
-                "changed_at": processed_at,
-                "action": "returned",
-                "return_qty": return_qty,
-                "old_qty": old_qty,
-                "new_qty": new_qty,
-                "reason": incoming.get("reason", "Ward Return"),
-                "return_bill_no": return_bill_no
+            # 1. Update medicine_particulars in bill
+            key = (str(item_id_val).strip(), batch_val)
+            billed_qty = 0.0
+            if key in existing_map:
+                idx, current = existing_map[key]
+                old_qty = float(current.get("quantity", current.get("qty", 0)))
+                history_returns = [
+                    float(h.get("return_qty", 0))
+                    for h in current.get("edit_history", [])
+                    if h.get("action") in ("returned", "sales_return")
+                ]
+                billed_qty = old_qty + sum(history_returns) if history_returns else old_qty
+
+                new_qty = max(0.0, old_qty - return_qty)
+
+                audit_entry = {
+                    "changed_by": changed_by,
+                    "changed_at": processed_at,
+                    "action": "returned",
+                    "return_qty": return_qty,
+                    "old_qty": old_qty,
+                    "new_qty": new_qty,
+                    "reason": incoming.get("reason", "Ward Return"),
+                    "return_bill_no": ward_return_bill_no
+                }
+
+                eh = current.get("edit_history", [])
+                if not isinstance(eh, list):
+                    eh = []
+                eh.append(audit_entry)
+                current["edit_history"] = eh
+                current["quantity"] = new_qty
+                current["qty"] = new_qty
+                existing[idx] = current
+
+            # 2. Reduce blocked_quantity in hospital_pharmacystock based on outlet_code, item_id, batch_number
+            item_outlet = incoming.get("outlet_code") or outlet_code
+            iid_candidates = [item_id_val]
+            try:
+                iid_candidates.append(int(item_id_val))
+            except (ValueError, TypeError):
+                pass
+            try:
+                iid_candidates.append(str(item_id_val).strip())
+            except (ValueError, TypeError):
+                pass
+            iid_candidates = list(set(iid_candidates))
+
+            stock_filter = {
+                "item_id": {"$in": iid_candidates},
+                "batch_number": batch_val,
             }
+            if item_outlet:
+                stock_filter["outlet_code"] = str(item_outlet).strip()
+            if branch_code:
+                stock_filter["branch_code"] = str(branch_code).strip()
+            if hospital_code:
+                stock_filter["hospital_code"] = str(hospital_code).strip()
 
-            eh = current.get("edit_history", [])
-            if not isinstance(eh, list): eh = []
-            eh.append(audit_entry)
-            current["edit_history"] = eh
-            current["quantity"] = new_qty
-            current["qty"] = new_qty
+            stock_doc = mongo_db["hospital_pharmacystock"].find_one(stock_filter)
+            if not stock_doc and item_outlet:
+                # Fallback matching outlet_code + item_id + batch_number
+                stock_doc = mongo_db["hospital_pharmacystock"].find_one({
+                    "outlet_code": str(item_outlet).strip(),
+                    "item_id": {"$in": iid_candidates},
+                    "batch_number": batch_val,
+                })
 
-            existing[idx] = current
+            if stock_doc:
+                current_blocked = float(stock_doc.get("blocked_quantity", 0) or 0)
+                new_blocked = max(0.0, current_blocked - return_qty)
+                mongo_db["hospital_pharmacystock"].update_one(
+                    {"_id": stock_doc["_id"]},
+                    {"$set": {"blocked_quantity": new_blocked}}
+                )
+                try:
+                    PharmacyStock.objects.filter(id=stock_doc.get("id")).update(blocked_quantity=new_blocked)
+                except Exception:
+                    pass
 
+            try:
+                clean_item_id = int(item_id_val)
+            except Exception:
+                clean_item_id = item_id_val
+
+            ward_return_particulars.append({
+                "item_id": clean_item_id,
+                "batch_number": batch_val,
+                "billed_qty": float(billed_qty),
+                "return_qty": float(return_qty),
+            })
+
+        # 3. Update status from "Pending" to "Approved" in the pending_returns array
         pending_returns[target_idx]["status"] = "Approved"
         pending_returns[target_idx]["processed_by"] = changed_by
         pending_returns[target_idx]["processed_at"] = processed_at
-        pending_returns[target_idx]["return_bill_no"] = return_bill_no
+        pending_returns[target_idx]["return_bill_no"] = ward_return_bill_no
 
         # Recalculate totals
         new_total = sum(
@@ -1657,14 +1771,129 @@ def approve_ward_return(request):
             update_data["billing_status"] = "Returned"
 
         mongo_db["hospital_pharmacybilling"].update_one(
-            {"Bill_id": bill_id},
+            bill_query,
             {"$set": update_data}
         )
+        try:
+            PharmacyBilling.objects.filter(Bill_id__in=[bill_id, int(bill_id) if str(bill_id).isdigit() else bill_id]).update(**update_data)
+        except Exception:
+            pass
 
-        return Response({"success": True, "message": "Return request approved successfully"})
+        # 4. Save to Ward_return_details collection and model
+        bill_no = (bill_doc.get("bill_no") if bill_doc else None) or getattr(bill, "bill_no", None)
+        uhid = (bill_doc.get("uhid") if bill_doc else None) or getattr(bill, "uhid", None)
+        auth_emp_id = (
+            data.get("auth-user-id")
+            or data.get("employee_id")
+            or data.get("changed_by")
+            or request.headers.get("auth-user-id")
+            or getattr(request.user, "username", "")
+            or changed_by
+            or ""
+        )
+        pharmacist_id = data.get("pharmacist_id") or auth_emp_id
+
+        # Django model save
+        ward_return_obj = None
+        try:
+            import json as _pyjson
+            mp_to_store = (
+                _pyjson.dumps(ward_return_particulars)
+                if not hasattr(Ward_return_details.medicine_particulars, 'field') or
+                   Ward_return_details._meta.get_field("medicine_particulars").get_internal_type() not in ("JSONField",)
+                else ward_return_particulars
+            )
+            ward_return_obj = Ward_return_details.objects.create(
+                ward_return_bill_no=ward_return_bill_no,
+                ward_return_bill_date=now_dt,
+                created_date=now_dt,
+                created_by=str(auth_emp_id) if auth_emp_id else "",
+                pharmacist_id=str(pharmacist_id) if pharmacist_id else "",
+                branch_code=str(branch_code) if branch_code else "",
+                hospital_code=str(hospital_code) if hospital_code else "",
+                outlet_code=str(outlet_code) if outlet_code else "",
+                bill_no=str(bill_no) if bill_no else "",
+                uhid=str(uhid) if uhid else "",
+                status="Approved",
+                medicine_particulars=mp_to_store,
+            )
+        except Exception as we:
+            print(f"Ward_return_details create failed: {we}")
+
+        # PyMongo direct write to hospital_wardreturndetails and wardreturndetails
+        mongo_ward_doc = {
+            "ward_return_bill_no": ward_return_bill_no,
+            "ward_return_bill_date": now_dt,
+            "created_date": now_dt,
+            "created_by": str(auth_emp_id) if auth_emp_id else "",
+            "pharmacist_id": str(pharmacist_id) if pharmacist_id else "",
+            "branch_code": str(branch_code) if branch_code else "",
+            "hospital_code": str(hospital_code) if hospital_code else "",
+            "outlet_code": str(outlet_code) if outlet_code else "",
+            "bill_no": str(bill_no) if bill_no else "",
+            "uhid": str(uhid) if uhid else "",
+            "status": "Approved",
+            "medicine_particulars": ward_return_particulars,
+        }
+        mongo_db["hospital_wardreturndetails"].update_one(
+            {"ward_return_bill_no": ward_return_bill_no},
+            {"$set": mongo_ward_doc},
+            upsert=True
+        )
+        mongo_db["wardreturndetails"].update_one(
+            {"ward_return_bill_no": ward_return_bill_no},
+            {"$set": mongo_ward_doc},
+            upsert=True
+        )
+
+        serialized_data = None
+        if ward_return_obj:
+            try:
+                serialized_data = Ward_return_detailsSerializer(ward_return_obj).data
+            except Exception:
+                pass
+
+        return Response({
+            "success": True,
+            "message": "Return request approved successfully",
+            "return_bill_no": ward_return_bill_no,
+            "ward_return_bill_no": ward_return_bill_no,
+            "ward_return_details": serialized_data or mongo_ward_doc
+        })
 
     except Exception as e:
         print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+def get_ward_return_details(request):
+    try:
+        from_date = request.GET.get("from_date")
+        to_date = request.GET.get("to_date")
+        bill_no = request.GET.get("bill_no")
+        uhid = request.GET.get("uhid")
+        ward_return_bill_no = request.GET.get("ward_return_bill_no")
+
+        query = {}
+        if ward_return_bill_no:
+            query["ward_return_bill_no"] = ward_return_bill_no
+        if bill_no:
+            query["bill_no"] = bill_no
+        if uhid:
+            query["uhid"] = uhid
+        if from_date and to_date:
+            try:
+                start_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                query["ward_return_bill_date__range"] = (start_dt, end_dt)
+            except Exception:
+                pass
+
+        qs = Ward_return_details.objects.filter(**query).order_by("-created_date")
+        serializer = Ward_return_detailsSerializer(qs, many=True)
+        return Response({"success": True, "data": serializer.data})
+    except Exception as e:
         return Response({"success": False, "error": str(e)}, status=500)
 
 

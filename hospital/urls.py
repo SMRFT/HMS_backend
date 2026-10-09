@@ -377,6 +377,7 @@ urlpatterns = [
     path("return_medicine_ward_request/", NursingStation.return_medicine_ward_request, name="return_medicine_ward_request"),
     path("get_pending_ward_returns/", NursingStation.get_pending_ward_returns, name="get_pending_ward_returns"),
     path("approve_ward_return/", NursingStation.approve_ward_return, name="approve_ward_return"),
+    path("get_ward_return_details/", NursingStation.get_ward_return_details, name="get_ward_return_details"),
     path("update_medicine_ward_request/", NursingStation.update_medicine_ward_request, name="update_medicine_ward_request"),
     path("cancel_medicine_ward_request/", NursingStation.cancel_medicine_ward_request, name="cancel_medicine_ward_request"),
     path("remove_individual_medicine/", NursingStation.remove_individual_medicine_from_ward_request, name="remove_individual_medicine"),
