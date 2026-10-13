@@ -484,6 +484,62 @@ def certificate_template_list_or_create(request):
                 title="Standard Template",
                 description="This is to certify that [Student Name] has successfully completed their internship in the department of [Department] from [Start Date] to [End Date]. During this period, their performance was [Performance]."
             )
+
+        # Check if Department Rotations Template with table exists
+        all_existing_tpls = list(InternshipCertificateTemplate.objects.all())
+        dept_tpl_exists = any("Department Postings" in (t.title or "") for t in all_existing_tpls)
+        if not dept_tpl_exists:
+            sample_rows = [
+                {"s_no": 1, "department": "PHLEBOTOMY", "duration": "3 MONTHS", "from_date": "9/10/2025", "to_date": "9/1/2026"},
+                {"s_no": 2, "department": "BIOCHEMISTRY", "duration": "3 MONTHS", "from_date": "9/1/2026", "to_date": "9/4/2026"},
+                {"s_no": 3, "department": "PATHOLOGY", "duration": "3 MONTHS", "from_date": "9/4/2026", "to_date": "9/7/2026"},
+                {"s_no": 4, "department": "MICROBIOLOGY", "duration": "3 MONTHS", "from_date": "9/7/2026", "to_date": "9/10/2026"}
+            ]
+            import json
+            sample_json = json.dumps(sample_rows)
+            table_html = (
+                '<table class="cert-dept-table" style="width: 100% !important; border-collapse: collapse !important; margin: 6px 0 8px 0 !important; border: 1px dashed #94a3b8 !important; font-family: \'Times New Roman\', Times, serif; text-indent: 0 !important; white-space: normal !important; box-sizing: border-box !important;">'
+                '<thead><tr style="background-color: #f8fafc;">'
+                '<th style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-weight: bold; font-size: 14px; font-family: \'Times New Roman\', Times, serif; width: 10%; color: #0f172a; line-height: 1.3;">S.NO</th>'
+                '<th style="border: 1px dashed #94a3b8; padding: 3px 8px; text-align: left; font-weight: bold; font-size: 14px; font-family: \'Times New Roman\', Times, serif; width: 38%; color: #0f172a; line-height: 1.3;">DEPARTMENTS</th>'
+                '<th style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-weight: bold; font-size: 14px; font-family: \'Times New Roman\', Times, serif; width: 18%; color: #0f172a; line-height: 1.3;">DURATION</th>'
+                '<th style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-weight: bold; font-size: 14px; font-family: \'Times New Roman\', Times, serif; width: 17%; color: #0f172a; line-height: 1.3;">FROM</th>'
+                '<th style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-weight: bold; font-size: 14px; font-family: \'Times New Roman\', Times, serif; width: 17%; color: #0f172a; line-height: 1.3;">TO</th>'
+                '</tr></thead><tbody>'
+                '<tr><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">1</td><td style="border: 1px dashed #94a3b8; padding: 3px 8px; text-align: left; font-size: 14px; font-weight: 500; text-transform: uppercase; line-height: 1.3;">PHLEBOTOMY</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; text-transform: uppercase; line-height: 1.3;">3 MONTHS</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/10/2025</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/1/2026</td></tr>'
+                '<tr><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">2</td><td style="border: 1px dashed #94a3b8; padding: 3px 8px; text-align: left; font-size: 14px; font-weight: 500; text-transform: uppercase; line-height: 1.3;">BIOCHEMISTRY</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; text-transform: uppercase; line-height: 1.3;">3 MONTHS</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/1/2026</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/4/2026</td></tr>'
+                '<tr><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">3</td><td style="border: 1px dashed #94a3b8; padding: 3px 8px; text-align: left; font-size: 14px; font-weight: 500; text-transform: uppercase; line-height: 1.3;">PATHOLOGY</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; text-transform: uppercase; line-height: 1.3;">3 MONTHS</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/4/2026</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/7/2026</td></tr>'
+                '<tr><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">4</td><td style="border: 1px dashed #94a3b8; padding: 3px 8px; text-align: left; font-size: 14px; font-weight: 500; text-transform: uppercase; line-height: 1.3;">MICROBIOLOGY</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; text-transform: uppercase; line-height: 1.3;">3 MONTHS</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/7/2026</td><td style="border: 1px dashed #94a3b8; padding: 3px 6px; text-align: center; font-size: 14px; line-height: 1.3;">9/10/2026</td></tr>'
+                '</tbody></table>'
+            )
+            desc_val = (
+                '<!-- TITLE: TO WHOMSOEVER IT MAY CONCERN -->\n'
+                f'<!-- DEPT_TABLE_JSON: {sample_json} -->\n'
+                'This is to certify that [Student Name], Reg No: [Intern ID], [Degree] student of [College] has successfully completed his/her internship training at Shanmuga Hospital Ltd., from [Start Date] to [End Date] as per the details given below,\n\n'
+                f'<!-- DEPT_TABLE_START -->\n{table_html}\n<!-- DEPT_TABLE_END -->\n\n'
+                'During the period, her/his performance and conduct were good.\n\n'
+                'FOR SHANMUGA HOSPITAL LTD.'
+            )
+            try:
+                InternshipCertificateTemplate.objects.create(
+                    title="Department Postings / Rotations Template (with Table)",
+                    description=desc_val
+                )
+            except Exception:
+                try:
+                    from pymongo import MongoClient
+                    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                    db = client.HMS
+                    col = db.hospital_internshipcertificatetemplate
+                    max_id = max([doc.get("template_id", 0) for doc in col.find()] or [0])
+                    col.insert_one({
+                        "template_id": max_id + 1,
+                        "title": "Department Postings / Rotations Template (with Table)",
+                        "description": desc_val,
+                        "is_active": True
+                    })
+                except Exception:
+                    pass
             
         if request.method == 'GET':
             templates = InternshipCertificateTemplate.objects.filter(is_active__in=[True]).order_by('template_id')
@@ -501,18 +557,37 @@ def certificate_template_list_or_create(request):
             description = request.data.get("description", "").strip()
             if not description:
                 return Response({"success": False, "error": "Description cannot be empty"}, status=400)
-                
-            template = InternshipCertificateTemplate.objects.create(
-                title=title,
-                description=description
-            )
+            
+            try:
+                template = InternshipCertificateTemplate.objects.create(
+                    title=title,
+                    description=description
+                )
+                template_id = template.template_id
+            except Exception as orm_err:
+                try:
+                    from pymongo import MongoClient
+                    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                    db = client.HMS
+                    col = db.hospital_internshipcertificatetemplate
+                    max_id = max([doc.get("template_id", 0) for doc in col.find()] or [0])
+                    template_id = max_id + 1
+                    col.insert_one({
+                        "template_id": template_id,
+                        "title": title,
+                        "description": description,
+                        "is_active": True
+                    })
+                except Exception as mongo_err:
+                    return Response({"success": False, "error": f"Failed to save template: {str(mongo_err)}"}, status=500)
+
             return Response({
                 "success": True,
                 "message": "Template created successfully",
                 "data": {
-                    "template_id": template.template_id,
-                    "title": template.title,
-                    "description": template.description
+                    "template_id": template_id,
+                    "title": title,
+                    "description": description
                 }
             }, status=status.HTTP_201_CREATED)
             
