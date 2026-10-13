@@ -1721,6 +1721,7 @@ def get_active_admission(request):
 
         # ── Find active admission directly in MongoDB ────────────────
         query = {
+            "is_admitted": True,
             "is_discharged": {"$ne": True},
             "is_cancelled": {"$ne": True},
         }
@@ -1731,21 +1732,46 @@ def get_active_admission(request):
 
         admission = hms_db["hospital_admission"].find_one(
             query,
-            sort=[("admissionDateTime", -1)]
+            sort=[("admissionDateTime", -1), ("_id", -1)]
         )
 
         if not admission:
-            fallback_query = {"is_discharged": {"$ne": True}}
+            fallback_query = {
+                "is_admitted": True,
+                "is_discharged": {"$ne": True},
+            }
             if ip_number:
                 fallback_query["ipNumber"] = ip_number
             elif uhid:
                 fallback_query["uhid"] = uhid
             admission = hms_db["hospital_admission"].find_one(
                 fallback_query,
-                sort=[("admissionDateTime", -1)]
+                sort=[("admissionDateTime", -1), ("_id", -1)]
             )
 
         if not admission:
+            # Check if any admission existed but is not active
+            existing_adm = None
+            if ip_number:
+                existing_adm = hms_db["hospital_admission"].find_one({"ipNumber": ip_number})
+            elif uhid:
+                existing_adm = hms_db["hospital_admission"].find_one({"uhid": uhid}, sort=[("admissionDateTime", -1)])
+            
+            if existing_adm:
+                is_disch = existing_adm.get("is_discharged") is True
+                is_canc = existing_adm.get("is_cancelled") is True
+                is_adm = existing_adm.get("is_admitted") is True
+                status_desc = "discharged" if is_disch else "cancelled" if is_canc else "inactive (is_admitted: false)"
+                ip_msg = existing_adm.get("ipNumber") or ip_number or "this patient"
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Admission {ip_msg} is {status_desc}. Active admission (is_admitted: true) is required.",
+                        "message": f"Admission {ip_msg} is {status_desc}."
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
             return Response(
                 {"success": False, "error": "No active admission found", "message": "No active admission found"},
                 status=status.HTTP_404_NOT_FOUND,

@@ -91,6 +91,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-room-search/?(\?.*)?$': 'HMS-P-SRM',
     r'^/_b_a_c_k_e_n_d/HMS/admission-advance/?(\?.*)?$': 'HMS-P-AA',
     r'^/_b_a_c_k_e_n_d/HMS/admission-advance/.+/?(\?.*)?$': 'HMS-P-AA',
+    r'^/_b_a_c_k_e_n_d/HMS/today-registered-patients/?(\?.*)?$': 'HMS-P-ADML',
+    r'^/_b_a_c_k_e_n_d/HMS/admission-requests/?(\?.*)?$': 'HMS-P-ADML',
+
 
     # ==================== INVENTORY ====================
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy-category/?(\?.*)?$': 'HMS-P-PC',

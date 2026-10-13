@@ -97,6 +97,9 @@ urlpatterns = [
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
     path('admission-mlc-doc/<path:filename>/', admission.get_mlc_doc, name='admission_mlc_doc'),
     path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
+    path('today-registered-patients/', admission.today_registered_patients, name='today_registered_patients'),
+    path('admission-requests/', admission.today_registered_patients, name='admission_requests'),
+
     
     # Inventory URLs
     # Vendor URLs

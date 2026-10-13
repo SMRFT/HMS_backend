@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from django.http import JsonResponse, FileResponse, HttpResponse
+from django.core.serializers.json import DjangoJSONEncoder
 from django.conf import settings
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -20,6 +21,22 @@ import traceback
 import json
 import ast
 from datetime import datetime, date
+
+
+def make_json_serializable(obj):
+    if obj is None:
+        return None
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {str(k): make_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [make_json_serializable(v) for v in obj]
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
+        return str(obj)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
+        return float(obj)
+    return obj
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,7 +137,8 @@ def parse_json_field(value):
 
 def _safe_list(value):
     result = parse_json_field(value)
-    return result if isinstance(result, list) else []
+    clean = result if isinstance(result, list) else []
+    return make_json_serializable(clean)
 
 
 def _normalize_age_type(val):
@@ -216,11 +234,23 @@ def _sync_to_mongo(ip, room_details=None, shifting_details=None, advance_payment
     try:
         update_doc = {}
         if room_details is not None:
-            update_doc["room_details"] = room_details if isinstance(room_details, list) else _safe_list(room_details)
+            rd = room_details if isinstance(room_details, list) else _safe_list(room_details)
+            if isinstance(rd, str):
+                rd = _safe_list(rd)
+            update_doc["room_details"] = make_json_serializable(rd) if isinstance(rd, list) else []
+
         if shifting_details is not None:
-            update_doc["roomShitingDetails"] = shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details)
+            sd = shifting_details if isinstance(shifting_details, list) else _safe_list(shifting_details)
+            if isinstance(sd, str):
+                sd = _safe_list(sd)
+            update_doc["roomShitingDetails"] = make_json_serializable(sd) if isinstance(sd, list) else []
+
         if advance_payments is not None:
-            update_doc["advance_payments"] = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
+            ap = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
+            if isinstance(ap, str):
+                ap = _safe_list(ap)
+            update_doc["advance_payments"] = make_json_serializable(ap) if isinstance(ap, list) else []
+
         if extra_fields and isinstance(extra_fields, dict):
             update_doc.update(extra_fields)
 
@@ -246,18 +276,44 @@ def _sync_to_mongo(ip, room_details=None, shifting_details=None, advance_payment
             client.close()
 
 
-def _sync_advance_to_mongo(ip, payments_list, employee_id=None):
+def _sync_advance_to_mongo(ip, payments_list, employee_id=None, admission_id=None):
     client, hms_db = _get_hms_db()
     try:
         clean_ap = payments_list if isinstance(payments_list, list) else _safe_list(payments_list)
+        if isinstance(clean_ap, str):
+            clean_ap = _safe_list(clean_ap)
+        clean_ap = make_json_serializable(clean_ap)
+        if not isinstance(clean_ap, list):
+            clean_ap = []
+
         up_doc = {"advance_payments": clean_ap}
         if employee_id:
             up_doc["lastmodified_by"] = employee_id
             up_doc["lastmodified_date"] = timezone.now()
-        hms_db["hospital_admission"].update_one(
-            {"ipNumber": str(ip)},
-            {"$set": up_doc}
-        )
+
+        res = None
+        if admission_id:
+            try:
+                from bson import ObjectId
+                if ObjectId.is_valid(str(admission_id)):
+                    res = hms_db["hospital_admission"].update_one(
+                        {"_id": ObjectId(str(admission_id))},
+                        {"$set": up_doc}
+                    )
+            except Exception:
+                pass
+
+        if not res or res.matched_count == 0:
+            res = hms_db["hospital_admission"].update_one(
+                {"ipNumber": str(ip), "is_admitted": True},
+                {"$set": up_doc}
+            )
+
+        if not res or res.matched_count == 0:
+            hms_db["hospital_admission"].update_one(
+                {"ipNumber": str(ip)},
+                {"$set": up_doc}
+            )
     except Exception as ex:
         print(f"[_sync_advance_to_mongo] Failed for {ip}: {ex}")
     finally:
@@ -270,6 +326,16 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
     sd  = shifting_details   if isinstance(shifting_details,   list) else _safe_list(shifting_details)
     ap  = advance_payments   if isinstance(advance_payments,   list) else _safe_list(advance_payments)
     eh  = _safe_list(getattr(adm, "edit_history", []))
+
+    if isinstance(rd, str): rd = _safe_list(rd)
+    if isinstance(sd, str): sd = _safe_list(sd)
+    if isinstance(ap, str): ap = _safe_list(ap)
+    if isinstance(eh, str): eh = _safe_list(eh)
+
+    rd = make_json_serializable(rd) if isinstance(rd, list) else []
+    sd = make_json_serializable(sd) if isinstance(sd, list) else []
+    ap = make_json_serializable(ap) if isinstance(ap, list) else []
+    eh = make_json_serializable(eh) if isinstance(eh, list) else []
 
     adm.room_details       = rd
     adm.roomShitingDetails = sd
@@ -1431,17 +1497,45 @@ def _generate_refund_bill_no(hospital_code=None, branch_code=None, outlet_code=N
 
 
 def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
-                              advance_payments, employee_id):
+                              advance_payments, employee_id, admission_id=None):
     clean_ap = advance_payments if isinstance(advance_payments, list) else _safe_list(advance_payments)
-    updated = Admission.objects.filter(
-        ipNumber=str(ip_number), hospital_code=hospital_code,
-        branch_code=branch_code, outlet_code=outlet_code,
-    ).update(
-        advance_payments=clean_ap,
-        lastmodified_by=employee_id,
-        lastmodified_date=timezone.now(),
-    )
-    _sync_advance_to_mongo(ip_number, clean_ap, employee_id)
+    if isinstance(clean_ap, str):
+        clean_ap = _safe_list(clean_ap)
+    clean_ap = make_json_serializable(clean_ap)
+    if not isinstance(clean_ap, list):
+        clean_ap = []
+
+    try:
+        updated = 0
+        if admission_id:
+            updated = Admission.objects.filter(pk=admission_id).update(
+                advance_payments=clean_ap,
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+            )
+        if not updated:
+            updated = Admission.objects.filter(
+                ipNumber=str(ip_number), is_admitted=True,
+                hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
+            ).update(
+                advance_payments=clean_ap,
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+            )
+        if not updated:
+            updated = Admission.objects.filter(
+                ipNumber=str(ip_number), hospital_code=hospital_code,
+                branch_code=branch_code, outlet_code=outlet_code,
+            ).update(
+                advance_payments=clean_ap,
+                lastmodified_by=employee_id,
+                lastmodified_date=timezone.now(),
+            )
+    except Exception as e:
+        print(f"[_update_advance_payments] Djongo update warning: {e}, syncing via mongo")
+        updated = 1
+
+    _sync_advance_to_mongo(ip_number, clean_ap, employee_id, admission_id=admission_id)
     return updated
 
 
@@ -1485,17 +1579,44 @@ def admission_advance(request, ipNumber=None):
                 q["ipNumber"] = ip_number
             if uhid:
                 q["uhid"] = uhid
+                if not ip_number and not (from_date and to_date):
+                    q["is_admitted"] = True
+                    q["is_discharged"] = {"$ne": True}
+
+            from_dt = None
+            to_dt = None
+            if from_date and to_date:
+                try:
+                    from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+                    to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
+                    from_dt_full = datetime.combine(from_dt, datetime.min.time())
+                    to_dt_full   = datetime.combine(to_dt,   datetime.max.time())
+                    q["$or"] = [
+                        {"advance_payments.date": {"$gte": from_date, "$lte": to_date}},
+                        {"advance_payments.created_date": {"$gte": from_dt_full, "$lte": to_dt_full}},
+                        {"advance_payments.bill_date": {"$gte": from_dt_full, "$lte": to_dt_full}},
+                    ]
+                except Exception as e:
+                    return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
+            else:
+                q["advance_payments.0"] = {"$exists": True}
 
             client, hms_db = _get_hms_db()
             try:
-                admissions = list(hms_db["hospital_admission"].find(q))
+                admissions = list(hms_db["hospital_admission"].find(
+                    q,
+                    {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "room_details": 1, "roomShitingDetails": 1, "roomNo": 1}
+                ))
                 if not admissions:
                     return JsonResponse({'success': True, 'data': [], 'count': 0})
 
                 uhids = list({str(a.get("uhid")).strip() for a in admissions if a.get("uhid")})
                 patient_map = {}
                 if uhids:
-                    pt_cursor = hms_db["hospital_patient"].find({"uhid": {"$in": uhids}})
+                    pt_cursor = hms_db["hospital_patient"].find(
+                        {"uhid": {"$in": uhids}},
+                        {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1}
+                    )
                     for p in pt_cursor:
                         key = str(p.get("uhid") or "").strip().upper()
                         patient_map[key] = " ".join(filter(None, [p.get("salutation"), p.get("firstName"), p.get("lastName")])).strip()
@@ -1507,6 +1628,8 @@ def admission_advance(request, ipNumber=None):
             for adm in admissions:
                 payments = _safe_list(adm.get("advance_payments"))
                 patient_key = str(adm.get("uhid") or "").strip().upper()
+                cur_room = _get_current_room(adm)
+                room_str = cur_room.get("roomNo") or adm.get("roomNo") or ""
                 for p in payments:
                     if not isinstance(p, dict):
                         continue
@@ -1520,6 +1643,7 @@ def admission_advance(request, ipNumber=None):
                         paid_date = paid_date.isoformat()
                     p["ip_number"]    = adm.get("ipNumber")
                     p["uhid"]         = adm.get("uhid")
+                    p["room"]         = room_str
                     p["patient_name"] = patient_map.get(patient_key, "")
                     p["payment_mode"] = payment_mode
                     p["paid_date"]    = paid_date
@@ -1554,17 +1678,56 @@ def admission_advance(request, ipNumber=None):
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
 
-            return JsonResponse({'success': True, 'data': advance_payments})
+            return JsonResponse({'success': True, 'data': make_json_serializable(advance_payments)}, encoder=DjangoJSONEncoder)
 
         # ── Find admission for POST / PUT ─────────────────────────────────────
-        adm = Admission.objects.filter(
-            ipNumber=str(ipNumber), hospital_code=hospital_code,
-            branch_code=branch_code, outlet_code=outlet_code,
-        ).first()
+        target_ip = str(ipNumber or request.data.get('ipNumber') or request.data.get('ip_number') or '').strip()
+        target_uhid = str(request.data.get('uhid') or '').strip()
+
+        adm = None
+        if target_ip:
+            adm = Admission.objects.filter(
+                ipNumber=target_ip, hospital_code=hospital_code,
+                branch_code=branch_code, outlet_code=outlet_code,
+            ).first()
+            if not adm:
+                adm = Admission.objects.filter(ipNumber=target_ip).first()
+
+        # If not found by IP or no IP provided, search for active admission by UHID
+        if not adm and target_uhid:
+            adm = Admission.objects.filter(
+                uhid=target_uhid,
+                is_admitted=True,
+                is_discharged=False,
+                is_cancelled=False,
+                hospital_code=hospital_code,
+                branch_code=branch_code,
+                outlet_code=outlet_code,
+            ).first()
+            if not adm:
+                adm = Admission.objects.filter(
+                    uhid=target_uhid,
+                    is_admitted=True,
+                    is_discharged=False,
+                    is_cancelled=False,
+                ).first()
+
         if not adm:
-            adm = Admission.objects.filter(ipNumber=str(ipNumber)).first()
-        if not adm:
-            return JsonResponse({'success': False, 'error': 'Admission not found'}, status=404)
+            return JsonResponse({'success': False, 'error': f'Admission not found for {target_ip or target_uhid}'}, status=404)
+
+        # Ensure ipNumber is the actual admission ipNumber
+        ipNumber = adm.ipNumber
+
+        # Validate active admission status for POST (adding advance)
+        if request.method == 'POST':
+            if not getattr(adm, 'is_admitted', False) or getattr(adm, 'is_discharged', False) or getattr(adm, 'is_cancelled', False):
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Cannot add IP advance: Patient admission {adm.ipNumber} is not active (is_admitted: true required).'
+                }, status=400)
+
+        if getattr(adm, 'is_cancelled', False):
+            return JsonResponse({'success': False, 'error': f'Admission {adm.ipNumber} has been cancelled.'}, status=400)
 
         ap = _safe_list(adm.advance_payments)
 
@@ -1616,8 +1779,8 @@ def admission_advance(request, ipNumber=None):
                 "refund_details":   [],
             }
             ap.append(new_entry)
-            _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
-            return JsonResponse({'success': True, 'data': new_entry}, status=201)
+            _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
+            return JsonResponse({'success': True, 'data': make_json_serializable(new_entry)}, status=201, encoder=DjangoJSONEncoder)
 
         # ── PUT ───────────────────────────────────────────────────────────────
         elif request.method == 'PUT':
@@ -1641,8 +1804,8 @@ def admission_advance(request, ipNumber=None):
                 entry['status']           = 'Cancelled'
                 entry['cancelled_by']     = employee_id
                 entry['cancelled_date']   = now_iso
-                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
-                return JsonResponse({'success': True, 'data': entry})
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
+                return JsonResponse({'success': True, 'data': make_json_serializable(entry)}, encoder=DjangoJSONEncoder)
 
             # ── refund — full amount only, single refund record, status -> Refunded ──
             elif action == 'refund':
@@ -1714,16 +1877,16 @@ def admission_advance(request, ipNumber=None):
                 entry['is_advanceActive']   = False
                 entry['fully_refunded_date'] = now_iso
 
-                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
 
                 return JsonResponse({
                     'success': True,
-                    'data': {
+                    'data': make_json_serializable({
                         'advance_entry':  entry,
                         'refund_record':  refund_record,
                         'refund_bill_no': refund_bill_no,
-                    },
-                })
+                    }),
+                }, encoder=DjangoJSONEncoder)
 
             # ── edit (only while Pending) ──────────────────────────────────
             else:
@@ -1762,9 +1925,281 @@ def admission_advance(request, ipNumber=None):
                     "refund_details":   [],
                 }
                 ap.append(new_entry)
-                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id)
-                return JsonResponse({'success': True, 'data': {'original': entry, 'new_entry': new_entry}})
+                _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
+                return JsonResponse({
+                    'success': True,
+                    'data': make_json_serializable({'original': entry, 'new_entry': new_entry}),
+                }, encoder=DjangoJSONEncoder)
 
     except Exception as e:
         traceback.print_exc()
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET  /today-registered-patients/ or /admission-requests/
+# ─────────────────────────────────────────────────────────────────────────────
+def _clean_doc_name(doc_name):
+    if not doc_name:
+        return ""
+    name = str(doc_name).strip()
+    clean = re.sub(r'^(dr\.?\s*)+', '', name, flags=re.IGNORECASE).strip()
+    if not clean:
+        return name
+    if clean.upper().startswith("R."):
+        return "DR." + clean[2:]
+    return f"DR. {clean}"
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def today_registered_patients(request):
+    """
+    Returns registered patients / admission requests.
+    Supports filtering by date (defaults to today), search (UHID/name/doctor/mobile),
+    and doctor.
+    """
+    try:
+        hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
+        branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
+
+        date_str = (request.GET.get('date') or '').strip()
+        search_query = (request.GET.get('search') or '').strip()
+        doctor_query = (request.GET.get('doctor') or '').strip()
+        limit_val = int(request.GET.get('limit') or 200)
+
+        # Default date to today's local date if not specified
+        if not date_str or date_str.lower() == 'today':
+            date_str = timezone.now().date().strftime("%Y-%m-%d")
+
+        client, hms_db = _get_hms_db()
+        try:
+            # Build emp_map for resolving employeeId -> employeeName from Global db
+            emp_map = {}
+            try:
+                global_db = client['Global']
+                for doc in global_db['backend_diagnostics_profile'].find({}, {"employeeId": 1, "employeeName": 1}):
+                    e_id = str(doc.get("employeeId") or "").strip()
+                    e_name = doc.get("employeeName")
+                    if e_id and e_name:
+                        emp_map[e_id] = e_name
+            except Exception as e:
+                pass
+
+            patient_map = {}
+
+            # 1. Fetch patients registered on target date from hospital_patient
+            p_filter = {}
+            if date_str != 'all':
+                p_filter["registration_date"] = date_str
+
+            if hospital_code and hospital_code != "system":
+                p_filter["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                p_filter["branch_code"] = branch_code
+
+            patients_cursor = hms_db["hospital_patient"].find(p_filter).sort([("created_date", -1)]).limit(limit_val)
+            for p in patients_cursor:
+                u = str(p.get("uhid") or "").strip()
+                if not u:
+                    continue
+                first_name = (p.get("firstName") or "").strip()
+                last_name = (p.get("lastName") or "").strip()
+                sal = (p.get("salutation") or "").strip()
+                full_name = " ".join([x for x in [sal, first_name, last_name] if x]).strip() or first_name or u
+
+                raw_doc = p.get("doctorName") or p.get("doctor") or ""
+                doc_resolved = _clean_doc_name(emp_map.get(str(raw_doc).strip(), raw_doc))
+
+                c_dt = p.get("created_date")
+                reg_time = ""
+                if isinstance(c_dt, datetime):
+                    reg_time = c_dt.strftime("%I:%M %p")
+
+                patient_map[u] = {
+                    "uhid": u,
+                    "patientName": full_name,
+                    "salutation": sal,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "doctor": doc_resolved,
+                    "doctorId": p.get("doctor_id") or p.get("doctorId") or "",
+                    "age": p.get("age") or "",
+                    "age_type": p.get("age_type") or "Y",
+                    "gender": p.get("gender") or "",
+                    "mobile": p.get("mobilePhone") or p.get("phone") or "",
+                    "registrationDate": p.get("registration_date") or date_str,
+                    "registrationTime": reg_time,
+                    "customerType": p.get("customer_type") or p.get("customerType") or "General",
+                    "company_name": p.get("company_name") or p.get("companyName") or "",
+                    "is_admitted": False,
+                    "ipNumber": "",
+                }
+
+            # 2. Also check hospital_billing for outpatient visits on date_str
+            if date_str != 'all':
+                try:
+                    target_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    start_dt = datetime.combine(target_dt, time.min)
+                    end_dt = datetime.combine(target_dt, time.max)
+                    bills_cursor = hms_db["hospital_billing"].find({
+                        "billed_date": {"$gte": start_dt, "$lte": end_dt}
+                    }).sort([("billed_date", -1)]).limit(limit_val)
+
+                    bill_pids = []
+                    bill_records = []
+                    for b in bills_cursor:
+                        pid = b.get("patient_id")
+                        if pid is not None:
+                            bill_pids.append(pid)
+                            bill_records.append(b)
+
+                    if bill_pids:
+                        bill_patients = {
+                            p.get("id"): p
+                            for p in hms_db["hospital_patient"].find({"id": {"$in": bill_pids}})
+                        }
+                        for b in bill_records:
+                            p = bill_patients.get(b.get("patient_id"))
+                            if not p:
+                                continue
+                            u = str(p.get("uhid") or "").strip()
+                            if not u:
+                                continue
+
+                            first_name = (p.get("firstName") or "").strip()
+                            last_name = (p.get("lastName") or "").strip()
+                            sal = (p.get("salutation") or "").strip()
+                            full_name = " ".join([x for x in [sal, first_name, last_name] if x]).strip() or first_name or u
+
+                            raw_doc = b.get("doctor_id") or p.get("doctorName") or ""
+                            doc_resolved = _clean_doc_name(emp_map.get(str(raw_doc).strip(), raw_doc))
+
+                            b_dt = b.get("billed_date")
+                            reg_time = ""
+                            if isinstance(b_dt, datetime):
+                                reg_time = b_dt.strftime("%I:%M %p")
+
+                            if u in patient_map:
+                                if doc_resolved:
+                                    patient_map[u]["doctor"] = doc_resolved
+                                    patient_map[u]["doctorId"] = str(b.get("doctor_id") or "")
+                                if reg_time:
+                                    patient_map[u]["registrationTime"] = reg_time
+                            else:
+                                patient_map[u] = {
+                                    "uhid": u,
+                                    "patientName": full_name,
+                                    "salutation": sal,
+                                    "firstName": first_name,
+                                    "lastName": last_name,
+                                    "doctor": doc_resolved,
+                                    "doctorId": str(b.get("doctor_id") or ""),
+                                    "age": p.get("age") or "",
+                                    "age_type": p.get("age_type") or "Y",
+                                    "gender": p.get("gender") or "",
+                                    "mobile": p.get("mobilePhone") or p.get("phone") or "",
+                                    "registrationDate": date_str,
+                                    "registrationTime": reg_time,
+                                    "customerType": p.get("customer_type") or p.get("customerType") or "General",
+                                    "company_name": p.get("company_name") or p.get("companyName") or "",
+                                    "is_admitted": False,
+                                    "ipNumber": "",
+                                }
+                except Exception as ex:
+                    pass
+
+            # 3. If a search query is provided and we have few/no results, search directly in hospital_patient
+            if search_query and len(patient_map) < 10:
+                s_rgx = {"$regex": re.escape(search_query), "$options": "i"}
+                sq_filter = {
+                    "$or": [
+                        {"uhid": s_rgx},
+                        {"firstName": s_rgx},
+                        {"lastName": s_rgx},
+                        {"mobilePhone": s_rgx},
+                        {"doctorName": s_rgx},
+                    ]
+                }
+                extra_patients = hms_db["hospital_patient"].find(sq_filter).sort([("created_date", -1)]).limit(50)
+                for p in extra_patients:
+                    u = str(p.get("uhid") or "").strip()
+                    if not u or u in patient_map:
+                        continue
+                    first_name = (p.get("firstName") or "").strip()
+                    last_name = (p.get("lastName") or "").strip()
+                    sal = (p.get("salutation") or "").strip()
+                    full_name = " ".join([x for x in [sal, first_name, last_name] if x]).strip() or first_name or u
+                    raw_doc = p.get("doctorName") or p.get("doctor") or ""
+                    doc_resolved = _clean_doc_name(emp_map.get(str(raw_doc).strip(), raw_doc))
+
+                    patient_map[u] = {
+                        "uhid": u,
+                        "patientName": full_name,
+                        "salutation": sal,
+                        "firstName": first_name,
+                        "lastName": last_name,
+                        "doctor": doc_resolved,
+                        "doctorId": p.get("doctor_id") or p.get("doctorId") or "",
+                        "age": p.get("age") or "",
+                        "age_type": p.get("age_type") or "Y",
+                        "gender": p.get("gender") or "",
+                        "mobile": p.get("mobilePhone") or p.get("phone") or "",
+                        "registrationDate": p.get("registration_date") or "",
+                        "registrationTime": "",
+                        "customerType": p.get("customer_type") or p.get("customerType") or "General",
+                        "company_name": p.get("company_name") or p.get("companyName") or "",
+                        "is_admitted": False,
+                        "ipNumber": "",
+                    }
+
+            # 4. Check active admission status for all gathered UHIDs
+            uhids_list = list(patient_map.keys())
+            if uhids_list:
+                adm_cursor = hms_db["hospital_admission"].find({
+                    "uhid": {"$in": uhids_list},
+                    "is_admitted": True,
+                    "is_discharged": False,
+                    "is_cancelled": False,
+                })
+                for adm in adm_cursor:
+                    adm_u = str(adm.get("uhid") or "").strip()
+                    if adm_u in patient_map:
+                        patient_map[adm_u]["is_admitted"] = True
+                        patient_map[adm_u]["ipNumber"] = adm.get("ipNumber") or ""
+
+            results = list(patient_map.values())
+
+            # Filter by search_query in-memory if needed
+            if search_query:
+                sq_lower = search_query.lower()
+                results = [
+                    r for r in results
+                    if sq_lower in r["uhid"].lower()
+                    or sq_lower in r["patientName"].lower()
+                    or sq_lower in r["doctor"].lower()
+                    or sq_lower in r["mobile"].lower()
+                ]
+
+            # Filter by doctor if specified
+            if doctor_query and doctor_query != "ALL":
+                doc_lower = doctor_query.lower()
+                results = [
+                    r for r in results
+                    if doc_lower in r["doctor"].lower() or (r["doctorId"] and doc_lower == str(r["doctorId"]).lower())
+                ]
+
+            return Response({
+                "success": True,
+                "date": date_str,
+                "total": len(results),
+                "data": results,
+            }, status=200)
+
+        finally:
+            if client:
+                client.close()
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=500)
