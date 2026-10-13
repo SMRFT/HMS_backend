@@ -838,6 +838,26 @@ class RoomBooking(AuditModel):
     def __str__(self):
         return f"Booking: IP={self.ip_number} | Room={self.room_number}/{self.bed_number} | shifted={self.room_shifted}"
 
+class MongoJSONField(models.JSONField):
+    """
+    Django's JSONField.get_prep_value() calls json.dumps() before handing
+    the value to the DB layer — correct for relational backends, but djongo
+    stores that string as-is instead of a native array/object.
+    This override skips the dumps() step so djongo persists real BSON.
+    """
+    def get_prep_value(self, value):
+        return value
+
+    def from_db_value(self, value, expression, connection):
+        if isinstance(value, str):
+            import json
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+
 class Admission(AuditModel):
     uhid                = models.CharField(max_length=20)
     ipNumber            = models.CharField(max_length=10, primary_key=True)
@@ -851,10 +871,10 @@ class Admission(AuditModel):
     customer_type       = models.CharField(max_length=100, default='General', blank=True, null=True)
     company_code        = models.CharField(max_length=100, blank=True, null=True)
     insurance_company   = models.CharField(max_length=200, blank=True, null=True)
-    room_details        = models.JSONField(default=list)
-    roomShitingDetails  = models.JSONField(default=list, blank=True, null=True)
+    room_details        = MongoJSONField(default=list)
+    roomShitingDetails  = MongoJSONField(default=list, blank=True, null=True)
     reasonForAdmission  = models.TextField(blank=True, null=True)
-    advance_payments    = models.JSONField(default=list, blank=True, null=True)
+    advance_payments    = MongoJSONField(default=list, blank=True, null=True)
     mlc_type            = models.CharField(max_length=50, blank=True, null=True)
     mlc_doc             = models.CharField(max_length=200, blank=True, null=True)
     mlc_remarks         = models.TextField(blank=True, null=True)
@@ -875,7 +895,7 @@ class Admission(AuditModel):
     cancelled_Reason    = models.TextField(blank=True, null=True)
  
     # ── Edit tracking (array of audit entries) ────────────────────────────────
-    edit_history        = models.JSONField(default=list, blank=True, null=True)
+    edit_history        = MongoJSONField(default=list, blank=True, null=True)
  
     # ── Ward / admission status ───────────────────────────────────────────────
     ward_status         = models.CharField(max_length=50, blank=True, null=True)
