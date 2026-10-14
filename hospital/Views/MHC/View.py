@@ -7,6 +7,7 @@ from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from datetime import datetime, timedelta
+from django.db.models import Q
 from pyauth.auth import HasRoleAndDataPermission
 import traceback
 
@@ -217,8 +218,8 @@ def mhc_report(request):
     """
     try:
         today_str = timezone.now().date().isoformat()
-        from_date_str = request.query_params.get('from_date', today_str)
-        to_date_str   = request.query_params.get('to_date',   today_str)
+        from_date_str = (request.query_params.get('from_date') or today_str).strip()
+        to_date_str   = (request.query_params.get('to_date')   or today_str).strip()
 
         from_dt = datetime.strptime(from_date_str, '%Y-%m-%d').replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -226,11 +227,19 @@ def mhc_report(request):
         to_dt = datetime.strptime(to_date_str, '%Y-%m-%d').replace(
             hour=23, minute=59, second=59, microsecond=999999
         )
+        if timezone.is_naive(from_dt):
+            from_dt = timezone.make_aware(from_dt)
+        if timezone.is_naive(to_dt):
+            to_dt = timezone.make_aware(to_dt)
 
         queryset = MasterHealthcheckup.objects.filter(
-            created_date__gte=from_dt,
-            created_date__lte=to_dt,
-        ).order_by('-created_date')
+            Q(registration_date__gte=from_date_str, registration_date__lte=to_date_str + '\uffff') |
+            Q(
+                Q(registration_date__isnull=True) | Q(registration_date=''),
+                created_date__gte=from_dt,
+                created_date__lte=to_dt
+            )
+        ).order_by('-registration_date', '-created_date', '-mhc_no')
 
         serializer = MasterHealthcheckupSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
