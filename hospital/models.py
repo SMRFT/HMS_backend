@@ -103,12 +103,15 @@ class Patient(AuditModel):
     home_phone = models.CharField(max_length=15, blank=True, null=True)
     blood_group =models.CharField(max_length=20, blank=True, null=True)
     spouse_name = models.CharField(max_length=100, blank=True, null=True)
+    guardian_type = models.CharField(max_length=20, blank=True, null=True)
+    guardian_name = models.CharField(max_length=100, blank=True, null=True)
     occupation = models.CharField(max_length=100, blank=True, null=True)
     annual_income = models.CharField(max_length=100, blank=True, null=True)
 
     # Referred fields
     referredBy = models.CharField(max_length=100, blank=True, null=True)
     referred_doctor_phone = models.CharField(max_length=15, blank=True, null=True)
+    source_of_visit = models.CharField(max_length=100, blank=True, null=True)
     doctorName = models.CharField(max_length=100, blank=True, null=True)
 
     # Emergency Contact

@@ -71,53 +71,93 @@ def patientCreateView(request):
         mobile = (request.GET.get('mobile') or '').strip()
         search_query = (request.GET.get('q') or request.GET.get('search') or '').strip()
 
-        # Collect all query values provided by user
-        terms = []
-        for val in [search_query, uhid, ip_number, mobile]:
-            if val and val not in terms:
-                terms.append(val)
-
-        if terms:
+        has_filter = bool(uhid or ip_number or mobile or search_query)
+        if has_filter:
             query_filters = Q()
             admitted_uhids = set()
 
-            for term in terms:
-                # 1. UHID Search (exact, substring, last 4 digits, suffix like /001)
-                term_q = (
-                    Q(uhid__iexact=term) |
-                    Q(uhid__icontains=term) |
-                    Q(uhid__iendswith=term) |
-                    Q(uhid__iendswith=f"/{term}")
-                )
+            def build_term_q(val, is_field=None):
+                sub_q = Q()
+                val = val.strip()
+                if not val:
+                    return sub_q
+                digits = re.sub(r'\D', '', val)
 
-                # 2. Mobile Search (exact, substring, last 4 digits, +91 formatted)
-                digits_only = re.sub(r'\D', '', term)
-                term_q |= Q(mobilePhone__icontains=term) | Q(mobilePhone=term)
-                if digits_only:
-                    term_q |= Q(mobilePhone__icontains=digits_only)
-                    if len(digits_only) >= 4:
-                        term_q |= Q(mobilePhone__iendswith=digits_only)
-                    if len(digits_only) == 10:
-                        term_q |= (
-                            Q(mobilePhone=f"+91{digits_only}") |
-                            Q(mobilePhone=f"+91 {digits_only}") |
-                            Q(mobilePhone=f"0{digits_only}")
+                # 1. Short numeric search (2 to 5 digits): match strictly by END of number (suffix match)
+                if val.isdigit() and 2 <= len(val) <= 5:
+                    if is_field in (None, 'uhid'):
+                        sub_q |= Q(uhid__iendswith=val) | Q(uhid__iendswith=f"/{val}") | Q(uhid__iendswith=f"0{val}")
+                    if is_field in (None, 'mobile'):
+                        sub_q |= Q(mobilePhone__iendswith=val)
+                    if is_field in (None, 'ip'):
+                        try:
+                            adm_uhids = Admission.objects.filter(
+                                Q(ipNumber__iendswith=val) | Q(ipNumber__iexact=val)
+                            ).values_list('uhid', flat=True)[:100]
+                            for au in adm_uhids:
+                                if au:
+                                    admitted_uhids.add(au)
+                        except Exception as adm_e:
+                            print(f"Error querying Admission by IP: {adm_e}")
+                    return sub_q
+
+                # 2. 10-digit mobile number: match exact phone variations
+                if len(digits) == 10:
+                    if is_field in (None, 'mobile'):
+                        sub_q |= (
+                            Q(mobilePhone=digits) |
+                            Q(mobilePhone=f"+91{digits}") |
+                            Q(mobilePhone=f"+91 {digits}") |
+                            Q(mobilePhone=f"0{digits}") |
+                            Q(mobilePhone__iendswith=digits)
                         )
+                    if is_field in (None, 'uhid'):
+                        sub_q |= Q(uhid__iexact=val) | Q(uhid__iendswith=val)
+                    return sub_q
 
-                # 3. IP Number Search via Admission (exact, substring, last 4 digits)
-                try:
-                    adm_uhid_list = Admission.objects.filter(
-                        Q(ipNumber__iexact=term) |
-                        Q(ipNumber__icontains=term) |
-                        Q(ipNumber__iendswith=term)
-                    ).values_list('uhid', flat=True)[:100]
-                    for au in adm_uhid_list:
-                        if au:
-                            admitted_uhids.add(au)
-                except Exception as adm_e:
-                    print(f"Error querying Admission by IP: {adm_e}")
+                # 3. Alphanumeric / Name / Full UHID:
+                if is_field in (None, 'uhid'):
+                    sub_q |= Q(uhid__iexact=val) | Q(uhid__icontains=val) | Q(uhid__iendswith=val)
+                if is_field in (None, 'mobile'):
+                    if digits:
+                        sub_q |= Q(mobilePhone__icontains=digits) | Q(mobilePhone__iendswith=digits)
+                    else:
+                        sub_q |= Q(mobilePhone__icontains=val)
+                if is_field in (None, 'name'):
+                    sub_q |= Q(firstName__icontains=val) | Q(lastName__icontains=val)
+                if is_field in (None, 'ip'):
+                    try:
+                        adm_uhids = Admission.objects.filter(
+                            Q(ipNumber__iexact=val) | Q(ipNumber__icontains=val) | Q(ipNumber__iendswith=val)
+                        ).values_list('uhid', flat=True)[:100]
+                        for au in adm_uhids:
+                            if au:
+                                admitted_uhids.add(au)
+                    except Exception as adm_e:
+                        print(f"Error querying Admission by IP: {adm_e}")
 
-                query_filters |= term_q
+                return sub_q
+
+            # Apply specific fields
+            specific_queries = []
+            if uhid:
+                uq = build_term_q(uhid, 'uhid')
+                if uq: specific_queries.append(uq)
+            if mobile:
+                mq = build_term_q(mobile, 'mobile')
+                if mq: specific_queries.append(mq)
+            if ip_number:
+                iq = build_term_q(ip_number, 'ip')
+                if iq: specific_queries.append(iq)
+
+            if specific_queries:
+                for sq in specific_queries:
+                    query_filters |= sq
+
+            if search_query:
+                q_terms = [t.strip() for t in search_query.split() if t.strip()]
+                for qt in q_terms:
+                    query_filters |= build_term_q(qt)
 
             if admitted_uhids:
                 query_filters |= Q(uhid__in=list(admitted_uhids)[:100])
@@ -148,20 +188,27 @@ def patientCreateView(request):
     elif request.method == 'POST':
         print("Received POST data:", request.data)
         
-        uhid = request.data.get('uhid')
+        post_data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        # Ensure backward compatibility between guardian_name and spouse_name
+        if post_data.get('guardian_name') and not post_data.get('spouse_name'):
+            post_data['spouse_name'] = post_data.get('guardian_name')
+        elif post_data.get('spouse_name') and not post_data.get('guardian_name'):
+            post_data['guardian_name'] = post_data.get('spouse_name')
+
+        uhid = post_data.get('uhid')
         patient = None
 
         if uhid:
             try:
                 patient = Patient.objects.get(uhid=uhid)
                 print(f"Found existing patient: {patient}")
-                serializer = PatientSerializer(patient, data=request.data, partial=True)
+                serializer = PatientSerializer(patient, data=post_data, partial=True)
             except Patient.DoesNotExist:
                 print(f"Patient with UHID {uhid} not found. Creating new...")
-                serializer = PatientSerializer(data=request.data)
+                serializer = PatientSerializer(data=post_data)
         else:
             print("No UHID provided. Creating new patient...")
-            serializer = PatientSerializer(data=request.data)
+            serializer = PatientSerializer(data=post_data)
 
         if serializer.is_valid():
             print("Serializer Valid. Saving...")
