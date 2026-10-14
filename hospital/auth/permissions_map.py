@@ -420,7 +420,7 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
     r'^/_b_a_c_k_e_n_d/HMS/ot_staffs/?(\?.*)?$': 'HMS-P-OTSS',
 
-    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-OTMB',  
+    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-IPKG',  
     r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
