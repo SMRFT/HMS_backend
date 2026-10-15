@@ -176,12 +176,19 @@ def serialize_mongo_docs(docs):
     return clean_docs(docs)
 
 
+def _is_unspecified(val):
+    if val is None:
+        return True
+    s = str(val).strip().lower()
+    return s in ("null", "none", "undefined", "", "all", "false", "0")
+
+
 def paginate_mongo_query(
     collection_name,
     filter_query=None,
     sort=None,
-    page=1,
-    page_size=10,
+    page=None,
+    page_size=None,
     projection=None,
     enrich_fn=None,
     request=None
@@ -190,6 +197,8 @@ def paginate_mongo_query(
     High-Performance Native MongoDB Index-Based Pagination Engine.
     Executes native PyMongo indexed queries (count_documents + skip + limit)
     with sub-millisecond response times even with 1,000,000+ records.
+
+    If page and page_size are null or not mentioned in frontend, returns all data.
     """
     ensure_inventory_indexes()
     client, db = get_hms_db()
@@ -198,36 +207,60 @@ def paginate_mongo_query(
     filter_query = filter_query or {}
     sort_spec = sort or [("_id", DESCENDING)]
 
-    if request is not None and hasattr(request, "GET"):
-        page_val = request.GET.get("page", page)
-        page_size_val = request.GET.get("page_size") or request.GET.get("limit") or page_size
-    else:
-        page_val = page
-        page_size_val = page_size
+    is_unpaginated = False
 
-    # Unpaginated request (e.g. for modal lookups or dropdown options)
-    if page_val is None or str(page_val).lower() in ("all", "none", ""):
+    if request is not None and hasattr(request, "GET"):
+        has_page = "page" in request.GET
+        has_page_size = ("page_size" in request.GET) or ("limit" in request.GET)
+        raw_page = request.GET.get("page")
+        raw_page_size = request.GET.get("page_size") or request.GET.get("limit")
+
+        # If neither is mentioned, or if either is not mentioned or null/empty/all/undefined:
+        if not has_page or not has_page_size or _is_unspecified(raw_page) or _is_unspecified(raw_page_size):
+            is_unpaginated = True
+        else:
+            try:
+                page_num = int(raw_page)
+                limit_num = int(raw_page_size)
+                if page_num < 1 or limit_num < 1:
+                    is_unpaginated = True
+            except (ValueError, TypeError):
+                is_unpaginated = True
+    else:
+        # No request object provided: check explicit page/page_size parameters
+        if _is_unspecified(page) or _is_unspecified(page_size):
+            is_unpaginated = True
+        else:
+            try:
+                page_num = int(page)
+                limit_num = int(page_size)
+                if page_num < 1 or limit_num < 1:
+                    is_unpaginated = True
+            except (ValueError, TypeError):
+                is_unpaginated = True
+
+    # ── Return all data if unpaginated ───────────────────────────
+    if is_unpaginated:
         cursor = coll.find(filter_query, projection).sort(sort_spec)
         docs = clean_docs(list(cursor))
         if enrich_fn and callable(enrich_fn):
             docs = enrich_fn(docs)
+        total_records = len(docs)
         return {
             "success": True,
-            "count": len(docs),
+            "count": total_records,
+            "total_records": total_records,
+            "total_pages": 1,
+            "current_page": 1,
+            "page_size": total_records,
+            "has_next": False,
+            "has_previous": False,
             "data": docs,
             "results": docs,
         }
 
-    try:
-        page_num = max(1, int(page_val or 1))
-    except (ValueError, TypeError):
-        page_num = 1
-
-    try:
-        limit_num = max(1, min(1000, int(page_size_val or 10)))
-    except (ValueError, TypeError):
-        limit_num = 10
-
+    # ── Paginated request ────────────────────────────────────────
+    limit_num = min(1000, limit_num)
     total_records = coll.count_documents(filter_query)
     total_pages = max(1, (total_records + limit_num - 1) // limit_num) if total_records > 0 else 1
     skip_count = (page_num - 1) * limit_num
@@ -254,39 +287,67 @@ def paginate_mongo_query(
 
 def paginate_queryset(
     queryset,
-    request,
-    serializer_class,
-    enrich_fn=None
+    request=None,
+    serializer_class=None,
+    enrich_fn=None,
+    page=None,
+    page_size=None
 ):
     """
     Paginate a Django QuerySet using index slicing [start:end] and DRF ModelSerializer.
+    If page and page_size are null or not mentioned in frontend, returns all data.
     """
-    page_param = request.GET.get("page") if hasattr(request, "GET") else None
-    page_size_param = request.GET.get("page_size", 10) if hasattr(request, "GET") else 10
+    is_unpaginated = False
 
-    if page_param is None or page_param in ("all", ""):
+    if request is not None and hasattr(request, "GET"):
+        has_page = "page" in request.GET
+        has_page_size = ("page_size" in request.GET) or ("limit" in request.GET)
+        raw_page = request.GET.get("page")
+        raw_page_size = request.GET.get("page_size") or request.GET.get("limit")
+
+        if not has_page or not has_page_size or _is_unspecified(raw_page) or _is_unspecified(raw_page_size):
+            is_unpaginated = True
+        else:
+            try:
+                page_num = int(raw_page)
+                limit_num = int(raw_page_size)
+                if page_num < 1 or limit_num < 1:
+                    is_unpaginated = True
+            except (ValueError, TypeError):
+                is_unpaginated = True
+    else:
+        if _is_unspecified(page) or _is_unspecified(page_size):
+            is_unpaginated = True
+        else:
+            try:
+                page_num = int(page)
+                limit_num = int(page_size)
+                if page_num < 1 or limit_num < 1:
+                    is_unpaginated = True
+            except (ValueError, TypeError):
+                is_unpaginated = True
+
+    if is_unpaginated:
         serializer = serializer_class(queryset, many=True)
         data = serializer.data
         if enrich_fn and callable(enrich_fn):
             data = enrich_fn(data)
+        total_records = len(data)
         return {
             "success": True,
-            "count": len(data),
+            "count": total_records,
+            "total_records": total_records,
+            "total_pages": 1,
+            "current_page": 1,
+            "page_size": total_records,
+            "has_next": False,
+            "has_previous": False,
             "data": data,
             "results": data,
         }
 
     total_records = queryset.count()
-    try:
-        page_num = max(1, int(page_param or 1))
-    except (ValueError, TypeError):
-        page_num = 1
-
-    try:
-        limit_num = max(1, min(1000, int(page_size_param or 10)))
-    except (ValueError, TypeError):
-        limit_num = 10
-
+    limit_num = min(1000, limit_num)
     total_pages = max(1, (total_records + limit_num - 1) // limit_num) if total_records > 0 else 1
     start = (page_num - 1) * limit_num
     end = start + limit_num

@@ -73,8 +73,10 @@ def vendor_view(request, pk=None):
             except Vendor.DoesNotExist:
                 return Response({"error": "Vendor not found"}, status=404)
 
-            serializer = VendorSerializer(vendor)
-            return Response(serializer.data)
+            data = VendorSerializer(vendor).data
+            if data.get("name"):
+                data["name"] = str(data["name"]).upper()
+            return Response(data)
 
         # list with high-performance MongoDB index pagination
         filter_q = {"is_active": True}
@@ -103,10 +105,20 @@ def vendor_view(request, pk=None):
 
         filter_q = apply_date_filter(filter_q, request, "created_date")
 
+        def _enrich_vendors(docs):
+            for d in docs:
+                if d.get("name"):
+                    d["name"] = str(d["name"]).upper()
+                if d.get("vendor_name"):
+                    d["vendor_name"] = str(d["vendor_name"]).upper()
+            docs.sort(key=lambda x: str(x.get("name") or "").upper())
+            return docs
+
         return Response(paginate_mongo_query(
             "hospital_vendor",
             filter_q,
-            sort=[("vendor_id", DESCENDING)],
+            sort=[("name", ASCENDING)],
+            enrich_fn=_enrich_vendors,
             request=request
         ))
 
@@ -218,7 +230,10 @@ def chemical_composition_view(request, pk=None):
                 comp = ChemicalComposition.objects.get(composition_id=pk)
                 if not comp.is_active:
                     return Response({"error": "Composition not found"}, status=404)
-                return Response(ChemicalCompositionSerializer(comp).data)
+                data = ChemicalCompositionSerializer(comp).data
+                if data.get("composition_name"):
+                    data["composition_name"] = str(data["composition_name"]).upper()
+                return Response(data)
 
             filter_q = {"is_active": True}
             if hospital_code and hospital_code != "system":
@@ -232,10 +247,18 @@ def chemical_composition_view(request, pk=None):
 
             filter_q = apply_date_filter(filter_q, request, "created_date")
 
+            def _enrich_compositions(docs):
+                for d in docs:
+                    if d.get("composition_name"):
+                        d["composition_name"] = str(d["composition_name"]).upper()
+                docs.sort(key=lambda x: str(x.get("composition_name") or "").upper())
+                return docs
+
             return Response(paginate_mongo_query(
                 "hospital_chemicalcomposition",
                 filter_q,
-                sort=[("composition_id", ASCENDING)],
+                sort=[("composition_name", ASCENDING)],
+                enrich_fn=_enrich_compositions,
                 request=request
             ))
 
@@ -337,7 +360,10 @@ def pharmacycategory_view(request, pk=None):
                 category = PharmacyCategory.objects.get(category_id=pk)
                 if not category.is_active:
                     return Response({"error": "Category not found"}, status=404)
-                return Response(PharmacyCategorySerializer(category).data)
+                data = PharmacyCategorySerializer(category).data
+                if data.get("category_name"):
+                    data["category_name"] = str(data["category_name"]).upper()
+                return Response(data)
 
             filter_q = {"is_active": True}
             if hospital_code and hospital_code != "system":
@@ -351,10 +377,18 @@ def pharmacycategory_view(request, pk=None):
 
             filter_q = apply_date_filter(filter_q, request, "created_date")
 
+            def _enrich_categories(docs):
+                for d in docs:
+                    if d.get("category_name"):
+                        d["category_name"] = str(d["category_name"]).upper()
+                docs.sort(key=lambda x: str(x.get("category_name") or "").upper())
+                return docs
+
             return Response(paginate_mongo_query(
                 "hospital_pharmacycategory",
                 filter_q,
-                sort=[("category_id", ASCENDING)],
+                sort=[("category_name", ASCENDING)],
+                enrich_fn=_enrich_categories,
                 request=request
             ))
 
@@ -456,7 +490,12 @@ def pharmacy_item_view(request, pk=None):
                 item = PharmacyItem.objects.get(item_id=pk)
                 if not item.is_active:
                     return Response({"error": "Item not found"}, status=404)
-                return Response(PharmacyItemSerializer(item).data)
+                data = PharmacyItemSerializer(item).data
+                if data.get("item_name"):
+                    data["item_name"] = str(data["item_name"]).upper()
+                if data.get("brand_name"):
+                    data["brand_name"] = str(data["brand_name"]).upper()
+                return Response(data)
 
             filter_q = {"is_active": True}
             if hospital_code and hospital_code != "system":
@@ -594,18 +633,28 @@ def pharmacy_item_view(request, pk=None):
                             comp_map[cname.lower()] = cname
 
                 for it in docs:
+                    if it.get("item_name"):
+                        it["item_name"] = str(it["item_name"]).upper()
+                    if it.get("item_last_name"):
+                        it["item_last_name"] = str(it["item_last_name"]).upper()
+                    if it.get("brand_name"):
+                        it["brand_name"] = str(it["brand_name"]).upper()
+
                     c_val = str(it.get("category") or "").strip()
-                    it["category_name"] = cat_map.get(c_val) or cat_map.get(c_val.lower()) or c_val
+                    raw_cat = cat_map.get(c_val) or cat_map.get(c_val.lower()) or c_val
+                    it["category_name"] = str(raw_cat).upper() if raw_cat else ""
 
                     comp_val = str(it.get("chemical_composition") or "").strip()
-                    it["chemical_composition_name"] = comp_map.get(comp_val) or comp_map.get(comp_val.lower()) or comp_val
+                    raw_comp = comp_map.get(comp_val) or comp_map.get(comp_val.lower()) or comp_val
+                    it["chemical_composition_name"] = str(raw_comp).upper() if raw_comp else ""
 
+                docs.sort(key=lambda x: str(x.get("item_name") or "").upper())
                 return docs
 
             return Response(paginate_mongo_query(
                 "hospital_pharmacyitem",
                 filter_q,
-                sort=[("item_id", ASCENDING)],
+                sort=[("item_name", ASCENDING)],
                 enrich_fn=_enrich_pharmacy_items,
                 request=request
             ))
@@ -1617,7 +1666,7 @@ def medicine_tracking(request):
         return Response({
             "success": True,
             "item_id": item_id,
-            "item_name": item_name_display,
+            "item_name": (item_name_display or "").upper(),
             "outlet_code": requested_outlet or "ALL",
             "outlet_name": outlet_map.get(requested_outlet, "All Outlets (Combined)"),
             "summary": {

@@ -559,8 +559,19 @@ def search_rooms(request):
                         continue
                     dob = patient.get("dob") or patient.get("dateOfBirth")
                     calc_num, calc_unit = _calc_age_and_type_from_dob(dob)
+                    pname = " ".join(filter(None, [
+                        str(patient.get("salutation") or "").strip(),
+                        str(patient.get("firstName") or "").strip(),
+                        str(patient.get("middleName") or "").strip(),
+                        str(patient.get("lastName") or "").strip()
+                    ])).strip()
+                    if not pname:
+                        pname = f"{patient.get('firstName') or ''} {patient.get('lastName') or ''}".strip()
+
                     patient_map[key] = {
                         "uhid":                 key,
+                        "patientname":          pname,
+                        "name":                 pname,
                         "salutation":           str(patient.get("salutation") or ""),
                         "firstName":            str(patient.get("firstName") or ""),
                         "middleName":           str(patient.get("middleName") or ""),
@@ -579,6 +590,20 @@ def search_rooms(request):
                         "insuranceCompanyName": "",
                         "company_code":         str(patient.get("company_code") or ""),
                     }
+
+            # Resolve Doctor map
+            doctor_map = {}
+            try:
+                doc_query = {}
+                if hospital_code and hospital_code != "system":
+                    doc_query["hospital_code"] = hospital_code
+                for d in hms_db["hospital_employee"].find(doc_query, {"employeeId": 1, "employeeName": 1}):
+                    emp_id = str(d.get("employeeId") or "").strip()
+                    emp_name = str(d.get("employeeName") or "").strip()
+                    if emp_id and emp_name:
+                        doctor_map[emp_id] = emp_name
+            except Exception:
+                pass
 
             # Fetch active bookings
             booking_map = {}
@@ -619,12 +644,28 @@ def search_rooms(request):
 
             uhid         = str(admission.get("uhid") or "").strip()
             ip_number    = str(admission.get("ipNumber") or "")
+            doc_id       = str(admission.get("admittingDoctor") or "").strip()
+            doc_name     = doctor_map.get(doc_id) or str(admission.get("admittingDoctorName") or doc_id)
+            if doc_name and not doc_name.startswith("Dr.") and (doc_id in doctor_map or not doc_name.isdigit()):
+                doc_name = f"Dr. {doc_name}"
+
+            adm_dt       = admission.get("admissionDateTime")
+            adm_dt_str   = adm_dt.isoformat() if hasattr(adm_dt, "isoformat") else str(adm_dt or "")
+
             patient_info = dict(patient_map.get(uhid, {"uhid": uhid}))
-            patient_info["is_high_risk"] = bool(admission.get("is_high_risk", False))
-            patient_info["high_risk_reason"] = admission.get("high_risk_reason") or ""
+            if not patient_info.get("patientname"):
+                fb_name = str(admission.get("patientName") or admission.get("patient_name") or "")
+                patient_info["patientname"] = fb_name
+                patient_info["name"] = fb_name
+            patient_info["admittingDoctor"]   = doc_name
+            patient_info["admittingDoctorId"] = doc_id
+            patient_info["admissionDateTime"] = adm_dt_str
+            patient_info["ip_number"]         = ip_number
+            patient_info["is_high_risk"]      = bool(admission.get("is_high_risk", False))
+            patient_info["high_risk_reason"]  = str(admission.get("high_risk_reason") or "")
             hr_dt = admission.get("high_risk_date")
-            patient_info["high_risk_date"] = hr_dt.isoformat() if hasattr(hr_dt, "isoformat") else str(hr_dt or "")
-            
+            patient_info["high_risk_date"]    = hr_dt.isoformat() if hasattr(hr_dt, "isoformat") else str(hr_dt or "")
+
             active_shifts = [s for s in shifts if bool(s.get("is_roomActive", False))]
             active_shift  = None
             if active_shifts:
@@ -1395,25 +1436,38 @@ def admission_detail(request, ipNumber):
                 new_bed_no  = str(get_val(data.get("bedNo"))  or "").strip()
 
                 if new_room_no or new_bed_no:
-                    now_iso     = timezone.now().isoformat()
-                    active_room = next((r for r in rd if isinstance(r, dict) and r.get("is_roomActive")), None)
-                    prev_room_no = prev_bed_no = ""
-                    if active_room:
-                        active_room["is_roomActive"]    = False
-                        active_room["endDateTime"]       = now_iso
-                        active_room["lastmodified_by"]   = employee_id
-                        active_room["lastmodified_date"] = now_iso
-                        prev_room_no = active_room.get("roomNo", "")
-                        prev_bed_no  = active_room.get("bedNo",  "")
-                    rd.append({
-                        "room_entry_id": len(rd) + 1,
-                        "roomNo": new_room_no or prev_room_no,
-                        "bedNo":  new_bed_no  or prev_bed_no,
-                        "is_roomActive":  True, "is_roomCleaned": False,
-                        "startDateTime":  timezone.now().isoformat(), "endDateTime": None,
-                        "created_by": employee_id, "created_date": timezone.now().isoformat(),
-                        "lastmodified_by": employee_id, "lastmodified_date": timezone.now().isoformat(),
-                    })
+                    # If the patient has already been shifted, their current room is governed by roomShitingDetails.
+                    # rd (room_details) must strictly contain only the initial admitted room.
+                    if sd:
+                        # Patient has room shiftings; preserve the initial admitted room without modifications
+                        pass
+                    else:
+                        # Patient has no shiftings: update the initial admitted room in place if changed
+                        if rd and isinstance(rd[0], dict):
+                            curr_r = str(rd[0].get("roomNo", "")).strip()
+                            curr_b = str(rd[0].get("bedNo", "")).strip()
+                            if (new_room_no and new_room_no != curr_r) or (new_bed_no and new_bed_no != curr_b):
+                                if new_room_no: rd[0]["roomNo"] = new_room_no
+                                if new_bed_no:  rd[0]["bedNo"]  = new_bed_no
+                                adm.roomNo = rd[0]["roomNo"]
+                                adm.bedNo  = rd[0]["bedNo"]
+                        elif new_room_no or new_bed_no:
+                            now_iso = timezone.now().isoformat()
+                            rd = [{
+                                "room_entry_id": 1,
+                                "roomNo": new_room_no,
+                                "bedNo":  new_bed_no,
+                                "is_roomActive":  True,
+                                "is_roomCleaned": False,
+                                "startDateTime":  now_iso,
+                                "endDateTime":    None,
+                                "created_by": employee_id,
+                                "created_date": now_iso,
+                                "lastmodified_by": employee_id,
+                                "lastmodified_date": now_iso,
+                            }]
+                            adm.roomNo = new_room_no
+                            adm.bedNo  = new_bed_no
 
                 # Append to edit_history array (single source of truth)
                 edit_history = _safe_list(getattr(adm, "edit_history", []))

@@ -199,6 +199,13 @@ def _enrich_po_list_batch(po_list: list) -> list:
     for p in po_list:
         if not p.get("vendor_name") and p.get("vendor_id") in vendor_map:
             p["vendor_name"] = vendor_map[p.get("vendor_id")]
+        if p.get("vendor_name"):
+            p["vendor_name"] = str(p["vendor_name"]).upper()
+
+        if isinstance(p.get("items"), list):
+            for it in p["items"]:
+                if isinstance(it, dict) and it.get("medicine_name"):
+                    it["medicine_name"] = str(it["medicine_name"]).upper()
 
         app_by = str(p.get("approved_by", "") or "").strip()
         p["approved_by_name"] = emp_map.get(app_by, app_by) if app_by else ""

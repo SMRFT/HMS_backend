@@ -306,7 +306,7 @@ def pharmacy_stock_view(request, pk=None):
                 enriched = []
                 for row in stock_docs:
                     iid = row.get("item_id")
-                    row["item_name"]                = imap.get(iid, f"Item #{iid}")
+                    row["item_name"]                = str(imap.get(iid, f"Item #{iid}")).upper()
                     row["mrp"]                      = str(_dec(row.get("mrp", 0)))
                     row["Selling_Price"]            = str(_dec(
                         row.get("Selling_Price") or row.get("selling_price") or row.get("mrp") or 0
@@ -330,6 +330,7 @@ def pharmacy_stock_view(request, pk=None):
                         + row["sales_return_quantity"]
                     )
                     enriched.append(row)
+                enriched.sort(key=lambda x: str(x.get("item_name") or "").upper())
                 return enriched
 
             return Response(paginate_mongo_query(

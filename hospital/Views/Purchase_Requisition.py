@@ -145,7 +145,7 @@ def _items_to_store(items: list) -> list:
             continue
         cleaned.append({
             "item_id":       item.get("item_id") or None,
-            "medicine_name": name,
+            "medicine_name": name.upper(),
         })
     return cleaned
 
@@ -202,6 +202,11 @@ def _enrich_pr_list_batch(pr_list: list) -> list:
         for field in _EMPLOYEE_FIELDS:
             eid = str(item.get(field, "") or "").strip()
             item[f"{field}_name"] = emp_map.get(eid, eid) if eid else ""
+
+        if isinstance(item.get("items"), list):
+            for it in item["items"]:
+                if isinstance(it, dict) and it.get("medicine_name"):
+                    it["medicine_name"] = str(it["medicine_name"]).upper()
 
     return pr_list
 
