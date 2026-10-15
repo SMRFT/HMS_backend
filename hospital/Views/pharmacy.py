@@ -1060,8 +1060,8 @@ def save_oppharmacy_estimate(request):
 
 def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_code=None):
     """
-    Deletes estimate bills older than 24 hours from their actual billing time,
-    releases blocked stock in hospital_pharmacystock, and writes audit records to hospital_pharmacy_deleted_logs.
+    Deletes estimate bills older than 24 hours from their actual billing save time (bill_date / created_date),
+    releases blocked stock in hospital_pharmacystock, and writes comprehensive audit records to hospital_pharmacy_deleted_logs.
     """
     try:
         now_utc = datetime.utcnow()
@@ -1095,7 +1095,7 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
             else:
                 continue
 
-            # Verify 24-hour expiry based on actual billing timestamp
+            # Verify 24-hour expiry strictly based on bill save timestamp
             if bill_time_utc > expiry_cutoff:
                 continue
 
@@ -1152,12 +1152,27 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
                 try:
                     adm = mongo_db["hospital_admission"].find_one(
                         {"ipNumber": bill.get("inpatient_number")},
-                        {"uhid": 1}
+                        {"uhid": 1, "patientName": 1}
                     )
                     if adm:
                         uhid = adm.get("uhid")
                 except Exception:
                     pass
+
+            # Resolve patient_name
+            patient_name = bill.get("patient_name") or bill.get("patientname") or ""
+            if not patient_name and uhid:
+                try:
+                    pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "patient_name": 1, "name": 1})
+                    if pat:
+                        fn = pat.get("firstName") or ""
+                        ln = pat.get("lastName") or ""
+                        patient_name = f"{fn} {ln}".strip() or pat.get("patient_name") or pat.get("name") or ""
+                except Exception:
+                    pass
+
+            doc_id = bill.get("doctor_id")
+            doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
 
             # 2. Write to deletion logs
             mongo_db["hospital_pharmacy_deleted_logs"].insert_one({
@@ -1167,16 +1182,19 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
                 "estimated_time": estimated_time,
                 "estimate_time": estimated_time,
                 "deleted_at": datetime.utcnow(),
-                "reason": "Estimate expired after 24 hours",
+                "reason": "Estimate expired after 24 hours from bill save time",
                 "medicine_particulars": medicines,
                 "hospital_code": h_code,
                 "branch_code": b_code,
                 "outlet_code": o_code,
+                "doctor_id": doc_id,
+                "doctor_name": doc_name,
                 "total_amount": float(bill.get("total_amount", 0) or 0),
                 "net_amount": float(bill.get("net_amount", 0) or 0),
                 "created_date": bill.get("created_date"),
                 "bill_date": bill.get("bill_date"),
-                "patient_name": bill.get("patient_name"),
+                "patient_name": patient_name,
+                "deleted_by": "AUTO_DELETE_24HR",
             })
 
             # 3. Delete from hospital_pharmacybilling
@@ -1199,108 +1217,192 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
 @permission_classes([HasRoleAndDataPermission])
 def get_active_estimates(request):
     process_expired_estimate_bills()
-    estimates = PharmacyBilling.objects.filter(billing_status="Estimate")
-    serializer = PharmacyBillingSerializer(estimates, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
-
+    estimates = list(bill_collection.find({"billing_status": "Estimate"}, {"_id": 0}).sort("Bill_id", -1))
+    return Response(estimates, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
     try:
-        hospital_code = request.data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-        branch_code = request.data.get("auth-branch-code") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
-        outlet_code = request.data.get("auth-outlet-code") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
-
-        # ── 1. Automatically purge and log any expired estimates (>24 hours from billing time) ──
-        process_expired_estimate_bills(hospital_code, branch_code, outlet_code)
-
-        # =========================================================
-        # ✅ Fetch Active Estimate Bills
-        # =========================================================
-        bills = PharmacyBilling.objects.filter(
-            billing_status="Estimate",
-            hospital_code=hospital_code,
-            branch_code=branch_code,
-            outlet_code=outlet_code
+        hospital_code = (
+            request.data.get("auth-hospital-code")
+            or request.headers.get("Hospital-Code")
+            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or request.META.get("HTTP_HOSPITAL_CODE")
+            or request.GET.get("hospital_code")
+            or "SH001"
+        )
+        branch_code = (
+            request.data.get("auth-branch-code")
+            or request.headers.get("Branch-Code")
+            or request.META.get("HTTP_AUTH_BRANCH_CODE")
+            or request.META.get("HTTP_BRANCH_CODE")
+            or request.GET.get("branch_code")
+        )
+        outlet_code = (
+            request.data.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+            or request.META.get("HTTP_OUTLET_CODE")
+            or request.GET.get("outlet_code")
         )
 
+        # ── 1. Automatically purge and log any expired estimates (>24 hours from bill save time) ──
+        process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_code=None)
+
+        # =========================================================
+        # ✅ Fetch Active Estimate Bills directly from MongoDB
+        # =========================================================
+        filter_query = {"billing_status": "Estimate"}
+        if hospital_code:
+            filter_query["hospital_code"] = hospital_code
+        if branch_code:
+            filter_query["branch_code"] = branch_code
+
+        # If a specific outlet is filtered via query parameter, apply it; otherwise show all active estimates for the branch
+        requested_outlet = request.GET.get("outlet_code")
+        if requested_outlet and requested_outlet.strip().upper() not in ["ALL", ""]:
+            filter_query["outlet_code"] = requested_outlet.strip()
+
+        cursor = bill_collection.find(filter_query).sort("Bill_id", -1)
         data = []
 
-        for bill in bills:
+        for bill in cursor:
+            Bill_id = bill.get("Bill_id")
+            uhid = bill.get("uhid") or ""
 
             # =========================================================
-            # ✅ Get Patient (ONLY ONCE)
+            # ✅ Get Patient Name
             # =========================================================
-            patient = Patient.objects.filter(uhid=bill.uhid).first()
+            patient_name = bill.get("patient_name") or bill.get("patientname") or ""
+            if not patient_name and uhid:
+                try:
+                    pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "patient_name": 1, "name": 1})
+                    if pat:
+                        fn = pat.get("firstName") or ""
+                        ln = pat.get("lastName") or ""
+                        patient_name = f"{fn} {ln}".strip() or pat.get("patient_name") or pat.get("name") or ""
+                except Exception:
+                    pass
 
-            patient_name = ""
-            if patient:
-                patient_name = f"{patient.firstName} {patient.lastName}"
+            if not patient_name and bill.get("inpatient_number"):
+                try:
+                    adm = mongo_db["hospital_admission"].find_one({"ipNumber": bill.get("inpatient_number")}, {"patientName": 1})
+                    if adm:
+                        patient_name = adm.get("patientName", "")
+                except Exception:
+                    pass
+
+            # =========================================================
+            # ✅ Resolve Doctor ID & Doctor Name
+            # =========================================================
+            doc_id = bill.get("doctor_id") or ""
+            doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
+
+            # =========================================================
+            # ✅ Resolve Bill Type Name
+            # =========================================================
+            bill_type_val = bill.get("bill_type")
+            bill_type_name = ""
+            if bill_type_val is not None:
+                try:
+                    bt_doc = mongo_db["hospital_billtype"].find_one({"bill_type": int(bill_type_val)})
+                    if bt_doc:
+                        bill_type_name = bt_doc.get("bill_name", "")
+                except Exception:
+                    pass
 
             # =========================================================
             # ✅ Medicine Particulars Handling
             # =========================================================
-            meds = bill.medicine_particulars
-
-            # Handle string JSON
+            meds = bill.get("medicine_particulars", [])
             if isinstance(meds, str):
-                meds = json.loads(meds)
+                try:
+                    meds = json.loads(meds)
+                except Exception:
+                    meds = []
 
             particulars = []
-
-            for med in meds:
+            for med in (meds or []):
+                if not isinstance(med, dict):
+                    continue
                 item_id = med.get("item_id")
+                item_name = med.get("item_name") or med.get("medicine_name") or med.get("name") or ""
+                if not item_name and item_id:
+                    try:
+                        p_item = mongo_db["hospital_pharmacyitem"].find_one({"item_id": int(item_id)}, {"item_name": 1})
+                        if p_item:
+                            item_name = p_item.get("item_name", "")
+                    except Exception:
+                        pass
 
-                # =====================================================
-                # ✅ Fetch Item Name
-                # =====================================================
-                item = PharmacyItem.objects.filter(item_id=item_id).first()
-                item_name = item.item_name if item else ""
+                qty = float(med.get("qty", 0) or med.get("quantity", 0) or 0)
+                rate = float(med.get("price", 0) or med.get("mrp", 0) or med.get("Selling_Price", 0) or 0)
+                mrp = float(med.get("mrp", 0) or rate)
 
                 particulars.append({
+                    **med,
                     "item_id": item_id,
                     "item_name": item_name,
-                    "batch_number": med.get("batch_number"),
-                    "qty": med.get("qty"),
-                    "price": med.get("price"),
+                    "name": item_name,
+                    "batch_number": med.get("batch_number", ""),
+                    "qty": qty,
+                    "quantity": qty,
+                    "price": rate,
+                    "mrp": mrp,
+                    "selling_price": rate,
+                    "calculated_price": float(med.get("calculated_price", 0) or (qty * mrp)),
+                    "total": float(med.get("total", 0) or (qty * mrp)),
+                    "CGST_Percentage": float(med.get("CGST_Percentage", 0) or 0),
+                    "SGST_Percentage": float(med.get("SGST_Percentage", 0) or 0),
+                    "CGST_Amt": float(med.get("CGST_Amt", 0) or 0),
+                    "SGST_Amt": float(med.get("SGST_Amt", 0) or 0),
+                    "dosage": med.get("dosage", ""),
+                    "noOfDays": med.get("noOfDays", ""),
                 })
 
-            # =========================================================
-            # ✅ Final Response Object
-            # =========================================================
+            bill_date = bill.get("bill_date") or bill.get("created_date")
+            created_date = bill.get("created_date") or bill.get("bill_date")
+
             data.append({
-                "created_date": bill.created_date,
-                "lastmodified_date": bill.lastmodified_date,
-                "created_by": bill.created_by,
-                "lastmodified_by": bill.lastmodified_by,
-                "bill_no": bill.bill_no,
-                "Bill_id": bill.Bill_id,
-                "estimate_no": bill.estimate_no,
-                "bill_date": bill.bill_date,
-                "uhid": bill.uhid,
-                "inpatient_number": bill.inpatient_number,
-                "bill_type": bill.bill_type,
+                "Bill_id": Bill_id,
+                "bill_no": bill.get("bill_no"),
+                "estimate_no": bill.get("estimate_no"),
+                "created_date": created_date.isoformat() if isinstance(created_date, datetime) else str(created_date or ""),
+                "bill_date": bill_date.isoformat() if isinstance(bill_date, datetime) else str(bill_date or ""),
+                "lastmodified_date": bill.get("lastmodified_date"),
+                "created_by": bill.get("created_by"),
+                "lastmodified_by": bill.get("lastmodified_by"),
+                "uhid": uhid,
+                "inpatient_number": bill.get("inpatient_number", ""),
+                "bill_type": bill_type_val,
+                "bill_type_name": bill_type_name,
+                "bill_name": bill_type_name,
                 "patient_name": patient_name,
-                "doctor_id": bill.doctor_id,
-                "room_no": bill.room_no,
+                "doctor_id": doc_id,
+                "doctor_name": doc_name,
+                "room_no": bill.get("room_no", ""),
                 "medicine_particulars": particulars,
-                "total_amount": bill.total_amount,
-                "overall_discount_type": bill.overall_discount_type,
-                "overall_discount_value": bill.overall_discount_value,
-                "overall_discount_amount": bill.overall_discount_amount,
-                "net_amount": bill.net_amount,
-                "round_off": bill.round_off,
-                "billing_status": bill.billing_status,
-                "billing_mode": bill.billing_mode,
-                "payment_details": bill.payment_details,
-                "cashier_id": bill.cashier_id,
+                "total_amount": float(bill.get("total_amount", 0) or 0),
+                "overall_discount_type": bill.get("overall_discount_type"),
+                "overall_discount_value": float(bill.get("overall_discount_value", 0) or 0),
+                "overall_discount_amount": float(bill.get("overall_discount_amount", 0) or 0),
+                "net_amount": float(bill.get("net_amount", 0) or 0),
+                "round_off": float(bill.get("round_off", 0) or 0),
+                "billing_status": "Estimate",
+                "billing_mode": bill.get("billing_mode", "ESTIMATE"),
+                "hospital_code": bill.get("hospital_code"),
+                "branch_code": bill.get("branch_code"),
+                "outlet_code": bill.get("outlet_code"),
+                "payment_details": bill.get("payment_details"),
+                "cashier_id": bill.get("cashier_id"),
             })
 
         return Response(data, status=status.HTTP_200_OK)
 
     except Exception as e:
+        print("[ERROR] get_estimate_bills:", e)
         return Response({
             "status": "error",
             "message": str(e)
@@ -1310,51 +1412,89 @@ def get_estimate_bills(request):
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def convert_estimate_to_bill(request, estimate_no):
+    try:
+        estimate = bill_collection.find_one({
+            "estimate_no": str(estimate_no),
+            "billing_status": "Estimate"
+        })
+        if not estimate:
+            return Response({"success": False, "error": f"Estimate {estimate_no} not found or already converted."}, status=404)
 
-    estimate = PharmacyBilling.objects.get(
-        estimate_no=estimate_no,
-        billing_status="Estimate"
-    )
+        medicines = estimate.get("medicine_particulars", [])
+        if isinstance(medicines, str):
+            try:
+                medicines = json.loads(medicines)
+            except Exception:
+                medicines = []
 
-    medicines = estimate.medicine_particulars
-    if isinstance(medicines, str):
-        medicines = json.loads(medicines)
+        converted_items = []
+        for m in medicines:
+            if not isinstance(m, dict):
+                continue
+            item_id = m.get("item_id")
+            rate = float(m.get("price") or m.get("Price") or m.get("mrp") or 0)
+            mrp = float(m.get("mrp") or rate)
+            converted_items.append({
+                "item_id": item_id,
+                "item_name": m.get("item_name") or m.get("medicine_name") or m.get("name") or "",
+                "batch_number": m.get("batch_number", ""),
+                "qty": float(m.get("qty", 0) or m.get("quantity", 0) or 0),
+                "price": rate,
+                "mrp": mrp,
+                "calculated_price": float(m.get("calculated_price", 0) or 0),
+                "edit_history": m.get("edit_history", [])
+            })
 
-    converted_items = []
+        patient_name = estimate.get("patient_name") or estimate.get("patientname") or ""
+        uhid = estimate.get("uhid")
+        if not patient_name and uhid:
+            try:
+                pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "patient_name": 1, "name": 1})
+                if pat:
+                    fn = pat.get("firstName") or ""
+                    ln = pat.get("lastName") or ""
+                    patient_name = f"{fn} {ln}".strip() or pat.get("patient_name") or pat.get("name") or ""
+            except Exception:
+                pass
 
-    for m in medicines:
-        converted_items.append({
-            "item_id": m.get("item_id"),
-            "batch_number": m.get("batch_number"),
-            "qty": m.get("qty"),
-            "price": m.get("price") or m.get("Price") or 0,
-            "edit_history": m.get("edit_history", [])
+        doc_id = estimate.get("doctor_id") or ""
+        doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
+
+        bill_type_val = estimate.get("bill_type")
+        bill_type_name = ""
+        if bill_type_val is not None:
+            try:
+                bt_doc = mongo_db["hospital_billtype"].find_one({"bill_type": int(bill_type_val)})
+                if bt_doc:
+                    bill_type_name = bt_doc.get("bill_name", "")
+            except Exception:
+                pass
+
+        data = {
+            "Bill_id": estimate.get("Bill_id"),
+            "estimate_no": estimate.get("estimate_no"),
+            "patient_name": patient_name,
+            "uhid": uhid,
+            "inpatient_number": estimate.get("inpatient_number"),
+            "doctor_id": doc_id,
+            "doctor_name": doc_name,
+            "room_no": estimate.get("room_no"),
+            "bill_type": bill_type_val,
+            "bill_type_name": bill_type_name,
+            "bill_name": bill_type_name,
+            "medicine_particulars": converted_items,
+            "net_amount": float(estimate.get("net_amount", 0) or 0),
+            "total_amount": float(estimate.get("total_amount", 0) or 0),
+        }
+
+        return Response({
+            "success": True,
+            "data": data
         })
 
-    # Re-fetch patient name for the response payload
-    patient = Patient.objects.filter(uhid=estimate.uhid).first()
-    patient_name = patient.patient_name if patient else ""
-
-    data = {
-        "patient_name": patient_name,
-        "uhid": estimate.uhid,
-        "inpatient_number": estimate.inpatient_number,
-        "doctor_id": estimate.doctor_id,
-        "room_no": estimate.room_no,
-        "bill_type": estimate.bill_type,
-        "bill_name": estimate.bill_name,
-        "medicine_particulars": converted_items,
-        "net_amount": estimate.net_amount
-    }
-
-    # deactivate estimate
-    estimate.is_active = False
-    estimate.save()
-
-    return Response({
-        "success": True,
-        "data": data
-    })
+    except Exception as e:
+        print("[ERROR] convert_estimate_to_bill:", e)
+        return Response({"success": False, "error": str(e)}, status=500)
 
 
 
@@ -1430,18 +1570,25 @@ def collect_oppharmacy_payment(request):
         hospital_code = (
             data.get("auth-hospital-code")
             or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or request.META.get("HTTP_HOSPITAL_CODE")
+            or request.headers.get("Hospital-Code")
+            or "SH001"
         )
 
         branch_code = (
             data.get("auth-branch-code")
-           
-            
+            or request.META.get("HTTP_AUTH_BRANCH_CODE")
+            or request.META.get("HTTP_BRANCH_CODE")
+            or request.headers.get("Branch-Code")
+            or "SHB001"
         )
 
         outlet_code = (
             data.get("auth-outlet-code")
-            
-           
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+            or request.META.get("HTTP_OUTLET_CODE")
+            or request.headers.get("Outlet-Code")
+            or "OLET001"
         )
 
         # =====================================================
@@ -1563,20 +1710,28 @@ def collect_oppharmacy_payment(request):
         # UPDATE STOCK
         # =====================================================
 
+        is_from_estimate = bool(bill.get("estimate_no"))
         for med in bill.get("medicine_particulars", []):
+            qty = float(med.get("qty", 0) or 0)
+            item_id = med.get("item_id")
+            try:
+                item_id = int(item_id)
+            except (ValueError, TypeError):
+                pass
+
+            inc_payload = {"sold_quantity": qty}
+            if is_from_estimate:
+                inc_payload["blocked_quantity"] = -qty
 
             stock_collection.update_one(
                 {
-                    "item_id": med.get("item_id"),
-                    "batch_number": med.get("batch_number")
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "item_id": item_id,
+                    "batch_number": str(med.get("batch_number", "")).strip()
                 },
-                {
-                    "$inc": {
-                        "sold_quantity": float(
-                            med.get("qty", 0)
-                        )
-                    }
-                }
+                {"$inc": inc_payload}
             )
 
         # =====================================================
@@ -1692,9 +1847,12 @@ def collect_oppharmacy_payment(request):
             print("❌ SERIALIZER ERRORS")
             print(cc_serializer.errors)
 
+            err_dict = cc_serializer.errors
+            err_msg = "; ".join([f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in err_dict.items()]) if isinstance(err_dict, dict) else str(err_dict)
+
             return Response({
                 "success": False,
-                "error": cc_serializer.errors
+                "error": err_msg
             })
 
         print("=" * 60)

@@ -548,10 +548,18 @@ PAGE_MAPPING = {
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-PAS',
 
         #  salesreturn urls
-         '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-SRGPD',
-         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-SRBD',
-         '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-OPSRBD',
-          r'/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/?(\?.*)?$': 'HMS-P-PGSRD',
+        '/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/': 'HMS-P-POPSR',
+        r'^/_b_a_c_k_e_n_d/HMS/salesreturn_get_patientdetails/?(\?.*)?$': 'HMS-P-POPSR',
+        '/_b_a_c_k_e_n_d/HMS/salesreturn_get_uhid_bills/': 'HMS-P-POPSR',
+        r'^/_b_a_c_k_e_n_d/HMS/salesreturn_get_uhid_bills/?(\?.*)?$': 'HMS-P-POPSR',
+        '/_b_a_c_k_e_n_d/HMS/gsalesreturn_get_uhid_bills/': 'HMS-P-POPSR',
+        r'^/_b_a_c_k_e_n_d/HMS/gsalesreturn_get_uhid_bills/?(\?.*)?$': 'HMS-P-POPSR',
+        # '/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/': 'HMS-P-PSRBD',
+        r'^/_b_a_c_k_e_n_d/HMS/get_salesreturn_billdetails/?(\?.*)?$': 'HMS-P-PSRBD',
+        '/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/': 'HMS-P-POPSRBD',
+        r'^/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/?(\?.*)?$': 'HMS-P-POPSRBD',
+        '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-POPSR',
+        r'^/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/?(\?.*)?$': 'HMS-P-POPSR',
 
 
         '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCOPPB',

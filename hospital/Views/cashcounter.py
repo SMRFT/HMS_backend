@@ -547,51 +547,60 @@ def calculate_shift_collection(shift_no):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
 
+        shift_vals = [shift_no]
+        try:
+            shift_vals.append(int(shift_no))
+        except (ValueError, TypeError):
+            pass
+        try:
+            shift_vals.append(str(shift_no))
+        except (ValueError, TypeError):
+            pass
+        shift_vals = list(set(shift_vals))
+
         # 1. Billing (Registration/Consultation)
         # Paid
-        paid_bills = list(db["hospital_billing"].find({"shiftno": shift_no, "payment_status": "Paid"}))
+        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Paid"}, {"total_fees": 1}))
         for b in paid_bills:
             results["total_collection"] += to_float(b.get("total_fees", 0))
         
         # Pending
-        pending_bills = list(db["hospital_billing"].find({"shiftno": shift_no, "payment_status": "Pending"}))
+        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Pending"}, {"total_fees": 1}))
         for b in pending_bills:
             results["pending_amount"] += to_float(b.get("total_fees", 0))
 
         # 2. Investigation
-        paid_invest = list(db["hospital_investbilling"].find({"shiftno": shift_no, "paymentStatus": "Paid"}))
+        paid_invest = list(db["hospital_investbilling"].find({"shiftno": {"$in": shift_vals}, "paymentStatus": "Paid"}, {"finalPrice": 1, "total": 1}))
         for d in paid_invest:
             results["total_collection"] += to_float(d.get("finalPrice") or d.get("total") or 0)
             
-        pending_invest = list(db["hospital_investbilling"].find({"shiftno": shift_no, "paymentStatus": "Pending"}))
+        pending_invest = list(db["hospital_investbilling"].find({"shiftno": {"$in": shift_vals}, "paymentStatus": "Pending"}, {"finalPrice": 1, "total": 1}))
         for d in pending_invest:
             results["pending_amount"] += to_float(d.get("finalPrice") or d.get("total") or 0)
 
         # 3. Discharge
-        paid_discharge = list(db["hospital_dischargebilling"].find({"shiftno": shift_no, "status": "Paid"}))
+        paid_discharge = list(db["hospital_dischargebilling"].find({"shiftno": {"$in": shift_vals}, "status": "Paid"}, {"net_amount": 1}))
         for d in paid_discharge:
             results["total_collection"] += to_float(d.get("net_amount", 0))
             
-        pending_discharge = list(db["hospital_dischargebilling"].find({"shiftno": shift_no, "status": "Pending"}))
+        pending_discharge = list(db["hospital_dischargebilling"].find({"shiftno": {"$in": shift_vals}, "status": "Pending"}, {"net_amount": 1}))
         for d in pending_discharge:
             results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 4. Pharmacy
-        paid_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": shift_no, "billing_status": "Paid"}))
+        paid_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": {"$in": shift_vals}, "billing_status": "Paid"}, {"net_amount": 1}))
         for d in paid_pharmacy:
             results["total_collection"] += to_float(d.get("net_amount", 0))
             
-        pending_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": shift_no, "billing_status": "Pending"}))
+        pending_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": {"$in": shift_vals}, "billing_status": "Pending"}, {"net_amount": 1}))
         for d in pending_pharmacy:
             results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 5. IP Advance (from Admission model's advance_payments)
-        native_adms = list(db["hospital_admission"].find({"advance_payments.shiftno": shift_no}))
-        active_adms = list(db["hospital_admission"].find({"is_admitted": True}))
-        adms_dict = {str(a["_id"]): a for a in (native_adms + active_adms)}
+        native_adms = list(db["hospital_admission"].find({"advance_payments.shiftno": {"$in": shift_vals}}, {"advance_payments": 1}))
         
         counted_advance_ids = set()
-        for adm in adms_dict.values():
+        for adm in native_adms:
             payments = adm.get("advance_payments", [])
             if isinstance(payments, str):
                 import json
@@ -605,7 +614,7 @@ def calculate_shift_collection(shift_no):
                         payments = []
             if isinstance(payments, list):
                 for p in payments:
-                    if isinstance(p, dict) and p.get("shiftno") == shift_no:
+                    if isinstance(p, dict) and p.get("shiftno") in shift_vals:
                         bill_no = p.get("bill_no")
                         if bill_no and bill_no not in counted_advance_ids:
                             # Only count collected (Paid) advances
@@ -616,14 +625,14 @@ def calculate_shift_collection(shift_no):
                                 counted_advance_ids.add(bill_no)
 
         # 6. Sales Return
-        returns = list(db["hospital_salesreturn"].find({"shiftno": shift_no}))
+        returns = list(db["hospital_salesreturn"].find({"shiftno": {"$in": shift_vals}}, {"return_amount": 1}))
         for r in returns:
             amt = to_float(r.get("return_amount", 0))
             results["sales_return"] += amt
             results["total_collection"] -= amt
 
         # 7. Receipt and Payment
-        rp_docs = list(db["hospital_receiptandpayment"].find({"shiftno": shift_no}))
+        rp_docs = list(db["hospital_receiptandpayment"].find({"shiftno": {"$in": shift_vals}}, {"amount": 1, "receipt_type": 1}))
         for d in rp_docs:
             amt = to_float(d.get("amount", 0))
             if d.get("receipt_type") == "Receipt":
@@ -677,7 +686,21 @@ def recalculate_and_update_shift_details(shift_no):
         extra_remitted = Decimal('0.00')
         extra_submit = Decimal('0.00')
 
-        docs = list(col.find({"shift_no": shift_no}))
+        shift_vals = [shift_no]
+        try:
+            shift_vals.append(int(shift_no))
+        except (ValueError, TypeError):
+            pass
+        try:
+            shift_vals.append(str(shift_no))
+        except (ValueError, TypeError):
+            pass
+        shift_vals = list(set(shift_vals))
+
+        docs = list(col.find(
+            {"shift_no": {"$in": shift_vals}},
+            {"RemittedToBank": 1, "HandOverAmount": 1, "billing_category": 1, "collected_amount": 1}
+        ))
         for doc in docs:
             # Sum up RemittedToBank and HandOverAmount
             remitted_sum += safe_dec(doc.get("RemittedToBank"))

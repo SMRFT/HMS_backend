@@ -141,6 +141,8 @@ urlpatterns = [
     path("get_employee_name/", pharmacy.get_employee_name_api, name='get_employee_name'),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('searchby_ip/', pharmacy.searchby_ip, name='searchby_ip'),
+    # path('PharmacyBillanalysis/', pharmacy.PharmacyBillanalysis, name='PharmacyBillanalysis'),
+
 
     
     # GRN URLs
