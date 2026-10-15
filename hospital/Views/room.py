@@ -76,10 +76,17 @@ def _save_admission(adm, room_details, shifting_details, advance_payments):
     adm.save()
 
     try:
-        MONGO_URI = os.getenv("GLOBAL_DB_HOST")
-        if MONGO_URI:
-            client = MongoClient(MONGO_URI)
-            client["HMS"]["hospital_admission"].update_one(
+        client, hms_db = _get_hms_db()
+        res = hms_db["hospital_admission"].update_one(
+            {"ipNumber": str(adm.ipNumber), "is_admitted": True},
+            {"$set": {
+                "room_details":       rd,
+                "roomShitingDetails": sd,
+                "advance_payments":   ap,
+            }}
+        )
+        if res.matched_count == 0:
+            hms_db["hospital_admission"].update_one(
                 {"ipNumber": str(adm.ipNumber)},
                 {"$set": {
                     "room_details":       rd,
@@ -1720,15 +1727,23 @@ def get_active_admission(request):
         client, hms_db = _get_hms_db()
 
         # ── Find active admission directly in MongoDB ────────────────
+        match_conditions = []
+        if ip_number:
+            match_conditions.append({"ipNumber": ip_number})
+            match_conditions.append({"uhid": ip_number})
+        if uhid:
+            match_conditions.append({"uhid": uhid})
+            match_conditions.append({"ipNumber": uhid})
+
         query = {
             "is_admitted": True,
             "is_discharged": {"$ne": True},
             "is_cancelled": {"$ne": True},
         }
-        if uhid:
-            query["uhid"] = uhid
-        if ip_number:
-            query["ipNumber"] = ip_number
+        if len(match_conditions) == 1:
+            query.update(match_conditions[0])
+        elif len(match_conditions) > 1:
+            query["$or"] = match_conditions
 
         admission = hms_db["hospital_admission"].find_one(
             query,
@@ -1740,10 +1755,11 @@ def get_active_admission(request):
                 "is_admitted": True,
                 "is_discharged": {"$ne": True},
             }
-            if ip_number:
-                fallback_query["ipNumber"] = ip_number
-            elif uhid:
-                fallback_query["uhid"] = uhid
+            if len(match_conditions) == 1:
+                fallback_query.update(match_conditions[0])
+            elif len(match_conditions) > 1:
+                fallback_query["$or"] = match_conditions
+
             admission = hms_db["hospital_admission"].find_one(
                 fallback_query,
                 sort=[("admissionDateTime", -1), ("_id", -1)]
@@ -1751,18 +1767,20 @@ def get_active_admission(request):
 
         if not admission:
             # Check if any admission existed but is not active
-            existing_adm = None
-            if ip_number:
-                existing_adm = hms_db["hospital_admission"].find_one({"ipNumber": ip_number})
-            elif uhid:
-                existing_adm = hms_db["hospital_admission"].find_one({"uhid": uhid}, sort=[("admissionDateTime", -1)])
+            search_vals = list({v for v in [ip_number, uhid] if v})
+            existing_adm = hms_db["hospital_admission"].find_one({
+                "$or": [
+                    {"ipNumber": {"$in": search_vals}},
+                    {"uhid": {"$in": search_vals}},
+                ]
+            }, sort=[("admissionDateTime", -1), ("_id", -1)])
             
             if existing_adm:
                 is_disch = existing_adm.get("is_discharged") is True
                 is_canc = existing_adm.get("is_cancelled") is True
                 is_adm = existing_adm.get("is_admitted") is True
                 status_desc = "discharged" if is_disch else "cancelled" if is_canc else "inactive (is_admitted: false)"
-                ip_msg = existing_adm.get("ipNumber") or ip_number or "this patient"
+                ip_msg = existing_adm.get("ipNumber") or ip_number or uhid or "this patient"
                 return Response(
                     {
                         "success": False,
@@ -2028,139 +2046,163 @@ def room_shifting_view(request):
     # POST — create a new shift (Indexed Direct Filter)
     # ════════════════════════════════════════════════════════════════════════
     elif request.method == "POST":
-        ip_number = str(request.data.get("ip_number", "")).strip()
-        new_room  = str(request.data.get("newRoomNo", "")).strip()
-        new_bed   = str(request.data.get("newBedNo",  "")).strip()
+        try:
+            ip_number = str(request.data.get("ip_number") or request.data.get("ipNumber") or "").strip()
+            uhid      = str(request.data.get("uhid") or "").strip()
+            new_room  = str(request.data.get("newRoomNo", "")).strip()
+            new_bed   = str(request.data.get("newBedNo",  "")).strip()
 
-        if not ip_number:
-            return Response(
-                {"success": False, "error": "ip_number is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not new_room or not new_bed:
-            return Response(
-                {"success": False, "error": "newRoomNo and newBedNo are required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            if not ip_number and not uhid:
+                return Response(
+                    {"success": False, "error": "ip_number or uhid is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not new_room or not new_bed:
+                return Response(
+                    {"success": False, "error": "newRoomNo and newBedNo are required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Direct indexed lookup for active admission
-        admission = Admission.objects.filter(
-            ipNumber=ip_number,
-            is_admitted=True,
-            is_discharged=False,
-            is_cancelled=False
-        ).first()
+            # Direct lookup without Djongo boolean negation crash
+            admission = None
+            if ip_number:
+                admission = Admission.objects.filter(ipNumber=ip_number).first()
+            if not admission and uhid:
+                admission = Admission.objects.filter(uhid=uhid).first()
 
-        if not admission:
-            admission = Admission.objects.filter(
-                ipNumber=ip_number,
-                is_discharged=False
-            ).first()
+            if not admission:
+                # Direct Mongo lookup for active admission matching either identifier
+                client, hms_db = _get_hms_db()
+                search_vals = list({v for v in [ip_number, uhid] if v})
+                m_doc = hms_db["hospital_admission"].find_one({
+                    "$or": [
+                        {"ipNumber": {"$in": search_vals}},
+                        {"uhid": {"$in": search_vals}},
+                    ],
+                    "is_admitted": True,
+                    "is_discharged": {"$ne": True},
+                    "is_cancelled": {"$ne": True},
+                }, sort=[("admissionDateTime", -1), ("_id", -1)])
+                if m_doc:
+                    admission = Admission.objects.filter(ipNumber=m_doc.get("ipNumber")).first()
 
-        if not admission:
-            return Response(
-                {"success": False, "error": "No active admission found for this IP Number"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            if not admission:
+                return Response(
+                    {"success": False, "error": "No active admission found for this IP Number / UHID"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-        # ── Guard: only one active shift allowed ──────────────────────────
-        existing_shiftings = _safe_list(admission.roomShitingDetails)
-        active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
+            if getattr(admission, 'is_discharged', False) or not getattr(admission, 'is_admitted', False) or getattr(admission, 'is_cancelled', False):
+                return Response(
+                    {"success": False, "error": f"Patient admission {admission.ipNumber} is not currently active (discharged or not admitted)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        if active_shiftings:
+            # ── Guard: only one active shift allowed ──────────────────────────
+            existing_shiftings = _safe_list(admission.roomShitingDetails)
+            active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
+
+            if active_shiftings:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "Room already shifted. Use Edit for the existing shifting record.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # ── Old room ──────────────────────────────────────────────────────
+            room_details = _safe_list(admission.room_details)
+            old_room_no  = old_bed_no = ""
+            for r in reversed(room_details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    old_room_no = str(r.get("roomNo", ""))
+                    old_bed_no  = str(r.get("bedNo",  ""))
+                    break
+            if not old_room_no and room_details:
+                last = room_details[-1]
+                if isinstance(last, dict):
+                    old_room_no = str(last.get("roomNo", ""))
+                    old_bed_no  = str(last.get("bedNo",  ""))
+
+            # ── Deactivate current room in room_details & set endDateTime ─────
+            now_iso = timezone.now().isoformat()
+            updated_room_details = []
+            for room in room_details:
+                if not isinstance(room, dict):
+                    continue
+                obj = dict(room)
+                if obj.get("is_roomActive"):
+                    obj["is_roomActive"] = False
+                    obj["endDateTime"]   = now_iso
+                updated_room_details.append(obj)
+
+            admission.room_details = updated_room_details
+
+            # ── Build new shifting entry ──────────────────────────────────────
+            new_shifting_id = generate_shifting_id(existing_shiftings)
+
+            cleaned_shiftings = []
+            for shift in existing_shiftings:
+                if isinstance(shift, dict):
+                    cleaned_shiftings.append(dict(shift))
+
+            cleaned_shiftings.append({
+                "shifting_id":      new_shifting_id,
+                "bill_number":      new_shifting_id,
+                "bill_no":          new_shifting_id,
+                "oldRoomNo":        old_room_no,
+                "oldBedNo":         old_bed_no,
+                "newRoomNo":        new_room,
+                "newBedNo":         new_bed,
+                "shiftingDateTime": now_iso,
+                "startDateTime":    now_iso,
+                "endDateTime":      None,
+                "shifted_by":       str(user_id),
+                "is_roomActive":    True,
+                "is_roomCleaned":   False,
+            })
+
+            admission.roomShitingDetails = cleaned_shiftings
+            admission.lastmodified_by    = str(user_id)
+            admission.lastmodified_date  = timezone.now()
+
+            ap = _safe_list(admission.advance_payments)
+            _save_admission(admission, updated_room_details, cleaned_shiftings, ap)
+
+            # ── Mark RoomBooking as shifted (indexed direct update) ───────────
+            try:
+                RoomBooking.objects.filter(
+                    ip_number=str(admission.ipNumber).strip(),
+                    is_booked=True,
+                    room_shifted=False
+                ).update(
+                    room_shifted=True,
+                    is_booked=False
+                )
+            except Exception:
+                traceback.print_exc()
+
             return Response(
                 {
-                    "success": False,
-                    "error": "Room already shifted. Use Edit for the existing shifting record.",
+                    "success": True,
+                    "message": "Room shifted successfully",
+                    "data": {
+                        "uhid":               admission.uhid,
+                        "ipNumber":           admission.ipNumber,
+                        "room_details":       admission.room_details,
+                        "roomShitingDetails": admission.roomShitingDetails,
+                    },
                 },
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_200_OK,
             )
 
-        # ── Old room ──────────────────────────────────────────────────────
-        room_details = _safe_list(admission.room_details)
-        old_room_no  = old_bed_no = ""
-        for r in reversed(room_details):
-            if isinstance(r, dict) and r.get("is_roomActive"):
-                old_room_no = str(r.get("roomNo", ""))
-                old_bed_no  = str(r.get("bedNo",  ""))
-                break
-        if not old_room_no and room_details:
-            last = room_details[-1]
-            if isinstance(last, dict):
-                old_room_no = str(last.get("roomNo", ""))
-                old_bed_no  = str(last.get("bedNo",  ""))
-
-        # ── Deactivate current room in room_details & set endDateTime ─────
-        now_iso = timezone.now().isoformat()
-        updated_room_details = []
-        for room in room_details:
-            if not isinstance(room, dict):
-                continue
-            obj = dict(room)
-            if obj.get("is_roomActive"):
-                obj["is_roomActive"] = False
-                obj["endDateTime"]   = now_iso
-            updated_room_details.append(obj)
-
-        admission.room_details = updated_room_details
-
-        # ── Build new shifting entry ──────────────────────────────────────
-        new_shifting_id = generate_shifting_id(existing_shiftings)
-
-        cleaned_shiftings = []
-        for shift in existing_shiftings:
-            if isinstance(shift, dict):
-                cleaned_shiftings.append(dict(shift))
-
-        cleaned_shiftings.append({
-            "shifting_id":      new_shifting_id,
-            "bill_number":      new_shifting_id,
-            "bill_no":          new_shifting_id,
-            "oldRoomNo":        old_room_no,
-            "oldBedNo":         old_bed_no,
-            "newRoomNo":        new_room,
-            "newBedNo":         new_bed,
-            "shiftingDateTime": now_iso,
-            "startDateTime":    now_iso,
-            "endDateTime":      None,
-            "shifted_by":       str(user_id),
-            "is_roomActive":    True,
-            "is_roomCleaned":   False,
-        })
-
-        admission.roomShitingDetails = cleaned_shiftings
-        admission.lastmodified_by    = str(user_id)
-        admission.lastmodified_date  = timezone.now()
-
-        ap = _safe_list(admission.advance_payments)
-        _save_admission(admission, updated_room_details, cleaned_shiftings, ap)
-
-        # ── Mark RoomBooking as shifted (indexed direct update) ───────────
-        try:
-            RoomBooking.objects.filter(
-                ip_number=str(ip_number).strip(),
-                is_booked=True,
-                room_shifted=False
-            ).update(
-                room_shifted=True,
-                is_booked=False
-            )
-        except Exception:
+        except Exception as exc:
             traceback.print_exc()
-
-        return Response(
-            {
-                "success": True,
-                "message": "Room shifted successfully",
-                "data": {
-                    "uhid":               admission.uhid,
-                    "ipNumber":           admission.ipNumber,
-                    "room_details":       admission.room_details,
-                    "roomShitingDetails": admission.roomShitingDetails,
-                },
-            },
-            status=status.HTTP_200_OK,
-        )
+            return Response(
+                {"success": False, "error": f"Failed to shift room: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

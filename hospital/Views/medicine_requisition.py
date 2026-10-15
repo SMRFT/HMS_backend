@@ -132,10 +132,19 @@ def medicine_requisition_view(request, pk=None):
 
             filter_q = apply_date_filter(filter_q, request, "created_date")
 
+            def _enrich_mr(docs):
+                for d in docs:
+                    if d.get("medicine_name"):
+                        d["medicine_name"] = str(d["medicine_name"]).upper()
+                    if d.get("chemical_composition"):
+                        d["chemical_composition"] = str(d["chemical_composition"]).upper()
+                return docs
+
             return Response(paginate_mongo_query(
                 "hospital_medicinerequisition",
                 filter_q,
                 sort=[("created_date", DESCENDING)],
+                enrich_fn=_enrich_mr,
                 request=request
             ))
 

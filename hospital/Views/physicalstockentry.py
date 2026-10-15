@@ -103,7 +103,7 @@ def pharmacy_stock_batches_view(request):
             iid = stock.get("item_id")
             result.append({
                 "item_id":        iid,
-                "item_name":      item_map.get(iid, f"Item #{iid}"),
+                "item_name":      str(item_map.get(iid, f"Item #{iid}")).upper(),
                 "stock_id":       stock.get("stock_id"),
                 "batch_number":   stock.get("batch_number", ""),
                 "computer_stock": available,
@@ -111,6 +111,7 @@ def pharmacy_stock_batches_view(request):
                 "mrp":            str(stock.get("mrp")) if stock.get("mrp") is not None else None,
             })
 
+        result.sort(key=lambda x: (str(x.get("item_name") or "").upper(), str(x.get("batch_number") or "").upper()))
         return Response(result, status=200)
 
     except Exception as e:
