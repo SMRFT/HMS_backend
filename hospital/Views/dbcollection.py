@@ -32,6 +32,8 @@ pharmacy_stock_collection         = hms_db["hospital_pharmacystock"]
 pharmacy_billing_collection       = hms_db["hospital_pharmacybilling"]
 admission_collection              = hms_db["hospital_admission"]
 
+import re
+
 doctor_role_code = "SD-R-DOC"
 sample_collector = "SD-R-SMC"
 
@@ -56,6 +58,134 @@ def get_employee_name_by_id(employee_id):
     return "Unknown"
 
 
+def _clean_doctor_name_tokens(name):
+    if not name:
+        return []
+    s = re.sub(r'(?i)\b(dr|doctor|prof|mr|mrs|ms|mbbs|md|orth|ortho|dnb|cardio|mrcs|eng|phd|mdrd)\b', ' ', str(name))
+    s = re.sub(r'[^a-zA-Z0-9\s]', ' ', s)
+    return [t.lower() for t in s.split() if len(t) > 2]
+
+
+def resolve_doctor_id(doctor_input):
+    """
+    Ensures doctor_id stored in hospital_pharmacybilling is ALWAYS an ID, never a name.
+    If doctor_input is an employeeId or numeric ID, returns it.
+    If doctor_input is a name string, compares against backend_diagnostics_profile
+    (profile_collection) to find the doctor's employeeId.
+    """
+    if not doctor_input:
+        return ""
+    val_str = str(doctor_input).strip()
+    if not val_str:
+        return ""
+
+    # 1. Direct match on employeeId in profile_collection
+    emp = profile_collection.find_one({"employeeId": val_str})
+    if emp and "employeeId" in emp:
+        return str(emp["employeeId"]).strip()
+
+    # 2. Check if numeric ID (handles int, padded strings)
+    if val_str.isdigit():
+        num_val = int(val_str)
+        emp = profile_collection.find_one({
+            "$or": [
+                {"employeeId": num_val},
+                {"employeeId": str(num_val)},
+                {"employeeId": f"{num_val:04d}"},
+                {"employeeId": f"{num_val:05d}"},
+                {"employeeId": f"{num_val:06d}"}
+            ]
+        })
+        if emp and "employeeId" in emp:
+            return str(emp["employeeId"]).strip()
+        return val_str
+
+    # 3. If input is a doctor name string, compare against profile_collection
+    emp = profile_collection.find_one({
+        "employeeName": {"$regex": f"^{re.escape(val_str)}$", "$options": "i"}
+    })
+    if emp and "employeeId" in emp:
+        return str(emp["employeeId"]).strip()
+
+    tokens = _clean_doctor_name_tokens(val_str)
+    if not tokens:
+        return ""
+
+    # Query doctors in profile_collection
+    query = {
+        "$or": [
+            {"designation": "DESIG094"},
+            {"primaryRole": doctor_role_code},
+            {"additionalRoles": doctor_role_code},
+            {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
+        ]
+    }
+    candidate_docs = list(profile_collection.find(query, {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}))
+    if not candidate_docs:
+        candidate_docs = list(profile_collection.find({}, {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}))
+
+    best_match = None
+    best_score = 0
+    for p in candidate_docs:
+        p_name = p.get("employeeName") or ""
+        p_tokens = _clean_doctor_name_tokens(p_name)
+        score = 0
+        for t in tokens:
+            for pt in p_tokens:
+                if t == pt:
+                    score += 3
+                elif t in pt or pt in t:
+                    score += 1
+        if p.get("designation") in ["DESIG094", "DESIG083"] or str(p_name).strip().lower().startswith("dr"):
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best_match = p
+
+    if best_match and best_score >= 3:
+        return str(best_match.get("employeeId")).strip()
+
+    return ""
+
+
+def get_doctor_name_by_id(doctor_id):
+    """
+    Compares doctor_id to backend_diagnostics_profile (profile_collection) to get the doctor's name.
+    If doctor_id is a valid employeeId, returns the formatted doctor's name from profile.
+    If doctor_id is a name from legacy data, resolves it to profile name or clean doctor name.
+    """
+    if not doctor_id:
+        return ""
+    doc_str = str(doctor_id).strip()
+    if not doc_str:
+        return ""
+
+    # 1. Lookup in profile_collection by ID
+    name = get_employee_name_by_id(doc_str)
+    if name and name != "Unknown":
+        if not name.lower().startswith("dr"):
+            return f"Dr. {name}"
+        return name
+
+    # 2. If doc_str is not an ID but a name, resolve doctor ID and compare to profile
+    resolved_id = resolve_doctor_id(doc_str)
+    if resolved_id and resolved_id != doc_str:
+        resolved_name = get_employee_name_by_id(resolved_id)
+        if resolved_name and resolved_name != "Unknown":
+            if not resolved_name.lower().startswith("dr"):
+                return f"Dr. {resolved_name}"
+            return resolved_name
+
+    # 3. Fallback clean format
+    if doc_str.lower().startswith("dr"):
+        return doc_str
+    if doc_str.isdigit():
+        return f"Dr. ({doc_str})"
+    return f"Dr. {doc_str}"
+
+
+
 from bson.decimal128 import Decimal128
 
 def _safe_float(val):
@@ -72,9 +202,7 @@ def _safe_float(val):
 def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_ids):
     """
     Common optimized function to match item IDs into hospital_pharmacyitem and hospital_pharmacystock.
-    Note:
-    - hospital_pharmacyitem has NO outlet_code (master at hospital_code + branch_code level).
-    - hospital_pharmacystock matches hospital_code, branch_code, outlet_code, and item_id.
+    Supports both master item_id AND stock_id/id from hospital_pharmacystock.
     """
     if not item_ids:
         return {"items": {}, "stock_by_item": {}, "stock_by_batch": {}}
@@ -92,20 +220,23 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
             pass
     query_ids = list(set(query_ids))
 
-    # 1. Fetch from hospital_pharmacyitem (hospital_code + branch_code only, NO outlet_code)
     items_map = {}
+
+    # 1. Fetch from hospital_pharmacyitem
+    item_filter = {"item_id": {"$in": query_ids}}
+    if hospital_code and branch_code:
+        item_filter["hospital_code"] = hospital_code
+        item_filter["branch_code"] = branch_code
+
     for itm in pharmacy_item_collection.find(
-        {
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "item_id": {"$in": query_ids}
-        },
+        item_filter,
         {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
     ):
         raw_id = itm.get("item_id")
         entry = {
             "item_name": itm.get("item_name") or "",
-            "is_consumable_items": bool(itm.get("is_consumable_items", False))
+            "is_consumable_items": bool(itm.get("is_consumable_items", False)),
+            "item_id": raw_id
         }
         items_map[raw_id] = entry
         items_map[str(raw_id).strip()] = entry
@@ -114,9 +245,9 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
         except (ValueError, TypeError):
             pass
 
-    # Fallback for any query_ids not found with hospital_code/branch_code filter
+    # 1b. Fallback across all branches if any query_ids missing
     missing_ids = [qid for qid in query_ids if qid not in items_map]
-    if missing_ids:
+    if missing_ids and hospital_code and branch_code:
         for itm in pharmacy_item_collection.find(
             {"item_id": {"$in": missing_ids}},
             {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
@@ -124,7 +255,8 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
             raw_id = itm.get("item_id")
             entry = {
                 "item_name": itm.get("item_name") or "",
-                "is_consumable_items": bool(itm.get("is_consumable_items", False))
+                "is_consumable_items": bool(itm.get("is_consumable_items", False)),
+                "item_id": raw_id
             }
             items_map[raw_id] = entry
             items_map[str(raw_id).strip()] = entry
@@ -133,42 +265,139 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
             except (ValueError, TypeError):
                 pass
 
-    # 2. Fetch from hospital_pharmacystock (hospital_code + branch_code + outlet_code + item_id)
+    # 1c. Check if any missing IDs are actually stock_id or id in hospital_pharmacystock
+    still_missing_ids = [qid for qid in query_ids if qid not in items_map]
+    stock_id_to_item_id = {}
+    stock_doc_names = {}
+    if still_missing_ids:
+        for stk in pharmacy_stock_collection.find(
+            {
+                "$or": [
+                    {"stock_id": {"$in": still_missing_ids}},
+                    {"id": {"$in": still_missing_ids}}
+                ]
+            },
+            {"stock_id": 1, "id": 1, "item_id": 1, "item_name": 1, "_id": 0}
+        ):
+            sid = stk.get("stock_id") or stk.get("id")
+            iid = stk.get("item_id")
+            s_name = stk.get("item_name")
+            if sid is not None:
+                keys = [sid, str(sid).strip()]
+                try:
+                    keys.append(int(sid))
+                except (ValueError, TypeError):
+                    pass
+                for k in keys:
+                    if iid is not None:
+                        stock_id_to_item_id[k] = iid
+                    if s_name:
+                        stock_doc_names[k] = s_name
+
+        resolved_item_ids = list(set(stock_id_to_item_id.values()))
+        if resolved_item_ids:
+            # Query pharmacy_item_collection for master item info
+            for itm in pharmacy_item_collection.find(
+                {"item_id": {"$in": resolved_item_ids}},
+                {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
+            ):
+                raw_id = itm.get("item_id")
+                entry = {
+                    "item_name": itm.get("item_name") or "",
+                    "is_consumable_items": bool(itm.get("is_consumable_items", False)),
+                    "item_id": raw_id
+                }
+                items_map[raw_id] = entry
+                items_map[str(raw_id).strip()] = entry
+                try:
+                    items_map[int(raw_id)] = entry
+                except (ValueError, TypeError):
+                    pass
+
+                # Also map every stock_id that points to this item_id
+                for sid, mapped_iid in stock_id_to_item_id.items():
+                    if str(mapped_iid) == str(raw_id):
+                        items_map[sid] = entry
+
+        # Fallback: if any stock_id still not in items_map, use stock_doc_names
+        for sid, s_name in stock_doc_names.items():
+            if sid not in items_map and s_name:
+                items_map[sid] = {
+                    "item_name": s_name,
+                    "is_consumable_items": False,
+                    "item_id": stock_id_to_item_id.get(sid, sid)
+                }
+
+    # 2. Fetch from hospital_pharmacystock
     stock_by_item = {}
     stock_by_batch = {}
-    stock_cursor = pharmacy_stock_collection.find(
-        {
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code,
-            "item_id": {"$in": query_ids}
-        },
-        {
-            "stock_id": 1,
-            "item_id": 1,
-            "item_name": 1,
-            "batch_number": 1,
-            "mrp": 1,
-            "Selling_Price": 1,
-            "total_stock": 1,
-            "sold_quantity": 1,
-            "transferred_out_quantity": 1,
-            "grn_return_quantity": 1,
-            "CGST_Percentage": 1,
-            "SGST_Percentage": 1,
-            "CGST_Amt": 1,
-            "SGST_Amt": 1,
-            "_id": 0
-        }
-    ).sort("stock_id", -1)
+
+    all_stock_item_ids = list(set(query_ids + list(stock_id_to_item_id.values())))
+    stock_query = {
+        "$or": [
+            {"item_id": {"$in": all_stock_item_ids}},
+            {"stock_id": {"$in": query_ids}},
+            {"id": {"$in": query_ids}}
+        ]
+    }
+    if hospital_code and branch_code:
+        stock_query["hospital_code"] = hospital_code
+        stock_query["branch_code"] = branch_code
+    if outlet_code:
+        stock_query["outlet_code"] = outlet_code
+
+    stock_fields = {
+        "stock_id": 1,
+        "id": 1,
+        "item_id": 1,
+        "item_name": 1,
+        "batch_number": 1,
+        "mrp": 1,
+        "Selling_Price": 1,
+        "total_stock": 1,
+        "sold_quantity": 1,
+        "transferred_out_quantity": 1,
+        "grn_return_quantity": 1,
+        "CGST_Percentage": 1,
+        "SGST_Percentage": 1,
+        "CGST_Amt": 1,
+        "SGST_Amt": 1,
+        "outlet_code": 1,
+        "_id": 0
+    }
+
+    stock_cursor = list(pharmacy_stock_collection.find(stock_query, stock_fields).sort("stock_id", -1))
+
+    # If no stock found with outlet_code filter, fallback to any outlet for pricing/metadata
+    if not stock_cursor and outlet_code:
+        fallback_query = dict(stock_query)
+        fallback_query.pop("outlet_code", None)
+        stock_cursor = list(pharmacy_stock_collection.find(fallback_query, stock_fields).sort("stock_id", -1))
 
     for stk in stock_cursor:
         raw_id = stk.get("item_id")
-        keys = {raw_id, str(raw_id).strip()}
-        try:
-            keys.add(int(raw_id))
-        except (ValueError, TypeError):
-            pass
+        stock_id = stk.get("stock_id")
+        alt_id = stk.get("id")
+
+        keys = set()
+        for raw_val in [raw_id, stock_id, alt_id]:
+            if raw_val is not None:
+                keys.add(raw_val)
+                keys.add(str(raw_val).strip())
+                try:
+                    keys.add(int(raw_val))
+                except (ValueError, TypeError):
+                    pass
+
+        # Also add any query_id that mapped to this item_id
+        for sid, mapped_iid in stock_id_to_item_id.items():
+            if str(mapped_iid) == str(raw_id):
+                keys.add(sid)
+                keys.add(str(sid).strip())
+                try:
+                    keys.add(int(sid))
+                except (ValueError, TypeError):
+                    pass
 
         for k in keys:
             stock_by_item.setdefault(k, []).append(stk)
@@ -178,6 +407,17 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
             bn_str = str(bn).strip()
             for k in keys:
                 stock_by_batch.setdefault((k, bn_str), []).append(stk)
+
+        # Make sure items_map also has item_name if available from stock
+        s_name = stk.get("item_name")
+        if s_name:
+            for k in keys:
+                if k not in items_map or not items_map[k].get("item_name"):
+                    items_map[k] = {
+                        "item_name": s_name,
+                        "is_consumable_items": False,
+                        "item_id": raw_id or k
+                    }
 
     return {
         "items": items_map,
