@@ -61,21 +61,35 @@ def doctor_list_from_diagnostics(request):
         dept_map = get_department_mapping(global_db)
         desig_map = get_designation_mapping(global_db)
 
-        # Find all profiles with DESIG094 designation
+        query = {
+            "$or": [
+                {"designation": "DESIG094"},
+                {"primaryRole": "SD-R-DOC"},
+                {"additionalRoles": "SD-R-DOC"},
+                {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
+            ]
+        }
         doctors = list(diagnostics_collection.find(
-            {"designation": "DESIG094"},
+            query,
             {"employeeId": 1, "employeeName": 1, "department": 1, "specialty": 1, "designation": 1, "_id": 0}
         ))
         
-        # Map codes to human readable names
+        # Map codes to human readable names & deduplicate
+        unique_doctors = []
+        seen_emp_ids = set()
         for doc in doctors:
+            eid = str(doc.get("employeeId") or "").strip()
+            if not eid or eid in seen_emp_ids:
+                continue
+            seen_emp_ids.add(eid)
             raw_dept = doc.get("department")
             doc["department"] = dept_map.get(raw_dept, raw_dept) if raw_dept else "N/A"
 
             raw_desig = doc.get("designation")
             doc["designation"] = desig_map.get(raw_desig, raw_desig) if raw_desig else "Doctor"
+            unique_doctors.append(doc)
         
-        return Response(doctors, status=status.HTTP_200_OK)
+        return Response(unique_doctors, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

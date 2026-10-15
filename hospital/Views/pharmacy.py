@@ -26,7 +26,7 @@ from rest_framework.permissions import AllowAny
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider,Admission
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
-from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details, get_employee_name_by_id
+from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details, get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id, admission_collection, pharmacy_billing_collection
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -61,11 +61,6 @@ def get_pharmacy_stock(request):
         hospital_code = data.get("auth-hospital-code") 
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
-        
-        # Respect passed outlet_code (query param or body) before falling back to auth-outlet-code
-        passed_outlet = data.get("outlet_code") or request.GET.get("outlet_code")
-        if passed_outlet:
-            outlet_code = passed_outlet
 
         print("hospital_code:", hospital_code)
         print("branch_code:", branch_code)
@@ -588,12 +583,14 @@ def save_pharmacy_bill(request):
     # --------------------------------------------------
     # COMMON FIELDS
     # --------------------------------------------------
+    resolved_doctor_id = resolve_doctor_id(data.get("doctor_id"))
+
     fields = {
         # FIX 1: uhid is optional — stored as-is (None if not provided)
         "uhid":                     uhid,
         "inpatient_number":         data.get("inpatient_number"),
         "bill_type":                data.get("bill_type"),
-        "doctor_id":                data.get("doctor_id"),
+        "doctor_id":                resolved_doctor_id,
         # FIX 3: age stored as integer; also returned in every response
         "age":                      int(data.get("age", 0) or 0),
         "room_no":                  data.get("room_no"),
@@ -668,12 +665,8 @@ def save_pharmacy_bill(request):
             {"$set": update_data}
         )
 
-        doc_id = data.get("doctor_id") or record.get("doctor_id")
-        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
-        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
-            doc_name = f"Dr. {doc_name}"
-        elif doc_name == "Unknown":
-            doc_name = ""
+        doc_id = resolve_doctor_id(data.get("doctor_id") or record.get("doctor_id"))
+        doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
 
         emp_id = employee_id or record.get("created_by")
         emp_name = get_employee_name_by_id(emp_id) if emp_id else ""
@@ -720,12 +713,9 @@ def save_pharmacy_bill(request):
         }
 
         # Resolve doctor & cashier names
-        doc_id = data.get("doctor_id")
-        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
-        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
-            doc_name = f"Dr. {doc_name}"
-        elif doc_name == "Unknown":
-            doc_name = ""
+        doc_id = resolve_doctor_id(data.get("doctor_id"))
+        record_doc["doctor_id"] = doc_id
+        doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
 
         emp_name = get_employee_name_by_id(employee_id) if employee_id else ""
         if emp_name == "Unknown":
@@ -803,15 +793,19 @@ def save_pharmacy_bill(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_employee_name_api(request):
-    """Resolve employee name by ID (doctor or cashier) using get_employee_name_by_id."""
+    """Resolve employee/doctor name by ID or name using get_employee_name_by_id / get_doctor_name_by_id."""
     emp_id = request.GET.get("employee_id") or request.GET.get("id") or request.GET.get("user_id")
     if not emp_id:
         return Response({"success": False, "error": "employee_id required", "name": ""})
     raw_name = get_employee_name_by_id(emp_id)
+    if not raw_name or raw_name == "Unknown":
+        raw_name = get_doctor_name_by_id(emp_id)
     name = "" if raw_name == "Unknown" else raw_name.strip()
+    resolved_doc_id = resolve_doctor_id(emp_id)
     return Response({
         "success": True,
         "employee_id": str(emp_id),
+        "doctor_id": resolved_doc_id,
         "name": name,
     })
 
@@ -1030,7 +1024,7 @@ def save_oppharmacy_estimate(request):
         "uhid": data.get("uhid"),
         "inpatient_number": data.get("inpatient_number"),
         "bill_type": data.get("bill_type"),
-        "doctor_id": data.get("doctor_id"),
+        "doctor_id": resolve_doctor_id(data.get("doctor_id")),
         "room_no": data.get("room_no"),
         "total_amount": float(data.get("total_amount", 0)),
         "overall_discount_type": data.get("overall_discount_type"),
@@ -1928,32 +1922,45 @@ def pharmacy_medicinechart(request):
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
 
-        print("hospital_code:", hospital_code)
-        print("branch_code:", branch_code)
-        print("outlet_code:", outlet_code)
-
-        if not hospital_code or not branch_code or not outlet_code:
-            return Response(
-                {"error": "hospital_code, branch_code, outlet_code required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        print(f"pharmacy_medicinechart -> hospital_code: '{hospital_code}', branch_code: '{branch_code}', outlet_code: '{outlet_code}'")
 
         # =========================================
-        # 1. GET BILL DATA (Using PharmacyBilling model & serializer)
+        # 1. GET BILL DATA (Using PyMongo for speed & reliability)
         # =========================================
-        queryset = PharmacyBilling.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code,
-            outlet_code=outlet_code,
-            billing_status__in=["Pending", "Processing"],
-            is_ward_request=True
-        ).order_by('-created_date')
+        base_mongo_filter = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "billing_status": {"$in": ["Pending", "Processing"]},
+            "is_ward_request": True
+        }
+        if outlet_code:
+            base_mongo_filter["outlet_code"] = outlet_code
 
-        serialized_data = PharmacyBillingSerializer(queryset, many=True).data
+        raw_bills = list(pharmacy_billing_collection.find(
+            base_mongo_filter
+        ).sort("created_date", -1))
+
+        serialized_data = []
+        for bill in raw_bills:
+            b = dict(bill)
+            if "_id" in b:
+                b["_id"] = str(b["_id"])
+            for date_key in ["created_date", "lastmodified_date", "bill_date", "ward_request_date"]:
+                val = b.get(date_key)
+                if val and hasattr(val, "isoformat"):
+                    b[date_key] = val.isoformat()
+            serialized_data.append(b)
 
         if not serialized_data:
             return Response(
-                {"status": "success", "count": 0, "data": []},
+                {
+                    "status": "success",
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": outlet_code,
+                    "count": 0,
+                    "data": []
+                },
                 status=status.HTTP_200_OK
             )
 
@@ -1993,33 +2000,62 @@ def pharmacy_medicinechart(request):
         if all_uhids:
             try:
                 for p in Patient.objects.filter(uhid__in=list(all_uhids)):
-                    p_name = f"{p.firstName or ''} {p.lastName or ''}".strip()
+                    f = (p.firstName or "").strip()
+                    l = (p.lastName or "").strip()
+                    n = f if (f and l and (f.lower() == l.lower() or f.lower().endswith(l.lower()))) else f"{f} {l}".strip()
+                    full_p_name = f"{p.salutation or ''} {n}".strip()
+
+                    age_str = ""
+                    if p.dob:
+                        try:
+                            d = p.dob
+                            today = date.today()
+                            years = today.year - d.year
+                            months = today.month - d.month
+                            days = today.day - d.day
+                            if days < 0:
+                                months -= 1
+                                days += 30
+                            if months < 0:
+                                years -= 1
+                                months += 12
+                            age_str = f"{years}Y {months}M {days}D"
+                        except Exception:
+                            age_str = str(p.age) if p.age else ""
+                    elif p.age:
+                        age_str = str(p.age)
+
                     patient_map[str(p.uhid).strip()] = {
-                        "patient_name": p_name,
+                        "patient_name": full_p_name,
                         "address": p.permanent_address or "",
-                        "mobile": p.mobilePhone or ""
+                        "place": p.area or "",
+                        "mobile": p.mobilePhone or "",
+                        "customer_type": p.customer_type or "General",
+                        "age": age_str,
                     }
             except Exception as e:
                 print("Patient bulk prefetch error:", e)
 
-        # 3b. Bulk fetch Admissions using Admission Django model
+        # 3b. Bulk fetch Admissions using PyMongo (ultra-fast)
         admission_map = {}
         if all_uhids:
             try:
-                admissions = Admission.objects.filter(
-                    hospital_code=hospital_code,
-                    branch_code=branch_code,
-                    uhid__in=list(all_uhids),
-                    is_admitted=True
-                ).order_by('-admissionDateTime')
+                admissions = list(admission_collection.find(
+                    {
+                        "hospital_code": hospital_code,
+                        "branch_code": branch_code,
+                        "uhid": {"$in": list(all_uhids)},
+                        "is_admitted": True
+                    }
+                ).sort("admissionDateTime", -1))
 
                 for adm in admissions:
-                    u = str(adm.uhid or "").strip()
+                    u = str(adm.get("uhid") or "").strip()
                     if u in admission_map:
                         continue  # Already captured latest active admission
 
-                    cust_type = str(adm.customer_type or "General").strip()
-                    adv_list = adm.advance_payments or []
+                    cust_type = str(adm.get("customer_type") or "General").strip()
+                    adv_list = adm.get("advance_payments") or []
                     total_adv = 0.0
 
                     if isinstance(adv_list, list):
@@ -2044,25 +2080,52 @@ def pharmacy_medicinechart(request):
                             except (ValueError, TypeError):
                                 pass
 
+                    room_details = adm.get("room_details") or []
+                    shifting_details = adm.get("roomShitingDetails") or []
+                    active_room = next((r for r in room_details if isinstance(r, dict) and r.get("is_roomActive") is True), None)
+                    active_shift = next((r for r in shifting_details if isinstance(r, dict) and r.get("is_roomActive") is True), None)
+                    room_label = ""
+                    if active_room:
+                        room_label = f"{active_room.get('roomNo', '')} / Bed {active_room.get('bedNo', '')}"
+                    elif active_shift:
+                        room_label = f"{active_shift.get('newRoomNo', '')} / Bed {active_shift.get('newBedNo', '')}"
+
+                    adm_dt = adm.get("admissionDateTime")
+                    adm_dt_str = adm_dt.isoformat() if hasattr(adm_dt, "isoformat") else str(adm_dt or "")
+
                     admission_map[u] = {
+                        "admitted": True,
                         "customer_type": cust_type,
                         "is_insurance": cust_type.lower() == "insurance",
-                        "insurance_company": adm.insurance_company or "",
+                        "insurance_company": adm.get("insurance_company") or "",
                         "total_ip_advance": round(total_adv, 2),
-                        "ipNumber": adm.ipNumber or ""
+                        "advance_payments": adv_list if isinstance(adv_list, list) else [],
+                        "ipNumber": adm.get("ipNumber") or "",
+                        "admissionDateTime": adm_dt_str,
+                        "admittingDoctor": adm.get("admittingDoctor") or "",
+                        "consultingDoctor": adm.get("consultingDoctor") or "",
+                        "roomLabel": room_label,
                     }
             except Exception as e:
-                print("Admission model bulk prefetch error:", e)
+                print("Admission bulk prefetch error:", e)
 
         # 4. Bulk fetch Doctors from profile_collection (dbcollection.py)
         doctor_map = {}
         if all_doc_ids:
             try:
+                emp_query_ids = list(all_doc_ids)
+                for x in all_doc_ids:
+                    if str(x).isdigit():
+                        emp_query_ids.append(int(x))
                 for emp in profile_collection.find(
-                    {"employeeId": {"$in": list(all_doc_ids)}},
+                    {"employeeId": {"$in": emp_query_ids}},
                     {"employeeId": 1, "employeeName": 1, "_id": 0}
                 ):
-                    doctor_map[str(emp.get("employeeId")).strip()] = emp.get("employeeName")
+                    eid_str = str(emp.get("employeeId")).strip()
+                    ename = emp.get("employeeName") or ""
+                    if ename and not ename.lower().startswith("dr"):
+                        ename = f"Dr. {ename}"
+                    doctor_map[eid_str] = ename
             except Exception as e:
                 print("profile_collection error:", e)
 
@@ -2083,16 +2146,39 @@ def pharmacy_medicinechart(request):
             uhid_str = str(bill.get("uhid") or "").strip()
             doc_id_str = str(bill.get("doctor_id") or "").strip()
 
-            bill["patient_details"] = patient_map.get(uhid_str, {})
-            bill["doctor_name"] = doctor_map.get(doc_id_str)
+            p_info = patient_map.get(uhid_str, {})
+            p_name = p_info.get("patient_name") or bill.get("patientname") or ""
+            p_addr = p_info.get("address") or ""
+            p_mob  = p_info.get("mobile") or ""
+
+            doc_name = doctor_map.get(doc_id_str) or get_doctor_name_by_id(doc_id_str)
+
+            bill["patient_details"] = {
+                "patient_name": p_name,
+                "address": p_addr,
+                "mobile": p_mob,
+                "doctor_name": doc_name
+            }
+            bill["patient_name"] = p_name
+            bill["address"] = p_addr
+            bill["place"] = p_info.get("place", "")
+            bill["mobile"] = p_mob
+            bill["age"] = p_info.get("age") or str(bill.get("age") or "")
+            bill["doctor_name"] = doc_name
 
             adm_info = admission_map.get(uhid_str, {})
+            bill["admission_status"] = "ADMITTED" if adm_info.get("admitted") else "NOT ADMITTED"
+            if not bill.get("inpatient_number") and adm_info.get("ipNumber"):
+                bill["inpatient_number"] = adm_info.get("ipNumber")
+            bill["admission_datetime"] = adm_info.get("admissionDateTime", "")
+            room_lbl = bill.get("room_no") or bill.get("ward_name") or adm_info.get("roomLabel") or ""
+            bill["room_no"] = room_lbl
+            bill["ward_name"] = room_lbl
             bill["customer_type"] = adm_info.get("customer_type", bill.get("customer_type", "General"))
             bill["is_insurance"] = adm_info.get("is_insurance", False)
             bill["insurance_company"] = adm_info.get("insurance_company", "")
+            bill["advance_payments"] = adm_info.get("advance_payments", [])
             bill["total_ip_advance"] = adm_info.get("total_ip_advance", 0.0)
-            if not bill.get("inpatient_number") and adm_info.get("ipNumber"):
-                bill["inpatient_number"] = adm_info.get("ipNumber")
 
             items = bill_items_map.get(b_id, [])
             mapped_items = []
@@ -2113,6 +2199,9 @@ def pharmacy_medicinechart(request):
         return Response(
             {
                 "status": "success",
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "outlet_code": outlet_code,
                 "count": len(final_data),
                 "data": final_data
             },
@@ -4135,13 +4224,12 @@ def get_doctor_prescriptions(request):
                 if not (match_uhid or match_name):
                     continue
 
-            # Doctor name
-            doc_id = getattr(c, "doctor_id", "") or getattr(c, "created_by", "") or ""
-            doc_name = get_employee_name_by_id(doc_id)
-            if not doc_name or doc_name == "Unknown":
-                doc_name = f"Dr. ({doc_id})" if doc_id else "Doctor"
-            elif not doc_name.lower().startswith("dr"):
-                doc_name = f"Dr. {doc_name}"
+            # Doctor name & ID
+            raw_doc = getattr(c, "doctor_id", "") or getattr(c, "created_by", "") or ""
+            doc_id = resolve_doctor_id(raw_doc) if raw_doc else ""
+            doc_name = get_doctor_name_by_id(doc_id or raw_doc)
+            if not doc_name:
+                doc_name = "Doctor"
 
             # Check if matching bill exists in pharmacy billing
             billing_status = "Pending"
