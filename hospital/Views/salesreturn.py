@@ -200,24 +200,44 @@ def salesreturn_get_patientdetails(request):
         ip_number = active_admission.ipNumber if active_admission else ""
  
         # ── Age calculation ──────────────────────────────────────────────────
-        if not patient.dob:
-            age_data = {"years": 0, "months": 0, "days": 0}
-        else:
+        age_data = {"years": 0, "months": 0, "days": 0}
+        dob_raw = patient.dob
+        dob = None
+
+        if dob_raw:
+            if isinstance(dob_raw, datetime):
+                dob = dob_raw.date()
+            elif isinstance(dob_raw, date):
+                dob = dob_raw
+            elif isinstance(dob_raw, str) and dob_raw.strip():
+                clean_dob = dob_raw.strip().split("T")[0]
+                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+                    try:
+                        dob = datetime.strptime(clean_dob, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+
+        if dob:
             today_date = date.today()
-            dob = patient.dob
- 
             years  = today_date.year  - dob.year
             months = today_date.month - dob.month
             days   = today_date.day   - dob.day
- 
+
             if days < 0:
                 months -= 1
                 days += 30
             if months < 0:
                 years  -= 1
                 months += 12
- 
-            age_data = {"years": years, "months": months, "days": days}
+
+            age_data = {"years": max(0, years), "months": max(0, months), "days": max(0, days)}
+        elif getattr(patient, "age", None):
+            try:
+                age_val = int(patient.age)
+                age_data = {"years": age_val, "months": 0, "days": 0}
+            except (ValueError, TypeError):
+                pass
  
         sal = (patient.salutation or "").strip()
         fn  = (patient.firstName or "").strip()
@@ -300,8 +320,11 @@ def salesreturn_get_uhid_bills(request):
         escaped = re.escape(uhid_input)
  
         query = {
-            "uhid":            {"$regex": escaped, "$options": "i"},
-            "billing_status":  "Paid",
+            "$or": [
+                {"uhid": {"$regex": escaped, "$options": "i"}},
+                {"inpatient_number": {"$regex": escaped, "$options": "i"}}
+            ],
+            "billing_status":  {"$in": ["Paid", "Billed"]},
             "bill_date":       {"$gte": cutoff_date},
         }
  
@@ -391,26 +414,45 @@ def get_salesreturn_billdetails(request):
         # =========================
         # ✅ AUTH DETAILS
         # =========================
-        hospital_code = data.get("auth-hospital-code")
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or "SH001"
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or request.META.get("HTTP_AUTH_BRANCH_CODE")
+            or request.META.get("HTTP_BRANCH_CODE")
+            or "SHB001"
+        )
+        outlet_code = (
+            data.get("auth-outlet-code")
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+            or request.META.get("HTTP_OUTLET_CODE")
+        )
 
         # =========================
         # ✅ FETCH BILL
         # =========================
-        bill = bill_collection.find_one({
-            "bill_no": bill_no,
+        bill_query = {
+            "bill_no": str(bill_no).strip(),
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            "outlet_code": outlet_code,
-            "billing_status": "Paid"
-        })
+            "billing_status": {"$in": ["Paid", "Billed"]}
+        }
+
+        if outlet_code:
+            bill = bill_collection.find_one({**bill_query, "outlet_code": outlet_code})
+            if not bill:
+                bill = bill_collection.find_one(bill_query)
+        else:
+            bill = bill_collection.find_one(bill_query)
 
         # ❌ BILL NOT FOUND
         if not bill:
             return Response({
                 "status": "error",
-                "message": f"No paid bill found for Bill No: {bill_no}."
+                "message": f"No active bill found for Bill No: {bill_no}."
             }, status=status.HTTP_404_NOT_FOUND)
 
         # =========================
