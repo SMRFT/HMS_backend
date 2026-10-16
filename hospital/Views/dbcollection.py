@@ -31,11 +31,114 @@ pharmacy_item_collection          = hms_db["hospital_pharmacyitem"]
 pharmacy_stock_collection         = hms_db["hospital_pharmacystock"]
 pharmacy_billing_collection       = hms_db["hospital_pharmacybilling"]
 admission_collection              = hms_db["hospital_admission"]
+patient_collection                = hms_db["hospital_patient"]
 
 import re
 
 doctor_role_code = "SD-R-DOC"
 sample_collector = "SD-R-SMC"
+
+def clean_patient_name(name):
+    """
+    Cleans and deduplicates patient name.
+    Handles duplicate tokens (e.g. 'RANI RANI' -> 'RANI', 'B B JOHN B B JOHN' -> 'B B JOHN').
+    """
+    if not name or name == "—":
+        return ""
+    words = str(name).strip().split()
+    if not words:
+        return ""
+    if len(words) >= 2 and len(words) % 2 == 0:
+        half = len(words) // 2
+        if [w.lower() for w in words[:half]] == [w.lower() for w in words[half:]]:
+            words = words[:half]
+    clean_words = []
+    for idx, w in enumerate(words):
+        if idx > 0 and len(w) > 1 and w.lower() == words[idx - 1].lower():
+            continue
+        clean_words.append(w)
+    return " ".join(clean_words).strip()
+
+
+def get_patient_details_by_uhid(uhid=None, ip_number=None):
+    """
+    Looks up patient details from hospital_patient, falling back to hospital_admission.
+    Returns dict: {'patient_name': ..., 'uhid': ..., 'inpatient_number': ..., 'age': ..., 'gender': ...}
+    """
+    res = {
+        "patient_name": "",
+        "uhid": str(uhid).strip() if uhid else "",
+        "inpatient_number": str(ip_number).strip() if ip_number else "",
+        "age": "",
+        "gender": "",
+        "mobilePhone": "",
+    }
+    if not uhid and not ip_number:
+        return res
+
+    pat = None
+    if uhid:
+        u_str = str(uhid).strip()
+        pat = patient_collection.find_one({"uhid": u_str})
+        if not pat:
+            pat = patient_collection.find_one({"uhid": {"$regex": f"^{re.escape(u_str)}$", "$options": "i"}})
+
+    if not pat and ip_number:
+        ip_str = str(ip_number).strip()
+        adm = admission_collection.find_one({"$or": [{"inpatient_number": ip_str}, {"ip_number": ip_str}]})
+        if adm:
+            if adm.get("uhid") and not res["uhid"]:
+                res["uhid"] = str(adm.get("uhid")).strip()
+            if adm.get("inpatient_number"):
+                res["inpatient_number"] = str(adm.get("inpatient_number")).strip()
+            p_det = adm.get("patient_details") or {}
+            if isinstance(p_det, dict) and (p_det.get("firstName") or p_det.get("patient_name")):
+                fn = (p_det.get("firstName") or "").strip()
+                ln = (p_det.get("lastName") or "").strip()
+                sal = (p_det.get("salutation") or "").strip()
+                raw_name = f"{sal} {fn} {ln}".strip() or p_det.get("patient_name") or ""
+                res["patient_name"] = clean_patient_name(raw_name)
+                res["age"] = p_det.get("age") or ""
+                res["gender"] = p_det.get("gender") or ""
+                return res
+            if adm.get("patient_name"):
+                res["patient_name"] = clean_patient_name(adm.get("patient_name"))
+                return res
+
+    if pat:
+        if pat.get("uhid"):
+            res["uhid"] = str(pat.get("uhid")).strip()
+        sal = (pat.get("salutation") or "").strip()
+        fn = (pat.get("firstName") or "").strip()
+        ln = (pat.get("lastName") or "").strip()
+        if fn and ln:
+            if (
+                fn.lower() == ln.lower()
+                or fn.lower().endswith(ln.lower())
+                or fn.lower().replace(" ", "") == ln.lower().replace(" ", "")
+            ):
+                ln = ""
+            elif ln.lower().startswith(fn.lower()):
+                fn = ""
+        full_name = f"{sal} {fn} {ln}".strip()
+        if not full_name:
+            full_name = (pat.get("patient_name") or pat.get("name") or "").strip()
+        res["patient_name"] = clean_patient_name(full_name)
+        res["age"] = pat.get("age") or ""
+        res["gender"] = pat.get("gender") or ""
+        res["mobilePhone"] = pat.get("mobilePhone") or ""
+        return res
+
+    return res
+
+
+def get_patient_name_by_uhid(uhid=None, ip_number=None):
+    """
+    Convenience function returning just the formatted patient name string.
+    """
+    details = get_patient_details_by_uhid(uhid, ip_number)
+    return details.get("patient_name") or ""
+
 
 def get_employee_name_by_id(employee_id):
     if not employee_id:

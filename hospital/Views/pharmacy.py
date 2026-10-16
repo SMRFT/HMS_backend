@@ -1364,14 +1364,27 @@ def get_estimate_bills(request):
 
             bill_date = bill.get("bill_date") or bill.get("created_date")
             created_date = bill.get("created_date") or bill.get("bill_date")
+            lastmodified_date = bill.get("lastmodified_date")
+
+            def _to_utc_iso(dt_val):
+                if not dt_val:
+                    return ""
+                if isinstance(dt_val, datetime):
+                    if dt_val.tzinfo is None:
+                        return dt_val.isoformat() + "Z"
+                    return dt_val.astimezone(timezone.utc).isoformat()
+                s = str(dt_val).strip()
+                if s and "T" in s and not s.endswith("Z") and "+" not in s:
+                    return s + "Z"
+                return s
 
             data.append({
                 "Bill_id": Bill_id,
                 "bill_no": bill.get("bill_no"),
                 "estimate_no": bill.get("estimate_no"),
-                "created_date": created_date.isoformat() if isinstance(created_date, datetime) else str(created_date or ""),
-                "bill_date": bill_date.isoformat() if isinstance(bill_date, datetime) else str(bill_date or ""),
-                "lastmodified_date": bill.get("lastmodified_date"),
+                "created_date": _to_utc_iso(created_date),
+                "bill_date": _to_utc_iso(bill_date),
+                "lastmodified_date": _to_utc_iso(lastmodified_date),
                 "created_by": bill.get("created_by"),
                 "lastmodified_by": bill.get("lastmodified_by"),
                 "uhid": uhid,

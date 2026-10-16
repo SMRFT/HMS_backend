@@ -59,7 +59,8 @@ from .Views import (
     OPEMR,
     IPEMR,
     Shanmuga360,
-    insurance_packages
+    insurance_packages,
+    Tanuh,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -797,6 +798,10 @@ urlpatterns = [
     path('insurance-visits/<path:visit_ref>/', insurance.insurance_member_visit_view, name='insurance_visits_detail'),
     path('insurance-search-patient/', insurance.search_patient_details_by_uhid, name='insurance_search_patient'),
     path('insurance-search-member/', insurance.search_insurance_member_by_number, name='insurance_search_member'),
+
+
+    # Tanuh
+    path('tanuh_breast_cancer_screening/', Tanuh.tanuh_breast_cancer_screening, name='tanuh_breast_cancer_screening'),
 ]
 
 

@@ -1846,68 +1846,36 @@ class SalesReturn(AuditModel):
             print(f"SalesReturn Pymongo force update failed: {e}")
 
 
-class Ward_return_details(AuditModel):
+class WardReturnDetails(AuditModel):
     ward_return_bill_no = models.CharField(max_length=200, unique=True, null=True, blank=True)
     ward_return_bill_date = models.DateTimeField(default=timezone.now)
     pharmacist_id = models.CharField(max_length=500, blank=True, null=True)
+    pharmacist_name = models.CharField(max_length=200, blank=True, null=True)
     bill_no = models.CharField(max_length=200, null=True, blank=True)
+    Bill_id = models.IntegerField(null=True, blank=True)
     uhid = models.CharField(max_length=50, null=True, blank=True)
     status = models.CharField(max_length=100, default="Approved", blank=True, null=True)
-    medicine_particulars = models.JSONField(blank=True, null=True)
-
-    class Meta:
-        db_table = "hospital_wardreturndetails"
+    medicine_particulars = MongoJSONField(default=list, blank=True, null=True)
+    return_amount = models.CharField(max_length=200, null=True, blank=True)
+    original_bill_amount = models.CharField(max_length=200, null=True, blank=True)
+    remaining_bill_amount = models.CharField(max_length=200, null=True, blank=True)
+    inpatient_number = models.CharField(max_length=100, null=True, blank=True)
+    patient_name = models.CharField(max_length=200, null=True, blank=True)
+    room_no = models.CharField(max_length=100, null=True, blank=True)
+    doctor_id = models.CharField(max_length=100, null=True, blank=True)
+    doctor_name = models.CharField(max_length=200, null=True, blank=True)
 
     def save(self, *args, **kwargs):
-        # 1. Standard Django Save
+        if isinstance(self.medicine_particulars, str):
+            try:
+                import json
+                self.medicine_particulars = json.loads(self.medicine_particulars)
+            except Exception:
+                self.medicine_particulars = []
+        elif not isinstance(self.medicine_particulars, list):
+            self.medicine_particulars = []
+
         super().save(*args, **kwargs)
-
-        # 2. Force BSON array storage in MongoDB using pymongo
-        try:
-            from pymongo import MongoClient
-            import os
-            import json
-
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client["HMS"]
-
-            meds = self.medicine_particulars
-            if isinstance(meds, str):
-                try:
-                    meds = json.loads(meds)
-                except Exception:
-                    meds = []
-
-            update_doc = {
-                "ward_return_bill_no": self.ward_return_bill_no,
-                "ward_return_bill_date": self.ward_return_bill_date or timezone.now(),
-                "created_date": self.created_date or timezone.now(),
-                "created_by": self.created_by,
-                "pharmacist_id": self.pharmacist_id,
-                "branch_code": self.branch_code,
-                "hospital_code": self.hospital_code,
-                "outlet_code": self.outlet_code,
-                "bill_no": self.bill_no,
-                "uhid": self.uhid,
-                "status": self.status,
-                "medicine_particulars": meds if isinstance(meds, list) else [],
-            }
-
-            if self.ward_return_bill_no:
-                db["hospital_wardreturndetails"].update_one(
-                    {"ward_return_bill_no": self.ward_return_bill_no},
-                    {"$set": update_doc},
-                    upsert=True
-                )
-                db["wardreturndetails"].update_one(
-                    {"ward_return_bill_no": self.ward_return_bill_no},
-                    {"$set": update_doc},
-                    upsert=True
-                )
-
-            client.close()
-        except Exception as e:
-            print(f"Ward_return_details Pymongo force update failed: {e}")
 
 
 class DietMaster(AuditModel):

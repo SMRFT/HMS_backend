@@ -21,6 +21,8 @@ from .MHC import View
 from . import mrd
 from . import OPEMR
 from . import Shanmuga360
+from .TANUH import Views as Tanuh
+from . import TANUH
 
 
 
