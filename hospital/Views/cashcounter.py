@@ -20,9 +20,17 @@ from ..models import Cashcountershiftdetails,PharmacyBilling,Patient,DischargeBi
 from ..serializers import CashcountershiftdetailsSerializer,PharmacyBillingSerializer, PatientSerializer, DischargeBillingSerializer, BillingSerializer
 def format_dt(val):
     if not val: return None
-    if isinstance(val, str): return val
-    try: return val.isoformat()
-    except: return str(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if "T" in s and not s.endswith("Z") and "+" not in s:
+            return s + "Z"
+        return s
+    try:
+        if getattr(val, "tzinfo", None) is None:
+            return val.isoformat() + "Z"
+        return val.astimezone(timezone.utc).isoformat()
+    except:
+        return str(val)
 def safe_dec(val):
     if val is None: return Decimal('0.00')
     if hasattr(val, 'to_decimal'):

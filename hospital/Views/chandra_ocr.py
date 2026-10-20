@@ -19,24 +19,27 @@ import re
 from typing import Any
 from rest_framework.decorators import api_view, permission_classes,parser_classes
 from django.views.decorators.csrf import csrf_exempt
-import pytesseract
 import shutil
-
-# Auto-detect Tesseract binary path dynamically based on platform and PATH
-tesseract_in_path = shutil.which("tesseract")
-if tesseract_in_path:
-    pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
-elif os.path.exists("/usr/bin/tesseract"):
-    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-elif os.path.exists("/opt/homebrew/bin/tesseract"):
-    pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
-else:
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
 try:
-    print("Tesseract Version:", pytesseract.get_tesseract_version())
-except Exception as e:
-    print("Warning: Tesseract version could not be retrieved:", e)
+    import pytesseract
+
+    # Auto-detect Tesseract binary path dynamically based on platform and PATH
+    tesseract_in_path = shutil.which("tesseract")
+    if tesseract_in_path:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
+    elif os.path.exists("/usr/bin/tesseract"):
+        pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+    elif os.path.exists("/opt/homebrew/bin/tesseract"):
+        pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
+    else:
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+    try:
+        print("Tesseract Version:", pytesseract.get_tesseract_version())
+    except Exception as e:
+        print(f"Warning: Tesseract not available: {e}")
+except ImportError:
+    pytesseract = None
 # Auth/permissions
 from pyauth.auth import HasRoleAndDataPermission
 
