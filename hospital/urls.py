@@ -802,6 +802,7 @@ urlpatterns = [
 
     # Tanuh
     path('tanuh_breast_cancer_screening/', Tanuh.tanuh_breast_cancer_screening, name='tanuh_breast_cancer_screening'),
+    path('tanuh_student_surveyor_registration/', Tanuh.tanuh_student_surveyor_registration, name='tanuh_student_surveyor_registration'),
 ]
 
 

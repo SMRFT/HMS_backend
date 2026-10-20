@@ -60,3 +60,20 @@ class BreastCancerScreening(AuditModel):
 
     def __str__(self):
         return f"{self.bill_number or 'No Bill'} - {self.subject_id} - {self.risk_level}"
+
+
+class StudentSurveyorRegistration(AuditModel):
+    _id              = models.ObjectIdField()
+    date             = models.DateField(default=timezone.localdate)
+    institute_name   = models.CharField(max_length=255, blank=True, null=True)
+    course_name_year = models.CharField(max_length=255, blank=True, null=True)
+    surveyor_name    = models.CharField(max_length=150, blank=True, null=True)
+    subject_id       = models.CharField(max_length=100, blank=True, null=True)
+    phone_number     = models.CharField(max_length=20, blank=True, null=True)
+    remarks          = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'tanuh_student_surveyor_registration'
+
+    def __str__(self):
+        return f"{self.surveyor_name} - {self.institute_name} ({self.subject_id})"
