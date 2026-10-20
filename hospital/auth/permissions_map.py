@@ -696,12 +696,8 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/sample_collector/'     : 'HMS-P-S360',
 
 
-        # Tanuh
-
-         r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
-    
-    
-
+        # Tanuh (Publicly accessible like QRScan / InPatientFeedback)
+        # r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
 }
 
  

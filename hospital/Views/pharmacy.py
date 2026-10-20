@@ -396,24 +396,20 @@ def sanitize_medicines(medicines):
                 else:
                     bn_val = ""
 
-        item_name = (med.get("item_name") or med.get("name") or "").strip()
         med_is_consumable = med.get("is_consumable_items")
-        if (med_is_consumable is None or not item_name) and item_id_val:
+        if med_is_consumable is None and item_id_val:
             try:
                 p_it = mongo_db["hospital_pharmacyitem"].find_one(
                     {"item_id": item_id_val},
-                    {"item_name": 1, "is_consumable_items": 1}
+                    {"is_consumable_items": 1}
                 )
                 if not p_it and str(item_id_val).isdigit():
                     p_it = mongo_db["hospital_pharmacyitem"].find_one(
                         {"item_id": int(item_id_val)},
-                        {"item_name": 1, "is_consumable_items": 1}
+                        {"is_consumable_items": 1}
                     )
                 if p_it:
-                    if not item_name:
-                        item_name = p_it.get("item_name") or ""
-                    if med_is_consumable is None:
-                        med_is_consumable = bool(p_it.get("is_consumable_items", False))
+                    med_is_consumable = bool(p_it.get("is_consumable_items", False))
             except Exception:
                 pass
         if med_is_consumable is None:
@@ -421,14 +417,15 @@ def sanitize_medicines(medicines):
         else:
             med_is_consumable = bool(med_is_consumable)
 
+        # item_name is intentionally NOT stored: item_id is the source of truth,
+        # and item_name is resolved on read / UI comparison
         clean_item = {
             "item_id": item_id_val,
-            "item_name": item_name,
             "batch_number": bn_val,
             "qty": int(med.get("qty", 0) or med.get("quantity", 0)),
             "price": float(med.get("price", 0) or med.get("mrp", 0)),
             "calculated_price": float(med.get("calculated_price", 0)),
-            "edit_history": med.get("edit_history", [])
+            "edit_history": med.get("edit_history") or []
         }
         if med_is_consumable:
             clean_item["is_consumable_items"] = True
@@ -499,26 +496,28 @@ def build_edit_history(old_meds, new_meds, employee_id):
         now = datetime.utcnow().isoformat()
 
         if not old and new:
-            new.setdefault("edit_history", [])
-            new["edit_history"].append({
+            new_item = {k: v for k, v in new.items() if k != "item_name"}
+            new_item.setdefault("edit_history", [])
+            new_item["edit_history"].append({
                 "action": "medicine_added",
                 "qty": new["qty"],
                 "blocked_change": new["qty"],
                 "timestamp": now,
                 "edited_by": employee_id
             })
-            updated.append(new)
+            updated.append(new_item)
 
         elif old and not new:
-            old.setdefault("edit_history", [])
-            old["edit_history"].append({
+            old_item = {k: v for k, v in old.items() if k != "item_name"}
+            old_item.setdefault("edit_history", [])
+            old_item["edit_history"].append({
                 "action": "medicine_deleted",
                 "qty_deleted": old["qty"],
                 "blocked_change": -old["qty"],
                 "timestamp": now,
                 "edited_by": employee_id
             })
-            updated.append(old)
+            updated.append(old_item)
 
         elif old and new:
             old_qty = old.get("qty", 0)
@@ -538,8 +537,9 @@ def build_edit_history(old_meds, new_meds, employee_id):
                     "edited_by": employee_id
                 })
 
-            new["edit_history"] = history
-            updated.append(new)
+            new_item = {k: v for k, v in new.items() if k != "item_name"}
+            new_item["edit_history"] = history
+            updated.append(new_item)
 
     return updated
 
@@ -2609,10 +2609,12 @@ def substitute_medicine(request):
                 })
 
                 # Replace in-place: substitute carries the history, old entry dropped
-                substitute_item["edit_history"] = med_edit_history
-                updated_medicines.append(substitute_item)   # ← substitute replaces original
+                substitute_item_clean = {k: v for k, v in substitute_item.items() if k != "item_name"}
+                substitute_item_clean["edit_history"] = med_edit_history
+                updated_medicines.append(substitute_item_clean)   # ← substitute replaces original
             else:
-                updated_medicines.append(med)               # ← all others unchanged
+                med_clean = {k: v for k, v in med.items() if k != "item_name"}
+                updated_medicines.append(med_clean)               # ← all others unchanged
 
         if not substituted:
             return Response({"error": "Matching medicine not found in bill"}, status=404)
@@ -3025,7 +3027,6 @@ def finalize_bill(request):
 
             med_entry = {
                 "item_id":          item_id,
-                "item_name":        med.get("item_name") or med.get("name"),
                 "batch_number":     bn_val,
                 "quantity":         qty,
                 "price":            price,
