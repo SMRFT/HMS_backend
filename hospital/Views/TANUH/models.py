@@ -72,8 +72,5 @@ class StudentSurveyorRegistration(AuditModel):
     phone_number     = models.CharField(max_length=20, blank=True, null=True)
     remarks          = models.TextField(blank=True, null=True)
 
-    class Meta:
-        db_table = 'tanuh_student_surveyor_registration'
-
     def __str__(self):
         return f"{self.surveyor_name} - {self.institute_name} ({self.subject_id})"

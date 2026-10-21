@@ -8,9 +8,13 @@ from .models import BreastCancerScreening, StudentSurveyorRegistration
 from .serializer import BreastCancerScreeningSerializer, StudentSurveyorRegistrationSerializer
 
 
+# Auth/permissions
+from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
+from rest_framework.decorators import api_view, permission_classes
+
 @csrf_exempt
 @api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def tanuh_breast_cancer_screening(request):
     """
     GET  - List all breast cancer screening records.
@@ -88,7 +92,7 @@ def tanuh_breast_cancer_screening(request):
 
 @csrf_exempt
 @api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def tanuh_student_surveyor_registration(request):
     """
     GET  - List all student surveyor registration records.
