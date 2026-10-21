@@ -14,7 +14,7 @@ from rest_framework.decorators import api_view, permission_classes
 
 @csrf_exempt
 @api_view(['GET', 'POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 def tanuh_breast_cancer_screening(request):
     """
     GET  - List all breast cancer screening records.
@@ -92,7 +92,7 @@ def tanuh_breast_cancer_screening(request):
 
 @csrf_exempt
 @api_view(['GET', 'POST'])
-# @permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 def tanuh_student_surveyor_registration(request):
     """
     GET  - List all student surveyor registration records.
