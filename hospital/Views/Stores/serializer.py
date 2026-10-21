@@ -5,6 +5,119 @@ from .models import (
     Stores_LabApprovedItem, Stores_LabUsedQtyDetail
 )
 
+_PROFILE_CACHE = {}
+_PROFILE_CACHE_EXPIRY = 0
+
+def get_employee_display_name(emp_id):
+    """
+    Resolves employee display name using created_by id matched into
+    DB: Global, col: backend_diagnostics_profile (employeeId / userId / _id) -> employeeName
+    """
+    if not emp_id:
+        return ""
+    emp_str = str(emp_id).strip()
+    if not emp_str:
+        return ""
+
+    import time
+    global _PROFILE_CACHE, _PROFILE_CACHE_EXPIRY
+    now = time.time()
+    if now > _PROFILE_CACHE_EXPIRY:
+        _PROFILE_CACHE.clear()
+        _PROFILE_CACHE_EXPIRY = now + 300  # 5-minute cache
+
+    if emp_str in _PROFILE_CACHE:
+        return _PROFILE_CACHE[emp_str]
+
+    try:
+        from ..dbcollection import profile_collection
+        from bson import ObjectId
+        query = {"$or": [{"employeeId": emp_str}, {"userId": emp_str}]}
+        if ObjectId.is_valid(emp_str):
+            query["$or"].append({"_id": ObjectId(emp_str)})
+        
+        doc = profile_collection.find_one(
+            query,
+            {"employeeName": 1, "name": 1, "employeeId": 1, "_id": 0}
+        )
+        if doc:
+            name = doc.get("employeeName") or doc.get("name") or emp_str
+            _PROFILE_CACHE[emp_str] = name
+            return name
+    except Exception:
+        pass
+
+    _PROFILE_CACHE[emp_str] = emp_str
+    return emp_str
+
+
+def get_employee_map_for_grns(queryset):
+    """
+    Bulk pre-fetches display names for all distinct created_by IDs in queryset
+    from Global.backend_diagnostics_profile.
+    """
+    employee_ids = set()
+    for grn in queryset:
+        cb = getattr(grn, 'created_by', None)
+        if cb:
+            employee_ids.add(str(cb).strip())
+
+    employee_map = {}
+    if not employee_ids:
+        return employee_map
+
+    # Check cache first
+    missing_ids = set()
+    for eid in employee_ids:
+        if eid in _PROFILE_CACHE:
+            employee_map[eid] = _PROFILE_CACHE[eid]
+        else:
+            missing_ids.add(eid)
+
+    if missing_ids:
+        try:
+            from ..dbcollection import profile_collection
+            from bson import ObjectId
+            or_queries = [
+                {"employeeId": {"$in": list(missing_ids)}},
+                {"userId": {"$in": list(missing_ids)}}
+            ]
+            valid_object_ids = [ObjectId(eid) for eid in missing_ids if ObjectId.is_valid(eid)]
+            if valid_object_ids:
+                or_queries.append({"_id": {"$in": valid_object_ids}})
+
+            profiles = list(profile_collection.find(
+                {"$or": or_queries},
+                {"employeeId": 1, "userId": 1, "employeeName": 1, "name": 1, "_id": 1}
+            ))
+            for p in profiles:
+                emp_name = p.get("employeeName") or p.get("name") or ""
+                if not emp_name:
+                    continue
+                if p.get("employeeId"):
+                    k = str(p["employeeId"]).strip()
+                    employee_map[k] = emp_name
+                    _PROFILE_CACHE[k] = emp_name
+                if p.get("userId"):
+                    k = str(p["userId"]).strip()
+                    employee_map[k] = emp_name
+                    _PROFILE_CACHE[k] = emp_name
+                if p.get("_id"):
+                    k = str(p["_id"]).strip()
+                    employee_map[k] = emp_name
+                    _PROFILE_CACHE[k] = emp_name
+        except Exception:
+            pass
+
+    # For any still missing, map to original ID
+    for eid in missing_ids:
+        if eid not in employee_map:
+            employee_map[eid] = eid
+            _PROFILE_CACHE[eid] = eid
+
+    return employee_map
+
+
 class StoresGRNSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     class Meta:
@@ -45,6 +158,21 @@ class StoresGRNSerializer(serializers.ModelSerializer):
                     representation[field] = list(val)
                 except:
                     representation[field] = []
+
+        # Resolve employee display name for created_by from Global.backend_diagnostics_profile
+        created_by_id = representation.get('created_by') or getattr(instance, 'created_by', None)
+        emp_name = None
+        if created_by_id:
+            emp_key = str(created_by_id).strip()
+            context_map = self.context.get('employee_map') if isinstance(getattr(self, 'context', None), dict) else None
+            if context_map and emp_key in context_map:
+                emp_name = context_map[emp_key]
+            else:
+                emp_name = get_employee_display_name(emp_key)
+
+        display_name = emp_name or (str(created_by_id).strip() if created_by_id else '')
+        representation['entered_by'] = display_name
+        representation['created_by_name'] = display_name
                     
         return representation
 
