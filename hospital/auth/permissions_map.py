@@ -697,7 +697,8 @@ PAGE_MAPPING = {
 
 
         # Tanuh (Publicly accessible like QRScan / InPatientFeedback)
-        # r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
+        r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
+        r'/_b_a_c_k_e_n_d/HMS/tanuh_student_surveyor_registration/?(\?.*)?$'     : 'HMS-P-TSSR',
 }
 
  
