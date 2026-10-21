@@ -11,7 +11,7 @@ from .models import (
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, RackSerializer, ShelfSerializer,
-    StoresGRNSerializer, StoresIntentSerializer,
+    StoresGRNSerializer, StoresIntentSerializer, get_employee_map_for_grns,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
     StoresIndentReturnSerializer
@@ -687,7 +687,8 @@ def stores_grn_list_create(request):
         if from_date and to_date:
             queryset = queryset.filter(date__range=[from_date, to_date])
             
-        serializer = StoresGRNSerializer(queryset, many=True)
+        emp_map = get_employee_map_for_grns(queryset)
+        serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map})
         return Response(serializer.data)
 
     elif request.method == 'POST':
@@ -706,7 +707,8 @@ def stores_grn_list_create(request):
             elif to_date:
                 queryset = queryset.filter(date__lte=to_date)
             
-            serializer = StoresGRNSerializer(queryset, many=True)
+            emp_map = get_employee_map_for_grns(queryset)
+            serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map})
             return Response(serializer.data)
 
         # Auto-generate GRN number
