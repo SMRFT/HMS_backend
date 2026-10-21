@@ -544,6 +544,7 @@ PAGE_MAPPING = {
          r'^/_b_a_c_k_e_n_d/HMS/searchby_ip/?(\?.*)?$': 'HMS-P-PSIP',
          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCIPAB',
           r'/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/?(\?.*)?$': 'HMS-P-PHVSB',
+          r'/_b_a_c_k_e_n_d/HMS/PharmacyBillanalysis/?(\?.*)?$': 'HMS-P-PHVSB',
 
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-PAS',
 

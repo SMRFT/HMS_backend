@@ -584,6 +584,10 @@ def save_pharmacy_bill(request):
     # COMMON FIELDS
     # --------------------------------------------------
     resolved_doctor_id = resolve_doctor_id(data.get("doctor_id"))
+    raw_pm = data.get("payment_mode") or data.get("paymentMode")
+    norm_pm = "Credit" if str(raw_pm).strip().lower() == "credit" else ("Cash" if str(raw_pm).strip().lower() == "cash" else None)
+    if status == "Billed" and not norm_pm:
+        norm_pm = "Cash"
 
     fields = {
         # FIX 1: uhid is optional — stored as-is (None if not provided)
@@ -600,6 +604,7 @@ def save_pharmacy_bill(request):
         "overall_discount_amount":  float(data.get("overall_discount_amount", 0)),
         "net_amount":               float(data.get("net_amount", 0)),
         "shiftno":                  data.get("shiftno"),
+        "payment_mode":             norm_pm,
     }
 
     # ✅ Save patient_name ONLY when uhid is not provided
@@ -657,7 +662,8 @@ def save_pharmacy_bill(request):
                 update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
 
             update_data["billing_status"] = "Billed"
-            update_data["billing_mode"]   = "ESTIMATE"
+            update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
+            update_data["payment_mode"]   = norm_pm or "Cash"
             update_data["bill_date"]      = datetime.utcnow()
 
         bill_collection.update_one(
@@ -728,7 +734,8 @@ def save_pharmacy_bill(request):
             record_doc.update({
                 "bill_no":      bill_no,
                 "estimate_no":  None,
-                "billing_mode": "DIRECT",
+                "billing_mode": data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "DIRECT"),
+                "payment_mode": norm_pm or "Cash",
             })
 
             bill_collection.insert_one(record_doc)
@@ -1227,25 +1234,15 @@ def get_estimate_bills(request):
     try:
         hospital_code = (
             request.data.get("auth-hospital-code")
-            or request.headers.get("Hospital-Code")
-            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-            or request.META.get("HTTP_HOSPITAL_CODE")
-            or request.GET.get("hospital_code")
-            or "SH001"
+            
         )
         branch_code = (
             request.data.get("auth-branch-code")
-            or request.headers.get("Branch-Code")
-            or request.META.get("HTTP_AUTH_BRANCH_CODE")
-            or request.META.get("HTTP_BRANCH_CODE")
-            or request.GET.get("branch_code")
+            
         )
         outlet_code = (
             request.data.get("auth-outlet-code")
-            or request.headers.get("Outlet-Code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or request.META.get("HTTP_OUTLET_CODE")
-            or request.GET.get("outlet_code")
+            
         )
 
         # ── 1. Automatically purge and log any expired estimates (>24 hours from bill save time) ──
@@ -3127,6 +3124,9 @@ def finalize_bill(request):
             set_payload["overall_discount_value"] = float(frontend_overall_discount_value)
         if frontend_overall_discount_amount is not None:
             set_payload["overall_discount_amount"] = float(frontend_overall_discount_amount)
+        raw_final_pm = data.get("payment_mode") or data.get("paymentMode")
+        if raw_final_pm:
+            set_payload["payment_mode"] = "Credit" if str(raw_final_pm).strip().lower() == "credit" else "Cash"
 
         bill_collection.update_one(
             {
@@ -4451,4 +4451,509 @@ def get_doctor_prescriptions(request):
         import traceback
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from hospital.Views.dbcollection import clean_patient_name
+
+@api_view(["POST", "GET"])
+@permission_classes([HasRoleAndDataPermission])
+def PharmacyBillanalysis(request):
+    """
+    Pharmacy Bill Analysis:
+    1. Displays bill analysis data stored in pharmacy billing filtered by outlet_code, hospital_code, branch_code.
+    2. Date range filtering (from_date, to_date) defaulting to today.
+    3. Complete A-to-Z bill travel analysis:
+       - Patient details link via UHID (Name, Age, Gender, Phone, Address).
+       - Inpatient admission details via IP number / UHID (IP Advance, Room, Doctors, Insurance, Discharged status).
+       - Sales return travel (hospital_salesreturn and edit_history).
+       - IP / Ward return travel (hospital_wardreturndetails and pending_returns).
+       - Cash counter collection status.
+       - Status, Date & Time, Bill Type, Bill Number, UHID, Patient Name, Gross, Discount, Advance, IP Return, Net Amount, Action.
+    """
+    try:
+        data = request.data
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
+
+        from_date_str = str(data.get("from_date") or "").strip()
+        to_date_str   = str(data.get("to_date") or "").strip()
+        search_value  = str(data.get("search") or "").strip()
+        status_filter = str(data.get("status") or "all").strip().lower()
+
+        # Connect to MongoDB
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client["HMS"]
+
+        pb_col    = hms_db["hospital_pharmacybilling"]
+        pat_col   = hms_db["hospital_patient"]
+        adm_col   = hms_db["hospital_admission"]
+        sr_col    = hms_db["hospital_salesreturn"]
+        wr_col    = hms_db["hospital_wardreturndetails"]
+        cc_col    = hms_db["hospital_cashcountercollection"]
+        disch_col = hms_db["hospital_dischargebilling"]
+        bt_col    = hms_db["hospital_billtype"]
+
+        # Date handling (Default to today in IST if not provided)
+        kolkata_tz = pytz.timezone("Asia/Kolkata")
+        today_str = datetime.now(kolkata_tz).strftime("%Y-%m-%d")
+
+        if not from_date_str:
+            from_date_str = today_str
+        if not to_date_str:
+            to_date_str = today_str
+
+        from_dt = None
+        to_dt = None
+
+        if from_date_str.lower() != "all":
+            try:
+                from_dt = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+            except Exception:
+                pass
+
+        if to_date_str.lower() != "all":
+            try:
+                to_dt = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+            except Exception:
+                pass
+
+        # Build Base Query
+        query = {
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+        }
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        if from_dt and to_dt:
+            query["$or"] = [
+                {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+            ]
+        elif from_dt:
+            query["$or"] = [
+                {"bill_date": {"$gte": from_dt}},
+                {"created_date": {"$gte": from_dt}},
+            ]
+
+        # Fetch Bills (sorted by created_date desc)
+        raw_bills = list(pb_col.find(query).sort("created_date", -1).limit(2500))
+
+        # Fallback: if 0 bills found with date filter, but search_value is present, search across all dates
+        if len(raw_bills) == 0 and search_value:
+            search_query = {
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+            }
+            if outlet_code:
+                search_query["outlet_code"] = outlet_code
+            search_query["$or"] = [
+                {"bill_no": {"$regex": re.escape(search_value), "$options": "i"}},
+                {"uhid": {"$regex": re.escape(search_value), "$options": "i"}},
+                {"inpatient_number": {"$regex": re.escape(search_value), "$options": "i"}},
+            ]
+            raw_bills = list(pb_col.find(search_query).sort("created_date", -1).limit(1000))
+
+        # Collect distinct identifiers for batch lookup
+        uhids = list({b.get("uhid") for b in raw_bills if b.get("uhid")})
+        ip_numbers = list({b.get("inpatient_number") for b in raw_bills if b.get("inpatient_number")})
+        bill_nos = list({b.get("bill_no") for b in raw_bills if b.get("bill_no")})
+
+        # 1. Batch fetch Patient Details
+        patients_map = {}
+        if uhids:
+            for p in pat_col.find({"uhid": {"$in": uhids}}):
+                u = p.get("uhid")
+                if u:
+                    f_name = p.get("firstName") or ""
+                    l_name = p.get("lastName") or ""
+                    full_name = clean_patient_name(f"{f_name} {l_name}".strip()) or f_name
+                    patients_map[u] = {
+                        "uhid": u,
+                        "name": full_name,
+                        "age": p.get("age", ""),
+                        "gender": p.get("gender", ""),
+                        "phone": p.get("mobilePhone", ""),
+                        "address": p.get("permanent_address") or p.get("city") or "",
+                    }
+
+        # 2. Batch fetch Admission Details
+        admissions_map = {}
+        adm_query = []
+        if uhids:
+            adm_query.append({"uhid": {"$in": uhids}})
+        if ip_numbers:
+            adm_query.append({"ipNumber": {"$in": ip_numbers}})
+        if adm_query:
+            for a in adm_col.find({"$or": adm_query}):
+                u = a.get("uhid")
+                ip = a.get("ipNumber")
+
+                adv_list = a.get("advance_payments") or []
+                total_adv = 0.0
+                adv_records = []
+                if isinstance(adv_list, list):
+                    for ap in adv_list:
+                        if isinstance(ap, dict):
+                            is_active = ap.get("is_advanceActive") is not False
+                            status_val = str(ap.get("status", "")).strip().lower()
+                            if is_active and status_val not in ["cancelled", "refunded"] and not ap.get("is_refund"):
+                                try:
+                                    amt = float(ap.get("ip_advance") or ap.get("advance_amount") or ap.get("amount") or 0)
+                                    total_adv += amt
+                                    adv_records.append({
+                                        "bill_no": ap.get("bill_no") or ap.get("bill_number") or "",
+                                        "amount": amt,
+                                        "date": ap.get("date") or ap.get("created_date") or "",
+                                        "mode": ap.get("payment_mode") or ap.get("mode") or "Cash",
+                                    })
+                                except Exception:
+                                    pass
+
+                room_label = ""
+                room_details = a.get("room_details") or []
+                shifting_details = a.get("roomShitingDetails") or []
+                active_room = next((r for r in room_details if isinstance(r, dict) and r.get("is_roomActive") is True), None)
+                active_shift = next((r for r in shifting_details if isinstance(r, dict) and r.get("is_roomActive") is True), None)
+                if active_room:
+                    room_label = f"{active_room.get('roomNo', '')} / Bed {active_room.get('bedNo', '')}"
+                elif active_shift:
+                    room_label = f"{active_shift.get('newRoomNo', '')} / Bed {active_shift.get('newBedNo', '')}"
+
+                adm_info = {
+                    "uhid": u,
+                    "ipNumber": ip,
+                    "total_ip_advance": round(total_adv, 2),
+                    "advance_records": adv_records,
+                    "room_label": room_label,
+                    "admissionDateTime": a.get("admissionDateTime"),
+                    "admittingDoctor": a.get("admittingDoctor") or "",
+                    "consultingDoctor": a.get("consultingDoctor") or "",
+                    "customer_type": a.get("customer_type") or "Cash",
+                    "insurance_company": a.get("insurance_company") or "",
+                    "is_discharged": a.get("is_discharged") is True,
+                    "is_admitted": a.get("is_admitted") is not False,
+                }
+                if u:
+                    admissions_map[u] = adm_info
+                if ip:
+                    admissions_map[ip] = adm_info
+
+        # 3. Batch fetch Sales Returns
+        sales_returns_map = {}
+        if bill_nos:
+            for sr in sr_col.find({"bill_no": {"$in": bill_nos}}):
+                b_no = sr.get("bill_no")
+                if b_no:
+                    if b_no not in sales_returns_map:
+                        sales_returns_map[b_no] = []
+                    ret_amt = 0.0
+                    try:
+                        ret_amt = float(sr.get("return_amount") or 0)
+                    except Exception:
+                        pass
+                    sales_returns_map[b_no].append({
+                        "return_bill_no": sr.get("return_bill_no", "—"),
+                        "return_date": sr.get("return_bill_date") or sr.get("created_date"),
+                        "return_amount": ret_amt,
+                        "payment_type": sr.get("PaymentType") or "Cash",
+                        "status": sr.get("status") or "Approved",
+                        "items": sr.get("medicine_particulars") or [],
+                    })
+
+        # 4. Batch fetch Ward / IP Returns
+        ward_returns_map = {}
+        if bill_nos:
+            for wr in wr_col.find({"bill_no": {"$in": bill_nos}}):
+                b_no = wr.get("bill_no")
+                if b_no:
+                    if b_no not in ward_returns_map:
+                        ward_returns_map[b_no] = []
+                    ret_amt = 0.0
+                    try:
+                        ret_amt = float(wr.get("return_amount") or 0)
+                    except Exception:
+                        pass
+                    ward_returns_map[b_no].append({
+                        "ward_return_bill_no": wr.get("ward_return_bill_no", "—"),
+                        "ward_return_date": wr.get("ward_return_bill_date") or wr.get("created_date"),
+                        "return_amount": ret_amt,
+                        "inpatient_number": wr.get("inpatient_number", ""),
+                        "status": wr.get("status") or "Approved",
+                        "items": wr.get("medicine_particulars") or [],
+                    })
+
+        # 5. Batch fetch Cash Counter Collections
+        cash_map = {}
+        if bill_nos:
+            for cc in cc_col.find({"bill_no": {"$in": bill_nos}}):
+                b_no = cc.get("bill_no")
+                if b_no:
+                    if b_no not in cash_map:
+                        cash_map[b_no] = []
+                    c_amt = 0.0
+                    try:
+                        c_amt = float(cc.get("collected_amount", 0) or 0)
+                    except Exception:
+                        pass
+                    cash_map[b_no].append({
+                        "bill_number": cc.get("bill_number"),
+                        "collected_amount": c_amt,
+                        "counter_code": cc.get("counter_code"),
+                        "shift_no": cc.get("shift_no"),
+                        "created_date": cc.get("created_date"),
+                    })
+
+        # 6. Batch fetch Bill Types map
+        billtype_map = {}
+        for bt in bt_col.find({}, {"bill_type": 1, "bill_name": 1}):
+            bt_id = bt.get("bill_type")
+            if bt_id is not None:
+                try:
+                    billtype_map[int(bt_id)] = bt.get("bill_name", "")
+                except Exception:
+                    pass
+
+        # Helper for float conversion
+        def to_num(val):
+            if val is None:
+                return 0.0
+            from bson.decimal128 import Decimal128
+            if isinstance(val, Decimal128):
+                return float(val.to_decimal())
+            try:
+                return float(val)
+            except Exception:
+                return 0.0
+
+        # Build Final Enriched Response
+        results = []
+        tot_gross = 0.0
+        tot_discount = 0.0
+        tot_net = 0.0
+        tot_advance = 0.0
+        tot_ip_return = 0.0
+        tot_sales_return = 0.0
+
+        for b in raw_bills:
+            b_no = b.get("bill_no", "—")
+            u = b.get("uhid", "")
+            ip_num = b.get("inpatient_number", "")
+
+            # Bill Type Lookup
+            bt_num = b.get("bill_type")
+            bt_name = "PHARMACY BILL"
+            if bt_num is not None:
+                try:
+                    bt_name = billtype_map.get(int(bt_num), f"Bill Type {bt_num}")
+                except Exception:
+                    pass
+
+            # Patient details
+            pat = patients_map.get(u, {})
+            p_name = pat.get("name") or b.get("patientname") or "—"
+            p_age = pat.get("age") or b.get("age") or ""
+            p_gender = pat.get("gender") or ""
+            p_phone = pat.get("phone") or ""
+            p_address = pat.get("address") or b.get("room_no") or ""
+
+            # Admission details
+            adm = admissions_map.get(ip_num) or admissions_map.get(u) or {}
+            adv_amt = float(adm.get("total_ip_advance", 0.0))
+            is_ip_cleared = adm.get("is_discharged", False)
+
+            # Sales return details
+            sr_list = sales_returns_map.get(b_no, [])
+            sales_ret_amt = sum(s["return_amount"] for s in sr_list)
+            # Check medicine_particulars edit_history for sales_return if not in hospital_salesreturn
+            med_list = b.get("medicine_particulars") or []
+            if sales_ret_amt == 0:
+                for m in med_list:
+                    if isinstance(m, dict):
+                        for eh in m.get("edit_history") or []:
+                            if isinstance(eh, dict) and eh.get("action") == "sales_return":
+                                try:
+                                    r_qty = float(eh.get("return_qty") or 0)
+                                    u_price = float(m.get("price") or 0)
+                                    sales_ret_amt += (r_qty * u_price)
+                                except Exception:
+                                    pass
+
+            has_sales_return = len(sr_list) > 0 or sales_ret_amt > 0
+
+            # IP / Ward return details
+            wr_list = ward_returns_map.get(b_no, [])
+            ip_ret_amt = sum(w["return_amount"] for w in wr_list)
+            # Check pending_returns inside bill
+            pending_ret = b.get("pending_returns") or []
+            if ip_ret_amt == 0:
+                for pr in pending_ret:
+                    if isinstance(pr, dict) and pr.get("status") == "Approved":
+                        for it in pr.get("items") or []:
+                            if isinstance(it, dict):
+                                try:
+                                    ip_ret_amt += float(it.get("return_qty") or 0) * 50.0
+                                except Exception:
+                                    pass
+
+            has_ip_return = len(wr_list) > 0 or ip_ret_amt > 0 or len(pending_ret) > 0
+
+            # Cash collection details
+            cash_list = cash_map.get(b_no, [])
+            is_cash_bill = len(cash_list) > 0 or b.get("billing_mode") == "DIRECT" or bool(b.get("payment_details"))
+
+            # Monetary amounts
+            gross = to_num(b.get("total_amount", 0))
+            discount = to_num(b.get("overall_discount_amount", 0))
+            net = to_num(b.get("net_amount", 0))
+
+            # Status determination (matching Screenshot 1: "Ip Credit Bills", "Cash Bill", "Cancelled")
+            b_status = b.get("billing_status") or "Billed"
+            is_cancelled = b_status.lower() in ["cancelled", "deleted"] or b.get("is_deleted") is True
+            p_mode = str(b.get("payment_mode") or "").strip().lower()
+
+            if is_cancelled:
+                derived_status = "Cancelled"
+            elif p_mode == "credit" or ip_num or "IP" in bt_name.upper() or b.get("billing_mode") in ["WARD REQUEST", "IP CREDIT", "CREDIT"]:
+                derived_status = "Ip Credit Bills"
+            else:
+                derived_status = "Cash Bill"
+
+            # Status filter
+            if status_filter != "all":
+                if status_filter == "ip credit bills" and derived_status != "Ip Credit Bills":
+                    continue
+                elif status_filter == "cash bill" and derived_status != "Cash Bill":
+                    continue
+                elif status_filter == "cancelled" and derived_status != "Cancelled":
+                    continue
+                elif status_filter == "sales return" and not has_sales_return:
+                    continue
+                elif status_filter == "ip return" and not has_ip_return:
+                    continue
+
+            # Format Date & Time: "DD/MM/YYYY HH:MM:SS" (e.g. 21/10/2026 08:23:46)
+            b_date = b.get("bill_date") or b.get("created_date")
+            date_time_str = "—"
+            if b_date:
+                try:
+                    if hasattr(b_date, "strftime"):
+                        date_time_str = b_date.strftime("%d/%m/%Y %H:%M:%S")
+                    else:
+                        d_obj = parse_datetime(str(b_date))
+                        if d_obj:
+                            date_time_str = d_obj.strftime("%d/%m/%Y %H:%M:%S")
+                        else:
+                            date_time_str = str(b_date)[:19]
+                except Exception:
+                    date_time_str = str(b_date)[:19]
+
+            # Accumulate totals
+            tot_gross += gross
+            tot_discount += discount
+            tot_net += net
+            tot_advance += adv_amt
+            tot_ip_return += ip_ret_amt
+            tot_sales_return += sales_ret_amt
+
+            # Serialized medicine items
+            serialized_meds = []
+            for m in med_list:
+                if isinstance(m, dict):
+                    serialized_meds.append({
+                        "item_id": m.get("item_id"),
+                        "item_name": m.get("item_name", "—"),
+                        "batch_number": m.get("batch_number", "—"),
+                        "qty": to_num(m.get("qty") or m.get("quantity") or 0),
+                        "price": to_num(m.get("price", 0)),
+                        "calculated_price": to_num(m.get("calculated_price", 0)),
+                        "edit_history": m.get("edit_history") or [],
+                    })
+
+            # Bill record item
+            results.append({
+                "id": str(b.get("_id", "")),
+                "bill_number": b_no,
+                "bill_no": b_no,
+                "date_time": date_time_str,
+                "bill_type": bt_name,
+                "bill_type_id": bt_num,
+                "uhid": u or "—",
+                "patient_name": p_name,
+                "patient_age": p_age,
+                "patient_gender": p_gender,
+                "patient_phone": p_phone,
+                "patient_address": p_address,
+                "inpatient_number": ip_num or "—",
+                "gross_amount": round(gross, 2),
+                "discount": round(discount, 2),
+                "advance": round(adv_amt, 2),
+                "ip_return": round(ip_ret_amt, 2),
+                "sales_return_amount": round(sales_ret_amt, 2),
+                "net_amount": round(net, 2),
+                "status": derived_status,
+                # Indicators matching Screenshot 2
+                "bill_cancelled": "Yes" if is_cancelled else "No",
+                "is_cash_bill": "Yes" if is_cash_bill else "No",
+                "sales_return_entered": "Yes" if has_sales_return else "No",
+                "ip_cleared": "Yes" if is_ip_cleared else "No",
+                # Complete Travel / Journey breakdown for Action modal
+                "travel": {
+                    "bill_info": {
+                        "bill_no": b_no,
+                        "bill_date": date_time_str,
+                        "bill_type": bt_name,
+                        "billing_mode": b.get("billing_mode", "DIRECT"),
+                        "billing_status": b_status,
+                        "shift_no": b.get("shiftno") or "—",
+                        "doctor_id": b.get("doctor_id") or "—",
+                        "created_by": b.get("created_by") or "—",
+                        "outlet_code": b.get("outlet_code") or outlet_code,
+                    },
+                    "patient": {
+                        "uhid": u,
+                        "name": p_name,
+                        "age": p_age,
+                        "gender": p_gender,
+                        "phone": p_phone,
+                        "address": p_address,
+                    },
+                    "admission": adm,
+                    "medicines": serialized_meds,
+                    "sales_returns": sales_returns_map.get(b_no, []),
+                    "ward_returns": ward_returns_map.get(b_no, []),
+                    "pending_returns": pending_ret,
+                    "cash_collections": cash_list,
+                }
+            })
+
+        summary = {
+            "total_bills": len(results),
+            "total_gross": round(tot_gross, 2),
+            "total_discount": round(tot_discount, 2),
+            "total_advance": round(tot_advance, 2),
+            "total_ip_return": round(tot_ip_return, 2),
+            "total_sales_return": round(tot_sales_return, 2),
+            "total_net": round(tot_net, 2),
+        }
+
+        return Response({
+            "success": True,
+            "data": results,
+            "summary": summary,
+            "filters": {
+                "from_date": from_date_str,
+                "to_date": to_date_str,
+                "outlet_code": outlet_code,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
