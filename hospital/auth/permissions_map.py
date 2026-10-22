@@ -235,7 +235,7 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-API-PACK',                 
+    '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                             
     r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
     '/_b_a_c_k_e_n_d/HMS/investBilling/': 'HMS-P-IB',                 

@@ -26,6 +26,96 @@ import re
 
 
 
+def _build_uhid_search_query(uhid_str):
+    clean = str(uhid_str or '').strip()
+    if not clean:
+        return Q()
+    if '/' in clean:
+        parts = clean.split('/', 1)
+        prefix, num_part = parts[0].strip(), parts[1].strip()
+        if num_part.isdigit():
+            num_int = int(num_part)
+            p6 = str(num_int).zfill(6)
+            p5 = str(num_int).zfill(5)
+            if prefix:
+                return (
+                    Q(uhid__iexact=f'{prefix}/{p6}') |
+                    Q(uhid__iexact=f'{prefix}/{p5}') |
+                    Q(uhid__iexact=f'{prefix}/{num_part}') |
+                    Q(uhid__iexact=clean)
+                )
+            else:
+                return (
+                    Q(uhid__iendswith=f'/{p6}') |
+                    Q(uhid__iendswith=f'/{p5}') |
+                    Q(uhid__iendswith=f'/{num_part}')
+                )
+        elif prefix:
+            return Q(uhid__istartswith=f'{prefix}/')
+        else:
+            return Q(uhid__iexact=clean)
+    elif clean.isdigit():
+        num_int = int(clean)
+        p6 = str(num_int).zfill(6)
+        p5 = str(num_int).zfill(5)
+        return (
+            Q(uhid__iendswith=f'/{p6}') |
+            Q(uhid__iendswith=f'/{p5}') |
+            Q(uhid__iexact=clean)
+        )
+    else:
+        return (
+            Q(uhid__istartswith=f'{clean}/') |
+            Q(uhid__istartswith=clean) |
+            Q(uhid__iexact=clean)
+        )
+
+
+def _build_ip_search_query(ip_str):
+    clean = str(ip_str or '').strip()
+    if not clean:
+        return Q()
+    if '/' in clean:
+        parts = clean.split('/', 1)
+        prefix, num_part = parts[0].strip(), parts[1].strip()
+        if num_part.isdigit():
+            num_int = int(num_part)
+            p6 = str(num_int).zfill(6)
+            p5 = str(num_int).zfill(5)
+            if prefix:
+                return (
+                    Q(ipNumber__iexact=f'{prefix}/{p6}') |
+                    Q(ipNumber__iexact=f'{prefix}/{p5}') |
+                    Q(ipNumber__iexact=f'{prefix}/{num_part}') |
+                    Q(ipNumber__iexact=clean)
+                )
+            else:
+                return (
+                    Q(ipNumber__iendswith=f'/{p6}') |
+                    Q(ipNumber__iendswith=f'/{p5}') |
+                    Q(ipNumber__iendswith=f'/{num_part}')
+                )
+        elif prefix:
+            return Q(ipNumber__istartswith=f'{prefix}/')
+        else:
+            return Q(ipNumber__iexact=clean)
+    elif clean.isdigit():
+        num_int = int(clean)
+        p6 = str(num_int).zfill(6)
+        p5 = str(num_int).zfill(5)
+        return (
+            Q(ipNumber__iendswith=f'/{p6}') |
+            Q(ipNumber__iendswith=f'/{p5}') |
+            Q(ipNumber__iexact=clean)
+        )
+    else:
+        return (
+            Q(ipNumber__istartswith=f'{clean}/') |
+            Q(ipNumber__istartswith=clean) |
+            Q(ipNumber__iexact=clean)
+        )
+
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def op_patient_detail_by_uhid(request, uhid):
@@ -42,12 +132,7 @@ def op_patient_detail_by_uhid(request, uhid):
         if is_search or name_param or mobile_param:
             query = Q()
             if uhid_param:
-                u_clean = uhid_param.strip()
-                u_num = u_clean.lstrip('0')
-                u_q = Q(uhid__icontains=u_clean)
-                if u_num:
-                    u_q |= Q(uhid__icontains=u_num)
-                query &= u_q
+                query &= _build_uhid_search_query(uhid_param)
 
             if name_param:
                 query &= (
@@ -63,7 +148,8 @@ def op_patient_detail_by_uhid(request, uhid):
             if branch_code and branch_code != "system":
                 query &= Q(branch_code=branch_code)
 
-            patients = list(Patient.objects.filter(query).order_by('-created_date')[:100])
+            order_fields = ('-uhid', '-created_date') if uhid_param else ('-created_date',)
+            patients = list(Patient.objects.filter(query).order_by(*order_fields)[:100])
             patient_serializer = PatientSerializer(patients, many=True)
             patient_data = patient_serializer.data
 
@@ -131,15 +217,12 @@ def op_patient_detail_by_uhid(request, uhid):
         patient = Patient.objects.filter(**query).first()
         if not patient:
             u_clean = str(uhid).strip()
-            u_num = u_clean.lstrip('0')
-            fallback_q = Q(uhid__icontains=u_clean)
-            if u_num:
-                fallback_q |= Q(uhid__icontains=u_num)
+            fallback_q = _build_uhid_search_query(u_clean)
             if hospital_code and hospital_code != "system":
                 fallback_q &= Q(hospital_code=hospital_code)
             if branch_code and branch_code != "system":
                 fallback_q &= Q(branch_code=branch_code)
-            patient = Patient.objects.filter(fallback_q).first()
+            patient = Patient.objects.filter(fallback_q).order_by('-uhid').first()
 
         if not patient:
             return Response({"error": "Patient not found"}, status=404)
@@ -173,19 +256,15 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
         if is_search or name_param:
             query = Q()
             if ip_param:
-                ip_clean = ip_param.strip()
-                ip_num = ip_clean.lstrip('0')
-                i_q = Q(ipNumber__icontains=ip_clean)
-                if ip_num:
-                    i_q |= Q(ipNumber__icontains=ip_num)
-                query &= i_q
+                query &= _build_ip_search_query(ip_param)
 
             if hospital_code and hospital_code != "system":
                 query &= Q(hospital_code=hospital_code)
             if branch_code and branch_code != "system":
                 query &= Q(branch_code=branch_code)
 
-            admissions = list(Admission.objects.filter(query).order_by('-created_date')[:100])
+            order_fields = ('-ipNumber', '-created_date') if ip_param else ('-created_date',)
+            admissions = list(Admission.objects.filter(query).order_by(*order_fields)[:100])
             adm_uhids = [a.uhid for a in admissions if a.uhid]
             patients_map = {}
             if adm_uhids:
@@ -259,15 +338,12 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
         admission = Admission.objects.filter(**admission_query).first()
         if not admission:
             ip_clean = str(ipNumber).strip()
-            ip_num = ip_clean.lstrip('0')
-            f_q = Q(ipNumber__icontains=ip_clean)
-            if ip_num:
-                f_q |= Q(ipNumber__icontains=ip_num)
+            fallback_q = _build_ip_search_query(ip_clean)
             if hospital_code and hospital_code != "system":
-                f_q &= Q(hospital_code=hospital_code)
+                fallback_q &= Q(hospital_code=hospital_code)
             if branch_code and branch_code != "system":
-                f_q &= Q(branch_code=branch_code)
-            admission = Admission.objects.filter(f_q).first()
+                fallback_q &= Q(branch_code=branch_code)
+            admission = Admission.objects.filter(fallback_q).order_by('-ipNumber').first()
 
         if not admission:
             return Response(
