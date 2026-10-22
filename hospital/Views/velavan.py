@@ -3127,6 +3127,37 @@ def get_velavan_dashboard_stats(request):
 
         # ── KPI Calculations ──
         gross_sales_amt = sum(to_f(s.get('total_amount')) for s in filtered_sales)
+
+        # Calculate sales taxable amounts from item-level pre-tax values
+        sales_taxable_amt = 0.0
+        for s in filtered_sales:
+            raw_items = normalize_items_payload(s.get('items', []))
+            s_tax = 0.0
+            if raw_items:
+                for itm in raw_items:
+                    it_taxable = to_f(
+                        itm.get('sellingCostBeforeGst') or 
+                        itm.get('taxable_amount') or 
+                        itm.get('taxableAmount')
+                    )
+                    if it_taxable == 0.0:
+                        sc = to_f(itm.get('sellingCost') or itm.get('totalAmount') or itm.get('total_amount'))
+                        tax_p = to_f(itm.get('sellingTax') or itm.get('tax') or (to_f(itm.get('sellingCgstPercent')) + to_f(itm.get('sellingsgstPercent'))))
+                        if sc > 0:
+                            it_taxable = sc / (1.0 + tax_p / 100.0) if tax_p > 0 else sc
+                        else:
+                            usc = to_f(itm.get('unitSellingCost'))
+                            qty = to_f(itm.get('quantity') or 1)
+                            it_taxable = usc * qty
+                    s_tax += it_taxable
+            if s_tax == 0.0:
+                s_tax = to_f(s.get('taxable_amount') or s.get('taxableAmount'))
+            if s_tax == 0.0:
+                s_tot = to_f(s.get('total_amount') or s.get('totalAmount'))
+                s_gst = to_f(s.get('cgst')) + to_f(s.get('sgst'))
+                s_tax = (s_tot - s_gst) if s_tot > s_gst else s_tot
+            sales_taxable_amt += s_tax
+
         # Calculate sales returns taxable amounts from item-level values
         sales_returns_taxable_amt = 0.0
         for sr in filtered_sr:
@@ -3679,4 +3710,4 @@ def get_velavan_dashboard_stats(request):
 
     except Exception as e:
         logger.error(f"Error in get_velavan_dashboard_stats: {str(e)}\n{traceback.format_exc()}")
-        return Response({'status': 'error', 'message': str(e)}, status=500)
+        return Response({'status': 'error', 'message': str(e)}, status=500)
