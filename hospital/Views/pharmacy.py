@@ -27,6 +27,7 @@ from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admi
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
 from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details, get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id, admission_collection, pharmacy_billing_collection
+from ..counter_service import get_next_pharmacy_bill_no
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
@@ -632,14 +633,16 @@ def save_pharmacy_bill(request):
             record.get("billing_status") == "Estimate" and status == "Billed"
         )
 
+        current_outlet_code = outlet_code or record.get("outlet_code")
+
         # ✅ STOCK UPDATE CONTROL
         if not is_estimate_to_bill or qty_changed:
             adjust_blocked_stock(
                 old_meds,
                 medicines,
-                hospital_code,
-                branch_code,
-                outlet_code
+                hospital_code or record.get("hospital_code"),
+                branch_code or record.get("branch_code"),
+                current_outlet_code
             )
 
         update_data = {**fields}
@@ -651,6 +654,13 @@ def save_pharmacy_bill(request):
         update_data["is_dispatched"]        = data.get("is_dispatched", False)   
         update_data["pending_returns"]      = data.get("pending_returns", [])
 
+        if current_outlet_code:
+            update_data["outlet_code"]      = current_outlet_code
+        if hospital_code or record.get("hospital_code"):
+            update_data["hospital_code"]    = hospital_code or record.get("hospital_code")
+        if branch_code or record.get("branch_code"):
+            update_data["branch_code"]      = branch_code or record.get("branch_code")
+
         # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
             update_data["billing_status"] = "Estimate"
@@ -659,7 +669,11 @@ def save_pharmacy_bill(request):
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
             if not record.get("bill_no"):
-                update_data["bill_no"] = get_last_oppharmacy_billno(get_financial_year())
+                update_data["bill_no"] = get_next_pharmacy_bill_no(
+                    outlet_code=current_outlet_code,
+                    fy=get_financial_year(),
+                    db_instance=mongo_db
+                )
 
             update_data["billing_status"] = "Billed"
             update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
@@ -729,7 +743,11 @@ def save_pharmacy_bill(request):
 
         # 🔥 DIRECT BILL
         if status == "Billed":
-            bill_no = get_last_oppharmacy_billno(get_financial_year())
+            bill_no = get_next_pharmacy_bill_no(
+                outlet_code=outlet_code,
+                fy=get_financial_year(),
+                db_instance=mongo_db
+            )
 
             record_doc.update({
                 "bill_no":      bill_no,
@@ -872,24 +890,17 @@ def get_financial_year():
 
     return f"{start:02d}{end:02d}"
 
-# HELPER: GET LAST BILL NO
+# HELPER: GET LAST BILL NO (Now atomic & outlet-wise via counter_service)
 
-def get_last_oppharmacy_billno(fy):
-    last_bill = bill_collection.find_one(
-        {"bill_no": {"$regex": f"^{fy}/"}},
-        sort=[("bill_no", -1)],
-        projection={"bill_no": 1}
+def get_last_oppharmacy_billno(fy=None, outlet_code=None):
+    if isinstance(fy, str) and not fy.isdigit() and outlet_code is None:
+        outlet_code = fy
+        fy = None
+    return get_next_pharmacy_bill_no(
+        outlet_code=outlet_code,
+        fy=fy or get_financial_year(),
+        db_instance=mongo_db
     )
-
-    if not last_bill or not last_bill.get("bill_no"):
-        return f"{fy}/000001"
-
-    try:
-        last_no = int(str(last_bill["bill_no"]).split("/")[-1])
-        next_no = last_no + 1
-        return f"{fy}/{next_no:06d}"
-    except (ValueError, IndexError):
-        return f"{fy}/000001"
 
 
 
@@ -2912,7 +2923,12 @@ def finalize_bill(request):
         if not bill.get("bill_no"):
 
             fy          = get_financial_year()
-            new_bill_no = get_last_oppharmacy_billno(fy)
+            outlet      = outlet_code or bill.get("outlet_code")
+            new_bill_no = get_next_pharmacy_bill_no(
+                outlet_code=outlet,
+                fy=fy,
+                db_instance=mongo_db
+            )
             bill_date   = datetime.utcnow()
 
             bill_collection.update_one(
