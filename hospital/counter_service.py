@@ -7,6 +7,7 @@ across huge migrated datasets for:
 3. Inventory (PharmacyItem, Vendor, Category, ChemicalComposition, GRN Draft)
 4. Rooms (RoomCategory, Block, NursingStation/Ward, ServiceDescription, KitItems, Shifting)
 5. Discharge Billing (Bill Number)
+6. Pharmacy Billing (Outlet-Wise Bill Number)
 """
 
 import os
@@ -128,6 +129,31 @@ def _resolve_seed_discharge_bill(db, fy):
     return 0
 
 
+def _resolve_seed_pharmacy_bill(db, outlet_code, fy):
+    """Finds maximum bill_no sequence for an outlet under financial year fy."""
+    clean_outlet = str(outlet_code or "").strip()
+    match_q = {"bill_no": {"$regex": f"^{fy}/"}}
+    if clean_outlet and clean_outlet != "DEFAULT":
+        match_q["outlet_code"] = clean_outlet
+
+    latest_bills = list(db["hospital_pharmacybilling"].find(
+        match_q,
+        projection={"bill_no": 1}
+    ).sort("bill_no", -1).limit(10))
+
+    max_no = 0
+    for b in latest_bills:
+        bn = str(b.get("bill_no") or "").strip()
+        if "/" in bn:
+            try:
+                num = int(bn.split("/")[-1])
+                if num > max_no:
+                    max_no = num
+            except Exception:
+                pass
+    return max_no
+
+
 def _resolve_seed_pharmacy_item(db):
     latest = db["hospital_pharmacyitem"].find_one(sort=[("item_id", -1)], projection={"item_id": 1})
     if latest and latest.get("item_id") is not None:
@@ -238,13 +264,20 @@ def _resolve_seed_room_kit(db):
 # Core Atomic Sequence Generator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0):
+def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db_instance=None):
     """
     Atomically increments and returns the next integer sequence for counter_name.
     - If the counter doesn't exist in MongoDB, it seeds from seed_resolver(db) or default_seed.
     - Uses find_one_and_update with $inc and ReturnDocument.AFTER.
+    - If db_instance is provided, it reuses the connection without closing it.
     """
-    client, db = _get_db()
+    should_close = False
+    if db_instance is not None:
+        db = db_instance
+    else:
+        client, db = _get_db()
+        should_close = True
+
     try:
         counters = db["counters"]
         existing = counters.find_one({"_id": counter_name})
@@ -279,7 +312,11 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0):
         )
         return doc["seq"]
     finally:
-        client.close()
+        if should_close:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,3 +454,22 @@ def get_next_room_kit_id():
         "rooms_kit_id",
         seed_resolver=_resolve_seed_room_kit
     )
+
+
+# 6. Pharmacy Billing Bill Number (Outlet-Wise)
+def get_next_pharmacy_bill_no(outlet_code=None, fy=None, db_instance=None):
+    """
+    Returns next sequential, outlet-wise Pharmacy bill number, e.g. '2627/000012'.
+    Database-backed and atomic via MongoDB 'counters' collection.
+    Independent series maintained per outlet_code.
+    """
+    clean_outlet = str(outlet_code or "DEFAULT").strip()
+    year_prefix = fy or _current_fin_year_prefix()
+    counter_name = f"pharmacy_bill_{clean_outlet}_{year_prefix}"
+
+    seq = get_next_sequence_value(
+        counter_name,
+        seed_resolver=lambda db: _resolve_seed_pharmacy_bill(db, clean_outlet, year_prefix),
+        db_instance=db_instance
+    )
+    return f"{year_prefix}/{seq:06d}"
