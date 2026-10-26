@@ -5,21 +5,19 @@ from ..serializers import SurgeryScheduleSerializer, SurgeryScheduleWriteSeriali
 from pyauth.auth import HasRoleAndDataPermission
 from django.utils import timezone
 from django.db import connections
-import traceback, json, re, requests
+import traceback, json, re, requests, logging
 from datetime import datetime, date as date_type
 import os
 
 from pymongo import MongoClient
-from pymongo import MongoClient
 import pytz
-from datetime import datetime
 from ..models import PharmacyBilling
 from ..models import ImplantRequest, VelavanItems 
 from bson.decimal128 import Decimal128
 from django.http import JsonResponse
-from ..models import VelavanItems 
 from ..models import Admission, Patient, InsuranceProvider
 
+logger = logging.getLogger(__name__)
 
 client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
 hms_db   = client[os.getenv("HMS_DB_NAME", "HMS")]
@@ -67,7 +65,7 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
         clean_ips = [str(ip).strip() for ip in ip_numbers if ip]
         admissions = list(adm_col.find(
             {"ipNumber": {"$in": clean_ips}},
-            {"ipNumber": 1, "uhid": 1, "age": 1, "age_type": 1, "is_admitted": 1, "is_discharged": 1}
+            {"ipNumber": 1, "uhid": 1, "age": 1, "age_type": 1, "is_admitted": 1, "is_discharged": 1, "is_high_risk": 1, "high_risk_reason": 1, "high_risk_date": 1}
         ))
         if not admissions:
             global_client.close()
@@ -113,6 +111,9 @@ def _bulk_get_patient_info(ip_numbers: set) -> dict:
                 "gender":        pt.get("gender"),
                 "customer_type": pt.get("customer_type"),
                 "company_name":  code_to_name.get(cc) if cc else None,
+                "is_high_risk":  bool(adm.get("is_high_risk", False)),
+                "high_risk_reason": adm.get("high_risk_reason") or "",
+                "high_risk_date": adm.get("high_risk_date").isoformat() if hasattr(adm.get("high_risk_date"), "isoformat") else (str(adm.get("high_risk_date")) if adm.get("high_risk_date") else None),
             }
 
         return result
@@ -250,6 +251,9 @@ def _enrich_bulk(records: list) -> list:
             "gender":        pt.get("gender"),
             "customer_type": pt.get("customer_type"),
             "company_name":  pt.get("company_name"),
+            "is_high_risk":  pt.get("is_high_risk", False),
+            "high_risk_reason": pt.get("high_risk_reason", ""),
+            "high_risk_date": pt.get("high_risk_date"),
 
             "ot_name":         ot_map.get(r.get("ot_id")),
             "anesthesia_name": anes_map.get(r.get("anesthesia_id")),
@@ -1937,7 +1941,7 @@ def get_implant_requests(request):
                     "ipNumber":    rec.inpatient_number,
                     "surgeryRef":  rec.surgery_ref or "",
                     "surgeon_id":  rec.surgeon_id or "",
-                    "items":       _normalize_items(rec.items),
+                    "items":       items,
                     "status":      rec.status,
                     "reqDate":     created.strftime("%d-%m-%Y") if created else "",
                     "reqTime":     created.strftime("%I:%M %p") if created else "",

@@ -320,6 +320,9 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                     'is_admitted': getattr(adm, 'is_admitted', False),
                     'is_discharged': adm.is_discharged,
                     'admitted': getattr(adm, 'is_admitted', False) and not adm.is_discharged,
+                    'is_high_risk': bool(getattr(adm, 'is_high_risk', False)),
+                    'high_risk_reason': getattr(adm, 'high_risk_reason', '') or '',
+                    'high_risk_date': getattr(adm, 'high_risk_date', None).isoformat() if hasattr(getattr(adm, 'high_risk_date', None), 'isoformat') else (str(getattr(adm, 'high_risk_date', '')) if getattr(adm, 'high_risk_date', None) else None),
                 })
 
             return Response({
@@ -428,6 +431,9 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'reasonForAdmission': admission.reasonForAdmission,
             'is_discharged': admission.is_discharged,
             'is_admitted': getattr(admission, 'is_admitted', False),
+            'is_high_risk': bool(getattr(admission, 'is_high_risk', False)),
+            'high_risk_reason': getattr(admission, 'high_risk_reason', '') or '',
+            'high_risk_date': getattr(admission, 'high_risk_date', None).isoformat() if hasattr(getattr(admission, 'high_risk_date', None), 'isoformat') else (str(getattr(admission, 'high_risk_date', '')) if getattr(admission, 'high_risk_date', None) else None),
             'salutation': getattr(patient, 'salutation', ''),
             'firstName': patient.firstName,
             'lastName': patient.lastName,

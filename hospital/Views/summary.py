@@ -355,6 +355,40 @@ def delete_summary_heading(request, heading_no):
             client.close()
 
 
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def summary_clinical_notes(request):
+    """
+    Get list of active summary clinical notes titles from hospital_summary_clinicalNotes collection sorted by title_no
+    """
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        notes_collection = hms_db['hospital_summary_clinicaNotes']
+
+        notes = list(notes_collection.find(
+            {"is_active": True},
+            {"_id": 0, "title_no": 1, "title_name": 1, "is_active": 1}
+        ))
+
+        def sort_key(item):
+            try:
+                return int(item.get('title_no', 0))
+            except (ValueError, TypeError):
+                return 9999
+
+        notes.sort(key=sort_key)
+        return Response(notes, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Error fetching summary clinical notes titles: {str(e)}")
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
+
 
 from datetime import datetime
 
@@ -494,13 +528,33 @@ def get_summaries(request):
                 full_name = f"{p.get('salutation', '')} {p.get('firstName', '')} {p.get('lastName', '')}".strip()
                 patient_map[p['uhid']] = full_name
 
-            # Attach names and convert approve_time to IST (+5:30)
+            # ── Batch admission fetch for is_high_risk ──
+            ip_nos = list({str(s.get('ipNo')).strip() for s in summaries if s.get('ipNo')})
+            adm_map = {}
+            if ip_nos:
+                adm_query = {"ipNumber": {"$in": ip_nos}}
+                if hospital_code:
+                    adm_query["hospital_code"] = hospital_code
+                if branch_code:
+                    adm_query["branch_code"] = branch_code
+                for adm in hms_db['hospital_admission'].find(
+                    adm_query,
+                    {"_id": 0, "ipNumber": 1, "is_high_risk": 1, "high_risk_reason": 1, "high_risk_date": 1}
+                ):
+                    adm_map[str(adm.get('ipNumber'))] = adm
+
+            # Attach names, high risk flags, and convert approve_time to IST (+5:30)
             from datetime import timezone, timedelta
             IST = timezone(timedelta(hours=5, minutes=30))
 
             for s in summaries:
                 uhid = s.get('uhid', '')
                 s['patient'] = patient_map.get(uhid, s.get('patient', ''))
+                adm_info = adm_map.get(str(s.get('ipNo', '')).strip(), {})
+                s['is_high_risk'] = bool(adm_info.get('is_high_risk', False))
+                s['high_risk_reason'] = adm_info.get('high_risk_reason') or ''
+                hr_d = adm_info.get('high_risk_date')
+                s['high_risk_date'] = hr_d.isoformat() if hasattr(hr_d, 'isoformat') else str(hr_d or '')
 
                 ap = s.get('approve_time')
                 if ap:
@@ -893,9 +947,24 @@ def get_editsummary(request, ip_no):
                 full_name = f"{patient.get('salutation', '')} {patient.get('firstName', '')} {patient.get('lastName', '')}".strip()
                 full_address = ", ".join(p for p in [patient.get('area'), patient.get('city'), patient.get('state')] if p)
                 summary['patient'] = full_name
-                summary['age']     = patient.get('age', '')
+                summary['age']     = patient.get('age') or summary.get('age', '')
                 summary['gender']  = patient.get('gender', '')
                 summary['address'] = full_address
+
+        # ── Admission details (is_high_risk & high_risk_reason) ──
+        adm_doc = db['hospital_admission'].find_one(
+            {"ipNumber": decoded_ip_no},
+            {"_id": 0, "is_high_risk": 1, "high_risk_reason": 1, "high_risk_date": 1}
+        )
+        if adm_doc:
+            summary['is_high_risk']     = bool(adm_doc.get('is_high_risk', False))
+            summary['high_risk_reason'] = adm_doc.get('high_risk_reason') or ''
+            hr_date = adm_doc.get('high_risk_date')
+            summary['high_risk_date']   = hr_date.isoformat() if hasattr(hr_date, 'isoformat') else str(hr_date or '')
+        else:
+            summary['is_high_risk']     = False
+            summary['high_risk_reason'] = ''
+            summary['high_risk_date']   = None
 
         # ── fieldsData: hand back exactly as stored ──────────────────────────
         # Stored natively in Mongo as an array: [{"key": "...", "value": "..."}, ...]
@@ -1155,6 +1224,21 @@ def get_printsummary(request, ip_no):
         # Guarantee gender is always a string
         if not summary.get('gender'):
             summary['gender'] = ''
+
+        # ── Admission details for High Risk ──
+        adm_doc = hms_db['hospital_admission'].find_one(
+            {"ipNumber": decoded_ip_no},
+            {"_id": 0, "is_high_risk": 1, "high_risk_reason": 1, "high_risk_date": 1}
+        )
+        if adm_doc:
+            summary['is_high_risk']     = bool(adm_doc.get('is_high_risk', False))
+            summary['high_risk_reason'] = adm_doc.get('high_risk_reason') or ''
+            hr_d = adm_doc.get('high_risk_date')
+            summary['high_risk_date']   = hr_d.isoformat() if hasattr(hr_d, 'isoformat') else str(hr_d or '')
+        else:
+            summary['is_high_risk']     = False
+            summary['high_risk_reason'] = ''
+            summary['high_risk_date']   = None
 
         # Init test fields
         summary['testdetails']  = []
@@ -1691,3 +1775,101 @@ def get_patient_discharge_medicines(request, ip_no):
     finally:
         if client:
             client.close()
+
+
+def clinical_nlp_summarize(raw_text, field_name=""):
+    """Fallback text normalizer without any hardcoded sentences or rules."""
+    if not raw_text or not str(raw_text).strip():
+        return ""
+    return str(raw_text).strip()
+
+
+def summarize_with_gemini(raw_text, field_name, patient_name, api_key):
+    """Dynamically improvise, translate, elevate, and refine notes using Google Gemini with zero hardcoding."""
+    models_to_try = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    prompt = (
+        f"You are a master medical editor, clinical documentation specialist, and expert in advanced English prose.\n"
+        f"Your task is to dynamically improvise, translate, rewrite, and elevate the following clinical notes for the '{field_name}' section of a hospital discharge summary.\n\n"
+        f"CORE INSTRUCTIONS:\n"
+        f"1. DYNAMIC MULTILINGUAL TRANSLATION: The input may be spoken or dictated in English, Tamil, or Hindi. Dynamically comprehend all linguistic context, semantics, and intent, and seamlessly translate everything into formal, fluent, professional medical English.\n"
+        f"2. REMOVE ALL GRAMMATICAL MISTAKES & SYNTACTIC ERRORS: Thoroughly correct all grammar, faulty sentence structures, run-on clauses, incorrect tenses, fragmentations, subject-verb disagreements, punctuation errors, and awkward phrasing.\n"
+        f"3. USE ADVANCED ENGLISH & ELEVATED MEDICAL VOCABULARY: Dynamically transform basic, conversational, or dictated words into sophisticated, articulate, high-level English words and authoritative clinical phrasing appropriate for a premier medical center discharge document.\n"
+        f"4. STRICTLY NO SUBTITLES, HEADERS, OR CATEGORY LABELS: Do NOT insert any subtitles, bold headers, section markers, or category titles.\n"
+        f"5. STRICTLY NO BULLET POINTS: Write as a continuous, coherent, flowing clinical narrative paragraph.\n"
+        f"6. PRESERVE 100% CLINICAL FACTS & FIDELITY: Retain every diagnostic finding, procedure detail, device dimension, medication name, dosage, and date with complete fidelity. Do not fabricate or invent unstated clinical conditions.\n"
+        f"7. OUTPUT: Output ONLY the improvised advanced English text directly. No conversational preamble, no closing remarks, and no markdown code fences.\n\n"
+        f"Clinical notes to improvise:\n{raw_text}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
+    }
+
+    for model_name in models_to_try:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            res = requests.post(url, json=payload, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                candidates = data.get('candidates', [])
+                if candidates:
+                    parts = candidates[0].get('content', {}).get('parts', [])
+                    if parts:
+                        text = parts[0].get('text', '').strip()
+                        # Strip conversational greeting if LLM added any
+                        text = re.sub(r'^(here is (a|the) (concise|clinical|formatted|patient)?\s*(summary|notes?).*?:?\s*\n+)', '', text, flags=re.IGNORECASE)
+                        # Remove markdown backtick code blocks if any
+                        text = re.sub(r'^```(?:markdown)?\s*', '', text)
+                        text = re.sub(r'\s*```$', '', text)
+                        # Strip any unwanted subtitles or bold headers like **Header:**
+                        text = re.sub(r'^\*\*[^*]+:\*\*\s*\n*', '', text)
+                        text = re.sub(r'\n+\*\*[^*]+:\*\*\s*\n*', ' ', text)
+                        # Strip leading bullet dots if any
+                        text = re.sub(r'^[•\-\*]\s*', '', text, flags=re.MULTILINE)
+                        # Normalize multiple whitespace/newlines into clean continuous paragraphs
+                        text = re.sub(r'\n\s*\n+', '\n\n', text).strip()
+                        if text:
+                            return text
+        except Exception as e:
+            logger.warning(f"Gemini {model_name} summarization failed: {e}")
+            continue
+
+    return None
+
+
+@api_view(['POST'])
+def ai_summarize_notes(request):
+    """
+    Endpoint: /ai-summarize-notes/
+    Summarizes and improvises raw or voice-dictated clinical notes into professional medical discharge prose using Google Gemini.
+    """
+    raw_text = request.data.get('text', '')
+    field_name = request.data.get('field', 'CLINICAL NOTES')
+    patient_name = request.data.get('patient_name', '')
+
+    if not raw_text or not str(raw_text).strip():
+        return Response({"error": "No notes provided to summarize"}, status=status.HTTP_400_BAD_REQUEST)
+
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    gemini_key = os.getenv('HMS_DS_GEMINI_API_KEY')
+    if not gemini_key:
+        return Response({
+            "success": False,
+            "error": "HMS_DS_GEMINI_API_KEY not configured in backend .env."
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    summarized_text = summarize_with_gemini(raw_text, field_name, patient_name, gemini_key)
+
+    if not summarized_text:
+        return Response({
+            "success": False,
+            "error": "Gemini AI could not improvise notes. Please verify API key quota and network connection."
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        "success": True,
+        "summarized": summarized_text,
+        "original": raw_text,
+    }, status=status.HTTP_200_OK)
