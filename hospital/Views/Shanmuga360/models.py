@@ -10,7 +10,6 @@ class registration360(AuditModel):
     bill_number       =  models.CharField(max_length=50, blank=True, null=True)
     medicine_bill_number = models.CharField(max_length=50, blank=True, null=True)
     lab_test_bill_number = models.CharField(max_length=50, blank=True, null=True)
-    labtestbillnumber = models.CharField(max_length=50, blank=True, null=True)
     patient_name      =  models.CharField(max_length=255, blank=True, null=True)
     mobile_number    = models.CharField(max_length=20, blank=True, null=True)
     doctor_name       = RawJSONField(default=list, blank=True, null=True)
@@ -30,10 +29,12 @@ class registration360(AuditModel):
     test_name             = RawJSONField(default=list, blank=True, null=True)
     reference_id    =  models.CharField(max_length=50, blank=True, null=True) 
     order_id        =  models.CharField(max_length=50, blank=True, null=True) 
-    
-    
-    
-    
+    delivery_fee          =  models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=0.0)
+    lab_delivery_fee      =  models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=0.0)
+    medicine_delivery_fee =  models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, default=0.0)
+    is_app_booking        =  models.BooleanField(default=False, blank=True, null=True)
+    app_booking           =  models.CharField(max_length=50, default="Manual", blank=True, null=True)
+    payment_mode          =  models.CharField(max_length=50, blank=True, null=True)
 
     
    

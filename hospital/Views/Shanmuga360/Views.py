@@ -162,7 +162,9 @@ def shanmuga360_report(request):
                 Q(staff_name__icontains=s) |
                 Q(home_care_type__icontains=s) |
                 Q(reference_id__icontains=s) |
-                Q(order_id__icontains=s)
+                Q(order_id__icontains=s) |
+                Q(payment_mode__icontains=s) |
+                Q(app_booking__icontains=s)
             )
 
         records = records.order_by('-date', '-created_date')
