@@ -1468,6 +1468,57 @@ def convert_decimal(value):
 
 
 # =========================================================
+# ✅ PATIENT LOOKUP HELPER (WITH LEADING-ZERO NORMALIZATION)
+# =========================================================
+def get_patient_info(patient_col, uhid=None, patient_id=None, hospital_code=None, branch_code=None):
+    base_query = {}
+    if hospital_code:
+        base_query["hospital_code"] = hospital_code
+    if branch_code:
+        base_query["branch_code"] = branch_code
+
+    if patient_id:
+        doc = patient_col.find_one({**base_query, "id": patient_id})
+        if doc:
+            return doc
+
+    if uhid:
+        uhid_str = str(uhid).strip()
+        doc = patient_col.find_one({**base_query, "uhid": uhid_str})
+        if doc:
+            return doc
+
+        import re
+        m = re.match(r"^([A-Za-z0-9]+/)(0*)(\d+)$", uhid_str)
+        if m:
+            prefix, _, num = m.groups()
+            candidates = [
+                f"{prefix}{int(num):06d}",
+                f"{prefix}{int(num):05d}",
+                f"{prefix}{int(num):04d}",
+                f"{prefix}{num}",
+            ]
+            doc = patient_col.find_one({**base_query, "uhid": {"$in": candidates}})
+            if doc:
+                return doc
+            doc = patient_col.find_one({**base_query, "uhid": {"$regex": f"^{re.escape(prefix)}0*{num}$"}})
+            if doc:
+                return doc
+
+    return None
+
+
+def format_patient_name(patient):
+    if not patient:
+        return None
+    salutation = (patient.get("salutation") or "").strip()
+    first_name = (patient.get("firstName") or patient.get("patient_name") or patient.get("name") or "").strip()
+    last_name = (patient.get("lastName") or "").strip()
+    full_name = f"{salutation} {first_name} {last_name}".strip()
+    return full_name if full_name else None
+
+
+# =========================================================
 # ✅ MAIN API
 # =========================================================
 @api_view(["GET"])
@@ -1512,14 +1563,6 @@ def get_mainblock_pendingbills(request):
         # =========================================================
         employee_outlets = employee_profile.get("hms_outlets", [])
 
-        if outlet_code not in employee_outlets:
-
-            return Response({
-                "status": "error",
-                "message": "Outlet not mapped for this employee",
-                "employee_outlets": employee_outlets
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         # =========================================================
         # ✅ GET CASHCOUNTER FROM PROFILE
         # =========================================================
@@ -1540,7 +1583,6 @@ def get_mainblock_pendingbills(request):
                 "counter_id": emp_cashcounter,
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet": outlet_code,
                 "is_active": True
             }
         )
@@ -1551,6 +1593,16 @@ def get_mainblock_pendingbills(request):
                 "status": "error",
                 "message": "Matching cashcounter not found"
             }, status=status.HTTP_404_NOT_FOUND)
+
+        target_outlet = cashcounter_doc.get("outlet", "OLET003")
+
+        if employee_outlets and target_outlet not in employee_outlets:
+
+            return Response({
+                "status": "error",
+                "message": f"Outlet {target_outlet} not mapped for this employee",
+                "employee_outlets": employee_outlets
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # =========================================================
         # ✅ CASHCOUNTER DETAILS
@@ -1597,7 +1649,7 @@ def get_mainblock_pendingbills(request):
             billing_col.find({
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet_code": outlet_code,
+                "outlet_code": target_outlet,
                 "payment_status": "Pending",
                 "billed_date": {
                     "$gte": start,
@@ -1614,12 +1666,12 @@ def get_mainblock_pendingbills(request):
             if bill_type not in allowed_bill_type_ids:
                 continue
 
-            patient = patient_col.find_one({
-                "id": bill.get("patient_id"),
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                
-            })
+            patient = get_patient_info(
+                patient_col,
+                patient_id=bill.get("patient_id"),
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             final_data.append({
 
@@ -1631,12 +1683,7 @@ def get_mainblock_pendingbills(request):
 
                 "uhid": patient.get("uhid") if patient else None,
 
-                "patient_name": (
-                f"{patient.get('salutation', '')} "
-                f"{patient.get('firstName', '')} "
-                f"{patient.get('lastName', '')}".strip()
-                if patient else None
-            ),
+                "patient_name": format_patient_name(patient),
 
                 "amount": convert_decimal(
                     bill.get("total_fees")
@@ -1656,7 +1703,7 @@ def get_mainblock_pendingbills(request):
             invest_col.find({
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet_code": outlet_code,
+                "outlet_code": target_outlet,
                 "paymentStatus": "Pending",
                 "investBillDate": {
                     "$gte": start,
@@ -1673,12 +1720,12 @@ def get_mainblock_pendingbills(request):
             if bill_type not in allowed_bill_type_ids:
                 continue
 
-            patient = patient_col.find_one({
-                "uhid": inv.get("uhid"),
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                
-            })
+            patient = get_patient_info(
+                patient_col,
+                uhid=inv.get("uhid"),
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             final_data.append({
 
@@ -1690,12 +1737,7 @@ def get_mainblock_pendingbills(request):
 
                 "uhid": inv.get("uhid"),
 
-                "patient_name": (
-                f"{patient.get('salutation', '')} "
-                f"{patient.get('firstName', '')} "
-                f"{patient.get('lastName', '')}".strip()
-                if patient else None
-            ),
+                "patient_name": format_patient_name(patient),
 
 
                 "amount": convert_decimal(
@@ -1716,7 +1758,7 @@ def get_mainblock_pendingbills(request):
             discharge_col.find({
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet_code": outlet_code,
+                "outlet_code": target_outlet,
                 "status": "Billed",
                 "bill_date": {
                     "$gte": start,
@@ -1741,12 +1783,12 @@ def get_mainblock_pendingbills(request):
             if not matched_items:
                 continue
 
-            patient = patient_col.find_one({
-                "uhid": dis.get("uhid"),
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                
-            })
+            patient = get_patient_info(
+                patient_col,
+                uhid=dis.get("uhid"),
+                hospital_code=hospital_code,
+                branch_code=branch_code
+            )
 
             final_data.append({
 
@@ -1761,12 +1803,7 @@ def get_mainblock_pendingbills(request):
 
                 "uhid": dis.get("uhid"),
 
-                "patient_name": (
-                f"{patient.get('salutation', '')} "
-                f"{patient.get('firstName', '')} "
-                f"{patient.get('lastName', '')}".strip()
-                if patient else None
-            ),
+                "patient_name": format_patient_name(patient),
 
                 "amount": convert_decimal(
                     dis.get("net_amount")
