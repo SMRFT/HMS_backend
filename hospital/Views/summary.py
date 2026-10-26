@@ -365,7 +365,7 @@ def summary_clinical_notes(request):
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db = client['HMS']
-        notes_collection = hms_db['hospital_summary_clinicaNotes']
+        notes_collection = hms_db['hospital_summary_clinicalNotes']
 
         notes = list(notes_collection.find(
             {"is_active": True},
