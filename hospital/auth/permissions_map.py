@@ -285,6 +285,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/summaries/?(\?.*)?$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/summary-type/?.*$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/summary-heading/?.*$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/summary-clinical-notes/?.*$': 'HMS-P-SUM',                  
     '/_b_a_c_k_e_n_d/HMS/summaries/create/': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/approve-summary(?:/[^/]+)+/$': 'HMS-P-SUMA',                  
     r'^/_b_a_c_k_e_n_d/HMS/delete-summary(?:/[^/]+)+/$': 'HMS-P-SUMD',                  

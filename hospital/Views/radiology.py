@@ -460,6 +460,27 @@ def get_investigations(request):
                 if emp_id:
                     diagnostics_profile_cache[emp_id] = p.get('employeeName', '')
 
+        # ── 5c. Admission Cache for IP Patients (High Risk) ──────────────────
+        ip_numbers = list({
+            str(r.get('ipNumber')).strip()
+            for r in filtered_records
+            if r.get('ipNumber') and str(r.get('ipNumber')).strip() not in ('', '—', 'None', 'NA', 'na', 'null')
+        })
+        admission_map = {}
+        if ip_numbers:
+            admission_coll = db['hospital_admission']
+            adm_filter = {'ipNumber': {'$in': ip_numbers}}
+            if hospital_code:
+                adm_filter['hospital_code'] = hospital_code
+            if branch_code:
+                adm_filter['branch_code'] = branch_code
+            admissions = list(admission_coll.find(
+                adm_filter,
+                {'_id': 0, 'ipNumber': 1, 'is_high_risk': 1, 'high_risk_reason': 1, 'high_risk_date': 1}
+            ))
+            for a in admissions:
+                admission_map[str(a.get('ipNumber'))] = a
+
         # ── 6. Batch Radiology Format Cache ──────────────────────────────────
         all_item_ids = set()
         for record in filtered_records:
@@ -570,6 +591,14 @@ def get_investigations(request):
                 base['referredByName'] = 'SELF'
             else:
                 base['referredByName'] = diagnostics_profile_cache.get(str(ref_val), '')
+
+            # ── High Risk Alert from Admission ────────────────────────────────
+            ip_val = str(record.get('ipNumber') or '').strip()
+            adm_info = admission_map.get(ip_val, {})
+            base['is_high_risk']     = bool(adm_info.get('is_high_risk', False))
+            base['high_risk_reason'] = adm_info.get('high_risk_reason') or ''
+            hr_d = adm_info.get('high_risk_date')
+            base['high_risk_date']   = hr_d.isoformat() if hasattr(hr_d, 'isoformat') else str(hr_d or '') if hr_d else None
 
             for item in matched_items:
                 raw_item_id = item.get('item_id') or item.get('test_id')
