@@ -864,7 +864,7 @@ def admission_view(request):
     employee_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
-    outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
+    outlet_code   = request.data.get('auth-outlet-code')
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
@@ -1202,7 +1202,7 @@ def admission_detail(request, ipNumber):
         employee_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
         hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
         branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
-        outlet_code   = (request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system")
+        outlet_code   = request.data.get('auth-outlet-code')
 
         from django.db.models import Q
         adm = Admission.objects.filter(
@@ -1609,7 +1609,7 @@ def admission_advance(request, ipNumber=None):
         employee_id   = request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system"
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
         branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
-        outlet_code   = request.data.get("auth-outlet-code")   or request.headers.get("Outlet-Code")        or "system"
+        outlet_code   = request.data.get('auth-outlet-code')
         now_iso = timezone.now().isoformat()
 
         # ── GET ───────────────────────────────────────────────────────────────
