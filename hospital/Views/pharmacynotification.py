@@ -23,12 +23,19 @@ def pharmacy_notifications(request):
             request.headers.get("auth-branch-code") or
             request.headers.get("Branch-Code")
         )
-        outlet_code = (
-            request.GET.get("outlet_code") or
-            request.headers.get("auth-outlet-code") or
-            request.headers.get("outlet-code") or
-            ""
-        ).strip()
+
+        if not hasattr(request, "data") or not isinstance(getattr(request, "data", None), dict):
+            request.data = {}
+        if not request.data.get("auth-outlet-code"):
+            request.data["auth-outlet-code"] = (
+                request.headers.get("auth-outlet-code") or
+                request.headers.get("Outlet-Code") or
+                request.headers.get("outlet-code") or
+                request.GET.get("outlet_code") or
+                ""
+            ).strip()
+
+        outlet_code = request.data.get('auth-outlet-code')
 
         _, db = get_hms_db()
 

@@ -93,6 +93,8 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/admission-advance/.+/?(\?.*)?$': 'HMS-P-AA',
     r'^/_b_a_c_k_e_n_d/HMS/today-registered-patients/?(\?.*)?$': 'HMS-P-ADML',
     r'^/_b_a_c_k_e_n_d/HMS/admission-requests/?(\?.*)?$': 'HMS-P-ADML',
+    r'^/_b_a_c_k_e_n_d/HMS/ip-patient-analysis/?(\?.*)?$': 'HMS-P-IPA',
+
 
 
     # ==================== INVENTORY ====================
@@ -229,7 +231,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/patient-vaccination(?:/[^/]+)+/$': 'HMS-P-HVCC',
     '/_b_a_c_k_e_n_d/HMS/save-patient-vaccination/': 'HMS-P-HVCC',
 
-     #Investigation Billing:
+    #Investigation Billing:
     r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
@@ -299,8 +301,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
-
-        '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
+    '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
     r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
 
     #HR: 
@@ -334,7 +335,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/medicine-packages/create/': 'HMS-P-MPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/medicine-packages(?:/[^/]+)+/$': 'HMS-P-MPKG',                  
     r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/update(?:/[^/]+)+/$': 'HMS-P-MPKGE',                  
-    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/delete(?:/[^/]+)+/$': 'HMS-P-MPKGD',   
+    r'^/_b_a_c_k_e_n_d/HMS/medicine-packages/delete(?:/[^/]+)+/$': 'HMS-P-MPKGD',
+
     #Bill Type Master:
     '/_b_a_c_k_e_n_d/HMS/bill-types_get/': 'HMS-P-BT',                  
     '/_b_a_c_k_e_n_d/HMS/bill-types/create/': 'HMS-P-BT',                  

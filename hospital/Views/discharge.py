@@ -35,6 +35,7 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+from django.http import JsonResponse
 import requests
 import re
 import logging
@@ -288,6 +289,10 @@ def _sanitize_item(it):
 
     return {
         "itemName":         str(it.get("itemName") or ""),
+        "code":             str(it.get("code") or it.get("test_id") or ""),
+        "nabh_code":        str(it.get("nabh_code") or it.get("nabhCode") or "").strip(),
+        "nabh_rate":        _to_float(it.get("nabh_rate", 0)) if it.get("nabh_rate") is not None else None,
+        "non_nabh_rate":    _to_float(it.get("non_nabh_rate", 0)) if it.get("non_nabh_rate") is not None else None,
         "quantity":         it.get("quantity", 1),
         "rate":             it.get("rate") if it.get("rate") is not None else it.get("price", 0),
         "discount":         _to_float(it.get("discount", 0)),
@@ -298,6 +303,7 @@ def _sanitize_item(it):
         "billTypeNo":       str(it.get("billTypeNo") or ""),
         "item_description": str(it.get("item_description") or it.get("billTypeNo") or ""),
         "package_name":     str(it.get("package_name") or ""),
+        "rate_category":    str(it.get("rate_category") or it.get("_rateCategory") or "").strip(),
         "doctors":          clean_doctors,
     }
 
@@ -744,11 +750,7 @@ def _apply_fields(obj, data, existing=None, request=None):
         if not branch_code and hasattr(request, "headers"):
             branch_code = request.headers.get("X-Branch-Code") or request.headers.get("branch-code")
 
-    outlet_code = data.get("outlet_code") or data.get("auth-outlet-code")
-    if not outlet_code and request:
-        outlet_code = getattr(request, "data", {}).get("auth-outlet-code") if isinstance(getattr(request, "data", None), dict) else None
-        if not outlet_code and hasattr(request, "headers"):
-            outlet_code = request.headers.get("X-Outlet-Code") or request.headers.get("outlet-code")
+    outlet_code = request.data.get('auth-outlet-code') if (request and hasattr(request, "data")) else data.get('auth-outlet-code')
 
     hospital_code = data.get("hospital_code") or data.get("auth-hospital-code")
     if not hospital_code and request:
@@ -1445,6 +1447,29 @@ def search_discharge_patient(request):
             {"paymentMethod": "Credit", "paymentStatus": "Pending", "is_active": {"$ne": False}}
         )
         if inv_q:
+            is_insurance_patient = str(patient_info.get("patient_type") or "").strip().lower() == "insurance"
+            nabh_tid_map, nabh_code_map = {}, {}
+            if is_insurance_patient:
+                try:
+                    nabh_records = list(db["hospital_lab_nabh_rate"].find(
+                        {},
+                        {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1, "sl_no": 1}
+                    ))
+                    for n_rec in nabh_records:
+                        tid = n_rec.get("test_id")
+                        if tid is not None and str(tid).strip() != "":
+                            t_str = str(tid).strip()
+                            nabh_tid_map[t_str] = n_rec
+                            try:
+                                nabh_tid_map[str(int(t_str))] = n_rec
+                            except Exception:
+                                pass
+                        c = n_rec.get("nabh_code")
+                        if c and str(c).strip():
+                            nabh_code_map[str(c).strip().upper()] = n_rec
+                except Exception as e:
+                    print(f"Error prefetching hospital_lab_nabh_rate: {e}")
+
             for bill in db["hospital_investbilling"].find(inv_q):
                 bill_no   = bill.get("investBillNo", "")
                 doctor    = bill.get("doctor", "")
@@ -1455,22 +1480,53 @@ def search_discharge_patient(request):
                     except Exception:
                         raw_items = []
                 for it in (raw_items if isinstance(raw_items, list) else []):
-                    price = _to_float(it.get("price", 0) or it.get("rate", 0))
+                    item_btn  = str(it.get("billTypeNo", "") or bill.get("billTypeNo", "") or "LAB01").strip().upper()
+                    item_name = it.get("itemName", "")
+                    test_id   = it.get("test_id") or it.get("item_id")
+                    nabh_code = str(it.get("nabh_code", "") or "").strip()
+                    price     = _to_float(it.get("price", 0) or it.get("rate", 0))
+
+                    if is_insurance_patient and (item_btn.startswith("LAB") or str(bill.get("bill_type")) == "16" or test_id is not None):
+                        matched_n = None
+                        if test_id is not None and str(test_id).strip() != "":
+                            t_s = str(test_id).strip()
+                            matched_n = nabh_tid_map.get(t_s)
+                            if not matched_n:
+                                try:
+                                    matched_n = nabh_tid_map.get(str(int(t_s)))
+                                except Exception:
+                                    pass
+                        if not matched_n and nabh_code:
+                            matched_n = nabh_code_map.get(nabh_code.upper())
+
+                        if matched_n:
+                            if matched_n.get("test_name"):
+                                item_name = matched_n.get("test_name")
+                            if matched_n.get("nabh_code"):
+                                nabh_code = str(matched_n.get("nabh_code")).strip()
+                            if item_btn == "LAB02" and matched_n.get("nabh_rate") is not None:
+                                price = _to_float(matched_n.get("nabh_rate"))
+                            elif item_btn == "LAB03" and matched_n.get("non_nabh_rate") is not None:
+                                price = _to_float(matched_n.get("non_nabh_rate"))
+
                     qty   = int(it.get("quantity", 1) or 1)
                     disc  = _to_float(it.get("discount", 0))
                     amt   = max(0.0, price * qty - disc)
                     invest_items.append({
                         "invest_bill_no": bill_no,
                         "bill_object_id": str(bill.get("_id")),
-                        "itemName":       it.get("itemName", ""),
+                        "itemName":       item_name,
                         "price":          price,
                         "rate":           str(price),
                         "quantity":       qty,
                         "discount":       disc,
                         "amount":         amt,
-                        "billTypeNo":     it.get("billTypeNo", "") or bill.get("billTypeNo", "") or "LAB01",
+                        "billTypeNo":     item_btn,
                         "bill_type":      bill.get("bill_type", 16),
-                        "test_id":        it.get("test_id"),
+                        "test_id":        test_id,
+                        "nabh_code":      nabh_code,
+                        "nabh_rate":      _to_float(matched_n.get("nabh_rate")) if matched_n and matched_n.get("nabh_rate") is not None else None,
+                        "non_nabh_rate":  _to_float(matched_n.get("non_nabh_rate")) if matched_n and matched_n.get("non_nabh_rate") is not None else None,
                         "doctor":         doctor,
                         "payment_status": bill.get("paymentStatus", ""),
                         "package_name":   it.get("packageName", "") or bill.get("packageName", ""),
@@ -1680,6 +1736,230 @@ def search_discharge_patient(request):
     })
 
 
+def get_discharge_investigation_items(request):
+    """
+    Fetch investigation items for Discharge Billing.
+    If customer_type is Insurance and lab bill type is selected,
+    compare test_id and nabh_code with hospital_lab_nabh_rate to get test_name and nabh_code.
+    """
+    bill_type_no = request.GET.get("billTypeNo", "")
+    bill_type = request.GET.get("billType")
+    item_name = request.GET.get("itemName", "")
+    customer_type = str(request.GET.get("customer_type", "")).strip()
+
+    if bill_type is None or bill_type == 'undefined' or bill_type == 'null':
+        return JsonResponse({
+            "error": "billType parameter is required",
+            "received": bill_type
+        }, status=400)
+
+    try:
+        bill_type = int(bill_type)
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "billType must be a valid integer",
+            "billType": bill_type
+        }, status=400)
+
+    btn_upper = str(bill_type_no).upper().strip()
+    is_insurance = customer_type.lower() == "insurance"
+
+    # Special case: billTypeNo = "LAB01" or "LAB02" or "LAB03" (or any LAB category)
+    if btn_upper in ["LAB01", "LAB02", "LAB03"] or btn_upper.startswith("LAB"):
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+
+        # 1. Fetch active lab tests from Diagnostics database -> core_testdetails
+        diag_db = client['Diagnostics']
+        test_collection = diag_db['core_testdetails']
+
+        query = {"is_active": True}
+        if item_name:
+            query["test_name"] = {"$regex": item_name, "$options": "i"}
+
+        tests = list(test_collection.find(
+            query,
+            {
+                "test_id": 1,
+                "test_name": 1,
+                "SH_Rate": 1,
+                "Credit_Rate": 1,
+                "_id": 0
+            }
+        ))
+
+        # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
+        hms_db = client['HMS']
+        nabh_collection = hms_db['hospital_lab_nabh_rate']
+        nabh_records = list(nabh_collection.find(
+            {},
+            {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1, "sl_no": 1}
+        ))
+
+        client.close()
+
+        # Build lookup dictionary by test_id and nabh_code
+        nabh_map = {}
+        nabh_code_map = {}
+        for n_rec in nabh_records:
+            tid = n_rec.get('test_id')
+            if tid is not None and str(tid).strip() != '':
+                tid_str = str(tid).strip()
+                nabh_map[tid_str] = n_rec
+                try:
+                    nabh_map[str(int(tid_str))] = n_rec
+                except Exception:
+                    pass
+            n_code = n_rec.get('nabh_code')
+            if n_code and str(n_code).strip():
+                nabh_code_map[str(n_code).strip().upper()] = n_rec
+
+        formatted_items = []
+        for test in tests:
+            t_id = test.get('test_id', '')
+            t_id_str = str(t_id).strip() if t_id is not None else ''
+
+            # Find matching NABH record by test_id
+            nabh_info = nabh_map.get(t_id_str)
+            if not nabh_info:
+                try:
+                    nabh_info = nabh_map.get(str(int(t_id_str)))
+                except Exception:
+                    nabh_info = None
+
+            if btn_upper == "LAB01":
+                # LAB01: price from SH_Rate
+                nabh_code = str(nabh_info.get('nabh_code', '')).strip() if nabh_info else ""
+                price = test.get('SH_Rate', '0')
+
+            elif btn_upper == "LAB02":
+                # LAB02: NABH rate & NABH code
+                if not nabh_info:
+                    continue
+                nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                nabh_rate = nabh_info.get('nabh_rate')
+                if nabh_rate is not None and str(nabh_rate).strip() != "" and str(nabh_rate).strip().lower() != "none":
+                    price = str(nabh_rate).strip()
+                else:
+                    price = "0"
+
+            elif btn_upper == "LAB03":
+                # LAB03: Non-NABH rate & NABH code
+                if not nabh_info:
+                    continue
+                nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                non_nabh_rate = nabh_info.get('non_nabh_rate')
+                if non_nabh_rate is not None and str(non_nabh_rate).strip() != "" and str(non_nabh_rate).strip().lower() != "none":
+                    price = str(non_nabh_rate).strip()
+                else:
+                    price = "0"
+
+            else:
+                nabh_code = str(nabh_info.get('nabh_code', '')).strip() if nabh_info else ""
+                price = test.get('SH_Rate', '0')
+
+            # CRUCIAL: If customer type is Insurance, compare test_id & nabh_code with hospital_lab_nabh_rate
+            # and get test_name from hospital_lab_nabh_rate to display in discharge billing
+            if is_insurance and nabh_info and nabh_info.get('test_name'):
+                display_name = nabh_info.get('test_name')
+                if not nabh_code and nabh_info.get('nabh_code'):
+                    nabh_code = str(nabh_info.get('nabh_code')).strip()
+            else:
+                display_name = test.get('test_name', '')
+
+            if price is None or str(price).strip().lower() == 'none' or str(price).strip() == '':
+                price = "0"
+
+            formatted_items.append({
+                "itemName": display_name,
+                "price": str(price),
+                "test_id": t_id,
+                "nabh_code": nabh_code,
+                "nabh_rate": _to_float(nabh_info.get("nabh_rate")) if nabh_info and nabh_info.get("nabh_rate") is not None else None,
+                "non_nabh_rate": _to_float(nabh_info.get("non_nabh_rate")) if nabh_info and nabh_info.get("non_nabh_rate") is not None else None,
+            })
+
+        # If customer is insurance, also append any NABH tests from hospital_lab_nabh_rate not in core_testdetails
+        if is_insurance:
+            seen_codes = {it.get("nabh_code") for it in formatted_items if it.get("nabh_code")}
+            seen_names = {it.get("itemName", "").strip().lower() for it in formatted_items if it.get("itemName")}
+            for n_rec in nabh_records:
+                n_code = str(n_rec.get("nabh_code", "")).strip()
+                t_name = str(n_rec.get("test_name", "")).strip()
+                if not t_name:
+                    continue
+                if (n_code and n_code in seen_codes) or (t_name.lower() in seen_names):
+                    continue
+                if btn_upper == "LAB03":
+                    r = n_rec.get("non_nabh_rate")
+                else:
+                    r = n_rec.get("nabh_rate") or n_rec.get("non_nabh_rate") or "0"
+                formatted_items.append({
+                    "itemName": t_name,
+                    "price": str(r) if r is not None else "0",
+                    "test_id": n_rec.get("test_id") or 0,
+                    "nabh_code": n_code,
+                    "nabh_rate": _to_float(n_rec.get("nabh_rate")) if n_rec.get("nabh_rate") is not None else None,
+                    "non_nabh_rate": _to_float(n_rec.get("non_nabh_rate")) if n_rec.get("non_nabh_rate") is not None else None,
+                })
+
+        return JsonResponse({"items": formatted_items}, safe=True)
+
+    # Regular case: Fetch from hospital_investigationprice
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+    db = client['HMS']
+    collection = db['hospital_investigationprice']
+    investigation_data = collection.find_one(
+        {"billTypeNo": bill_type_no},
+        {"_id": 0, "Items": 1, "BillType": 1}
+    )
+    client.close()
+
+    if investigation_data and "Items" in investigation_data:
+        items = investigation_data["Items"]
+        is_surgery_type = btn_upper.startswith("SUR")
+        formatted_items = []
+        for item in items:
+            it_name = item.get("itemName", "")
+            item_id = item.get("item_id", "")
+            val = item.get(str(bill_type))
+            price = "0"
+            nabh_code = ""
+
+            if is_surgery_type:
+                if isinstance(val, dict):
+                    price = str(val.get("price", "0")).strip()
+                    nabh_code = str(val.get("nabh_code", "")).strip()
+                elif val is not None:
+                    price = str(val).strip()
+                if it_name:
+                    formatted_items.append({
+                        "itemName": it_name,
+                        "item_id": item_id,
+                        "price": price if (price and price.lower() != "none") else "0",
+                        "nabh_code": nabh_code
+                    })
+            else:
+                if val is None:
+                    continue
+                if isinstance(val, dict):
+                    price = str(val.get("price", "")).strip()
+                    nabh_code = str(val.get("nabh_code", "")).strip()
+                else:
+                    price = str(val).strip()
+                    nabh_code = ""
+                if price and price != "0" and price.lower() != "none" and it_name:
+                    formatted_items.append({
+                        "itemName": it_name,
+                        "item_id": item_id,
+                        "price": price,
+                        "nabh_code": nabh_code
+                    })
+
+        return JsonResponse({"items": formatted_items}, safe=True)
+
+    return JsonResponse({"items": []}, safe=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LIST + CREATE
 # GET  /discharge-billing/
@@ -1694,6 +1974,10 @@ def discharge_billing_list_create(request):
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == "GET":
+        action = request.GET.get("action")
+        if action == "investigation_items" or request.GET.get("get_investigation_items"):
+            return get_discharge_investigation_items(request)
+
         status_f = request.GET.get("status")
         uhid_f   = request.GET.get("uhid")
         ip_f     = request.GET.get("ip_number")
@@ -1701,9 +1985,11 @@ def discharge_billing_list_create(request):
         to_f     = request.GET.get("to_date")
         search_f = request.GET.get("search") or request.GET.get("q")
 
-        q = {"is_cancelled": {"$ne": True}}
+        q = {}
         if status_f:
             q["status"] = status_f
+            if status_f == "Estimate":
+                q["is_cancelled"] = {"$ne": True}
         if uhid_f:
             q["uhid"] = str(uhid_f).strip()
         if ip_f:
