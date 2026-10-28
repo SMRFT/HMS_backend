@@ -56,15 +56,36 @@ def convert_decimals(obj):
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_stock(request):
     try:
-        # ✅ Get values
-        data = request.data
-        hospital_code = data.get("auth-hospital-code") 
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
+        # ✅ Get values safely from request data, GET params, headers or fallback
+        data = request.data if isinstance(getattr(request, "data", None), dict) else {}
+        hospital_code = (
+            request.GET.get("hospital_code")
+            or data.get("auth-hospital-code")
+            or request.headers.get("auth-hospital-code")
+            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or "SH001"
+        )
+        branch_code = (
+            request.GET.get("branch_code")
+            or data.get("auth-branch-code")
+            or request.headers.get("auth-branch-code")
+            or request.META.get("HTTP_AUTH_BRANCH_CODE")
+            or "SHB001"
+        )
+        outlet_code = (
+            request.GET.get("outlet_code")
+            or data.get("auth-outlet-code")
+            or request.headers.get("auth-outlet-code")
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+            or "OLET001"
+        )
 
-        print("hospital_code:", hospital_code)
-        print("branch_code:", branch_code)
-        print("outlet_code:", outlet_code)
+        search_query = (
+            request.GET.get("search")
+            or request.GET.get("q")
+            or data.get("search")
+            or ""
+        ).strip()
 
         if not hospital_code or not branch_code or not outlet_code:
             return JsonResponse({
@@ -87,6 +108,28 @@ def get_pharmacy_stock(request):
         include_zero_stock = request.GET.get("include_zero_stock") or data.get("include_zero_stock")
         if not include_zero_stock or str(include_zero_stock).lower() == "false":
             match_stage["total_stock"] = {"$gt": 0}
+
+        # Fast search filter: if search query is provided, find matching item_ids first using item_name index
+        if search_query:
+            import re
+            search_items = list(mongo_db.hospital_pharmacyitem.find(
+                {
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "item_name": {"$regex": re.escape(search_query), "$options": "i"},
+                    "is_active": True,
+                    "is_blocked": False
+                },
+                {"item_id": 1, "_id": 0}
+            ).limit(60))
+            matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
+            if not matching_ids:
+                return JsonResponse({
+                    "success": True,
+                    "count": 0,
+                    "data": []
+                })
+            match_stage["item_id"] = {"$in": matching_ids}
 
         pipeline = [
 

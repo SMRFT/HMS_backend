@@ -23,7 +23,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
     
-from .models import Billing, TempPatientRegistration, Refund, Patient, UHIDCounter, Admission
+from .models import Billing, TempPatientRegistration, Refund, Patient, UHIDCounter, Admission, get_safe_uhid_counter
 
 from .models import Billing
 from .serializers import PatientSerializer
@@ -369,26 +369,7 @@ def get_last_uhid(request):
         fy_year = today.year if today.month >= 4 else today.year - 1
         prefix = f"S0{fy_year % 100:02d}"
 
-        counter, created = UHIDCounter.objects.get_or_create(
-            prefix=prefix,
-            defaults={'last_sequence': 0}
-        )
-
-        if created or counter.last_sequence == 0:
-            year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-            max_number = 0
-            for u in year_patients:
-                try:
-                    num_str = u.split('/')[-1]
-                    num = int(num_str)
-                    if num > max_number:
-                        max_number = num
-                except (ValueError, IndexError):
-                    continue
-            counter.last_sequence = max_number
-            if max_number > 0:
-                counter.save()
-
+        counter = get_safe_uhid_counter(prefix)
         latest_uhid = f"{prefix}/{counter.last_sequence:06d}" if counter.last_sequence > 0 else "None"
         return Response({"uhid": latest_uhid}, status=200)
     except Exception as e:
@@ -825,6 +806,16 @@ def patient_visit_list(request):
             except Exception as ex:
                 print(f"Error fetching emp map: {ex}")
 
+        # Batch fetch refunds for all bills in this list to eliminate N+1 queries
+        bill_numbers = [b.bill_number for b in bills if b.bill_number]
+        refunds_by_bill = {}
+        if bill_numbers:
+            try:
+                for r in Refund.objects.filter(bill_no__in=bill_numbers):
+                    refunds_by_bill.setdefault(r.bill_no, []).append(r)
+            except Exception as ref_err:
+                print(f"Error batch fetching refunds: {ref_err}")
+
         data = []
         for bill in bills:
             if not hasattr(bill, 'patient') or bill.patient is None:
@@ -844,18 +835,19 @@ def patient_visit_list(request):
             full_name = f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
             resolved_doc_name = emp_map.get(str(bill.doctor_id).strip()) or p.doctorName or bill.doctor_id
             
-            # Formatting address safely
+            # Formatting address safely with district
             address_parts = [
                 p.permanent_address,
                 p.area,
                 p.city,
+                p.district,
                 p.state,
                 p.zipcode
             ]
             full_address = ", ".join([str(val) for val in address_parts if val]).strip()
 
-            # Get refund details
-            refunds = Refund.objects.filter(bill_no=bill.bill_number)
+            # Get refund details from batch map
+            refunds = refunds_by_bill.get(bill.bill_number, [])
             refund_data = []
             total_refunded = 0
             for r in refunds:
@@ -998,19 +990,17 @@ def get_pending_qr_registrations(request):
     try:
         status = request.GET.get('status', 'pending')
         
-        # Base query
-        query = TempPatientRegistration.objects.all().order_by('-created_at')
+        # Base query - Djongo SQL2Mongo crashes on is_consumed=False, so filter in Python
+        records = list(TempPatientRegistration.objects.all().order_by('-created_at')[:200])
         
         # Filter based on status
         if status == 'pending':
-            query = query.filter(is_consumed=False)
+            records = [p for p in records if not p.is_consumed]
         elif status == 'consumed':
-            query = query.filter(is_consumed=True)
-        # if status is 'all', no filter is applied (reloaded Global.backend_diagnostics_Departments resolution)
+            records = [p for p in records if p.is_consumed]
             
-        pending = query
         results = []
-        for p in pending:
+        for p in records:
             try:
                 # Handle potential JSON parsing issues
                 if isinstance(p.data, str):

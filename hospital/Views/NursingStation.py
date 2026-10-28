@@ -698,10 +698,9 @@ def get_medicine_ward_requests(request):
         if outlet_code:
             query_params["outlet_code"] = outlet_code
 
-        # Fetch billing records
-        requests_data = list(
-            PharmacyBilling.objects.filter(**query_params).values().order_by("-bill_date")
-        )
+        # Fetch billing records using PyMongo for maximum speed & compound index support
+        raw_cursor = mongo_db["hospital_pharmacybilling"].find(query_params).sort("bill_date", -1)
+        requests_data = [serialize_doc(d) for d in raw_cursor]
 
         # --- Batch-load item names ---
         all_item_ids = set()
@@ -712,10 +711,13 @@ def get_medicine_ward_requests(request):
                         all_item_ids.add(int(itm["item_id"]))
                     except (ValueError, TypeError):
                         pass
-        item_name_map = {
-            i.item_id: i.item_name
-            for i in PharmacyItem.objects.filter(item_id__in=all_item_ids)
-        }
+        item_name_map = {}
+        if all_item_ids:
+            for itm in mongo_db["hospital_pharmacyitem"].find(
+                {"item_id": {"$in": list(all_item_ids)}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ):
+                item_name_map[itm.get("item_id")] = itm.get("item_name", "")
 
         formatted_data = []
         for doc in requests_data:
@@ -756,6 +758,30 @@ def get_medicine_ward_requests(request):
                     "edit_history": itm.get("edit_history", []),
                 })
 
+            _raw_dt = doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
+            _req_date = ""
+            _req_time = ""
+            if _raw_dt:
+                _dt_obj = None
+                if isinstance(_raw_dt, str):
+                    try:
+                        _dt_obj = datetime.fromisoformat(_raw_dt.replace("Z", "+00:00"))
+                    except Exception:
+                        _req_date = _raw_dt[:10] if len(_raw_dt) >= 10 else _raw_dt
+                elif hasattr(_raw_dt, "astimezone") or isinstance(_raw_dt, datetime):
+                    _dt_obj = _raw_dt
+
+                if _dt_obj:
+                    try:
+                        if not _dt_obj.tzinfo:
+                            _dt_obj = pytz.UTC.localize(_dt_obj)
+                        kolkata_tz = pytz.timezone("Asia/Kolkata")
+                        _dt_ist = _dt_obj.astimezone(kolkata_tz)
+                        _req_date = _dt_ist.strftime("%d-%m-%Y")
+                        _req_time = _dt_ist.strftime("%I:%M %p")
+                    except Exception:
+                        _req_date = str(_raw_dt)[:10]
+
             formatted_data.append({
                 "Bill_id": doc.get("Bill_id"),
                 "reqId": str(doc.get("Bill_id")),
@@ -764,20 +790,8 @@ def get_medicine_ward_requests(request):
                 "billType": doc.get("bill_type", ""),
                 "billTypeNo": doc.get("bill_type_no", ""),
                 "billName": doc.get("bill_type_no", ""),
-                "reqDate": (\
-                    (lambda dt: dt.astimezone(pytz.timezone("Asia/Kolkata")).strftime("%d-%m-%Y"))(
-                        doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
-                    )
-                ) if (
-                    doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
-                ) else "",
-                "reqTime": (
-                    (lambda dt: dt.astimezone(pytz.timezone("Asia/Kolkata")).strftime("%I:%M %p"))(
-                        doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
-                    )
-                ) if (
-                    doc.get("ward_request_date") or doc.get("bill_date") or doc.get("created_date")
-                ) else "",
+                "reqDate": _req_date,
+                "reqTime": _req_time,
                 "status": doc.get("billing_status", "Pending"),
                 "doctor": doc.get("doctor_id", ""),
                 "outlet_code": doc.get("outlet_code", ""),
