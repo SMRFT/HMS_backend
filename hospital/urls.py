@@ -327,6 +327,7 @@ urlpatterns = [
     path('summary-clinical-notes/', summary.summary_clinical_notes, name='summary_clinical_notes'),
     path('ai-summarize-notes/', summary.ai_summarize_notes, name='ai_summarize_notes'),
     path('summaries/create/', summary.create_summary, name='create_summary'),   
+    re_path(r'^check-summary-exists/(?P<ip_no>.+)/$', summary.check_summary_exists, name='check_summary_exists'),
     re_path(r'^approve-summary/(?P<ip_no>.+)/$', summary.approve_summary, name='approve_summary'),
     re_path(r'^delete-summary/(?P<ip_no>.+)/$', summary.delete_summary, name='delete_summary'),
     re_path(r'^get-editsummary/(?P<ip_no>.+)/$', summary.get_editsummary, name='get_editsummary'),

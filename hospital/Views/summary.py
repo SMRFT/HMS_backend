@@ -59,9 +59,17 @@ def summary_type(request):
 
         if request.method == 'GET':
             summary_types = list(summary_collection.find(
-                {"is_active": True},                           # filter
-                {"_id": 0, "summaryNo": 1, "summaryType": 1}  # projection
+                {},                           # fetch all records in db
+                {"_id": 0, "summaryNo": 1, "summaryType": 1, "headings": 1, "is_active": 1}  # projection
             ))
+            for st in summary_types:
+                if 'headings' not in st or not isinstance(st['headings'], list):
+                    st['headings'] = []
+                else:
+                    for h in st['headings']:
+                        if isinstance(h, dict):
+                            h['defaultValue'] = str(h.get('defaultValue') if h.get('defaultValue') is not None else (h.get('default_value') or ''))
+                st['is_active'] = bool(st.get('is_active', True))
             return Response(summary_types, status=status.HTTP_200_OK)
 
         elif request.method == 'POST':
@@ -93,10 +101,31 @@ def summary_type(request):
             hospital_code = request.data.get('auth-hospital-code', "system")
             outlet_code = request.data.get('auth-outlet-code', "system")
 
+            headings = request.data.get('headings', [])
+            clean_headings = []
+            if isinstance(headings, list):
+                for idx, h in enumerate(headings, start=1):
+                    if isinstance(h, dict):
+                        def_val = str(h.get('defaultValue') if h.get('defaultValue') is not None else (h.get('default_value') or ''))
+                        clean_headings.append({
+                            "order_id": int(h.get('order_id', idx)),
+                            "headingNo": str(h.get('headingNo', '')),
+                            "heading": str(h.get('heading', '')).strip(),
+                            "defaultValue": def_val.strip()
+                        })
+                    elif isinstance(h, str) and h.strip():
+                        clean_headings.append({
+                            "order_id": idx,
+                            "headingNo": "",
+                            "heading": h.strip(),
+                            "defaultValue": ""
+                        })
+
             now_dt = datetime.utcnow()
             new_doc = {
                 "summaryNo": next_summary_no,
                 "summaryType": summary_type_val,
+                "headings": clean_headings,
                 "is_active": True,
                 "created_by": created_by,
                 "created_date": now_dt,
@@ -112,7 +141,9 @@ def summary_type(request):
                 "message": "Summary type created successfully",
                 "data": {
                     "summaryNo": next_summary_no,
-                    "summaryType": summary_type_val
+                    "summaryType": summary_type_val,
+                    "headings": clean_headings,
+                    "is_active": True,
                 }
             }, status=status.HTTP_201_CREATED)
 
@@ -127,34 +158,62 @@ def summary_type(request):
 @api_view(['PUT', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def update_summary_type(request, summary_no):
-    """Update summary type name by summaryNo"""
+    """Update summary type name, headings, or is_active by summaryNo"""
     client = None
     try:
-        summary_type_val = (request.data.get('summaryType') or '').strip()
-        if not summary_type_val:
-            return Response({"error": "Summary type name is required"}, status=status.HTTP_400_BAD_REQUEST)
-
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db = client['HMS']
         summary_collection = hms_db['hospital_summarytype']
 
-        # Duplicate check excluding current
-        existing = summary_collection.find_one({
-            "summaryNo": {"$ne": str(summary_no)},
-            "summaryType": {"$regex": f"^{re.escape(summary_type_val)}$", "$options": "i"},
-            "is_active": True
-        })
-        if existing:
-            return Response({"error": f"Summary type '{summary_type_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
-
         modified_by = request.data.get('auth-user-id', "system")
+        set_payload = {
+            "lastmodified_by": modified_by,
+            "lastmodified_date": datetime.utcnow()
+        }
+
+        if 'summaryType' in request.data:
+            summary_type_val = (request.data.get('summaryType') or '').strip()
+            if not summary_type_val:
+                return Response({"error": "Summary type name is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Duplicate check excluding current
+            existing = summary_collection.find_one({
+                "summaryNo": {"$ne": str(summary_no)},
+                "summaryType": {"$regex": f"^{re.escape(summary_type_val)}$", "$options": "i"},
+                "is_active": True
+            })
+            if existing:
+                return Response({"error": f"Summary type '{summary_type_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            set_payload["summaryType"] = summary_type_val
+
+        if 'headings' in request.data:
+            headings = request.data.get('headings') or []
+            clean_headings = []
+            if isinstance(headings, list):
+                for idx, h in enumerate(headings, start=1):
+                    if isinstance(h, dict):
+                        def_val = str(h.get('defaultValue') if h.get('defaultValue') is not None else (h.get('default_value') or ''))
+                        clean_headings.append({
+                            "order_id": int(h.get('order_id', idx)),
+                            "headingNo": str(h.get('headingNo', '')),
+                            "heading": str(h.get('heading', '')).strip(),
+                            "defaultValue": def_val.strip()
+                        })
+                    elif isinstance(h, str) and h.strip():
+                        clean_headings.append({
+                            "order_id": idx,
+                            "headingNo": "",
+                            "heading": h.strip(),
+                            "defaultValue": ""
+                        })
+            set_payload["headings"] = clean_headings
+
+        if 'is_active' in request.data:
+            set_payload["is_active"] = bool(request.data.get('is_active'))
+
         res = summary_collection.update_one(
             {"summaryNo": str(summary_no)},
-            {"$set": {
-                "summaryType": summary_type_val,
-                "lastmodified_by": modified_by,
-                "lastmodified_date": datetime.utcnow()
-            }}
+            {"$set": set_payload}
         )
 
         if res.matched_count == 0:
@@ -213,9 +272,11 @@ def summary_heading(request):
 
         if request.method == 'GET':
             headings = list(heading_collection.find(
-                {"is_active": True},                           # filter
-                {"_id": 0, "headingNo": 1, "heading": 1}      # projection
+                {},                           # fetch all in db
+                {"_id": 0, "headingNo": 1, "heading": 1, "is_active": 1}      # projection
             ))
+            for h in headings:
+                h['is_active'] = bool(h.get('is_active', True))
             return Response(headings, status=status.HTTP_200_OK)
 
         elif request.method == 'POST':
@@ -266,7 +327,8 @@ def summary_heading(request):
                 "message": "Summary heading created successfully",
                 "data": {
                     "headingNo": next_heading_no,
-                    "heading": heading_val
+                    "heading": heading_val,
+                    "is_active": True,
                 }
             }, status=status.HTTP_201_CREATED)
 
@@ -281,38 +343,55 @@ def summary_heading(request):
 @api_view(['PUT', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def update_summary_heading(request, heading_no):
-    """Update heading name by headingNo"""
+    """Update heading name or is_active by headingNo"""
     client = None
     try:
-        heading_val = (request.data.get('heading') or '').strip()
-        if not heading_val:
-            return Response({"error": "Heading name is required"}, status=status.HTTP_400_BAD_REQUEST)
-
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         hms_db = client['HMS']
         heading_collection = hms_db['hospital_summaryheading']
 
-        # Duplicate check excluding current
-        existing = heading_collection.find_one({
-            "headingNo": {"$ne": str(heading_no)},
-            "heading": {"$regex": f"^{re.escape(heading_val)}$", "$options": "i"},
-            "is_active": True
-        })
-        if existing:
-            return Response({"error": f"Heading '{heading_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
-
         modified_by = request.data.get('auth-user-id', "system")
+        set_payload = {
+            "lastmodified_by": modified_by,
+            "lastmodified_date": datetime.utcnow()
+        }
+
+        if 'heading' in request.data:
+            heading_val = (request.data.get('heading') or '').strip()
+            if not heading_val:
+                return Response({"error": "Heading name is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Duplicate check excluding current
+            existing = heading_collection.find_one({
+                "headingNo": {"$ne": str(heading_no)},
+                "heading": {"$regex": f"^{re.escape(heading_val)}$", "$options": "i"},
+                "is_active": True
+            })
+            if existing:
+                return Response({"error": f"Heading '{heading_val}' already exists"}, status=status.HTTP_400_BAD_REQUEST)
+            set_payload["heading"] = heading_val
+
+        if 'is_active' in request.data:
+            set_payload["is_active"] = bool(request.data.get('is_active'))
+
         res = heading_collection.update_one(
             {"headingNo": str(heading_no)},
-            {"$set": {
-                "heading": heading_val,
-                "lastmodified_by": modified_by,
-                "lastmodified_date": datetime.utcnow()
-            }}
+            {"$set": set_payload}
         )
 
         if res.matched_count == 0:
             return Response({"error": "Heading not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Also sync heading name in summary types that include this heading
+        if 'heading' in set_payload:
+            try:
+                hms_db['hospital_summarytype'].update_many(
+                    {"headings.headingNo": str(heading_no)},
+                    {"$set": {"headings.$[elem].heading": set_payload['heading']}},
+                    array_filters=[{"elem.headingNo": str(heading_no)}]
+                )
+            except Exception as sync_err:
+                logger.warning(f"Failed to sync heading update to summary types: {sync_err}")
 
         return Response({"message": "Heading updated successfully"}, status=status.HTTP_200_OK)
 
@@ -437,14 +516,11 @@ def enrich_summary_type_and_heading(summaries, hms_db):
         elif cur_type and cur_type.upper() in type_rev_map:
             s['summaryNo'] = type_rev_map[cur_type.upper()]
         
-        # heading <-> headingNo
+        # Preserve custom heading input string; only fallback if heading is empty
         cur_h_no = str(s.get('headingNo') or '').strip()
         cur_h_val = str(s.get('heading') or '').strip()
-        if cur_h_no and cur_h_no in heading_map:
+        if not cur_h_val and cur_h_no and cur_h_no in heading_map:
             s['heading'] = heading_map[cur_h_no]
-            s['headingNo'] = cur_h_no
-        elif cur_h_val and cur_h_val.upper() in heading_rev_map:
-            s['headingNo'] = heading_rev_map[cur_h_val.upper()]
 
     return items[0] if is_single else summaries
 
@@ -578,6 +654,43 @@ def get_summaries(request):
             client.close()
 
 
+def sort_fields_data_by_summary_type(fields_data, summary_no=None, summary_type=None, db=None):
+    """Sort fieldsData array according to the order_id of hospital_summarytype.headings."""
+    if not isinstance(fields_data, list) or len(fields_data) <= 1 or db is None:
+        return fields_data
+    try:
+        st = None
+        if summary_no:
+            st = db['hospital_summarytype'].find_one({"summaryNo": str(summary_no).strip()})
+        if not st and summary_type:
+            st = db['hospital_summarytype'].find_one({
+                "summaryType": {"$regex": f"^{re.escape(str(summary_type).strip())}$", "$options": "i"}
+            })
+        if not st or not isinstance(st.get('headings'), list):
+            return fields_data
+
+        sorted_headings = sorted(
+            st['headings'],
+            key=lambda x: (int(x.get('order_id', 0)) if isinstance(x, dict) and str(x.get('order_id', '')).isdigit() else 0)
+        )
+        order_map = {}
+        for idx, h in enumerate(sorted_headings):
+            h_name = h.get('heading') if isinstance(h, dict) else str(h)
+            if h_name:
+                order_map[h_name.strip().upper()] = idx
+
+        def get_sort_key(entry):
+            if isinstance(entry, dict):
+                k = str(entry.get('key', '')).strip().upper()
+                return order_map.get(k, 99999)
+            return 99999
+
+        fields_data.sort(key=get_sort_key)
+    except Exception as e:
+        logger.warning(f"Error sorting fieldsData: {e}")
+    return fields_data
+
+
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
 def create_summary(request):
@@ -603,24 +716,27 @@ def create_summary(request):
         except Exception as e:
             logger.warning(f"Error resolving summaryNo: {e}")
 
-    if not heading_no and data.get('heading'):
+    heading_val = (data.get('heading') or '').strip()
+    data['heading'] = heading_val
+    data['summaryNo'] = summary_no
+    # summaryType is normalized by summaryNo, heading is input text, headingNo is not used
+    data.pop('summaryType', None)
+    data.pop('headingNo', None)
+
+    # Sort fieldsData by summary type headings order if present
+    if 'fieldsData' in data and isinstance(data['fieldsData'], list):
         try:
             client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-            hms_db = client['HMS']
-            match_h = hms_db['hospital_summaryheading'].find_one({
-                "heading": {"$regex": f"^{re.escape(str(data['heading']).strip())}$", "$options": "i"}
-            })
-            if match_h:
-                heading_no = match_h.get('headingNo', '')
+            db = client['HMS']
+            data['fieldsData'] = sort_fields_data_by_summary_type(
+                data['fieldsData'],
+                summary_no=summary_no,
+                summary_type=request.data.get('summaryType'),
+                db=db
+            )
             client.close()
         except Exception as e:
-            logger.warning(f"Error resolving headingNo: {e}")
-
-    data['summaryNo'] = summary_no
-    data['headingNo'] = heading_no
-    # Do not store raw text names in database
-    data.pop('summaryType', None)
-    data.pop('heading', None)
+            logger.warning(f"Error sorting fieldsData in create_summary: {e}")
 
     serializer = SummarySerializer(data=data)
     if serializer.is_valid():
@@ -643,7 +759,7 @@ def create_summary(request):
             created_date=datetime.utcnow()
         )
 
-        # ── After ORM save, fix fieldsData and ensure summaryNo/headingNo in MongoDB ──
+        # ── After ORM save, fix fieldsData and ensure summaryNo/heading in MongoDB ──
         raw_fields = request.data.get('fieldsData', [])
         if isinstance(raw_fields, str):
             try:
@@ -666,16 +782,22 @@ def create_summary(request):
             db = client['HMS']
             patch_doc = {
                 "summaryNo": summary_no,
-                "headingNo": heading_no,
+                "heading": heading_val,
             }
             if fields_array:
+                fields_array = sort_fields_data_by_summary_type(
+                    fields_array,
+                    summary_no=summary_no,
+                    summary_type=request.data.get('summaryType'),
+                    db=db
+                )
                 patch_doc["fieldsData"] = fields_array
             
             db['hospital_summary'].update_one(
                 {"ipNo": ip_no},
                 {
                     "$set": patch_doc,
-                    "$unset": {"summaryType": "", "heading": ""}
+                    "$unset": {"summaryType": "", "headingNo": ""}
                 }
             )
             client.close()
@@ -847,6 +969,66 @@ def delete_summary(request, ip_no):
     
 
 from urllib.parse import unquote
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def check_summary_exists(request, ip_no):
+    """Check if a discharge summary already exists for the given ipNo in hospital_summary collection"""
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        hms_db = client['HMS']
+        summary_collection = hms_db['hospital_summary']
+
+        decoded_ip_no = unquote(ip_no).strip()
+        if not decoded_ip_no:
+            return Response({"exists": False, "message": "No IP number provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        branch_code   = request.data.get("auth-branch-code", "system")
+        hospital_code = request.data.get("auth-hospital-code", "system")
+
+        query = {
+            "ipNo": {"$regex": f"^{re.escape(decoded_ip_no)}$", "$options": "i"},
+            "is_active": {"$ne": False}
+        }
+        if hospital_code and hospital_code != "system":
+            query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            query["branch_code"] = branch_code
+
+        existing = summary_collection.find_one(
+            query,
+            {"_id": 0, "ipNo": 1, "patient": 1, "date": 1, "approve": 1, "summaryNo": 1}
+        )
+
+        if not existing:
+            # Fallback across branch/hospital codes in case codes were different or unset
+            existing = summary_collection.find_one(
+                {
+                    "ipNo": {"$regex": f"^{re.escape(decoded_ip_no)}$", "$options": "i"},
+                    "is_active": {"$ne": False}
+                },
+                {"_id": 0, "ipNo": 1, "patient": 1, "date": 1, "approve": 1, "summaryNo": 1}
+            )
+
+        if existing:
+            return Response({
+                "exists": True,
+                "message": "Discharge Summary already exist with this IP number",
+                "data": existing
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "exists": False,
+                "message": "No summary exists for this IP number"
+            }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
+
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
@@ -1023,19 +1205,16 @@ def update_summary_fields(request, ip_no):
             })
             if match_t:
                 summary_no = match_t.get('summaryNo', '')
+        if not summary_no:
+            existing_doc = collection.find_one({"ipNo": decoded_ip_no}, {"summaryNo": 1})
+            if existing_doc:
+                summary_no = existing_doc.get("summaryNo", "")
 
-        heading_no = str(data.get('headingNo') or '').strip()
-        if not heading_no and data.get('heading'):
-            match_h = db['hospital_summaryheading'].find_one({
-                "heading": {"$regex": f"^{re.escape(str(data['heading']).strip())}$", "$options": "i"}
-            })
-            if match_h:
-                heading_no = match_h.get('headingNo', '')
-
+        if 'heading' in request.data:
+            data['heading'] = str(request.data.get('heading') or '').strip()
         data['summaryNo'] = summary_no
-        data['headingNo'] = heading_no
         data.pop('summaryType', None)
-        data.pop('heading', None)
+        data.pop('headingNo', None)
 
         # ── fieldsData is now a native array of {"key": ..., "value": ...} ──
         fields_data = data['fieldsData']
@@ -1058,6 +1237,13 @@ def update_summary_fields(request, ip_no):
                     {"error": "Each fieldsData entry must be an object with 'key' and 'value'"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+        fields_data = sort_fields_data_by_summary_type(
+            fields_data,
+            summary_no=summary_no,
+            summary_type=request.data.get('summaryType'),
+            db=db
+        )
 
         data['fieldsData'] = fields_data
 
@@ -1112,7 +1298,7 @@ def update_summary_fields(request, ip_no):
             {"ipNo": decoded_ip_no},
             {
                 "$set": data,
-                "$unset": {"summaryType": "", "heading": ""}
+                "$unset": {"summaryType": "", "headingNo": ""}
             }
         )
 
