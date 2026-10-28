@@ -26,7 +26,12 @@ from rest_framework.permissions import AllowAny
 from ..models import Patient, PharmacyStock, PharmacyBilling, PharmacyItem, Admission, InsuranceProvider,Admission
 from ..serializers import PharmacyBillingSerializer
 from .cashcounter import validate_active_shift
-from .dbcollection import profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details, get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id, admission_collection, pharmacy_billing_collection
+from .dbcollection import (
+    profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details,
+    get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id,
+    admission_collection, pharmacy_billing_collection,
+    hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name
+)
 from ..counter_service import get_next_pharmacy_bill_no
 
 # MongoDB Configuration
@@ -110,19 +115,35 @@ def get_pharmacy_stock(request):
         if not include_zero_stock or str(include_zero_stock).lower() == "false":
             match_stage["total_stock"] = {"$gt": 0}
 
-        # Fast search filter: if search query is provided, find matching item_ids first using item_name index
+        # Fast search filter: if search query is provided, find matching item_ids first
+        # Prioritizing items whose names start with the search query ("starting letter filter")
         if search_query:
             import re
+            escaped_q = re.escape(search_query)
             search_items = list(mongo_db.hospital_pharmacyitem.find(
                 {
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
-                    "item_name": {"$regex": re.escape(search_query), "$options": "i"},
+                    "item_name": {"$regex": f"^{escaped_q}", "$options": "i"},
                     "is_active": True,
                     "is_blocked": False
                 },
-                {"item_id": 1, "_id": 0}
-            ).limit(60))
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ).sort("item_name", 1).limit(100))
+
+            # Fallback if no starting-letter matches: match word boundary
+            if not search_items:
+                search_items = list(mongo_db.hospital_pharmacyitem.find(
+                    {
+                        "hospital_code": hospital_code,
+                        "branch_code": branch_code,
+                        "item_name": {"$regex": f"(?:^|\\s){escaped_q}", "$options": "i"},
+                        "is_active": True,
+                        "is_blocked": False
+                    },
+                    {"item_id": 1, "item_name": 1, "_id": 0}
+                ).sort("item_name", 1).limit(60))
+
             matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
             if not matching_ids:
                 return JsonResponse({
@@ -380,6 +401,13 @@ def get_pharmacy_stock(request):
 
         result = list(mongo_db["hospital_pharmacystock"].aggregate(pipeline))
         result = convert_decimals(result)
+
+        if search_query:
+            sq = search_query.upper()
+            result.sort(key=lambda x: (
+                0 if str(x.get("item_name") or "").upper().startswith(sq) else 1,
+                str(x.get("item_name") or "").upper()
+            ))
 
         return JsonResponse({
             "success": True,
@@ -2253,6 +2281,7 @@ def pharmacy_medicinechart(request):
                         "place": p.area or "",
                         "mobile": p.mobilePhone or "",
                         "customer_type": p.customer_type or "General",
+                        "company_code": p.company_code or "",
                         "age": age_str,
                     }
             except Exception as e:
@@ -2396,9 +2425,37 @@ def pharmacy_medicinechart(request):
             room_lbl = bill.get("room_no") or bill.get("ward_name") or adm_info.get("roomLabel") or ""
             bill["room_no"] = room_lbl
             bill["ward_name"] = room_lbl
-            bill["customer_type"] = adm_info.get("customer_type", bill.get("customer_type", "General"))
-            bill["is_insurance"] = adm_info.get("is_insurance", False)
-            bill["insurance_company"] = adm_info.get("insurance_company", "")
+            adm_cust_type = adm_info.get("customer_type") or ""
+            pat_cust_type = p_info.get("customer_type") or ""
+            bill_cust_type = bill.get("customer_type") or ""
+            final_cust_type = adm_cust_type or pat_cust_type or bill_cust_type or "General"
+
+            comp_code = p_info.get("company_code") or bill.get("company_code") or adm_info.get("company_code") or ""
+            ins_details = get_insurance_provider_by_patient(
+                uhid=uhid_str,
+                company_code=comp_code,
+                patient_obj=p_info
+            )
+
+            ins_company = ins_details.get("company_name") or adm_info.get("insurance_company") or bill.get("insurance_company") or ""
+            is_ins = bool(
+                ins_details.get("is_insurance")
+                or final_cust_type.lower() == "insurance"
+                or adm_info.get("is_insurance")
+                or ins_company
+            )
+
+            if is_ins:
+                final_cust_type = "Insurance"
+
+            bill["customer_type"] = final_cust_type
+            bill["is_insurance"] = is_ins
+            bill["insurance_company"] = ins_company
+            bill["company_code"] = ins_details.get("company_code") or comp_code
+            bill["patient_details"]["customer_type"] = final_cust_type
+            bill["patient_details"]["insurance_company"] = ins_company
+            bill["patient_details"]["company_code"] = bill["company_code"]
+            bill["patient_details"]["is_insurance"] = is_ins
             bill["advance_payments"] = adm_info.get("advance_payments", [])
             bill["total_ip_advance"] = adm_info.get("total_ip_advance", 0.0)
 
