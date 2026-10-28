@@ -546,6 +546,7 @@ urlpatterns = [
     path('stores-non-moving-items-report/', stores.stores_non_moving_items_report, name='stores_non_moving_items_report'),
     path('stores-short-expiry-report/', stores.stores_short_expiry_report, name='stores_short_expiry_report'),
     path('stores-reorder-level-report/', stores.stores_reorder_level_report, name='stores_reorder_level_report'),
+    path('stores-opening-stock-report/', stores.stores_opening_stock_report, name='stores_opening_stock_report'),
     path('stores-rack-classification/', stores.stores_item_rack_update, name='stores_item_rack_update'),
 
 

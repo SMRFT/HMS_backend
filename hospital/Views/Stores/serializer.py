@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
     GeneralStoreVendor, VendingMachineSale, StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn,
-    Stores_LabApprovedItem, Stores_LabUsedQtyDetail
+    Stores_LabApprovedItem, Stores_LabUsedQtyDetail, ItemOpeningStockLog
 )
 
 _PROFILE_CACHE = {}
@@ -118,6 +118,113 @@ def get_employee_map_for_grns(queryset):
     return employee_map
 
 
+_DEPT_CACHE = {}
+_DEPT_CACHE_EXPIRY = 0
+
+def get_department_display_name(dept_code):
+    """
+    Resolves department code -> department name using:
+    1. Global['backend_diagnostics_Departments'] (department_code / department_id / _id)
+    2. Department model (hospital_department)
+    """
+    if not dept_code:
+        return ""
+    code_str = str(dept_code).strip()
+    if not code_str:
+        return ""
+
+    import time
+    global _DEPT_CACHE, _DEPT_CACHE_EXPIRY
+    now = time.time()
+    if now > _DEPT_CACHE_EXPIRY or not _DEPT_CACHE:
+        try:
+            from ..dbcollection import department_collection
+            new_map = {}
+            for doc in department_collection.find():
+                if doc.get('is_active', True) is False:
+                    continue
+                c = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+                n = doc.get('department_name')
+                if c and n:
+                    c_clean = str(c).strip()
+                    n_clean = str(n).strip()
+                    new_map[c_clean] = n_clean
+                    new_map[c_clean.lower()] = n_clean
+                    new_map[n_clean] = n_clean
+                    new_map[n_clean.lower()] = n_clean
+            for d in Department.objects.filter(is_active__in=[True]):
+                if d.department_id and d.department_name:
+                    d_id = str(d.department_id).strip()
+                    d_name = str(d.department_name).strip()
+                    new_map[d_id] = d_name
+                    new_map[d_id.lower()] = d_name
+                    new_map[d_name] = d_name
+                    new_map[d_name.lower()] = d_name
+            _DEPT_CACHE = new_map
+            _DEPT_CACHE_EXPIRY = now + 300  # 5-minute cache
+        except Exception:
+            pass
+
+    resolved = _DEPT_CACHE.get(code_str) or _DEPT_CACHE.get(code_str.lower())
+    return resolved or code_str
+
+
+def get_department_map_for_grns(queryset=None):
+    """
+    Pre-populates and returns department code -> name mapping from Global.backend_diagnostics_Departments.
+    """
+    import time
+    global _DEPT_CACHE, _DEPT_CACHE_EXPIRY
+    now = time.time()
+    if now > _DEPT_CACHE_EXPIRY or not _DEPT_CACHE:
+        try:
+            from ..dbcollection import department_collection
+            new_map = {}
+            for doc in department_collection.find():
+                if doc.get('is_active', True) is False:
+                    continue
+                c = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+                n = doc.get('department_name')
+                if c and n:
+                    c_clean = str(c).strip()
+                    n_clean = str(n).strip()
+                    new_map[c_clean] = n_clean
+                    new_map[c_clean.lower()] = n_clean
+                    new_map[n_clean] = n_clean
+                    new_map[n_clean.lower()] = n_clean
+            for d in Department.objects.filter(is_active__in=[True]):
+                if d.department_id and d.department_name:
+                    d_id = str(d.department_id).strip()
+                    d_name = str(d.department_name).strip()
+                    new_map[d_id] = d_name
+                    new_map[d_id.lower()] = d_name
+                    new_map[d_name] = d_name
+                    new_map[d_name.lower()] = d_name
+            _DEPT_CACHE = new_map
+            _DEPT_CACHE_EXPIRY = now + 300
+        except Exception:
+            pass
+
+    return _DEPT_CACHE
+
+
+def get_department_candidates(dept_val):
+    """
+    Returns all possible department code and name variations matching dept_val
+    by comparing with backend_diagnostics_Departments and Department model.
+    """
+    if not dept_val:
+        return set()
+    dept_map = get_department_map_for_grns()
+    v = str(dept_val).strip().lower()
+    cands = {str(dept_val).strip()}
+    for k, name in dept_map.items():
+        if k.lower() == v or name.lower() == v:
+            cands.add(k)
+            cands.add(name)
+    return cands
+
+
 class StoresGRNSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     class Meta:
@@ -173,6 +280,34 @@ class StoresGRNSerializer(serializers.ModelSerializer):
         display_name = emp_name or (str(created_by_id).strip() if created_by_id else '')
         representation['entered_by'] = display_name
         representation['created_by_name'] = display_name
+
+        # Resolve department name comparing department code with backend_diagnostics_Departments
+        dept_val = representation.get('department') or getattr(instance, 'department', None)
+        if not dept_val:
+            # Fallback if GRN top-level department is blank, check items
+            try:
+                items_val = representation.get('items') or getattr(instance, 'items', None)
+                if isinstance(items_val, list) and len(items_val) > 0 and isinstance(items_val[0], dict):
+                    dept_val = items_val[0].get('department')
+            except Exception:
+                pass
+
+        if dept_val:
+            dept_key = str(dept_val).strip()
+            context_map = self.context.get('department_map') if isinstance(getattr(self, 'context', None), dict) else None
+            resolved_dept_name = None
+            if context_map and dept_key in context_map:
+                resolved_dept_name = context_map[dept_key]
+            elif context_map and dept_key.lower() in context_map:
+                resolved_dept_name = context_map[dept_key.lower()]
+            else:
+                resolved_dept_name = get_department_display_name(dept_key)
+
+            representation['department_code'] = dept_key
+            representation['department_name'] = resolved_dept_name or dept_key
+        else:
+            representation['department_code'] = ''
+            representation['department_name'] = ''
                     
         return representation
 
@@ -216,13 +351,34 @@ _GROUP_MAP = {}
 _GROUP_TYPE_MAP = {}
 _VENDOR_MAP = {}
 
+GROUP_CODE_TO_DEPT_CODE = {
+    'GRP00028': 'DEPT036',  # STATIONERY -> General Store
+    'GRP00029': 'DEPT036',  # GENERAL ITEMS -> General Store
+    'GRP00030': 'DEPT036',  # PRINTING -> General Store
+    'GRP00031': 'DEPT010',  # ELECTRICAL GOODS -> Electrician
+    'GRP00032': 'DEPT013',  # HOUSE KEEPING -> House Keeping
+    'GRP00037': 'DEPT048',  # MAMMOGRAPHY -> Radiology
+    'GRP00049': 'DEPT053',  # PLUMING WORK -> Maintenance
+    'GRP00052': 'DEPT036',  # TABL -> General Store
+    'GRP00004': 'DPT00004',  # Vending Machine
+    'GRP00001': 'DPT00001',
+    'GRP00002': 'DPT00002',
+    'GRP00003': 'DPT00002',
+}
+
 def get_lookup_maps():
     import time
     global _CACHE_EXPIRY, _CAT_MAP, _DEPT_MAP, _GROUP_MAP, _GROUP_TYPE_MAP, _VENDOR_MAP
     now_ts = time.time()
     if now_ts > _CACHE_EXPIRY:
         try:
-            _CAT_MAP = {c.category_id: c.category_name for c in Category.objects.filter(is_active__in=[True]) if c.category_id and c.category_name}
+            from ..dbcollection import hms_db
+            _CAT_MAP = {}
+            for doc in hms_db['hospital_category'].find({'is_active': True}):
+                cid = doc.get('category_id')
+                cname = doc.get('category_name') or doc.get('categoryName') or doc.get('name')
+                if cid and cname:
+                    _CAT_MAP[cid] = cname
         except Exception:
             _CAT_MAP = {}
             
@@ -234,14 +390,22 @@ def get_lookup_maps():
                 name = doc.get('department_name')
                 if code and name:
                     _DEPT_MAP[str(code)] = name
+                    _DEPT_MAP[str(name)] = name
             for d in Department.objects.filter(is_active__in=[True]):
-                if d.department_id and d.department_name and str(d.department_id) not in _DEPT_MAP:
+                if d.department_id and d.department_name:
                     _DEPT_MAP[str(d.department_id)] = d.department_name
+                    _DEPT_MAP[str(d.department_name)] = d.department_name
         except Exception:
             _DEPT_MAP = {}
 
         try:
-            _GROUP_MAP = {g.group_id: g.group_name for g in Group.objects.filter(is_active__in=[True]) if g.group_id and g.group_name}
+            from ..dbcollection import hms_db
+            _GROUP_MAP = {}
+            for doc in hms_db['hospital_group'].find({'is_active': True}):
+                gid = doc.get('group_id')
+                gname = doc.get('group_name') or doc.get('groupName') or doc.get('name')
+                if gid and gname:
+                    _GROUP_MAP[gid] = gname
         except Exception:
             _GROUP_MAP = {}
 
@@ -278,6 +442,53 @@ class ItemMasterSerializer(serializers.ModelSerializer):
             data['ved_category'] = 'D'
         if data.get('abc_category') is None or data.get('abc_category') == '':
             data['abc_category'] = 'C'
+        if data.get('opening_stock') is None or data.get('opening_stock') == '':
+            data['opening_stock'] = 0.00
+        else:
+            try:
+                data['opening_stock'] = float(data.get('opening_stock', 0))
+            except (ValueError, TypeError):
+                data['opening_stock'] = 0.00
+
+        cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+        rev_group_map = {v.lower().strip(): k for k, v in group_map.items() if v}
+        rev_cat_map = {v.lower().strip(): k for k, v in cat_map.items() if v}
+
+        # Resolve group to group_id code
+        grp_code = data.get('group_code')
+        if grp_code and grp_code in group_map:
+            data['group'] = grp_code
+        elif data.get('group'):
+            g_val = str(data['group']).strip()
+            if g_val in group_map:
+                data['group'] = g_val
+            elif g_val.lower() in rev_group_map:
+                data['group'] = rev_group_map[g_val.lower()]
+
+        # Resolve category to category_id code
+        cat_code = data.get('category_code')
+        if cat_code and cat_code in cat_map:
+            data['category'] = cat_code
+        elif data.get('category'):
+            c_val = str(data['category']).strip()
+            if c_val in cat_map:
+                data['category'] = c_val
+            elif c_val.lower() in rev_cat_map:
+                data['category'] = rev_cat_map[c_val.lower()]
+
+        # If category is provided but group is missing, auto-populate group from Category Master
+        if data.get('category') and (not data.get('group') or str(data.get('group')).strip() in ('', '-', 'None', 'null')):
+            from ..dbcollection import hms_db
+            cat_doc = hms_db['hospital_category'].find_one({'category_id': data['category']})
+            if cat_doc and cat_doc.get('group'):
+                data['group'] = cat_doc['group']
+
+        # Ensure department code mapping
+        dept_val = data.get('department')
+        if not dept_val or str(dept_val).strip() in ('', '-', 'None', 'null'):
+            grp_val = data.get('group')
+            if grp_val and grp_val in GROUP_CODE_TO_DEPT_CODE:
+                data['department'] = GROUP_CODE_TO_DEPT_CODE[grp_val]
         return super().to_internal_value(data)
 
     def to_representation(self, instance):
@@ -293,16 +504,22 @@ class ItemMasterSerializer(serializers.ModelSerializer):
             rep['category'] = cat_name
         else:
             rep['category_name'] = '-'
+            rep['category_code'] = ''
 
         # Department Code -> Name mapping
         dept_code = getattr(instance, 'department', None)
+        if not dept_code or str(dept_code).strip() in ('', '-', 'None', 'null'):
+            group_code = getattr(instance, 'group', None)
+            dept_code = GROUP_CODE_TO_DEPT_CODE.get(group_code)
+
         if dept_code:
-            dept_name = dept_map.get(dept_code) or dept_code
+            dept_name = dept_map.get(str(dept_code)) or dept_code
             rep['department_name'] = dept_name
             rep['department_code'] = dept_code
             rep['department'] = dept_name
         else:
             rep['department_name'] = '-'
+            rep['department_code'] = ''
 
         # Group Code -> Name mapping
         group_code = getattr(instance, 'group', None)
@@ -355,15 +572,109 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
 class GroupSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
+    group_name = serializers.CharField(required=False, allow_null=True)
+    groupName = serializers.CharField(required=False, allow_null=True)
     class Meta:
         model = Group
         fields = '__all__'
 
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        name = ret.get('group_name') or data.get('groupName') or data.get('group_name')
+        if name:
+            ret['group_name'] = name
+        return ret
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        name = getattr(instance, 'group_name', None) or getattr(instance, 'groupName', None)
+        if not rep.get('group_name') and name:
+            rep['group_name'] = name
+        rep['groupName'] = rep.get('group_name') or name
+        return rep
+
+    def create(self, validated_data):
+        name = validated_data.get('group_name')
+        instance = super().create(validated_data)
+        if name:
+            try:
+                from ..dbcollection import hms_db
+                hms_db['hospital_group'].update_one({'_id': instance.pk}, {'$set': {'groupName': name, 'group_name': name}})
+            except Exception:
+                pass
+        return instance
+
+    def update(self, instance, validated_data):
+        name = validated_data.get('group_name') or instance.group_name
+        instance = super().update(instance, validated_data)
+        if name:
+            try:
+                from ..dbcollection import hms_db
+                hms_db['hospital_group'].update_one({'_id': instance.pk}, {'$set': {'groupName': name, 'group_name': name}})
+            except Exception:
+                pass
+        return instance
+
 class CategorySerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
+    category_name = serializers.CharField(required=False, allow_null=True)
+    categoryName = serializers.CharField(required=False, allow_null=True)
+    group = serializers.CharField(required=False, allow_null=True)
+    group_name = serializers.CharField(required=False, allow_null=True)
+    group_type = serializers.CharField(required=False, allow_null=True)
+
     class Meta:
         model = Category
         fields = '__all__'
+
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        name = ret.get('category_name') or data.get('categoryName') or data.get('category_name')
+        if name:
+            ret['category_name'] = name
+        if data.get('group'):
+            ret['group'] = data['group']
+        if data.get('group_type'):
+            ret['group_type'] = data['group_type']
+        return ret
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        name = getattr(instance, 'category_name', None) or getattr(instance, 'categoryName', None)
+        if not rep.get('category_name') and name:
+            rep['category_name'] = name
+        rep['categoryName'] = rep.get('category_name') or name
+        grp = getattr(instance, 'group', None)
+        if grp and not rep.get('group'):
+            rep['group'] = grp
+        if grp:
+            _, _, group_map, _, _ = get_lookup_maps()
+            rep['group_name'] = group_map.get(grp) or grp
+        else:
+            rep['group_name'] = '-'
+        return rep
+
+    def create(self, validated_data):
+        name = validated_data.get('category_name')
+        instance = super().create(validated_data)
+        if name:
+            try:
+                from ..dbcollection import hms_db
+                hms_db['hospital_category'].update_one({'_id': instance.pk}, {'$set': {'categoryName': name, 'category_name': name}})
+            except Exception:
+                pass
+        return instance
+
+    def update(self, instance, validated_data):
+        name = validated_data.get('category_name') or instance.category_name
+        instance = super().update(instance, validated_data)
+        if name:
+            try:
+                from ..dbcollection import hms_db
+                hms_db['hospital_category'].update_one({'_id': instance.pk}, {'$set': {'categoryName': name, 'category_name': name}})
+            except Exception:
+                pass
+        return instance
 
 class GroupTypeSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -603,6 +914,37 @@ class StoresIndentReturnSerializer(serializers.ModelSerializer):
         elif val is None:
             representation['items'] = []
         return representation
+
+
+class ItemOpeningStockLogSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = ItemOpeningStockLog
+        fields = '__all__'
+
+    def get_created_by_name(self, obj):
+        return get_employee_display_name(getattr(obj, 'created_by', None))
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+        
+        dept_val = getattr(instance, 'department', None)
+        if dept_val:
+            rep['department_name'] = dept_map.get(str(dept_val), str(dept_val))
+        
+        grp_val = getattr(instance, 'group', None)
+        if grp_val:
+            rep['group_name'] = group_map.get(str(grp_val), str(grp_val))
+
+        cat_val = getattr(instance, 'category', None)
+        if cat_val:
+            rep['category_name'] = cat_map.get(str(cat_val), str(cat_val))
+
+        rep['created_by_name'] = self.get_created_by_name(instance)
+        return rep
+
 
 
 

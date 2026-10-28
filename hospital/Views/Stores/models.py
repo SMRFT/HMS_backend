@@ -17,6 +17,7 @@ class ItemMaster(AuditModel):
     manufacturer = models.CharField(max_length=255, null=True, blank=True)
     total_quantity = models.IntegerField(default=0)
     approved_quantity = models.IntegerField(default=0)
+    opening_stock = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, null=True, blank=True)
     VED_CHOICES = [
         ('V', 'Vital'),
         ('E', 'Essential'),
@@ -69,6 +70,8 @@ class Group(AuditModel):
 class Category(AuditModel):
     category_id = models.CharField(max_length=50,primary_key=True)
     category_name = models.CharField(max_length=255)
+    group = models.CharField(max_length=100, null=True, blank=True)
+    group_type = models.CharField(max_length=50, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
@@ -113,6 +116,7 @@ class storesGRN(AuditModel):
     total_amount_paid = models.DecimalField(max_digits=15, decimal_places=2, default=0)
 
     purchase_category = models.CharField(max_length=50,null=True,blank=True)
+    department = models.CharField(max_length=100, null=True, blank=True)
 
     vendor_id = models.CharField(max_length=255, blank=True, null=True)
 
@@ -156,6 +160,12 @@ class storesGRN(AuditModel):
     quotation_rate = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     courier_transport_charge = models.DecimalField(max_digits=20, decimal_places=2, default=0)     
     is_approved = models.BooleanField(default=False)    
+    
+    # Cancellation tracking
+    is_cancelled = models.BooleanField(default=False)
+    cancellation_remarks = models.TextField(blank=True, null=True)
+    cancelled_by = models.CharField(max_length=100, blank=True, null=True)
+    cancelled_date = models.DateTimeField(blank=True, null=True)
     
     def __str__(self):
         return f"{self.grn_number} - {self.vendor_id or ''}"    
@@ -308,6 +318,22 @@ class StoresIndentReturn(AuditModel):
         return f"IndentReturn: {self.return_id} (Intent: {self.intent_id})"
 
 
+class ItemOpeningStockLog(AuditModel):
+    log_id = models.CharField(max_length=50, primary_key=True)
+    item_id = models.CharField(max_length=50)
+    item_name = models.CharField(max_length=255, null=True, blank=True)
+    opening_stock = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    previous_opening_stock = models.DecimalField(max_digits=15, decimal_places=2, default=0.00, null=True, blank=True)
+    remark = models.TextField(null=True, blank=True)
+    department = models.CharField(max_length=50, null=True, blank=True)
+    department_name = models.CharField(max_length=255, null=True, blank=True)
+    group = models.CharField(max_length=100, null=True, blank=True)
+    category = models.CharField(max_length=100, null=True, blank=True)
+    action_type = models.CharField(max_length=50, default='INITIAL') # INITIAL, UPDATE
+    is_active = models.BooleanField(default=True)
 
+    class Meta:
+        ordering = ['-created_date']
 
-
+    def __str__(self):
+        return f"{self.log_id} - {self.item_id}: {self.opening_stock}"

@@ -6,15 +6,16 @@ from rest_framework import status
 from .models import (
     ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
     Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale,
-    StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn
+    StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn, ItemOpeningStockLog
 )
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, RackSerializer, ShelfSerializer,
-    StoresGRNSerializer, StoresIntentSerializer, get_employee_map_for_grns,
+    StoresGRNSerializer, StoresIntentSerializer, get_employee_map_for_grns, get_department_map_for_grns,
+    get_department_candidates,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
-    StoresIndentReturnSerializer
+    StoresIndentReturnSerializer, ItemOpeningStockLogSerializer
 )
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -88,11 +89,42 @@ def item_master_list_create(request):
         if search:
             items = items.filter(Q(itemName__icontains=search) | Q(item_id__icontains=search) | Q(hsn__icontains=search) | Q(barcode__icontains=search))
         if dept:
-            items = items.filter(department=dept)
+            dept_str = str(dept).strip()
+            dept_candidates = {dept_str}
+            dept_obj = Department.objects.filter(Q(department_id=dept_str) | Q(department_name__iexact=dept_str)).first()
+            if dept_obj:
+                if dept_obj.department_id: dept_candidates.add(dept_obj.department_id)
+                if dept_obj.department_name: dept_candidates.add(dept_obj.department_name)
+            try:
+                from ..dbcollection import department_collection
+                doc = department_collection.find_one({
+                    "$or": [
+                        {"department_code": {"$regex": f"^{dept_str}$", "$options": "i"}},
+                        {"department_name": {"$regex": f"^{dept_str}$", "$options": "i"}},
+                        {"department_id": {"$regex": f"^{dept_str}$", "$options": "i"}}
+                    ]
+                })
+                if doc:
+                    if doc.get('department_code'): dept_candidates.add(doc['department_code'])
+                    if doc.get('department_name'): dept_candidates.add(doc['department_name'])
+                    if doc.get('department_id'): dept_candidates.add(doc['department_id'])
+            except Exception:
+                pass
+
+            q_filter = Q()
+            for cand in dept_candidates:
+                q_filter |= Q(department=cand) | Q(department__iexact=cand)
+            items = items.filter(q_filter)
         if cat:
-            items = items.filter(category=cat)
+            cat_str = str(cat).strip()
+            cat_obj = Category.objects.filter(Q(category_id=cat_str) | Q(category_name__iexact=cat_str)).first()
+            cat_code = cat_obj.category_id if cat_obj else cat_str
+            items = items.filter(Q(category=cat_code) | Q(category__iexact=cat_str))
         if grp:
-            items = items.filter(group=grp)
+            grp_str = str(grp).strip()
+            grp_obj = Group.objects.filter(Q(group_id=grp_str) | Q(group_name__iexact=grp_str)).first()
+            grp_code = grp_obj.group_id if grp_obj else grp_str
+            items = items.filter(Q(group=grp_code) | Q(group__iexact=grp_str))
             
         items = items.order_by('-created_date')
         serializer = ItemMasterSerializer(items, many=True)
@@ -106,10 +138,46 @@ def item_master_list_create(request):
         data['created_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
+
+        opening_stock_val = data.get('opening_stock')
+        remark_val = data.get('remark') or data.get('opening_stock_remark') or ''
 
         serializer = ItemMasterSerializer(data=data)
         if serializer.is_valid():
-            serializer.save()
+            created_item = serializer.save()
+            try:
+                op_stock = float(opening_stock_val) if opening_stock_val not in (None, '') else 0.0
+            except (ValueError, TypeError):
+                op_stock = 0.0
+
+            if op_stock > 0 or remark_val:
+                try:
+                    if op_stock > 0 and (data.get('total_quantity') in (None, 0, '0', '')):
+                        created_item.total_quantity = int(round(op_stock))
+                        created_item.save(update_fields=['total_quantity'])
+
+                    log_id = generate_custom_id_without_fy(ItemOpeningStockLog, 'log_id', 'OSL', 6)
+                    ItemOpeningStockLog.objects.create(
+                        log_id=log_id,
+                        item_id=created_item.item_id,
+                        item_name=created_item.itemName,
+                        opening_stock=op_stock,
+                        previous_opening_stock=0.00,
+                        remark=remark_val,
+                        department=created_item.department,
+                        group=created_item.group,
+                        category=created_item.category,
+                        action_type='INITIAL',
+                        created_by=employee_id,
+                        branch_code=branch_code,
+                        outlet_code=outlet_code,
+                        hospital_code=hospital_code,
+                        is_active=True
+                    )
+                except Exception as log_err:
+                    print(f"Error creating ItemOpeningStockLog on create: {log_err}")
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -137,6 +205,7 @@ def item_master_detail(request, pk):
         data['lastmodified_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
+        data['hospital_code'] = hospital_code
 
         if data.get('unit_price') is None or data.get('unit_price') == '':
             data['unit_price'] = 0.00
@@ -146,10 +215,52 @@ def item_master_detail(request, pk):
             data['abc_category'] = 'C'
         if 'is_VM' in data:
             data['is_VM'] = bool(data.get('is_VM'))
+
+        prev_opening_stock = float(item.opening_stock or 0.0)
+        has_opening_stock_in_req = 'opening_stock' in data
+        remark_val = data.get('remark') or data.get('opening_stock_remark') or ''
         
         serializer = ItemMasterSerializer(item, data=data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            updated_item = serializer.save()
+
+            if has_opening_stock_in_req or remark_val:
+                try:
+                    new_opening_stock = float(updated_item.opening_stock or 0.0)
+                    if abs(new_opening_stock - prev_opening_stock) > 0.0001 or remark_val:
+                        diff = new_opening_stock - prev_opening_stock
+                        if data.get('sync_total_quantity', True):
+                            try:
+                                current_tot = float(updated_item.total_quantity or 0)
+                                if current_tot == 0 and prev_opening_stock == 0:
+                                    updated_item.total_quantity = int(round(new_opening_stock))
+                                else:
+                                    updated_item.total_quantity = max(0, int(round(current_tot + diff)))
+                                updated_item.save(update_fields=['total_quantity'])
+                            except Exception as sync_err:
+                                print(f"Error syncing total_quantity: {sync_err}")
+
+                        log_id = generate_custom_id_without_fy(ItemOpeningStockLog, 'log_id', 'OSL', 6)
+                        ItemOpeningStockLog.objects.create(
+                            log_id=log_id,
+                            item_id=updated_item.item_id,
+                            item_name=updated_item.itemName,
+                            opening_stock=new_opening_stock,
+                            previous_opening_stock=prev_opening_stock,
+                            remark=remark_val,
+                            department=updated_item.department,
+                            group=updated_item.group,
+                            category=updated_item.category,
+                            action_type='UPDATE' if prev_opening_stock > 0 else 'INITIAL',
+                            created_by=employee_id,
+                            branch_code=branch_code,
+                            outlet_code=outlet_code,
+                            hospital_code=hospital_code,
+                            is_active=True
+                        )
+                except Exception as log_err:
+                    print(f"Error creating ItemOpeningStockLog on update: {log_err}")
+
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -232,8 +343,14 @@ def item_price_history(request, item_id):
 
 # --- Department Views ---
 def serialize_doc(doc):
-    """Convert MongoDB document to JSON serializable"""
+    """Convert MongoDB document to JSON serializable with both department_id and department_code"""
     doc['_id'] = str(doc['_id'])
+    code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+    if not doc.get('department_id'):
+        doc['department_id'] = code
+    if not doc.get('department_code'):
+        doc['department_code'] = code
+    doc['id'] = doc.get('department_id')
     return doc
 
 
@@ -246,50 +363,99 @@ def department_list_create(request):
     outlet_code = request.data.get('auth-outlet-code', 'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
-    # ✅ GET → Fetch only active departments
+    # ✅ GET → Fetch all active departments (both Store Department model and Global department_collection)
     if request.method == 'GET':
-        departments = list(
-            department_collection.find(
-                {"is_active": True}
-            ).sort("created_date", -1)
-        )
+        dept_list = []
+        seen_keys = set()
 
-        data = [serialize_doc(doc) for doc in departments]
-        return Response(data)
+        # 1. Primary: Department model (hospital_department) where stores items are linked
+        for dept in Department.objects.filter(is_active__in=[True]).order_by('-created_date'):
+            d_id = getattr(dept, 'department_id', None)
+            d_name = getattr(dept, 'department_name', None)
+            if d_id and d_name:
+                key = (str(d_id).strip().lower(), str(d_name).strip().lower())
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    dept_list.append({
+                        'id': d_id,
+                        'department_id': d_id,
+                        'department_code': d_id,
+                        'department_name': d_name,
+                        'is_active': bool(getattr(dept, 'is_active', True)),
+                        'created_date': dept.created_date.isoformat() if getattr(dept, 'created_date', None) else None
+                    })
+
+        # 2. Secondary: Global department_collection if not already present
+        try:
+            departments = list(
+                department_collection.find(
+                    {"is_active": True}
+                ).sort("created_date", -1)
+            )
+            for doc in departments:
+                d_id = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
+                d_name = doc.get('department_name')
+                if d_id and d_name:
+                    name_key = str(d_name).strip().lower()
+                    if name_key not in [k[1] for k in seen_keys]:
+                        seen_keys.add((str(d_id).strip().lower(), name_key))
+                        dept_list.append({
+                            'id': d_id,
+                            'department_id': d_id,
+                            'department_code': d_id,
+                            'department_name': d_name,
+                            'is_active': bool(doc.get('is_active', True)),
+                            'created_date': doc.get('created_date').isoformat() if hasattr(doc.get('created_date'), 'isoformat') else str(doc.get('created_date') or '')
+                        })
+        except Exception:
+            pass
+
+        dept_list.sort(key=lambda x: str(x.get('department_name', '')).lower())
+        return Response(dept_list)
 
     # ✅ POST → Insert new department
     elif request.method == 'POST':
         data = request.data.copy()
+        dept_name = data.get('department_name')
+        if not data.get('department_id'):
+            data['department_id'] = generate_custom_id_without_fy(Department, 'department_id', 'DPT', 5)
+        dept_id = data.get('department_id')
+        data['department_code'] = data.get('department_code') or dept_id
 
-        # Generate department_code if not provided
-        if not data.get('department_code'):
-            last = department_collection.find_one(
-                {},
-                sort=[("department_code", -1)]
-            )
-
-            if last and last.get('department_code'):
-                last_num = int(last['department_code'].replace('DEPT', ''))
-                new_code = f"DEPT{str(last_num + 1).zfill(3)}"
-            else:
-                new_code = "DEPT001"
-
-            data['department_code'] = new_code
-
-        # Add audit fields
         data['created_by'] = employee_id
         data['branch_code'] = branch_code
         data['outlet_code'] = outlet_code
         data['hospital_code'] = hospital_code
-        data['created_date'] = timezone.now().isoformat()
         data['is_active'] = True
 
-        # Insert into MongoDB
-        result = department_collection.insert_one(dict(data))
+        # Save to Department model
+        try:
+            Department.objects.create(
+                department_id=dept_id,
+                department_name=dept_name,
+                is_active=True,
+                created_by=employee_id,
+                branch_code=branch_code,
+                outlet_code=outlet_code,
+                hospital_code=hospital_code
+            )
+        except Exception:
+            pass
 
-        # Return inserted document
-        inserted_doc = department_collection.find_one({"_id": result.inserted_id})
-        return Response(serialize_doc(inserted_doc), status=status.HTTP_201_CREATED)
+        # Also insert into department_collection
+        try:
+            data['created_date'] = timezone.now().isoformat()
+            department_collection.insert_one(dict(data))
+        except Exception:
+            pass
+
+        return Response({
+            'id': dept_id,
+            'department_id': dept_id,
+            'department_code': dept_id,
+            'department_name': dept_name,
+            'is_active': True
+        }, status=status.HTTP_201_CREATED)
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([HasRoleAndDataPermission])
@@ -300,9 +466,28 @@ def department_detail(request, pk):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     try:
-        item = Department.objects.filter(pk=pk, is_active__in=[True]).first()
+        item = Department.objects.filter(Q(department_id=pk) | Q(department_id__iexact=pk) | Q(department_name__iexact=pk), is_active__in=[True]).first()
         if not item:
-            return Response({"error": "Department not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+            # Check in department_collection
+            from bson import ObjectId
+            q = {"$or": [{"department_code": pk}, {"department_name": pk}]}
+            if ObjectId.is_valid(pk):
+                q["$or"].append({"_id": ObjectId(pk)})
+            doc = department_collection.find_one(q)
+            if not doc:
+                return Response({"error": "Department not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+            if request.method == 'GET':
+                return Response(serialize_doc(doc))
+            elif request.method == 'PATCH':
+                data = request.data.copy()
+                data['lastmodified_by'] = employee_id
+                data['lastmodified_date'] = timezone.now().isoformat()
+                department_collection.update_one({"_id": doc["_id"]}, {"$set": dict(data)})
+                updated = department_collection.find_one({"_id": doc["_id"]})
+                return Response(serialize_doc(updated))
+            elif request.method == 'DELETE':
+                department_collection.update_one({"_id": doc["_id"]}, {"$set": {"is_active": False, "lastmodified_by": employee_id}})
+                return Response({"message": "Department soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -319,6 +504,13 @@ def department_detail(request, pk):
         serializer = DepartmentSerializer(item, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            try:
+                department_collection.update_one(
+                    {"department_code": item.department_id},
+                    {"$set": {"department_name": item.department_name, "lastmodified_by": employee_id}}
+                )
+            except Exception:
+                pass
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -326,6 +518,13 @@ def department_detail(request, pk):
         item.is_active = False
         item.lastmodified_by = employee_id
         item.save()
+        try:
+            department_collection.update_one(
+                {"department_code": item.department_id},
+                {"$set": {"is_active": False, "lastmodified_by": employee_id}}
+            )
+        except Exception:
+            pass
         return Response({"message": "Department soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 # --- Group Views ---
@@ -679,16 +878,39 @@ def stores_grn_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     if request.method == 'GET':
-        from_date = request.query_params.get('from_date')
-        to_date = request.query_params.get('to_date')
+        from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+        to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+        department = request.query_params.get('department') or request.GET.get('department')
 
         queryset = storesGRN.objects.filter(is_active__in=[True]).order_by('-created_date')
         
         if from_date and to_date:
-            queryset = queryset.filter(date__range=[from_date, to_date])
+            try:
+                f_d = datetime.strptime(str(from_date).strip(), '%Y-%m-%d').date()
+                t_d = datetime.strptime(str(to_date).strip(), '%Y-%m-%d').date()
+                queryset = queryset.filter(date__gte=f_d, date__lte=t_d)
+            except Exception:
+                queryset = queryset.filter(date__range=[from_date, to_date])
+        elif from_date:
+            try:
+                f_d = datetime.strptime(str(from_date).strip(), '%Y-%m-%d').date()
+                queryset = queryset.filter(date__gte=f_d)
+            except Exception:
+                queryset = queryset.filter(date__gte=from_date)
+        elif to_date:
+            try:
+                t_d = datetime.strptime(str(to_date).strip(), '%Y-%m-%d').date()
+                queryset = queryset.filter(date__lte=t_d)
+            except Exception:
+                queryset = queryset.filter(date__lte=to_date)
+
+        if department:
+            dept_cands = get_department_candidates(department)
+            queryset = queryset.filter(department__in=list(dept_cands))
             
         emp_map = get_employee_map_for_grns(queryset)
-        serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map})
+        dept_map = get_department_map_for_grns(queryset)
+        serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
         return Response(serializer.data)
 
     elif request.method == 'POST':
@@ -697,18 +919,37 @@ def stores_grn_list_create(request):
         # Check if this is a filter request (search by date range)
         from_date = data.get('from_date')
         to_date = data.get('to_date')
+        department = data.get('department')
         
-        if from_date or to_date:
+        if from_date or to_date or (department and not data.get('items')):
             queryset = storesGRN.objects.filter(is_active__in=[True]).order_by('-created_date')
             if from_date and to_date:
-                queryset = queryset.filter(date__range=[from_date, to_date])
+                try:
+                    f_d = datetime.strptime(str(from_date).strip(), '%Y-%m-%d').date()
+                    t_d = datetime.strptime(str(to_date).strip(), '%Y-%m-%d').date()
+                    queryset = queryset.filter(date__gte=f_d, date__lte=t_d)
+                except Exception:
+                    queryset = queryset.filter(date__range=[from_date, to_date])
             elif from_date:
-                queryset = queryset.filter(date__gte=from_date)
+                try:
+                    f_d = datetime.strptime(str(from_date).strip(), '%Y-%m-%d').date()
+                    queryset = queryset.filter(date__gte=f_d)
+                except Exception:
+                    queryset = queryset.filter(date__gte=from_date)
             elif to_date:
-                queryset = queryset.filter(date__lte=to_date)
+                try:
+                    t_d = datetime.strptime(str(to_date).strip(), '%Y-%m-%d').date()
+                    queryset = queryset.filter(date__lte=t_d)
+                except Exception:
+                    queryset = queryset.filter(date__lte=to_date)
+
+            if department:
+                dept_cands = get_department_candidates(department)
+                queryset = queryset.filter(department__in=list(dept_cands))
             
             emp_map = get_employee_map_for_grns(queryset)
-            serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map})
+            dept_map = get_department_map_for_grns(queryset)
+            serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
             return Response(serializer.data)
 
         # Auto-generate GRN number
@@ -835,12 +1076,39 @@ def stores_grn_detail(request, pk):
         return Response({"error": "GRN not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'GET':
-        serializer = StoresGRNSerializer(grn)
+        emp_map = get_employee_map_for_grns([grn])
+        dept_map = get_department_map_for_grns([grn])
+        serializer = StoresGRNSerializer(grn, context={'employee_map': emp_map, 'department_map': dept_map})
         return Response(serializer.data)
 
     elif request.method == 'PATCH':
         import json
         data = request.data.copy()
+
+        # Check if cancellation requested via PATCH
+        if data.get('action') == 'cancel' or data.get('is_cancelled') is True:
+            if grn.is_approved:
+                return Response({"error": "Approved GRNs cannot be cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+            cancellation_remarks = (
+                data.get('cancellation_remarks')
+                or data.get('remark')
+                or data.get('remarks')
+                or data.get('cancelled_reason')
+            )
+            if not cancellation_remarks or not str(cancellation_remarks).strip():
+                return Response({"error": "Cancellation remark is required to cancel a GRN."}, status=status.HTTP_400_BAD_REQUEST)
+            from django.utils import timezone
+            now = timezone.now()
+            storesGRN.objects.filter(grn_number=grn.grn_number).update(
+                is_active=False,
+                is_cancelled=True,
+                cancellation_remarks=str(cancellation_remarks).strip(),
+                cancelled_by=employee_id,
+                cancelled_date=now,
+                lastmodified_by=employee_id,
+                lastmodified_date=now
+            )
+            return Response({"message": "GRN cancelled successfully", "grn_number": grn.grn_number}, status=status.HTTP_200_OK)
 
         # --- Payment-safe merge logic ---
         # The frontend sends the full payment_status array. We trust the frontend to have
@@ -931,8 +1199,36 @@ def stores_grn_detail(request, pk):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
-        storesGRN.objects.filter(grn_number=grn.grn_number).update(is_active=False)
-        return Response({"message": "GRN soft deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+        if grn.is_approved:
+            return Response({"error": "Approved GRNs cannot be cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cancellation_remarks = (
+            (request.data.get('cancellation_remarks') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            or (request.data.get('remark') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            or (request.data.get('remarks') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            or (request.data.get('cancelled_reason') if hasattr(request, 'data') and isinstance(request.data, dict) else None)
+            or request.query_params.get('cancellation_remarks')
+            or request.query_params.get('remark')
+            or request.query_params.get('remarks')
+            or request.query_params.get('cancelled_reason')
+        )
+        if not cancellation_remarks or not str(cancellation_remarks).strip():
+            return Response({"error": "Cancellation remark is required to cancel a GRN."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cancellation_remarks = str(cancellation_remarks).strip()
+        from django.utils import timezone
+        now = timezone.now()
+
+        storesGRN.objects.filter(grn_number=grn.grn_number).update(
+            is_active=False,
+            is_cancelled=True,
+            cancellation_remarks=cancellation_remarks,
+            cancelled_by=employee_id,
+            cancelled_date=now,
+            lastmodified_by=employee_id,
+            lastmodified_date=now
+        )
+        return Response({"message": "GRN cancelled successfully", "grn_number": grn.grn_number}, status=status.HTTP_200_OK)
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -1723,7 +2019,7 @@ def vending_machine_sales_import_excel(request):
                     if cat_name:
                         cat_obj = Category.objects.filter(category_name__iexact=cat_name.strip(), is_active__in=[True]).first()
                         if not cat_obj:
-                            cat_id = generate_custom_id_without_fy(Category, 'category_id', 'CAT', 5)
+                            cat_id = generate_custom_id_without_fy(Category, 'category_id', 'VMC', 5)
                             cat_obj = Category.objects.create(category_id=cat_id, category_name=cat_name.strip(), is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
 
                     vendor_obj = None
@@ -1815,7 +2111,7 @@ def vending_machine_sales_import_excel(request):
             if cat_name:
                 cat_obj = Category.objects.filter(category_name__iexact=cat_name.strip(), is_active__in=[True]).first()
                 if not cat_obj:
-                    cat_id = generate_custom_id_without_fy(Category, 'category_id', 'CAT', 5)
+                    cat_id = generate_custom_id_without_fy(Category, 'category_id', 'VMC', 5)
                     cat_obj = Category.objects.create(category_id=cat_id, category_name=cat_name.strip(), is_active=True, created_by=employee_id, branch_code=branch_code, outlet_code=outlet_code)
 
             vendor_obj = None
@@ -3383,6 +3679,7 @@ def stores_item_rack_update(request):
         rack = request.query_params.get('rack_no') or request.GET.get('rack_no')
         shelf = request.query_params.get('shelf_no') or request.GET.get('shelf_no')
         barcode = request.query_params.get('barcode') or request.GET.get('barcode')
+        department = request.query_params.get('department') or request.GET.get('department')
         search_query = request.query_params.get('search') or request.GET.get('search') or ''
 
         qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('rack_no', 'shelf_no', 'itemName')
@@ -3392,6 +3689,13 @@ def stores_item_rack_update(request):
             qs = qs.filter(shelf_no__iexact=shelf)
         if barcode:
             qs = qs.filter(barcode=barcode)
+        if department:
+            dept_str = str(department).strip()
+            matched_depts = list(Department.objects.filter(
+                Q(department_id__iexact=dept_str) | Q(department_name__iexact=dept_str)
+            ).values_list('department_id', flat=True))
+            matched_depts.append(dept_str)
+            qs = qs.filter(department__in=matched_depts)
         if search_query:
             qs = qs.filter(
                 Q(itemName__icontains=search_query) |
@@ -3697,6 +4001,81 @@ def stores_indent_return_delete(request, pk):
     ret_obj.lastmodified_by = employee_id
     ret_obj.save()
     return Response({"success": True, "message": "Indent return deleted successfully"}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_opening_stock_report(request):
+    """
+    Returns audit log report of Item Opening Stock entries.
+    Supports filtering by from_date, to_date, department, group, search.
+    """
+    from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
+    search = request.query_params.get('search') or request.GET.get('search')
+    department = request.query_params.get('department') or request.GET.get('department')
+    group = request.query_params.get('group') or request.GET.get('group')
+
+    logs = ItemOpeningStockLog.objects.filter(is_active__in=[True])
+
+    if from_date_str:
+        try:
+            from_d = datetime.strptime(from_date_str.strip(), "%Y-%m-%d").date()
+            from_dt = timezone.make_aware(datetime.combine(from_d, datetime.min.time())) if timezone.is_aware(timezone.now()) else datetime.combine(from_d, datetime.min.time())
+            logs = logs.filter(created_date__gte=from_dt)
+        except Exception:
+            pass
+
+    if to_date_str:
+        try:
+            to_d = datetime.strptime(to_date_str.strip(), "%Y-%m-%d").date()
+            to_dt = timezone.make_aware(datetime.combine(to_d, datetime.max.time())) if timezone.is_aware(timezone.now()) else datetime.combine(to_d, datetime.max.time())
+            logs = logs.filter(created_date__lte=to_dt)
+        except Exception:
+            pass
+
+    if department:
+        dept_str = str(department).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand) | Q(department_name__iexact=cand)
+        logs = logs.filter(q_dept)
+
+    if group:
+        grp_str = str(group).strip()
+        grp_obj = Group.objects.filter(Q(group_id=grp_str) | Q(group_name__iexact=grp_str)).first()
+        grp_code = grp_obj.group_id if grp_obj else grp_str
+        logs = logs.filter(Q(group=grp_code) | Q(group__iexact=grp_str))
+
+    if search:
+        s = search.strip()
+        logs = logs.filter(
+            Q(item_id__icontains=s) |
+            Q(item_name__icontains=s) |
+            Q(log_id__icontains=s) |
+            Q(remark__icontains=s)
+        )
+
+    logs = logs.order_by('-created_date')
+
+    serializer = ItemOpeningStockLogSerializer(logs, many=True)
+    serialized_data = serializer.data
+
+    total_logs = len(serialized_data)
+    unique_items = len(set(log.get('item_id') for log in serialized_data if log.get('item_id')))
+    total_opening_stock = sum(float(log.get('opening_stock') or 0.0) for log in serialized_data)
+
+    return Response({
+        "success": True,
+        "summary": {
+            "total_logs": total_logs,
+            "unique_items": unique_items,
+            "total_opening_stock": round(total_opening_stock, 2)
+        },
+        "results": serialized_data
+    })
+
 
 
 
