@@ -107,11 +107,28 @@ def doctor_schedule_list(request):
         dept_map = get_department_mapping(global_db)
         desig_map = get_designation_mapping(global_db)
 
+        query = {
+            "$or": [
+                {"designation": "DESIG094"},
+                {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
+            ]
+        }
         doctors_cursor = diagnostics_collection.find(
-            {"designation": "DESIG094"},
+            query,
             {"employeeId": 1, "employeeName": 1, "department": 1, "specialty": 1, "designation": 1, "email": 1, "mobileNumber": 1, "_id": 0} 
         )
         doctors = list(doctors_cursor)
+        
+        # Deduplicate by employeeId
+        unique_doctors = []
+        seen_emp_ids = set()
+        for doc in doctors:
+            eid = str(doc.get("employeeId") or "").strip()
+            if not eid or eid in seen_emp_ids:
+                continue
+            seen_emp_ids.add(eid)
+            unique_doctors.append(doc)
+        doctors = unique_doctors
         
         # Get schedules for these doctors
         hms_db = client['HMS']
@@ -182,7 +199,7 @@ def doctor_schedule_detail(request, employee_id):
         global_db = client['Global']
         diagnostics_collection = global_db['backend_diagnostics_profile']
         diagnostic_profile = diagnostics_collection.find_one(
-            {"employeeId": employee_id, "designation": "DESIG094"}
+            {"employeeId": employee_id}
         )
         
         if not diagnostic_profile:
@@ -253,7 +270,7 @@ def doctor_schedule_upsert(request, employee_id):
         global_db = client['Global']
         diagnostics_collection = global_db['backend_diagnostics_profile']
         diagnostic_profile = diagnostics_collection.find_one(
-            {"employeeId": employee_id, "designation": "DESIG094"}
+            {"employeeId": employee_id}
         )
         
         if not diagnostic_profile:

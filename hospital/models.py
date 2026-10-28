@@ -97,6 +97,7 @@ class Patient(AuditModel):
     area = models.CharField(max_length=100, blank=True, null=True)
     zipcode = models.CharField(max_length=10, blank=True, null=True)
     city = models.CharField(max_length=50, blank=True, null=True)
+    district = models.CharField(max_length=100, blank=True, null=True)
     state = models.CharField(max_length=50, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     mobilePhone = models.CharField(max_length=15)
@@ -149,29 +150,53 @@ class Patient(AuditModel):
         prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            counter, created = UHIDCounter.objects.get_or_create(
-                prefix=prefix,
-                defaults={'last_sequence': 0}
-            )
-
-            # Safety check: ensure counter is at least as high as maximum existing Patient record
-            year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-            max_number = counter.last_sequence
-            for u in year_patients:
-                try:
-                    num = int(u.split('/')[-1])
-                    if num > max_number:
-                        max_number = num
-                except (ValueError, IndexError):
-                    continue
-
-            counter.last_sequence = max_number + 1
+            counter = get_safe_uhid_counter(prefix)
+            counter.last_sequence = (counter.last_sequence or 0) + 1
             counter.save()
             
             # Format with 6-digit padding (S026/000001)
             self.uhid = f"{prefix}/{counter.last_sequence:06d}"
 
         super().save(*args, **kwargs)
+
+def get_safe_uhid_counter(prefix):
+    """
+    Safely retrieves or creates the UHIDCounter for a given prefix.
+    Guarantees no MultipleObjectsReturned error by:
+    1. Using filter(prefix=prefix) instead of get().
+    2. Automatically deleting duplicate records if multiple exist, keeping the highest sequence.
+    3. Ensuring last_sequence is at least as high as any existing Patient in the database.
+    """
+    counters = list(UHIDCounter.objects.filter(prefix=prefix).order_by('-last_sequence'))
+    if counters:
+        counter = counters[0]
+        if len(counters) > 1:
+            for duplicate in counters[1:]:
+                try:
+                    duplicate.delete()
+                except Exception as del_err:
+                    print(f"Warning deleting duplicate UHIDCounter: {del_err}")
+    else:
+        counter = UHIDCounter.objects.create(prefix=prefix, last_sequence=0)
+
+    try:
+        year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
+        max_number = counter.last_sequence or 0
+        for u in year_patients:
+            try:
+                num = int(str(u).split('/')[-1])
+                if num > max_number:
+                    max_number = num
+            except (ValueError, IndexError):
+                continue
+
+        if max_number > (counter.last_sequence or 0):
+            counter.last_sequence = max_number
+            counter.save()
+    except Exception as e:
+        print(f"Error checking max patient UHID: {e}")
+
+    return counter
 
 class CustomerType(AuditModel):
     type_id = models.IntegerField(primary_key=True)
