@@ -207,6 +207,7 @@ PAGE_MAPPING = {
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-reorder-level-report/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-rack-classification/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-rack-update/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-opening-stock-report/?(\?.*)?$': 'HMS-API-IT',
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
@@ -510,19 +511,19 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/stores-assets-management/.*/': 'HMS-API-SAM',
 
     # Stores Assets Maintenance & Incharge Assign:
-    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/?(\?.*)?$': 'HMS-API-AIA',               
-    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-AIA',
-    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-AIA',
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/?(\?.*)?$': 'HMS-API-SAM',               
+    r'^/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
+    '/_b_a_c_k_e_n_d/HMS/stores-assets-maintenance/.*/': 'HMS-API-SAM',
 
     # Asset Maintenance Request & Approval:
-    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/?(\?.*)?$': 'HMS-API-AMR',               
-    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/[^/]+/?(\?.*)?$': 'HMS-API-AMR',
-    '/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/.*/': 'HMS-API-AMR',
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/?(\?.*)?$': 'HMS-API-SAM',               
+    r'^/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/[^/]+/?(\?.*)?$': 'HMS-API-SAM',
+    '/_b_a_c_k_e_n_d/HMS/asset-maintenance-request/.*/': 'HMS-API-SAM',
 
     #Recycle Assets Management:
-    '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SRM',               
-    r'^/_b_a_c_k_e_n_d/HMS/recycle_asset/[^/]+/?(\?.*)?$': 'HMS-API-SRM',               
-    '/_b_a_c_k_e_n_d/HMS/recycle_asset/.*/': 'HMS-API-SRM',   
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/': 'HMS-API-SAM',               
+    r'^/_b_a_c_k_e_n_d/HMS/recycle_asset/[^/]+/?(\?.*)?$': 'HMS-API-SAM',               
+    '/_b_a_c_k_e_n_d/HMS/recycle_asset/.*/': 'HMS-API-SAM',   
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',
