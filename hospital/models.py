@@ -150,53 +150,105 @@ class Patient(AuditModel):
         prefix = f"S0{fy_year % 100:02d}"
 
         if not self.uhid:
-            counter = get_safe_uhid_counter(prefix)
-            counter.last_sequence = (counter.last_sequence or 0) + 1
-            counter.save()
-            
+            next_seq = get_next_uhid_sequence(prefix)
             # Format with 6-digit padding (S026/000001)
-            self.uhid = f"{prefix}/{counter.last_sequence:06d}"
+            self.uhid = f"{prefix}/{next_seq:06d}"
 
         super().save(*args, **kwargs)
 
-def get_safe_uhid_counter(prefix):
+def get_next_uhid_sequence(prefix):
     """
-    Safely retrieves or creates the UHIDCounter for a given prefix.
-    Guarantees no MultipleObjectsReturned error by:
-    1. Using filter(prefix=prefix) instead of get().
-    2. Automatically deleting duplicate records if multiple exist, keeping the highest sequence.
-    3. Ensuring last_sequence is at least as high as any existing Patient in the database.
+    Safely and atomically increments and returns the next UHID sequence for a given prefix.
+    Uses PyMongo's atomic find_one_and_update directly to completely avoid Djongo's broken primary-key / duplicate key issues.
+    Also ensures the sequence is at least as high as any existing Patient in the database.
     """
-    counters = list(UHIDCounter.objects.filter(prefix=prefix).order_by('-last_sequence'))
-    if counters:
-        counter = counters[0]
-        if len(counters) > 1:
-            for duplicate in counters[1:]:
+    import os
+    from pymongo import MongoClient, ReturnDocument
+
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST', 'mongodb://localhost:27017'))
+    db = client['HMS']
+    col = db['hospital_uhidcounter']
+
+    # 1. Find max existing patient UHID for this prefix to avoid collisions with migrated/legacy records
+    max_patient_seq = 0
+    try:
+        top_patients = list(db['hospital_patient'].find(
+            {"uhid": {"$regex": f"^{prefix}/"}},
+            {"uhid": 1}
+        ).sort("uhid", -1).limit(20))
+        for p in top_patients:
+            u_str = str(p.get("uhid") or "").strip()
+            if "/" in u_str:
                 try:
-                    duplicate.delete()
-                except Exception as del_err:
-                    print(f"Warning deleting duplicate UHIDCounter: {del_err}")
-    else:
-        counter = UHIDCounter.objects.create(prefix=prefix, last_sequence=0)
+                    num = int(u_str.split("/")[-1])
+                    if num > max_patient_seq:
+                        max_patient_seq = num
+                except (ValueError, IndexError):
+                    pass
+    except Exception as e:
+        print(f"Error checking top patient for prefix {prefix}: {e}")
+
+    # 2. Get current counter doc
+    doc = col.find_one({"prefix": prefix})
+    curr_seq = int(doc.get("last_sequence", 0)) if doc else 0
+
+    if max_patient_seq > curr_seq:
+        col.update_one(
+            {"prefix": prefix},
+            {"$set": {"last_sequence": max_patient_seq}},
+            upsert=True
+        )
+
+    # 3. Atomically increment and return
+    res = col.find_one_and_update(
+        {"prefix": prefix},
+        {"$inc": {"last_sequence": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+    return int(res.get("last_sequence", 1))
+
+def get_current_uhid_sequence(prefix):
+    """
+    Safely gets the current (latest) UHID sequence for a given prefix without incrementing.
+    """
+    import os
+    from pymongo import MongoClient
+
+    client = MongoClient(os.getenv('GLOBAL_DB_HOST', 'mongodb://localhost:27017'))
+    db = client['HMS']
+    col = db['hospital_uhidcounter']
+
+    doc = col.find_one({"prefix": prefix})
+    curr_seq = int(doc.get("last_sequence", 0)) if doc else 0
 
     try:
-        year_patients = Patient.objects.filter(uhid__startswith=prefix).values_list('uhid', flat=True)
-        max_number = counter.last_sequence or 0
-        for u in year_patients:
-            try:
-                num = int(str(u).split('/')[-1])
-                if num > max_number:
-                    max_number = num
-            except (ValueError, IndexError):
-                continue
-
-        if max_number > (counter.last_sequence or 0):
-            counter.last_sequence = max_number
-            counter.save()
+        top_patients = list(db['hospital_patient'].find(
+            {"uhid": {"$regex": f"^{prefix}/"}},
+            {"uhid": 1}
+        ).sort("uhid", -1).limit(10))
+        for p in top_patients:
+            u_str = str(p.get("uhid") or "").strip()
+            if "/" in u_str:
+                try:
+                    num = int(u_str.split("/")[-1])
+                    if num > curr_seq:
+                        curr_seq = num
+                except (ValueError, IndexError):
+                    pass
     except Exception as e:
-        print(f"Error checking max patient UHID: {e}")
+        print(f"Error checking top patient for prefix {prefix}: {e}")
 
-    return counter
+    return curr_seq
+
+def get_safe_uhid_counter(prefix):
+    """
+    Backward-compatibility helper that returns an object with a .last_sequence attribute.
+    """
+    class SafeCounter:
+        def __init__(self, seq):
+            self.last_sequence = seq
+    return SafeCounter(get_current_uhid_sequence(prefix))
 
 class CustomerType(AuditModel):
     type_id = models.IntegerField(primary_key=True)
