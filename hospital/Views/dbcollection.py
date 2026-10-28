@@ -32,6 +32,8 @@ pharmacy_stock_collection         = hms_db["hospital_pharmacystock"]
 pharmacy_billing_collection       = hms_db["hospital_pharmacybilling"]
 admission_collection              = hms_db["hospital_admission"]
 patient_collection                = hms_db["hospital_patient"]
+hospital_insuranceprovider        = hms_db["hospital_insuranceprovider"]
+insurance_provider_collection     = hms_db["hospital_insuranceprovider"]
 
 import re
 
@@ -138,6 +140,90 @@ def get_patient_name_by_uhid(uhid=None, ip_number=None):
     """
     details = get_patient_details_by_uhid(uhid, ip_number)
     return details.get("patient_name") or ""
+
+
+def get_insurance_provider_by_patient(uhid=None, company_code=None, patient_obj=None):
+    """
+    Common reusable function:
+    Finds and returns insurance provider details (company_name, company_code)
+    using the Patient model / hospital_insuranceprovider collection.
+
+    Can be called with:
+      - uhid: Looks up Patient model for company_code and customer_type
+      - company_code: Directly looks up hospital_insuranceprovider
+      - patient_obj: A Patient model instance or dict with company_code / customer_type
+
+    Returns dict:
+      {
+        "is_insurance": bool,
+        "company_code": str,
+        "company_name": str,
+      }
+    """
+    res = {
+        "is_insurance": False,
+        "company_code": "",
+        "company_name": "",
+    }
+
+    c_code = str(company_code).strip() if company_code else ""
+    cust_type = ""
+
+    # 1. If patient_obj passed
+    if patient_obj:
+        if isinstance(patient_obj, dict):
+            c_code = c_code or str(patient_obj.get("company_code") or "").strip()
+            cust_type = str(patient_obj.get("customer_type") or "").strip()
+        else:
+            c_code = c_code or str(getattr(patient_obj, "company_code", "") or "").strip()
+            cust_type = str(getattr(patient_obj, "customer_type", "") or "").strip()
+
+    # 2. If uhid passed and we need to check Patient model
+    if uhid and (not c_code or not cust_type):
+        u_str = str(uhid).strip()
+        try:
+            from ..models import Patient
+            p = Patient.objects.filter(uhid=u_str).first()
+            if p:
+                cust_type = cust_type or str(p.customer_type or "").strip()
+                c_code = c_code or str(p.company_code or "").strip()
+        except Exception:
+            pass
+
+        if not c_code or not cust_type:
+            # Fallback to patient_collection in mongo
+            p_doc = patient_collection.find_one({"uhid": u_str})
+            if not p_doc:
+                p_doc = patient_collection.find_one({"uhid": {"$regex": f"^{re.escape(u_str)}$", "$options": "i"}})
+            if p_doc:
+                cust_type = cust_type or str(p_doc.get("customer_type") or "").strip()
+                c_code = c_code or str(p_doc.get("company_code") or "").strip()
+
+    is_ins = cust_type.lower() == "insurance" or bool(c_code)
+    res["is_insurance"] = is_ins
+    res["company_code"] = c_code
+
+    # 3. Lookup company_name from hospital_insuranceprovider
+    if c_code:
+        ins_doc = hospital_insuranceprovider.find_one({
+            "company_code": {"$regex": f"^{re.escape(c_code)}$", "$options": "i"}
+        })
+        if not ins_doc:
+            ins_doc = hospital_insuranceprovider.find_one({"company_code": c_code})
+
+        if ins_doc:
+            res["company_name"] = str(ins_doc.get("company_name") or "").strip()
+
+    return res
+
+
+def get_insurance_company_name(uhid=None, company_code=None, patient_obj=None):
+    """
+    Common helper returning just the insurance company_name string.
+    Whenever needed across any view, call get_insurance_company_name(uhid=...) or get_insurance_company_name(company_code=...).
+    """
+    details = get_insurance_provider_by_patient(uhid=uhid, company_code=company_code, patient_obj=patient_obj)
+    return details.get("company_name") or ""
 
 
 def get_employee_name_by_id(employee_id):
