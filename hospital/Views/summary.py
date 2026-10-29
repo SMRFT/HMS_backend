@@ -783,6 +783,8 @@ def create_summary(request):
             patch_doc = {
                 "summaryNo": summary_no,
                 "heading": heading_val,
+                "explainedBy": (data.get('explainedBy') or '').strip(),
+                "explainedTo": (data.get('explainedTo') or '').strip(),
             }
             if fields_array:
                 fields_array = sort_fields_data_by_summary_type(
