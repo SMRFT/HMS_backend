@@ -305,7 +305,11 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/send-whatsapp/?(\?.*)?$': 'HMS-API-WTSAP',
     r'^/_b_a_c_k_e_n_d/HMS/send-email/?(\?.*)?$': 'HMS-API-EML',
     r'^/_b_a_c_k_e_n_d/HMS/communication-logs/?(\?.*)?$': 'HMS-P-SUM',
-    '^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/': 'HMS-P-CDDS',
+
+    #dialysis discharge summary:
+    r'^/_b_a_c_k_e_n_d/HMS/dialysis_patient_details/?(\?.*)?$': 'HMS-P-CDDS',
+    r'^/_b_a_c_k_e_n_d/HMS/create_dialysis_discharge_summary/?(\?.*)?$': 'HMS-P-CDDS',
+    r'^/_b_a_c_k_e_n_d/HMS/dialysis-discharge-summary/?(\?.*)?$': 'HMS-P-CDDS',
     r'^/_b_a_c_k_e_n_d/HMS/Print_dialysis_dischargesummary/?(\?.*)?$': 'HMS-P-PDDS',
 
     #HR: 

@@ -258,6 +258,8 @@ urlpatterns = [
     path("send-discharge-visit-reminder/", discharge.send_single_discharge_visit_reminder_api, name="send-single-discharge-visit-reminder"),
     path("patient-next-visit-logs/", discharge.patient_next_visit_logs_api, name="patient-next-visit-logs"),
     path("dialysis-discharge-summary/", discharge.create_dialysis_discharge_summary, name="dialysis-discharge-summary"),
+    path("create_dialysis_discharge_summary/", discharge.create_dialysis_discharge_summary, name="create_dialysis_discharge_summary"),
+    path("Print_dialysis_dischargesummary/", discharge.Print_dialysis_dischargesummary, name="Print_dialysis_dischargesummary"),
     path('dialysis_patient_details/', discharge.dialysis_patient_details, name='dialysis_patient_details'),
 
     # Patient URLs

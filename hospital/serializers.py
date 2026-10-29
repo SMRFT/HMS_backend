@@ -672,12 +672,21 @@ class CashCounterCollectionSerializer(serializers.ModelSerializer):
 
 
 
+import datetime as _dt
 from .models import DialysisDischargeSummary
 class DialysisDischargeSummarySerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
+
     class Meta:
         model = DialysisDischargeSummary
         fields = '__all__'
+
+    def to_representation(self, instance):
+        for attr in ('date', 'date_of_first_dialysis', 'date_of_last_dialysis', 'next_hd_session_on'):
+            val = getattr(instance, attr, None)
+            if isinstance(val, _dt.datetime):
+                setattr(instance, attr, val.date())
+        return super().to_representation(instance)
 
 
 
