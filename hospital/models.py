@@ -1168,6 +1168,8 @@ class Summary(AuditModel):
     surgeryDate = models.DateField(null=True, blank=True)
     nextReviewDate = models.DateField(null=True, blank=True)
     doctor = models.CharField(max_length=100, blank=True, null=True)
+    explainedBy = models.CharField(max_length=200, blank=True, null=True)
+    explainedTo = models.CharField(max_length=200, blank=True, null=True)
     summaryNo = models.CharField(max_length=50, blank=True, null=True)
     summaryType = models.CharField(max_length=100, blank=True, null=True)
     headingNo = models.CharField(max_length=50, blank=True, null=True)
