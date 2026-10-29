@@ -2084,13 +2084,13 @@ class DialysisDischargeSummary(AuditModel):
     age = models.PositiveIntegerField()
     gender = models.CharField(max_length=100)
 
-    uhid = models.CharField(max_length=100, unique=True)
+    uhid = models.CharField(max_length=100)
     consultant = models.CharField(max_length=255,null=True, blank=True)
     id_no = models.CharField(max_length=100,null=True, blank=True)
     insurance = models.CharField(max_length=255, blank=True, default="")
 
     address = models.TextField()
-    date = models.DateField(default=timezone.now)
+    date = models.DateField(default=timezone.localdate)
     diagnosis = models.TextField()
 
     date_of_first_dialysis = models.DateField(null=True, blank=True)
@@ -2133,8 +2133,16 @@ class DialysisDischargeSummary(AuditModel):
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             db = client["HMS"]
 
+            date_str = self.date.isoformat() if hasattr(self.date, "isoformat") else str(self.date)
+            # Find the most recently inserted document for this uhid and date
+            doc = db["hospital_dialysisdischargesummary"].find_one(
+                {"uhid": self.uhid, "date": date_str},
+                sort=[("_id", -1)]
+            )
+            update_query = {"_id": doc["_id"]} if doc else {"uhid": self.uhid}
+
             db["hospital_dialysisdischargesummary"].update_one(
-                {"uhid": self.uhid},
+                update_query,
                 {
                     "$set": {
                         "blood_investigations": self._parse_json_field(self.blood_investigations),

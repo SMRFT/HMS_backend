@@ -2422,11 +2422,21 @@ def dialysis_patient_details(request):
 
         patient["billing"] = billing_list
 
+    # Check if this patient already has a dialysis discharge summary saved today
+    today = timezone.localdate()
+    saved_today = False
+    if uhid:
+        saved_today = DialysisDischargeSummary.objects.filter(
+            uhid__iexact=str(uhid).strip(),
+            date=today
+        ).exists()
+
     # =========================================================
     # STEP 5 : RESPONSE
     # =========================================================
     return Response({
         "success": True,
+        "already_saved_today": saved_today,
         "data": patient_data
     }, status=status.HTTP_200_OK)
 
@@ -2508,6 +2518,7 @@ def create_dialysis_discharge_summary(request):
 
             "address":   data.get("address"),
             "diagnosis": data.get("diagnosis"),
+            "date":      data.get("date") or timezone.localdate().isoformat(),
 
             "date_of_first_dialysis": data.get("date_of_first_dialysis"),
             "date_of_last_dialysis":  data.get("date_of_last_dialysis"),
@@ -2536,6 +2547,35 @@ def create_dialysis_discharge_summary(request):
 
             "next_hd_session_on": data.get("next_hd_session_on"),
         }
+
+        # ============================================
+        # CHECK IF ALREADY SAVED FOR THIS DATE
+        # ============================================
+        today_date = timezone.localdate()
+        target_date_str = payload.get("date")
+        if target_date_str:
+            try:
+                target_date = _datetime.strptime(str(target_date_str)[:10], "%Y-%m-%d").date()
+            except Exception:
+                target_date = today_date
+        else:
+            target_date = today_date
+
+        existing_today = DialysisDischargeSummary.objects.filter(
+            uhid__iexact=str(payload["uhid"]).strip(),
+            date=target_date
+        ).first()
+
+        if existing_today:
+            return Response(
+                {
+                    "success": False,
+                    "status_code": 400,
+                    "message": f"Dialysis discharge summary for {payload['name']} (UHID: {payload['uhid']}) has already been saved for {target_date}. Duplicate summary cannot be created for the same date.",
+                    "data": None
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ============================================
         # SERIALIZER
