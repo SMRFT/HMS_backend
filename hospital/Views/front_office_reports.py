@@ -24,11 +24,19 @@ def get_doctor_mapping(client):
     try:
         global_db = client['Global']
         diagnostics_collection = global_db['backend_diagnostics_profile']
+        doctor_query = {
+            "$or": [
+                {"designation": "DESIG094"},
+                {"primaryRole": "SD-R-DOC"},
+                {"additionalRoles": "SD-R-DOC"},
+                {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
+            ]
+        }
         doctors = list(diagnostics_collection.find(
-            {"designation": "DESIG094"},
+            doctor_query,
             {"employeeId": 1, "employeeName": 1, "_id": 0}
         ))
-        return {d['employeeId']: d['employeeName'] for d in doctors if d.get('employeeId')}
+        return {str(d['employeeId']): d['employeeName'] for d in doctors if d.get('employeeId')}
     except:
         return {}
 
@@ -44,8 +52,18 @@ def front_office_report_view(request):
         end_date_str = request.GET.get('end_date')
         doctor_name = request.GET.get('doctor_name', 'all')
         
-        hospital_code = request.data.get('auth-hospital-code', 'system')
-        branch_code = request.data.get('auth-branch-code', 'system')
+        hospital_code = (
+            request.data.get('auth-hospital-code') or 
+            request.headers.get('Hospital-Code') or 
+            request.GET.get('hospital_code') or 
+            'SH001'
+        )
+        branch_code = (
+            request.data.get('auth-branch-code') or 
+            request.headers.get('Branch-Code') or 
+            request.GET.get('branch_code') or 
+            'SHB001'
+        )
 
         if not start_date_str or not end_date_str:
             return Response({"error": "start_date and end_date are required"}, status=400)
@@ -62,13 +80,13 @@ def front_office_report_view(request):
         doctor_map = get_doctor_mapping(client)
         def resolve_doc_name(val):
             if not val: return val
-            return doctor_map.get(val, val)
+            return doctor_map.get(str(val), val)
 
         results = []
 
         if report_type == 'referred_patients' or report_type == 'op_patients':
             query = {
-                "hospital_code": hospital_code,
+                "hospital_code": {"$in": [hospital_code, None, "system"]},
                 "branch_code": branch_code,
                 "created_date": {"$gte": start_date, "$lte": end_date}
             }
@@ -82,14 +100,12 @@ def front_office_report_view(request):
 
         elif report_type == 'admission_register' or report_type == 'doctor_wise_admission':
             query = {
-                "hospital_code": hospital_code,
+                "hospital_code": {"$in": [hospital_code, None, "system"]},
                 "branch_code": branch_code,
                 "admissionDateTime": {"$gte": start_date, "$lte": end_date}
             }
-            # If searching by name, we might need to handle both name and ID in query if doctor_name is a name
             if doctor_name and doctor_name.lower() != 'all':
-                # Find ID for this name if possible
-                doc_id = next((k for k, v in doctor_map.items() if v == doctor_name), None)
+                doc_id = next((k for k, v in doctor_map.items() if v.lower() == doctor_name.lower()), None)
                 if doc_id:
                     query["$or"] = [{"admittingDoctor": doctor_name}, {"admittingDoctor": doc_id}]
                 else:
@@ -97,41 +113,45 @@ def front_office_report_view(request):
                 
             admissions = list(db['hospital_admission'].find(query).sort("admissionDateTime", 1))
             
-            uhids = [a.get('uhid') for a in admissions]
-            patients = {p['uhid']: f"{p.get('firstName', '')} {p.get('lastName', '')}" 
+            uhids = [a.get('uhid') for a in admissions if a.get('uhid')]
+            patients = {p['uhid']: f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() 
                         for p in db['hospital_patient'].find({"uhid": {"$in": uhids}})}
             
             for a in admissions:
-                a['patient_name'] = patients.get(a.get('uhid'), 'Unknown')
+                a['patient_name'] = patients.get(a.get('uhid')) or 'Unknown'
                 a['admittingDoctor'] = resolve_doc_name(a.get('admittingDoctor'))
                 a['consultingDoctor'] = resolve_doc_name(a.get('consultingDoctor'))
                 results.append(a)
 
         elif report_type == 'discharge_register':
             query = {
-                "hospital_code": hospital_code,
+                "hospital_code": {"$in": [hospital_code, None, "system"]},
                 "branch_code": branch_code,
-                "dod": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()},
-                "is_active": True
+                "is_active": True,
+                "$or": [
+                    {"dod": {"$gte": start_date, "$lte": end_date}},
+                    {"dod": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()}}
+                ]
             }
             summaries = list(db['hospital_summary'].find(query).sort("dod", 1))
             
-            ip_numbers = [r.get('ipNo') for r in summaries]
+            ip_numbers = [r.get('ipNo') for r in summaries if r.get('ipNo')]
+            uhids = [r.get('uhid') for r in summaries if r.get('uhid')]
+            
             admissions = {a['ipNumber']: a for a in db['hospital_admission'].find({"ipNumber": {"$in": ip_numbers}})}
+            patients = {p['uhid']: f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() 
+                        for p in db['hospital_patient'].find({"uhid": {"$in": uhids}})}
             
             for r in summaries:
                 adm = admissions.get(r.get('ipNo'), {})
-                r['admission_date'] = adm.get('admissionDateTime')
-                r['admitting_doctor'] = resolve_doc_name(adm.get('admittingDoctor'))
-                
-                p = db['hospital_patient'].find_one({"uhid": r.get('uhid')})
-                if p:
-                    r['patient_name'] = f"{p.get('firstName', '')} {p.get('lastName', '')}"
+                r['admission_date'] = adm.get('admissionDateTime') or r.get('doa')
+                r['admitting_doctor'] = resolve_doc_name(adm.get('admittingDoctor')) or r.get('doctor') or 'N/A'
+                r['patient_name'] = patients.get(r.get('uhid')) or 'Unknown'
                 results.append(r)
 
         elif report_type == 'new_born_babies':
             query = {
-                "hospital_code": hospital_code,
+                "hospital_code": {"$in": [hospital_code, None, "system"]},
                 "branch_code": branch_code,
                 "created_date": {"$gte": start_date, "$lte": end_date},
                 "mothers_uhid_no": {"$exists": True, "$ne": None, "$ne": ""}
@@ -142,41 +162,57 @@ def front_office_report_view(request):
                 results.append(b)
 
         elif report_type == 'doctor_wise_ip_collection':
-            # DischargeBilling.bill_date is a DateField and is persisted as an
-            # ISO date string ("YYYY-MM-DD"), not a BSON datetime — compare as
-            # strings (same convention used in advanced_dashboard.py).
             query = {
-                "hospital_code": hospital_code,
+                "hospital_code": {"$in": [hospital_code, None, "system"]},
                 "branch_code": branch_code,
-                "bill_date": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()},
-                "status": "Billed",
-                "is_active": True
+                "is_active": True,
+                "$or": [
+                    {"bill_date": {"$gte": start_date, "$lte": end_date}},
+                    {"bill_date": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()}}
+                ]
             }
             billings = list(db['hospital_dischargebilling'].find(query))
             
             doctor_stats = {}
             for bill in billings:
                 items = bill.get('items', [])
-                for item in items:
-                    doc_val = item.get('doctor')
-                    if not doc_val: continue
-                    
-                    doc_name_resolved = resolve_doc_name(doc_val)
-                    
-                    if doctor_name and doctor_name.lower() != 'all' and doc_name_resolved != doctor_name:
-                        continue
+                if items:
+                    for item in items:
+                        doc_val = item.get('doctor') or bill.get('doctor') or bill.get('admitting_doctor')
+                        if not doc_val: continue
                         
-                    if doc_name_resolved not in doctor_stats:
-                        doctor_stats[doc_name_resolved] = {
-                            "doctor_name": doc_name_resolved,
-                            "total_collection": 0,
-                            "bill_count": 0,
-                            "patients": set()
-                        }
-                    
-                    doctor_stats[doc_name_resolved]["total_collection"] += float(serialize_doc(item.get('amount', 0)) or 0)
-                    doctor_stats[doc_name_resolved]["bill_count"] += 1
-                    doctor_stats[doc_name_resolved]["patients"].add(bill.get('uhid'))
+                        doc_name_resolved = resolve_doc_name(doc_val)
+                        
+                        if doctor_name and doctor_name.lower() != 'all' and doc_name_resolved.lower() != doctor_name.lower():
+                            continue
+                            
+                        if doc_name_resolved not in doctor_stats:
+                            doctor_stats[doc_name_resolved] = {
+                                "doctor_name": doc_name_resolved,
+                                "total_collection": 0,
+                                "bill_count": 0,
+                                "patients": set()
+                            }
+                        
+                        doctor_stats[doc_name_resolved]["total_collection"] += float(serialize_doc(item.get('amount', 0)) or 0)
+                        doctor_stats[doc_name_resolved]["bill_count"] += 1
+                        doctor_stats[doc_name_resolved]["patients"].add(bill.get('uhid'))
+                else:
+                    doc_val = bill.get('doctor') or bill.get('admitting_doctor')
+                    if doc_val:
+                        doc_name_resolved = resolve_doc_name(doc_val)
+                        if doctor_name and doctor_name.lower() != 'all' and doc_name_resolved.lower() != doctor_name.lower():
+                            continue
+                        if doc_name_resolved not in doctor_stats:
+                            doctor_stats[doc_name_resolved] = {
+                                "doctor_name": doc_name_resolved,
+                                "total_collection": 0,
+                                "bill_count": 0,
+                                "patients": set()
+                            }
+                        doctor_stats[doc_name_resolved]["total_collection"] += float(serialize_doc(bill.get('net_amount', 0) or bill.get('total_amount', 0)) or 0)
+                        doctor_stats[doc_name_resolved]["bill_count"] += 1
+                        doctor_stats[doc_name_resolved]["patients"].add(bill.get('uhid'))
             
             for doc in doctor_stats:
                 doctor_stats[doc]["patient_count"] = len(doctor_stats[doc]["patients"])
