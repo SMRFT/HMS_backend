@@ -242,8 +242,18 @@ def get_employee_name_by_id(employee_id):
                 {"employeeId": f"{num_val:06d}"}
             ]
         })
+    if not emp:
+        emp = profile_collection.find_one({
+            "$or": [
+                {"employeeId": emp_str.upper()},
+                {"employeeId": emp_str.lower()},
+                {"userId": emp_str}
+            ]
+        })
     if emp and "employeeName" in emp:
         return emp["employeeName"]
+    if emp and "name" in emp:
+        return emp["name"]
     return "Unknown"
 
 
