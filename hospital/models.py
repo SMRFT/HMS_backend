@@ -1179,6 +1179,7 @@ class Summary(AuditModel):
     fieldsData = models.JSONField(blank=True, null=True)  # To store dynamic field data
     approve = models.BooleanField(default=False)
     approve_time = models.DateTimeField(null=True, blank=True)
+    approved_by = models.CharField(max_length=100, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
 

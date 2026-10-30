@@ -621,7 +621,23 @@ def get_summaries(request):
 
             # Attach names, high risk flags, and convert approve_time to IST (+5:30)
             from datetime import timezone, timedelta
+            from .dbcollection import get_employee_name_by_id
             IST = timezone(timedelta(hours=5, minutes=30))
+
+            # Batch employee name resolution from Global.backend_diagnostics_profile
+            emp_ids = set()
+            for s in summaries:
+                if s.get('created_by'):
+                    emp_ids.add(str(s['created_by']).strip())
+                if s.get('approved_by'):
+                    emp_ids.add(str(s['approved_by']).strip())
+
+            emp_name_map = {}
+            for eid in emp_ids:
+                if eid:
+                    name = get_employee_name_by_id(eid)
+                    if name and name != "Unknown":
+                        emp_name_map[eid] = name
 
             for s in summaries:
                 uhid = s.get('uhid', '')
@@ -631,6 +647,12 @@ def get_summaries(request):
                 s['high_risk_reason'] = adm_info.get('high_risk_reason') or ''
                 hr_d = adm_info.get('high_risk_date')
                 s['high_risk_date'] = hr_d.isoformat() if hasattr(hr_d, 'isoformat') else str(hr_d or '')
+
+                cb = str(s.get('created_by') or '').strip()
+                s['created_by_name'] = emp_name_map.get(cb, cb)
+
+                ab = str(s.get('approved_by') or '').strip()
+                s['approved_by_name'] = emp_name_map.get(ab, ab)
 
                 ap = s.get('approve_time')
                 if ap:
@@ -696,8 +718,12 @@ def sort_fields_data_by_summary_type(fields_data, summary_no=None, summary_type=
 def create_summary(request):
     data = request.data.copy()
 
-    if data.get('date'):
-        data['date'] = str(data['date'])[:10]
+    for dt_field in ('surgeryDate', 'nextReviewDate', 'doa', 'dod', 'doaTime', 'dodTime', 'date'):
+        val = data.get(dt_field)
+        if val == '' or val is None or (isinstance(val, str) and not val.strip()):
+            data[dt_field] = None
+        elif dt_field == 'date' and val:
+            data['date'] = str(val)[:10]
 
     # Resolve summaryNo and headingNo if names were passed
     summary_no = (data.get('summaryNo') or '').strip()
@@ -785,6 +811,7 @@ def create_summary(request):
                 "heading": heading_val,
                 "explainedBy": (data.get('explainedBy') or '').strip(),
                 "explainedTo": (data.get('explainedTo') or '').strip(),
+                "created_by": created_by,
             }
             if fields_array:
                 fields_array = sort_fields_data_by_summary_type(
@@ -1817,6 +1844,17 @@ def get_printsummary(request, ip_no):
 
         summary['signatures']       = signatures        # for standard lab sections
         summary['micro_signatures'] = micro_signatures  # for microbiology section
+
+        # Enrich employee display names from Global.backend_diagnostics_profile
+        from .dbcollection import get_employee_name_by_id
+        cb = str(summary.get('created_by') or '').strip()
+        if cb:
+            cb_name = get_employee_name_by_id(cb)
+            summary['created_by_name'] = cb_name if cb_name != "Unknown" else cb
+        ab = str(summary.get('approved_by') or '').strip()
+        if ab:
+            ab_name = get_employee_name_by_id(ab)
+            summary['approved_by_name'] = ab_name if ab_name != "Unknown" else ab
 
         client.close()
         return JsonResponse(serialize_mongo(summary), safe=False)
