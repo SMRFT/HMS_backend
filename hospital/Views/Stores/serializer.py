@@ -449,6 +449,10 @@ class ItemMasterSerializer(serializers.ModelSerializer):
                 data['opening_stock'] = float(data.get('opening_stock', 0))
             except (ValueError, TypeError):
                 data['opening_stock'] = 0.00
+        if data.get('total_quantity') in (None, ''):
+            data['total_quantity'] = 0
+        if data.get('approved_quantity') in (None, ''):
+            data['approved_quantity'] = 0
 
         cat_map, dept_map, group_map, _, _ = get_lookup_maps()
         rev_group_map = {v.lower().strip(): k for k, v in group_map.items() if v}
@@ -947,4 +951,4 @@ class ItemOpeningStockLogSerializer(serializers.ModelSerializer):
 
 
 
-
+

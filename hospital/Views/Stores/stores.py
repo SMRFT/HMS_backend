@@ -34,39 +34,73 @@ def get_financial_year_string():
 def generate_custom_id(model_class, id_field_name, prefix, sequence_length):
     fy_str = get_financial_year_string()
     base_prefix = f"{prefix}{fy_str}"
-    
-    last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
-    
-    if last_record:
-        last_id = getattr(last_record, id_field_name)
-        try:
-            last_sequence = int(last_id.replace(base_prefix, ''))
-            new_sequence = last_sequence + 1
-        except ValueError:
+    try:
+        from ..dbcollection import hms_db
+        col_name = model_class._meta.db_table
+        col = hms_db[col_name]
+        last_doc = col.find_one(
+            {id_field_name: {'$regex': f'^{base_prefix}'}},
+            sort=[(id_field_name, -1)]
+        )
+        max_seq = 0
+        if last_doc:
+            val = str(last_doc.get(id_field_name, ''))
+            rem = val[len(base_prefix):]
+            if rem.isdigit():
+                max_seq = int(rem)
+        new_sequence = max_seq + 1
+        new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        while col.find_one({id_field_name: new_id}):
+            new_sequence += 1
+            new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        return new_id
+    except Exception:
+        last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
+        if last_record:
+            last_id = getattr(last_record, id_field_name)
+            try:
+                last_sequence = int(last_id.replace(base_prefix, ''))
+                new_sequence = last_sequence + 1
+            except ValueError:
+                new_sequence = 1
+        else:
             new_sequence = 1
-    else:
-        new_sequence = 1
-        
-    return f"{base_prefix}{new_sequence:0{sequence_length}d}"
+        return f"{base_prefix}{new_sequence:0{sequence_length}d}"
 
 def generate_custom_id_without_fy(model_class, id_field_name, prefix, sequence_length):
     base_prefix = f"{prefix}"
-    print("base_prefix", base_prefix)
-    last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
-    print("last_record", last_record)
-    if last_record:
-        last_id = getattr(last_record, id_field_name)
-        try:
-            last_sequence = int(last_id.replace(base_prefix, ''))
-            print("last_sequence", last_sequence)
-            new_sequence = last_sequence + 1
-            print("new_sequence", new_sequence)
-        except ValueError:
+    try:
+        from ..dbcollection import hms_db
+        col_name = model_class._meta.db_table
+        col = hms_db[col_name]
+        last_doc = col.find_one(
+            {id_field_name: {'$regex': f'^{base_prefix}'}},
+            sort=[(id_field_name, -1)]
+        )
+        max_seq = 0
+        if last_doc:
+            val = str(last_doc.get(id_field_name, ''))
+            rem = val[len(base_prefix):]
+            if rem.isdigit():
+                max_seq = int(rem)
+        new_sequence = max_seq + 1
+        new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        while col.find_one({id_field_name: new_id}):
+            new_sequence += 1
+            new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        return new_id
+    except Exception:
+        last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
+        if last_record:
+            last_id = getattr(last_record, id_field_name)
+            try:
+                last_sequence = int(last_id.replace(base_prefix, ''))
+                new_sequence = last_sequence + 1
+            except ValueError:
+                new_sequence = 1
+        else:
             new_sequence = 1
-    else:
-        new_sequence = 1
-        
-    return f"{base_prefix}{new_sequence:0{sequence_length}d}"
+        return f"{base_prefix}{new_sequence:0{sequence_length}d}"
 
 # --- Item Master Views ---
 
@@ -342,63 +376,86 @@ def item_price_history(request, item_id):
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
     try:
-        import json
+        from ..dbcollection import hms_db
+        from datetime import datetime, date
+
         from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
         to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
 
-        history = []
-        grns = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+        item_id_str = str(item_id).strip()
+        id_queries = [
+            {'items.item_id': item_id_str},
+            {'items.id': item_id_str},
+            {'items.itemId': item_id_str},
+        ]
+        if item_id_str.isdigit():
+            id_queries.append({'items.item_id': int(item_id_str)})
+            id_queries.append({'items.id': int(item_id_str)})
+
+        query = {
+            'is_active': {'$in': [True, 1, 'True', 'true']},
+            '$or': id_queries
+        }
 
         if from_date_str:
             try:
-                from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
-                grns = [g for g in grns if g.date and g.date >= from_d]
-            except Exception:
-                pass
-        if to_date_str:
-            try:
-                to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
-                grns = [g for g in grns if g.date and g.date <= to_d]
+                from_d = datetime.strptime(from_date_str, "%Y-%m-%d")
+                query.setdefault('date', {})['$gte'] = from_d
             except Exception:
                 pass
 
-        for grn in grns:
-            items = grn.items
-            if isinstance(items, str):
-                try:
-                    items = json.loads(items)
-                except Exception:
-                    items = []
-            if not isinstance(items, list):
-                items = []
-                
-            for item in items:
-                i_id = item.get('item_id') or item.get('id') or item.get('itemId')
-                if str(i_id) == str(item_id):
-                    # Find price rate
-                    rate_val = item.get('rate') or item.get('purchase_price') or item.get('unit_price') or item.get('price') or item.get('net_amount') or item.get('unitPrice')
-                    if rate_val is not None:
-                        try:
-                            rate = float(rate_val)
-                            history.append({
-                                "grn_number": grn.grn_number,
-                                "date": grn.date.strftime("%Y-%m-%d") if grn.date else None,
-                                "vendor_id": grn.vendor_id,
-                                "rate": rate,
-                                "quantity": item.get('quantity')
-                            })
-                        except (ValueError, TypeError):
-                            pass
+        if to_date_str:
+            try:
+                to_d = datetime.strptime(to_date_str, "%Y-%m-%d")
+                query.setdefault('date', {})['$lte'] = to_d
+            except Exception:
+                pass
+
+        cursor = hms_db['hospital_storesgrn'].find(
+            query,
+            {'grn_number': 1, 'date': 1, 'vendor_id': 1, 'items': 1}
+        ).sort('date', -1).limit(250)
+
+        history = []
+        for grn in cursor:
+            items = grn.get('items', [])
+            if isinstance(items, list):
+                for itm in items:
+                    if not isinstance(itm, dict):
+                        continue
+                    i_id = str(itm.get('item_id') or itm.get('id') or itm.get('itemId') or '')
+                    if i_id == item_id_str:
+                        rate_val = itm.get('purchaseCost') or itm.get('unitPrice') or itm.get('rate') or itm.get('purchase_price') or itm.get('unit_price') or itm.get('price') or itm.get('net_amount')
+                        if rate_val is not None:
+                            try:
+                                rate = float(rate_val)
+                                g_date = grn.get('date')
+                                if isinstance(g_date, (datetime, date)):
+                                    date_str = g_date.strftime("%Y-%m-%d")
+                                elif g_date:
+                                    date_str = str(g_date)[:10]
+                                else:
+                                    date_str = None
+
+                                history.append({
+                                    "grn_number": grn.get('grn_number'),
+                                    "date": date_str,
+                                    "vendor_id": grn.get('vendor_id'),
+                                    "rate": round(rate, 2),
+                                    "quantity": itm.get('quantity') or 0
+                                })
+                            except (ValueError, TypeError):
+                                pass
 
         if not history:
             return Response({"history": [], "lowest": 0, "highest": 0, "average": 0})
 
-        rates = [h['rate'] for h in history]
+        rates = [h['rate'] for h in history if h['rate'] > 0]
         return Response({
             "history": history,
-            "lowest": round(min(rates), 2),
-            "highest": round(max(rates), 2),
-            "average": round(sum(rates) / len(rates), 2),
+            "lowest": round(min(rates), 2) if rates else 0,
+            "highest": round(max(rates), 2) if rates else 0,
+            "average": round(sum(rates) / len(rates), 2) if rates else 0,
         })
 
     except Exception as e:
