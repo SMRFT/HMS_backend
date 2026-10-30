@@ -301,7 +301,7 @@ def _sanitize_item(it):
         "doctor_fee":       str(it.get("doctor_fee") or ""),
         "bill_type":        it.get("bill_type") if it.get("bill_type") is not None else 2,
         "billTypeNo":       str(it.get("billTypeNo") or ""),
-        "item_description": str(it.get("item_description") or it.get("billTypeNo") or ""),
+        "item_description": str(it.get("item_description") or "") if str(it.get("item_description") or "").strip() not in ["DIS01", str(it.get("billTypeNo") or "").strip()] else "",
         "package_name":     str(it.get("package_name") or ""),
         "rate_category":    str(it.get("rate_category") or it.get("_rateCategory") or "").strip(),
         "doctors":          clean_doctors,
@@ -350,6 +350,11 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "cancelled_date", None): update_dict["cancelled_date"] = obj.cancelled_date
             if getattr(obj, "cancelled_reason", None): update_dict["cancelled_reason"] = str(obj.cancelled_reason)
             if getattr(obj, "edit_history", None) is not None: update_dict["edit_history"] = obj.edit_history
+            if getattr(obj, "is_insurance_bill", None) is not None: update_dict["is_insurance_bill"] = bool(obj.is_insurance_bill)
+            if getattr(obj, "claim_number", None) is not None: update_dict["claim_number"] = str(obj.claim_number)
+            if getattr(obj, "id_card_number", None) is not None: update_dict["id_card_number"] = str(obj.id_card_number)
+            if getattr(obj, "insurance_bill_number", None) is not None: update_dict["insurance_bill_number"] = str(obj.insurance_bill_number)
+            if getattr(obj, "company_name", None) is not None: update_dict["company_name"] = str(obj.company_name)
 
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
@@ -499,6 +504,18 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             doc_name = _resolve_employee_name(doc_id) if doc_id else ""
 
+            raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
+            company_name_p = ""
+            if raw_comp:
+                try:
+                    _, db_conn = get_hms_db()
+                    ins_doc = db_conn["hospital_insuranceprovider"].find_one({
+                        "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
+                    })
+                    company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
+                except Exception:
+                    company_name_p = str(raw_comp)
+
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
                 "age":            p.get("age", ""),
@@ -512,6 +529,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
                 "doctor_id":      doc_id,
                 "admission_date": adm_str,
                 "room_no":        current_room,
+                "company":        doc.get("company_name") or company_name_p or str(raw_comp),
+                "company_code":   str(raw_comp),
             }
 
     created_by_val = doc.get("created_by")
@@ -544,6 +563,11 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "net_amount":        _to_float(doc.get("net_amount")),
         "remarks":           doc.get("remarks") or "",
         "next_visit_date":   _safe_isoformat(doc.get("next_visit_date")),
+        "is_insurance_bill":     bool(doc.get("is_insurance_bill", False)),
+        "claim_number":          doc.get("claim_number") or "",
+        "id_card_number":        doc.get("id_card_number") or "",
+        "insurance_bill_number": doc.get("insurance_bill_number") or "",
+        "company_name":          doc.get("company_name") or "",
         "created_by":        created_by_val,
         "created_by_name":   created_by_name,
         "created_date":      _safe_isoformat(doc.get("created_date")),
@@ -614,6 +638,18 @@ def _obj_to_dict(obj):
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             doc_name = _resolve_employee_name(doc_id) if doc_id else ""
 
+            raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
+            company_name_p = ""
+            if raw_comp:
+                try:
+                    _, db_conn = get_hms_db()
+                    ins_doc = db_conn["hospital_insuranceprovider"].find_one({
+                        "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
+                    })
+                    company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
+                except Exception:
+                    company_name_p = str(raw_comp)
+
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
                 "age":            p.get("age", ""),
@@ -627,6 +663,8 @@ def _obj_to_dict(obj):
                 "doctor_id":      doc_id,
                 "admission_date": adm_str,
                 "room_no":        current_room,
+                "company":        getattr(obj, "company_name", None) or company_name_p or str(raw_comp),
+                "company_code":   str(raw_comp),
             }
         except Exception:
             pass
@@ -658,6 +696,11 @@ def _obj_to_dict(obj):
         "net_amount":        _to_float(obj.net_amount),
         "remarks":           obj.remarks or "",
         "next_visit_date":   _safe_isoformat(getattr(obj, "next_visit_date", None)),
+        "is_insurance_bill":     bool(getattr(obj, "is_insurance_bill", False)),
+        "claim_number":          getattr(obj, "claim_number", "") or "",
+        "id_card_number":        getattr(obj, "id_card_number", "") or "",
+        "insurance_bill_number": getattr(obj, "insurance_bill_number", "") or "",
+        "company_name":          getattr(obj, "company_name", "") or "",
         "created_by":        created_by_val,
         "created_by_name":   created_by_name,
         "created_date":      _safe_isoformat(getattr(obj, "created_date", None)),
@@ -722,6 +765,32 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.net_amount       = flt("net_amount")
     obj.remarks          = s("remarks")
     obj.shiftno          = s("shiftno")
+
+    # ── Insurance Fields ─────────────────────────────────────────────────────
+    if "is_insurance_bill" in data:
+        obj.is_insurance_bill = bool(data.get("is_insurance_bill"))
+    elif existing and hasattr(existing, "is_insurance_bill"):
+        obj.is_insurance_bill = existing.is_insurance_bill
+
+    if "claim_number" in data:
+        obj.claim_number = s("claim_number")
+    elif existing and getattr(existing, "claim_number", None):
+        obj.claim_number = existing.claim_number
+
+    if "id_card_number" in data:
+        obj.id_card_number = s("id_card_number")
+    elif existing and getattr(existing, "id_card_number", None):
+        obj.id_card_number = existing.id_card_number
+
+    if "insurance_bill_number" in data:
+        obj.insurance_bill_number = s("insurance_bill_number")
+    elif existing and getattr(existing, "insurance_bill_number", None):
+        obj.insurance_bill_number = existing.insurance_bill_number
+
+    if "company_name" in data:
+        obj.company_name = s("company_name")
+    elif existing and getattr(existing, "company_name", None):
+        obj.company_name = existing.company_name
 
     # Handle optional next_visit_date
     nv_date = data.get("next_visit_date")
@@ -2285,6 +2354,45 @@ def cancel_discharge_billing(request, pk):
     return Response({
         "success": True,
         "message": "Bill cancelled successfully",
+        "data": _obj_to_dict(billing)
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def convert_bill_to_insurance(request, pk):
+    billing = _resolve_pk(pk)
+    if billing is None:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    claim_number = str(request.data.get("claim_number") or "").strip()
+    id_card_number = str(request.data.get("id_card_number") or "").strip()
+    insurance_bill_number = str(request.data.get("insurance_bill_number") or "").strip()
+    company_name = str(request.data.get("company_name") or "").strip()
+
+    billing.is_insurance_bill = True
+    billing.claim_number = claim_number
+    billing.id_card_number = id_card_number
+    billing.insurance_bill_number = insurance_bill_number
+    if company_name:
+        billing.company_name = company_name
+
+    user_id = getattr(request, "user_id", None) or request.data.get("auth-user-id") or request.data.get("user_id") or request.data.get("created_by")
+    if user_id:
+        billing.lastmodified_by = str(user_id).strip()
+    billing.lastmodified_date = timezone.now()
+
+    _normalise_decimals(billing)
+    try:
+        billing.save()
+        _sync_mongo_items_array(billing)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        "success": True,
+        "message": "Bill converted to insurance successfully",
         "data": _obj_to_dict(billing)
     }, status=status.HTTP_200_OK)
 

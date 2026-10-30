@@ -46,11 +46,17 @@ class PharmacyItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["item_id"]
 
 
-from .models import StockTransfer
+from .models import StockTransfer, ExpiryMedicine
 class StockTransferSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model  = StockTransfer
+        fields = "__all__"
+
+class ExpiryMedicineSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model  = ExpiryMedicine
         fields = "__all__"
 
 

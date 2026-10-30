@@ -129,6 +129,9 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
+    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines/?(\?.*)?$': 'HMS-P-EM',
+    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines/[^/]+/?(\?.*)?$': 'HMS-P-EM',
+    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines-action/?(\?.*)?$': 'HMS-P-EMA',
 
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-PO',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
