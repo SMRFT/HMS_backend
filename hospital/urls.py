@@ -9,6 +9,7 @@ from .Views import (
     inventory,
     medicine_requisition,
     stocktransfer,
+    expirymedicine,
     chandra_ocr,
     package_crud,
     pharmacy,
@@ -159,6 +160,11 @@ urlpatterns = [
     path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
     path("stock-transfer-action/", stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
 
+    # Expiry Medicines URLs
+    path('expiry-medicines/', expirymedicine.expiry_medicine_view, name='expiry_medicines_list'),
+    re_path(r'^expiry-medicines/(?P<pk>[^/]+)/?$', expirymedicine.expiry_medicine_view, name='expiry_medicines_detail'),
+    path("expiry-medicines-action/", expirymedicine.expiry_medicine_action_view, name="expiry_medicines_action"),
+
     path("purchase-return/", purchasereturn.purchase_return_view, name="purchase-return-list"),
     path("purchase-return/<str:pk>/", purchasereturn.purchase_return_view, name="purchase-return-detail"),
     path("grn-items/", purchasereturn.get_grn_items, name="grn-items"),
@@ -254,6 +260,7 @@ urlpatterns = [
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),
     path("discharge-billing/<str:pk>/cancel/", discharge.cancel_discharge_billing, name="discharge-billing-cancel"),
+    path("discharge-billing/<str:pk>/convert-to-insurance/", discharge.convert_bill_to_insurance, name="discharge-billing-convert-insurance"),
     path("discharge-billing/send-visit-reminders/", discharge.send_discharge_visit_reminders_api, name="discharge-billing-send-visit-reminders"),
     path("send-discharge-visit-reminder/", discharge.send_single_discharge_visit_reminder_api, name="send-single-discharge-visit-reminder"),
     path("patient-next-visit-logs/", discharge.patient_next_visit_logs_api, name="patient-next-visit-logs"),
