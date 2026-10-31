@@ -257,6 +257,30 @@ def get_employee_name_by_id(employee_id):
     return "Unknown"
 
 
+def resolve_created_by_name(created_by):
+    """
+    Resolves the display name for `created_by`:
+    - If empty or None -> returns ""
+    - If it contains numbers (e.g. employeeId '60002', '1042') -> looks up employeeName via get_employee_name_by_id
+    - If lookup finds a valid name (not 'Unknown') -> returns that employeeName
+    - If it has only alphabets (e.g. 'admin', 'Sister Mary') or fallback -> returns created_by as it is
+    """
+    if not created_by:
+        return ""
+    val_str = str(created_by).strip()
+    if not val_str:
+        return ""
+    if any(c.isdigit() for c in val_str):
+        try:
+            emp_name = get_employee_name_by_id(val_str)
+            if emp_name and emp_name.strip().lower() != "unknown":
+                return emp_name
+        except Exception:
+            pass
+    return val_str
+
+
+
 def _clean_doctor_name_tokens(name):
     if not name:
         return []

@@ -621,7 +621,7 @@ def get_summaries(request):
 
             # Attach names, high risk flags, and convert approve_time to IST (+5:30)
             from datetime import timezone, timedelta
-            from .dbcollection import get_employee_name_by_id
+            from .dbcollection import get_employee_name_by_id, resolve_created_by_name
             IST = timezone(timedelta(hours=5, minutes=30))
 
             # Batch employee name resolution from Global.backend_diagnostics_profile
@@ -635,8 +635,8 @@ def get_summaries(request):
             emp_name_map = {}
             for eid in emp_ids:
                 if eid:
-                    name = get_employee_name_by_id(eid)
-                    if name and name != "Unknown":
+                    name = resolve_created_by_name(eid)
+                    if name:
                         emp_name_map[eid] = name
 
             for s in summaries:
@@ -649,10 +649,10 @@ def get_summaries(request):
                 s['high_risk_date'] = hr_d.isoformat() if hasattr(hr_d, 'isoformat') else str(hr_d or '')
 
                 cb = str(s.get('created_by') or '').strip()
-                s['created_by_name'] = emp_name_map.get(cb, cb)
+                s['created_by_name'] = emp_name_map.get(cb) or resolve_created_by_name(cb)
 
                 ab = str(s.get('approved_by') or '').strip()
-                s['approved_by_name'] = emp_name_map.get(ab, ab)
+                s['approved_by_name'] = emp_name_map.get(ab) or resolve_created_by_name(ab)
 
                 ap = s.get('approve_time')
                 if ap:
@@ -1846,15 +1846,13 @@ def get_printsummary(request, ip_no):
         summary['micro_signatures'] = micro_signatures  # for microbiology section
 
         # Enrich employee display names from Global.backend_diagnostics_profile
-        from .dbcollection import get_employee_name_by_id
+        from .dbcollection import get_employee_name_by_id, resolve_created_by_name
         cb = str(summary.get('created_by') or '').strip()
         if cb:
-            cb_name = get_employee_name_by_id(cb)
-            summary['created_by_name'] = cb_name if cb_name != "Unknown" else cb
+            summary['created_by_name'] = resolve_created_by_name(cb)
         ab = str(summary.get('approved_by') or '').strip()
         if ab:
-            ab_name = get_employee_name_by_id(ab)
-            summary['approved_by_name'] = ab_name if ab_name != "Unknown" else ab
+            summary['approved_by_name'] = resolve_created_by_name(ab)
 
         client.close()
         return JsonResponse(serialize_mongo(summary), safe=False)
