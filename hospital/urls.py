@@ -72,7 +72,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report
 from .Views.INPatientcare import ip_patient_analysis
 from .Views.Complaints import complaints
 from .Views.QRScan import qrscan
@@ -444,6 +444,7 @@ urlpatterns = [
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
+    path('insurance-credit-report/', insurance_credit_report.insurance_credit_report_view, name='insurance_credit_report'),
     path('ip-patient-analysis/', ip_patient_analysis.ip_patient_analysis_view, name='ip_patient_analysis'),
     path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),

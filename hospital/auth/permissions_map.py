@@ -14,8 +14,13 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-credit-report/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
+
+    
+
+    
 
     r'^/_b_a_c_k_e_n_d/HMS/insurance-visits/?(\?.*)?$': 'HMS-P-ICD',
     

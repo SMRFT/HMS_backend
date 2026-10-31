@@ -134,6 +134,13 @@ def doctor_schedule_list(request):
         hms_db = client['HMS']
         doctor_collection = hms_db['hospital_doctor']
         
+        # Batch fetch all schedules in a single query to eliminate N+1 network latency
+        emp_ids = [doc.get('employeeId') for doc in doctors if doc.get('employeeId')]
+        schedules_map = {
+            s.get("employeeId"): s
+            for s in doctor_collection.find({"employeeId": {"$in": emp_ids}})
+        }
+        
         detailed_doctors = []
         for doc in doctors:
             employee_id = doc.get('employeeId')
@@ -169,7 +176,7 @@ def doctor_schedule_list(request):
                 "schedule_exists": False
             }
             
-            schedule = doctor_collection.find_one({"employeeId": employee_id})
+            schedule = schedules_map.get(employee_id)
             if schedule:
                 doc_data.update({
                     "consulting_fee": schedule.get("consulting_fee", 0),
