@@ -155,6 +155,7 @@ urlpatterns = [
 
     # Stock Transfer URLs
     path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
+    path('get_stocktransfer_departments/', stocktransfer.get_stocktransfer_departments, name='get_stocktransfer_departments'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock-detail'),
     path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
