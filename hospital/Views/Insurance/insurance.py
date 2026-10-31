@@ -663,32 +663,106 @@ def insurance_member_visit_view(request, visit_ref=None):
 def search_patient_details_by_uhid(request):
     """
     Lookup patient by UHID to auto-fill member or visit registration.
+    Supports both raw mongo documents (name/permanentAddress) and Django ORM fields.
     """
-    uhid = request.GET.get('uhid')
+    uhid = (request.GET.get('uhid') or '').strip()
     if not uhid:
         return Response({"success": False, "error": "UHID is required"}, status=400)
     
     try:
-        patient = Patient.objects.filter(uhid=uhid).order_by().first()
-        if not patient:
-            return Response({"success": False, "error": f"Patient with UHID {uhid} not found"}, status=404)
+        # Check raw mongo document first to catch documents with camelCase or variant schemas
+        patient_doc = hms_db["hospital_patient"].find_one({"uhid": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}})
         
+        patient = None
+        if not patient_doc:
+            patient = Patient.objects.filter(uhid=uhid).order_by().first()
+            if not patient:
+                return Response({"success": False, "error": f"Patient with UHID {uhid} not found"}, status=404)
+        
+        p_dict = patient_doc or {}
+
+        # Name resolution: handle name, firstName, lastName, patient_name
+        raw_name = str(p_dict.get('name') or p_dict.get('patient_name') or p_dict.get('patientName') or '').strip()
+        first_name = (p_dict.get('firstName') or getattr(patient, 'firstName', None) or '').strip()
+        last_name = (p_dict.get('lastName') or getattr(patient, 'lastName', None) or '').strip()
+
+        if not first_name and raw_name:
+            parts = raw_name.split()
+            if len(parts) > 1:
+                first_name = parts[0]
+                last_name = " ".join(parts[1:])
+            else:
+                first_name = raw_name
+                last_name = ""
+
+        full_name = f"{first_name} {last_name}".strip() or raw_name or ""
+        gender = p_dict.get('gender') or getattr(patient, 'gender', None) or ''
+        salutation = p_dict.get('salutation') or getattr(patient, 'salutation', None) or ''
+        if not salutation and gender:
+            salutation = 'Mr.' if str(gender).lower() in ['male', 'm'] else 'Ms.'
+
+        # Address resolution: permanentAddress (MongoDB camelCase), permanent_address (ORM), address
+        address = (
+            p_dict.get('permanentAddress')
+            or p_dict.get('permanent_address')
+            or getattr(patient, 'permanent_address', None)
+            or p_dict.get('address')
+            or getattr(patient, 'address', None)
+            or ''
+        )
+
+        # Date of birth
+        dob = p_dict.get('dob') or p_dict.get('dateOfBirth') or getattr(patient, 'dob', None)
+        dob_str = ""
+        if dob:
+            if isinstance(dob, (datetime.date, datetime.datetime)):
+                dob_str = dob.strftime('%Y-%m-%d')
+            else:
+                dob_str = str(dob).split('T')[0]
+
+        age = p_dict.get('age') if p_dict.get('age') is not None else getattr(patient, 'age', None)
+        mobile_phone = (
+            p_dict.get('mobilePhone')
+            or p_dict.get('mobile_phone')
+            or p_dict.get('phone')
+            or getattr(patient, 'mobilePhone', None)
+            or ''
+        )
+
+        area = p_dict.get('area') or getattr(patient, 'area', None) or ''
+        city = p_dict.get('city') or getattr(patient, 'city', None) or ''
+        state = p_dict.get('state') or getattr(patient, 'state', None) or ''
+        zipcode = p_dict.get('zipcode') or p_dict.get('zip_code') or getattr(patient, 'zipcode', None) or ''
+        blood_group = p_dict.get('bloodGroup') or p_dict.get('blood_group') or getattr(patient, 'blood_group', None) or ''
+        customer_type = p_dict.get('customer_type') or p_dict.get('customerType') or getattr(patient, 'customer_type', None) or 'General'
+        company_code = p_dict.get('company_code') or p_dict.get('insuranceProviderCode') or getattr(patient, 'company_code', None) or ''
+        insurance_company = p_dict.get('insurance_company') or p_dict.get('insuranceCompanyName') or getattr(patient, 'insurance_company', None) or ''
+
         return Response({
             "success": True,
             "data": {
-                "uhid": patient.uhid,
-                "firstName": patient.firstName,
-                "lastName": patient.lastName,
-                "salutation": patient.salutation,
-                "gender": patient.gender,
-                "dob": str(patient.dob) if patient.dob else "",
-                "age": patient.age,
-                "mobilePhone": patient.mobilePhone,
-                "address": patient.permanent_address,
-                "area": patient.area,
-                "city": patient.city,
-                "state": patient.state,
-                "customer_type": patient.customer_type
+                "uhid": p_dict.get('uhid') or getattr(patient, 'uhid', uhid),
+                "firstName": first_name or full_name,
+                "lastName": last_name,
+                "name": full_name,
+                "patient_name": full_name,
+                "salutation": salutation,
+                "gender": gender,
+                "dob": dob_str,
+                "age": age,
+                "mobilePhone": mobile_phone,
+                "phone": mobile_phone,
+                "address": address,
+                "permanentAddress": address,
+                "area": area,
+                "city": city,
+                "state": state,
+                "zipcode": zipcode,
+                "bloodGroup": blood_group,
+                "customer_type": customer_type,
+                "company_code": company_code,
+                "insurance_company": insurance_company,
+                "insurance_type": company_code or insurance_company
             }
         })
     except Exception as e:
