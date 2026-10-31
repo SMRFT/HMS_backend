@@ -34,39 +34,73 @@ def get_financial_year_string():
 def generate_custom_id(model_class, id_field_name, prefix, sequence_length):
     fy_str = get_financial_year_string()
     base_prefix = f"{prefix}{fy_str}"
-    
-    last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
-    
-    if last_record:
-        last_id = getattr(last_record, id_field_name)
-        try:
-            last_sequence = int(last_id.replace(base_prefix, ''))
-            new_sequence = last_sequence + 1
-        except ValueError:
+    try:
+        from ..dbcollection import hms_db
+        col_name = model_class._meta.db_table
+        col = hms_db[col_name]
+        last_doc = col.find_one(
+            {id_field_name: {'$regex': f'^{base_prefix}'}},
+            sort=[(id_field_name, -1)]
+        )
+        max_seq = 0
+        if last_doc:
+            val = str(last_doc.get(id_field_name, ''))
+            rem = val[len(base_prefix):]
+            if rem.isdigit():
+                max_seq = int(rem)
+        new_sequence = max_seq + 1
+        new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        while col.find_one({id_field_name: new_id}):
+            new_sequence += 1
+            new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        return new_id
+    except Exception:
+        last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
+        if last_record:
+            last_id = getattr(last_record, id_field_name)
+            try:
+                last_sequence = int(last_id.replace(base_prefix, ''))
+                new_sequence = last_sequence + 1
+            except ValueError:
+                new_sequence = 1
+        else:
             new_sequence = 1
-    else:
-        new_sequence = 1
-        
-    return f"{base_prefix}{new_sequence:0{sequence_length}d}"
+        return f"{base_prefix}{new_sequence:0{sequence_length}d}"
 
 def generate_custom_id_without_fy(model_class, id_field_name, prefix, sequence_length):
     base_prefix = f"{prefix}"
-    print("base_prefix", base_prefix)
-    last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
-    print("last_record", last_record)
-    if last_record:
-        last_id = getattr(last_record, id_field_name)
-        try:
-            last_sequence = int(last_id.replace(base_prefix, ''))
-            print("last_sequence", last_sequence)
-            new_sequence = last_sequence + 1
-            print("new_sequence", new_sequence)
-        except ValueError:
+    try:
+        from ..dbcollection import hms_db
+        col_name = model_class._meta.db_table
+        col = hms_db[col_name]
+        last_doc = col.find_one(
+            {id_field_name: {'$regex': f'^{base_prefix}'}},
+            sort=[(id_field_name, -1)]
+        )
+        max_seq = 0
+        if last_doc:
+            val = str(last_doc.get(id_field_name, ''))
+            rem = val[len(base_prefix):]
+            if rem.isdigit():
+                max_seq = int(rem)
+        new_sequence = max_seq + 1
+        new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        while col.find_one({id_field_name: new_id}):
+            new_sequence += 1
+            new_id = f"{base_prefix}{str(new_sequence).zfill(sequence_length)}"
+        return new_id
+    except Exception:
+        last_record = model_class.objects.filter(**{f"{id_field_name}__startswith": base_prefix}).order_by('-created_date').first()
+        if last_record:
+            last_id = getattr(last_record, id_field_name)
+            try:
+                last_sequence = int(last_id.replace(base_prefix, ''))
+                new_sequence = last_sequence + 1
+            except ValueError:
+                new_sequence = 1
+        else:
             new_sequence = 1
-    else:
-        new_sequence = 1
-        
-    return f"{base_prefix}{new_sequence:0{sequence_length}d}"
+        return f"{base_prefix}{new_sequence:0{sequence_length}d}"
 
 # --- Item Master Views ---
 
@@ -85,50 +119,114 @@ def item_master_list_create(request):
         cat = request.query_params.get('category') or request.GET.get('category')
         grp = request.query_params.get('group') or request.GET.get('group')
         
-        items = ItemMaster.objects.filter(is_active__in=[True])
-        if search:
-            items = items.filter(Q(itemName__icontains=search) | Q(item_id__icontains=search) | Q(hsn__icontains=search) | Q(barcode__icontains=search))
-        if dept:
-            dept_str = str(dept).strip()
-            dept_candidates = {dept_str}
-            dept_obj = Department.objects.filter(Q(department_id=dept_str) | Q(department_name__iexact=dept_str)).first()
-            if dept_obj:
-                if dept_obj.department_id: dept_candidates.add(dept_obj.department_id)
-                if dept_obj.department_name: dept_candidates.add(dept_obj.department_name)
-            try:
-                from ..dbcollection import department_collection
-                doc = department_collection.find_one({
-                    "$or": [
-                        {"department_code": {"$regex": f"^{dept_str}$", "$options": "i"}},
-                        {"department_name": {"$regex": f"^{dept_str}$", "$options": "i"}},
-                        {"department_id": {"$regex": f"^{dept_str}$", "$options": "i"}}
-                    ]
-                })
-                if doc:
-                    if doc.get('department_code'): dept_candidates.add(doc['department_code'])
-                    if doc.get('department_name'): dept_candidates.add(doc['department_name'])
-                    if doc.get('department_id'): dept_candidates.add(doc['department_id'])
-            except Exception:
-                pass
+        try:
+            from ..dbcollection import hms_db, department_collection
+            from bson import Decimal128
+            import re
 
-            q_filter = Q()
-            for cand in dept_candidates:
-                q_filter |= Q(department=cand) | Q(department__iexact=cand)
-            items = items.filter(q_filter)
-        if cat:
-            cat_str = str(cat).strip()
-            cat_obj = Category.objects.filter(Q(category_id=cat_str) | Q(category_name__iexact=cat_str)).first()
-            cat_code = cat_obj.category_id if cat_obj else cat_str
-            items = items.filter(Q(category=cat_code) | Q(category__iexact=cat_str))
-        if grp:
-            grp_str = str(grp).strip()
-            grp_obj = Group.objects.filter(Q(group_id=grp_str) | Q(group_name__iexact=grp_str)).first()
-            grp_code = grp_obj.group_id if grp_obj else grp_str
-            items = items.filter(Q(group=grp_code) | Q(group__iexact=grp_str))
-            
-        items = items.order_by('-created_date')
-        serializer = ItemMasterSerializer(items, many=True)
-        return Response(serializer.data)
+            col = hms_db['hospital_itemmaster']
+            mongo_q = {"is_active": True}
+
+            if search:
+                s_str = str(search).strip()
+                escaped = re.escape(s_str)
+                mongo_q["$or"] = [
+                    {"itemName": {"$regex": escaped, "$options": "i"}},
+                    {"item_id": {"$regex": escaped, "$options": "i"}},
+                    {"hsn": {"$regex": escaped, "$options": "i"}},
+                    {"barcode": {"$regex": escaped, "$options": "i"}}
+                ]
+
+            if dept:
+                dept_str = str(dept).strip()
+                target_d = dept_str.lower()
+                dept_candidates = {dept_str}
+                try:
+                    # In-memory scan of the small department collection (~70 docs) is instantaneous and exact
+                    for d_doc in department_collection.find({"is_active": True}):
+                        d_code = str(d_doc.get('department_code') or '').strip().lower()
+                        d_name = str(d_doc.get('department_name') or '').strip().lower()
+                        d_id = str(d_doc.get('department_id') or '').strip().lower()
+                        if target_d in (d_code, d_name, d_id):
+                            for k in ('department_code', 'department_name', 'department_id'):
+                                if d_doc.get(k):
+                                    dept_candidates.add(str(d_doc[k]))
+                            break
+                except Exception:
+                    pass
+                mongo_q["department"] = {"$in": list(dept_candidates)}
+
+            if cat:
+                cat_str = str(cat).strip()
+                cat_candidates = {cat_str}
+                cat_obj = Category.objects.filter(Q(category_id=cat_str) | Q(category_name__iexact=cat_str)).first()
+                if cat_obj:
+                    if cat_obj.category_id: cat_candidates.add(str(cat_obj.category_id))
+                    if cat_obj.category_name: cat_candidates.add(str(cat_obj.category_name))
+                mongo_q["category"] = {"$in": list(cat_candidates)}
+
+            if grp:
+                grp_str = str(grp).strip()
+                grp_candidates = {grp_str}
+                grp_obj = Group.objects.filter(Q(group_id=grp_str) | Q(group_name__iexact=grp_str)).first()
+                if grp_obj:
+                    if grp_obj.group_id: grp_candidates.add(str(grp_obj.group_id))
+                    if grp_obj.group_name: grp_candidates.add(str(grp_obj.group_name))
+                mongo_q["group"] = {"$in": list(grp_candidates)}
+
+            # Lean projection of required item fields for high-speed transmission
+            item_projection = {
+                'item_id': 1, 'itemName': 1, 'department': 1, 'department_code': 1,
+                'department_name': 1, 'category': 1, 'group': 1, 'group_type': 1,
+                'hsn': 1, 'hsn_code': 1, 'total_quantity': 1, 'approved_quantity': 1,
+                'unit_price': 1, 'rate': 1, 'mrp': 1, 'tax': 1, 'ved_category': 1,
+                'abc_category': 1, 'is_VM': 1, 'barcode': 1
+            }
+            # Fetch directly with index then sort in Python memory (avoids slow Mongo sort stage)
+            raw_items = list(col.find(mongo_q, item_projection))
+
+            serialized_items = []
+            for item in raw_items:
+                doc_id = str(item.pop('_id', ''))
+                item['id'] = str(item.get('item_id') or doc_id)
+                item['_id'] = doc_id
+                for k, v in list(item.items()):
+                    if isinstance(v, Decimal128):
+                        item[k] = float(str(v))
+                    elif hasattr(v, 'isoformat'):
+                        item[k] = v.isoformat()
+                # Defaults
+                if 'unit_price' not in item or item['unit_price'] is None:
+                    item['unit_price'] = 0.0
+                if 'ved_category' not in item or not item['ved_category']:
+                    item['ved_category'] = 'D'
+                if 'abc_category' not in item or not item['abc_category']:
+                    item['abc_category'] = 'C'
+                if 'is_VM' not in item:
+                    item['is_VM'] = False
+                serialized_items.append(item)
+
+            # Sort alphabetically (A to Z) case-insensitive
+            serialized_items.sort(key=lambda x: (x.get('itemName') or '').lower())
+            return Response(serialized_items)
+
+        except Exception as fast_err:
+            print(f"Fallback to ORM for item_master: {fast_err}")
+            items = ItemMaster.objects.filter(is_active__in=[True])
+            if search:
+                items = items.filter(Q(itemName__icontains=search) | Q(item_id__icontains=search) | Q(hsn__icontains=search) | Q(barcode__icontains=search))
+            if dept:
+                dept_str = str(dept).strip()
+                items = items.filter(Q(department=dept_str) | Q(department__iexact=dept_str))
+            if cat:
+                cat_str = str(cat).strip()
+                items = items.filter(Q(category=cat_str) | Q(category__iexact=cat_str))
+            if grp:
+                grp_str = str(grp).strip()
+                items = items.filter(Q(group=grp_str) | Q(group__iexact=grp_str))
+            items = items.order_by('itemName')
+            serializer = ItemMasterSerializer(items, many=True)
+            return Response(serializer.data)
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -278,63 +376,86 @@ def item_price_history(request, item_id):
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
     try:
-        import json
+        from ..dbcollection import hms_db
+        from datetime import datetime, date
+
         from_date_str = request.query_params.get('from_date') or request.GET.get('from_date')
         to_date_str = request.query_params.get('to_date') or request.GET.get('to_date')
 
-        history = []
-        grns = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+        item_id_str = str(item_id).strip()
+        id_queries = [
+            {'items.item_id': item_id_str},
+            {'items.id': item_id_str},
+            {'items.itemId': item_id_str},
+        ]
+        if item_id_str.isdigit():
+            id_queries.append({'items.item_id': int(item_id_str)})
+            id_queries.append({'items.id': int(item_id_str)})
+
+        query = {
+            'is_active': {'$in': [True, 1, 'True', 'true']},
+            '$or': id_queries
+        }
 
         if from_date_str:
             try:
-                from_d = datetime.strptime(from_date_str, "%Y-%m-%d").date()
-                grns = [g for g in grns if g.date and g.date >= from_d]
-            except Exception:
-                pass
-        if to_date_str:
-            try:
-                to_d = datetime.strptime(to_date_str, "%Y-%m-%d").date()
-                grns = [g for g in grns if g.date and g.date <= to_d]
+                from_d = datetime.strptime(from_date_str, "%Y-%m-%d")
+                query.setdefault('date', {})['$gte'] = from_d
             except Exception:
                 pass
 
-        for grn in grns:
-            items = grn.items
-            if isinstance(items, str):
-                try:
-                    items = json.loads(items)
-                except Exception:
-                    items = []
-            if not isinstance(items, list):
-                items = []
-                
-            for item in items:
-                i_id = item.get('item_id') or item.get('id') or item.get('itemId')
-                if str(i_id) == str(item_id):
-                    # Find price rate
-                    rate_val = item.get('rate') or item.get('purchase_price') or item.get('unit_price') or item.get('price') or item.get('net_amount') or item.get('unitPrice')
-                    if rate_val is not None:
-                        try:
-                            rate = float(rate_val)
-                            history.append({
-                                "grn_number": grn.grn_number,
-                                "date": grn.date.strftime("%Y-%m-%d") if grn.date else None,
-                                "vendor_id": grn.vendor_id,
-                                "rate": rate,
-                                "quantity": item.get('quantity')
-                            })
-                        except (ValueError, TypeError):
-                            pass
+        if to_date_str:
+            try:
+                to_d = datetime.strptime(to_date_str, "%Y-%m-%d")
+                query.setdefault('date', {})['$lte'] = to_d
+            except Exception:
+                pass
+
+        cursor = hms_db['hospital_storesgrn'].find(
+            query,
+            {'grn_number': 1, 'date': 1, 'vendor_id': 1, 'items': 1}
+        ).sort('date', -1).limit(250)
+
+        history = []
+        for grn in cursor:
+            items = grn.get('items', [])
+            if isinstance(items, list):
+                for itm in items:
+                    if not isinstance(itm, dict):
+                        continue
+                    i_id = str(itm.get('item_id') or itm.get('id') or itm.get('itemId') or '')
+                    if i_id == item_id_str:
+                        rate_val = itm.get('purchaseCost') or itm.get('unitPrice') or itm.get('rate') or itm.get('purchase_price') or itm.get('unit_price') or itm.get('price') or itm.get('net_amount')
+                        if rate_val is not None:
+                            try:
+                                rate = float(rate_val)
+                                g_date = grn.get('date')
+                                if isinstance(g_date, (datetime, date)):
+                                    date_str = g_date.strftime("%Y-%m-%d")
+                                elif g_date:
+                                    date_str = str(g_date)[:10]
+                                else:
+                                    date_str = None
+
+                                history.append({
+                                    "grn_number": grn.get('grn_number'),
+                                    "date": date_str,
+                                    "vendor_id": grn.get('vendor_id'),
+                                    "rate": round(rate, 2),
+                                    "quantity": itm.get('quantity') or 0
+                                })
+                            except (ValueError, TypeError):
+                                pass
 
         if not history:
             return Response({"history": [], "lowest": 0, "highest": 0, "average": 0})
 
-        rates = [h['rate'] for h in history]
+        rates = [h['rate'] for h in history if h['rate'] > 0]
         return Response({
             "history": history,
-            "lowest": round(min(rates), 2),
-            "highest": round(max(rates), 2),
-            "average": round(sum(rates) / len(rates), 2),
+            "lowest": round(min(rates), 2) if rates else 0,
+            "highest": round(max(rates), 2) if rates else 0,
+            "average": round(sum(rates) / len(rates), 2) if rates else 0,
         })
 
     except Exception as e:
@@ -537,9 +658,29 @@ def group_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     if request.method == 'GET':
-        items = Group.objects.filter(is_active__in=[True]).order_by('-created_date')
-        serializer = GroupSerializer(items, many=True)
-        return Response(serializer.data)
+        try:
+            from ..dbcollection import hms_db
+            from bson import Decimal128
+            g_col = hms_db['hospital_group']
+            raw_groups = list(g_col.find({"is_active": True}))
+            serialized_groups = []
+            for g in raw_groups:
+                doc_id = str(g.pop('_id', ''))
+                g['id'] = str(g.get('group_id') or doc_id)
+                g['_id'] = doc_id
+                for k, val in list(g.items()):
+                    if isinstance(val, Decimal128):
+                        g[k] = float(str(val))
+                    elif hasattr(val, 'isoformat'):
+                        g[k] = val.isoformat()
+                serialized_groups.append(g)
+            serialized_groups.sort(key=lambda x: str(x.get('created_date') or ''), reverse=True)
+            return Response(serialized_groups)
+        except Exception as fast_g_err:
+            print(f"Fallback to ORM for group: {fast_g_err}")
+            items = Group.objects.filter(is_active__in=[True]).order_by('-created_date')
+            serializer = GroupSerializer(items, many=True)
+            return Response(serializer.data)
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -603,9 +744,29 @@ def category_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     if request.method == 'GET':
-        items = Category.objects.filter(is_active__in=[True]).order_by('-created_date')
-        serializer = CategorySerializer(items, many=True)
-        return Response(serializer.data)
+        try:
+            from ..dbcollection import hms_db
+            from bson import Decimal128
+            c_col = hms_db['hospital_category']
+            raw_cats = list(c_col.find({"is_active": True}))
+            serialized_cats = []
+            for c in raw_cats:
+                doc_id = str(c.pop('_id', ''))
+                c['id'] = str(c.get('category_id') or doc_id)
+                c['_id'] = doc_id
+                for k, val in list(c.items()):
+                    if isinstance(val, Decimal128):
+                        c[k] = float(str(val))
+                    elif hasattr(val, 'isoformat'):
+                        c[k] = val.isoformat()
+                serialized_cats.append(c)
+            serialized_cats.sort(key=lambda x: str(x.get('created_date') or ''), reverse=True)
+            return Response(serialized_cats)
+        except Exception as fast_c_err:
+            print(f"Fallback to ORM for category: {fast_c_err}")
+            items = Category.objects.filter(is_active__in=[True]).order_by('-created_date')
+            serializer = CategorySerializer(items, many=True)
+            return Response(serializer.data)
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -669,9 +830,29 @@ def group_type_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     if request.method == 'GET':
-        items = GroupType.objects.filter(is_active__in=[True]).order_by('-created_date')
-        serializer = GroupTypeSerializer(items, many=True)
-        return Response(serializer.data)
+        try:
+            from ..dbcollection import hms_db
+            from bson import Decimal128
+            gt_col = hms_db['hospital_grouptype']
+            raw_grpts = list(gt_col.find({"is_active": True}))
+            serialized_grpts = []
+            for gt in raw_grpts:
+                doc_id = str(gt.pop('_id', ''))
+                gt['id'] = str(gt.get('group_type_id') or doc_id)
+                gt['_id'] = doc_id
+                for k, val in list(gt.items()):
+                    if isinstance(val, Decimal128):
+                        gt[k] = float(str(val))
+                    elif hasattr(val, 'isoformat'):
+                        gt[k] = val.isoformat()
+                serialized_grpts.append(gt)
+            serialized_grpts.sort(key=lambda x: str(x.get('created_date') or ''), reverse=True)
+            return Response(serialized_grpts)
+        except Exception as fast_gt_err:
+            print(f"Fallback to ORM for group_type: {fast_gt_err}")
+            items = GroupType.objects.filter(is_active__in=[True]).order_by('-created_date')
+            serializer = GroupTypeSerializer(items, many=True)
+            return Response(serializer.data)
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -952,24 +1133,48 @@ def stores_grn_list_create(request):
             serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
             return Response(serializer.data)
 
-        # Auto-generate GRN number
+        # Auto-generate GRN number in format: 2627/00022316
         if not data.get('grn_number'):
-            # SGRN252600001
             fy_str = get_financial_year_string()
-            prefix = f"SGRN{fy_str}"
+            prefix = f"{fy_str}/"
             
-            # Simple sequence generator
-            last_record = storesGRN.objects.filter(grn_number__startswith=prefix).order_by('-created_date').first()
-            if last_record and last_record.grn_number:
-                try:
-                    last_sequence = int(last_record.grn_number.replace(prefix, ''))
-                    new_sequence = last_sequence + 1
-                except ValueError:
+            try:
+                from ..dbcollection import hms_db
+                col = hms_db['hospital_storesgrn']
+                
+                # Check for highest 8-digit sequence in current FY
+                # Supports both new format ("2627/00022316") and legacy format ("SGRN2627262700022316", "SGRN262700022316")
+                pattern = rf'^(?:{fy_str}/|SGRN{fy_str}{fy_str}|SGRN{fy_str})(\d{{8}})$'
+                max_seq = 0
+                for doc in col.find({'grn_number': {'$regex': pattern}}, {'grn_number': 1}):
+                    grn_no = str(doc.get('grn_number') or '')
+                    m = re.match(pattern, grn_no)
+                    if m:
+                        try:
+                            seq = int(m.group(1))
+                            if seq > max_seq:
+                                max_seq = seq
+                        except ValueError:
+                            pass
+                
+                new_sequence = max_seq + 1
+                new_grn_number = f"{prefix}{new_sequence:08d}"
+                while col.find_one({'grn_number': new_grn_number}):
+                    new_sequence += 1
+                    new_grn_number = f"{prefix}{new_sequence:08d}"
+                
+                data['grn_number'] = new_grn_number
+            except Exception:
+                last_record = storesGRN.objects.filter(grn_number__startswith=prefix).order_by('-created_date').first()
+                if last_record and last_record.grn_number:
+                    try:
+                        last_sequence = int(last_record.grn_number.split('/')[1])
+                        new_sequence = last_sequence + 1
+                    except (IndexError, ValueError):
+                        new_sequence = 1
+                else:
                     new_sequence = 1
-            else:
-                new_sequence = 1
-            
-            data['grn_number'] = f"{prefix}{new_sequence:05d}"
+                data['grn_number'] = f"{prefix}{new_sequence:08d}"
             
         # Initial Payment Status
         if 'payment_status' not in data or not data['payment_status']:
@@ -1065,6 +1270,9 @@ def stores_grn_detail(request, pk):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     try:
+        if pk:
+            import urllib.parse
+            pk = urllib.parse.unquote(str(pk)).strip('/')
         grn = storesGRN.objects.filter(grn_number=pk, is_active__in=[True]).first()
         if not grn:
             from bson import ObjectId
@@ -1772,10 +1980,30 @@ def general_store_vendor_list_create(request):
     hospital_code = request.data.get('auth-hospital-code', 'system')
 
     if request.method == 'GET':
-        vendors = list(GeneralStoreVendor.objects.filter(is_active__in=[True]))
-        vendors.sort(key=lambda x: x.created_date if x.created_date else timezone.now(), reverse=True)
-        serializer = GeneralStoreVendorSerializer(vendors, many=True)
-        return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
+        try:
+            from ..dbcollection import hms_db
+            from bson import Decimal128
+            v_col = hms_db['hospital_generalstorevendor']
+            raw_vendors = list(v_col.find({"is_active": True}))
+            serialized_vendors = []
+            for v in raw_vendors:
+                doc_id = str(v.pop('_id', ''))
+                v['id'] = str(v.get('vendor_id') or doc_id)
+                v['_id'] = doc_id
+                for k, val in list(v.items()):
+                    if isinstance(val, Decimal128):
+                        v[k] = float(str(val))
+                    elif hasattr(val, 'isoformat'):
+                        v[k] = val.isoformat()
+                serialized_vendors.append(v)
+            serialized_vendors.sort(key=lambda x: str(x.get('created_date') or ''), reverse=True)
+            return Response({"success": True, "data": serialized_vendors}, status=status.HTTP_200_OK)
+        except Exception as fast_v_err:
+            print(f"Fallback to ORM for general_store_vendor: {fast_v_err}")
+            vendors = list(GeneralStoreVendor.objects.filter(is_active__in=[True]))
+            vendors.sort(key=lambda x: x.created_date if x.created_date else timezone.now(), reverse=True)
+            serializer = GeneralStoreVendorSerializer(vendors, many=True)
+            return Response({"success": True, "data": serializer.data}, status=status.HTTP_200_OK)
 
     elif request.method == 'POST':
         data = request.data.copy()
@@ -4079,4 +4307,4 @@ def stores_opening_stock_report(request):
 
 
 
-
+
