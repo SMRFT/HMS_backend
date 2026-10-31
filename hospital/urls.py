@@ -417,7 +417,9 @@ urlpatterns = [
 
     # Insurance Packages Master & Items API
     path('insurance-packages/schemes/', insurance_packages.get_insurance_package_schemes, name='get_insurance_package_schemes'),
-    path('insurance-packages/items/', insurance_packages.get_insurance_package_items, name='get_insurance_package_items'),
+    path('insurance-packages/items/', insurance_packages.insurance_package_items_list_create, name='insurance_package_items'),
+    path('insurance-packages/items/<str:item_id>/', insurance_packages.insurance_package_item_detail, name='insurance_package_item_detail'),
+    path('insurance-packages/items/<str:item_id>/toggle-active/', insurance_packages.toggle_insurance_package_item_active, name='insurance_package_toggle_active'),
     path('insurance-packages/', insurance_packages.insurance_packages_hub, name='insurance_packages_hub'),
 
     # Investigation Price Master

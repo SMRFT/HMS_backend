@@ -700,26 +700,56 @@ def search_patient_details_by_uhid(request):
 @permission_classes([HasRoleAndDataPermission])
 def search_insurance_member_by_number(request):
     """
-    Lookup member and active dependents by member_number, UHID, or Card No.
+    Lookup member and active dependents by member_number, UHID, Card No, or Patient Name.
+    card_no is id card no, and referral_number is Claim number.
     """
     member_number = (request.GET.get('member_number') or '').strip()
     uhid = (request.GET.get('uhid') or '').strip()
     card_no = (request.GET.get('card_no') or '').strip()
+    patient_name = (request.GET.get('patient_name') or request.GET.get('name') or '').strip()
 
     try:
         matched = None
+        claim_number = ""
+
         if member_number:
             matched = members_col.find_one({"member_number": {"$regex": f"^{re.escape(member_number)}$", "$options": "i"}, "is_active": True})
         elif uhid:
             matched = members_col.find_one({"uhid": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}, "is_active": True})
+            if not matched:
+                v = visits_col.find_one({"uhid": {"$regex": f"^{re.escape(uhid)}$", "$options": "i"}}, sort=[("visit_date", -1), ("created_date", -1)])
+                if v:
+                    claim_number = str(v.get("referral_number") or "").strip()
+                    m_num = v.get("member_number")
+                    if m_num:
+                        matched = members_col.find_one({"member_number": m_num})
         elif card_no:
             rgx = re.compile(f"^{re.escape(card_no)}$", re.IGNORECASE)
             matched = members_col.find_one({"$or": [{"card_no": rgx}, {"echs_card": rgx}], "is_active": True})
+        elif patient_name:
+            rgx = re.compile(f"^{re.escape(patient_name)}$", re.IGNORECASE)
+            v = visits_col.find_one({"patient_name": rgx}, sort=[("visit_date", -1), ("created_date", -1)])
+            if v:
+                claim_number = str(v.get("referral_number") or "").strip()
+                m_num = v.get("member_number")
+                if m_num:
+                    matched = members_col.find_one({"member_number": m_num})
+            if not matched:
+                matched = members_col.find_one({"$or": [{"member_name": rgx}, {"member_first_name": rgx}], "is_active": True})
 
-        if not matched:
+        if not matched and not claim_number:
             return Response({"success": False, "error": "Insurance Member not found"}, status=404)
 
-        return Response({"success": True, "data": clean_mongo_doc(matched)})
+        doc = clean_mongo_doc(matched) if matched else {}
+        id_card = doc.get("card_no") or doc.get("echs_card") or ""
+        claim_no = doc.get("referral_number") or claim_number or ""
+
+        doc["card_no"] = id_card
+        doc["id_card_number"] = id_card
+        doc["referral_number"] = claim_no
+        doc["claim_number"] = claim_no
+
+        return Response({"success": True, "data": doc})
     except Exception as e:
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=500)
