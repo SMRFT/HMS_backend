@@ -69,13 +69,14 @@ def pharmacy_stock_batches_view(request):
     try:
         client, hms_db = get_hms_db()
 
-        # Search matching items
+        # Search matching items starting with query
+        clean_name = re.escape(item_name_query.strip())
         matched_items = list(hms_db["hospital_pharmacyitem"].find({
             "is_active": True,
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            "item_name": {"$regex": item_name_query, "$options": "i"}
-        }, {"item_id": 1, "item_name": 1}))
+            "item_name": {"$regex": f"^{clean_name}", "$options": "i"}
+        }, {"item_id": 1, "item_name": 1}).sort("item_name", 1).limit(100))
 
         if not matched_items:
             return Response([], status=200)
