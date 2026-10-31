@@ -106,8 +106,8 @@ PAGE_MAPPING = {
 
     r'^/_b_a_c_k_e_n_d/HMS/vendors/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/vendors/[0-9]+/?(\?.*)?$': 'HMS-P-VNDD',
-    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/?(\?.*)?$': 'HMS-P-VND',
-    r'^/_b_a_c_k_e_n_d/HMS/general-store-vendors/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/general-store-vendors/?(\?.*)?$': 'HMS-P-VNDD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/general-store-vendors/[^/]+/?(\?.*)?$': 'HMS-P-VNDD',
 
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
@@ -170,7 +170,7 @@ PAGE_MAPPING = {
 
     # Stores GRN
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/?(\?.*)?$': 'HMS-P-SGRN',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/[^/]+/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/.+/?(\?.*)?$': 'HMS-P-SGRN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
 
     # Stores Intent
@@ -206,7 +206,7 @@ PAGE_MAPPING = {
     # Stores Advanced Reports
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-analysis-report/?(\?.*)?$': 'HMS-P-SGRN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-previous-day-stock-report/?(\?.*)?$': 'HMS-API-IT',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-supplier-wise-report/?(\?.*)?$': 'HMS-P-VND',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-supplier-wise-report/?(\?.*)?$': 'HMS-P-VNDD',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-non-moving-items-report/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-short-expiry-report/?(\?.*)?$': 'HMS-P-PER',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-reorder-level-report/?(\?.*)?$': 'HMS-API-IT',
@@ -241,7 +241,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
+    # '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',      
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
+
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                             
