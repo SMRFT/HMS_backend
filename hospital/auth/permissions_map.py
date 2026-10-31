@@ -734,6 +734,3 @@ GEN_ACTION_MAPPING = {
     'DELETE': 'RW',
     'GET': 'R',
 }
-
-
-
