@@ -61,6 +61,15 @@ def get_employee_map_for_grns(queryset):
         cb = getattr(grn, 'created_by', None)
         if cb:
             employee_ids.add(str(cb).strip())
+        lmb = getattr(grn, 'lastmodified_by', None)
+        if lmb:
+            employee_ids.add(str(lmb).strip())
+        vb = getattr(grn, 'verified_by', None)
+        if vb:
+            employee_ids.add(str(vb).strip())
+        ab = getattr(grn, 'approved_by', None)
+        if ab:
+            employee_ids.add(str(ab).strip())
 
     employee_map = {}
     if not employee_ids:
@@ -280,6 +289,26 @@ class StoresGRNSerializer(serializers.ModelSerializer):
         display_name = emp_name or (str(created_by_id).strip() if created_by_id else '')
         representation['entered_by'] = display_name
         representation['created_by_name'] = display_name
+
+        # Resolve employee display name for verified_by / approved_by / lastmodified_by
+        is_approved_val = bool(representation.get('is_approved') or getattr(instance, 'is_approved', False))
+        verified_by_id = representation.get('verified_by') or representation.get('approved_by') or (
+            getattr(instance, 'lastmodified_by', None) or representation.get('lastmodified_by') if is_approved_val else None
+        )
+        ver_name = None
+        if verified_by_id:
+            ver_key = str(verified_by_id).strip()
+            context_map = self.context.get('employee_map') if isinstance(getattr(self, 'context', None), dict) else None
+            if context_map and ver_key in context_map:
+                ver_name = context_map[ver_key]
+            else:
+                ver_name = get_employee_display_name(ver_key)
+
+        ver_display = ver_name or (str(verified_by_id).strip() if verified_by_id else '')
+        if not ver_display and is_approved_val:
+            ver_display = 'APPROVED'
+        representation['verified_by'] = ver_display
+        representation['verified_by_name'] = ver_display
 
         # Resolve department name comparing department code with backend_diagnostics_Departments
         dept_val = representation.get('department') or getattr(instance, 'department', None)

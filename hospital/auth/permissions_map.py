@@ -165,7 +165,7 @@ PAGE_MAPPING = {
 
     # Stores GRN
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/?(\?.*)?$': 'HMS-P-SGRN',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/[^/]+/?(\?.*)?$': 'HMS-P-SGRN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn/.+/?(\?.*)?$': 'HMS-P-SGRN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-grn-supplier-report/?(\?.*)?$': 'HMS-P-SGRN',
 
     # Stores Intent
