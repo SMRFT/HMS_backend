@@ -124,6 +124,33 @@ def get_active_stock_outlets(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_stocktransfer_departments(request):
+    """
+    Returns departments from hospital_stocktransfer_department.
+    Optional query params:
+      dept_type: 'ip' (filters is_ipstock_dept=True) or 'op' (filters is_opstock_dept=True)
+    """
+    try:
+        client, hms_db = get_hms_db()
+        dept_type = request.query_params.get("dept_type", "").strip().lower()
+        filter_q = {"is_active": True}
+        if dept_type == "ip":
+            filter_q["is_ipstock_dept"] = True
+        elif dept_type == "op":
+            filter_q["is_opstock_dept"] = True
+
+        docs = list(hms_db["hospital_stocktransfer_department"].find(
+            filter_q,
+            {"_id": 0}
+        ))
+        return Response({"success": True, "data": clean_docs(docs)})
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ITEM PARSING / ENRICHMENT HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,11 +246,29 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
 def _enrich_transfers_batch(transfer_list: list, hospital_code: str, branch_code: str) -> list:
     if not transfer_list:
         return transfer_list
+    try:
+        _, hms_db = get_hms_db()
+        outlets = {
+            o["outlet_code"]: o.get("outlet_name", "")
+            for o in hms_db["hospital_outlets"].find({}, {"outlet_code": 1, "outlet_name": 1})
+        }
+        depts = {
+            d["department_id"]: d.get("department_name", "")
+            for d in hms_db["hospital_stocktransfer_department"].find({}, {"department_id": 1, "department_name": 1})
+        }
+    except Exception:
+        outlets = {}
+        depts = {}
+
     for row in transfer_list:
         raw_items = row.get("items", [])
         parsed_items = parse_transfer_items(raw_items)
         row["items"] = enrich_items_with_medicine_name(parsed_items, hospital_code, branch_code)
-        row["from_outlet"] = row.get("outlet_code", "")
+        from_code = row.get("outlet_code", "")
+        to_code = row.get("to_outlet", "")
+        row["from_outlet"] = from_code
+        row["from_outlet_name"] = outlets.get(from_code, from_code)
+        row["to_outlet_name"] = depts.get(to_code) or outlets.get(to_code, to_code)
     return transfer_list
 
 
@@ -279,12 +324,21 @@ def pharmacy_stock_view(request, pk=None):
 
             client, hms_db = get_hms_db()
             if search:
-                matching_ids = [
-                    d["item_id"] for d in hms_db["hospital_pharmacyitem"].find(
-                        {"item_name": {"$regex": re.escape(search), "$options": "i"}},
-                        {"item_id": 1}
-                    )
-                ]
+                clean_s = re.escape(search.strip())
+                item_q = {
+                    "is_active": True,
+                    "item_name": {"$regex": f"^{clean_s}", "$options": "i"}
+                }
+                if hospital_code and hospital_code != "system":
+                    item_q["hospital_code"] = hospital_code
+                if branch_code and branch_code != "system":
+                    item_q["branch_code"] = branch_code
+
+                matching_docs = list(hms_db["hospital_pharmacyitem"].find(
+                    item_q,
+                    {"item_id": 1}
+                ).limit(100))
+                matching_ids = [d["item_id"] for d in matching_docs if "item_id" in d]
                 if not matching_ids:
                     return Response({
                         "success": True, "count": 0, "total_records": 0, "total_pages": 1,
@@ -422,7 +476,7 @@ def stock_transfer_view(request, pk=None):
             filter_q["$or"] = [{"to_outlet": ""}, {"to_outlet": None}]
         else:
             if outlet_code:
-                filter_q["to_outlet"] = outlet_code
+                filter_q["$or"] = [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
 
         search = request.GET.get("search", "").strip()
         if search:
@@ -668,15 +722,24 @@ def stock_transfer_action_view(request):
             return Response({"success": False, "error": "Rejected transfers cannot be approved"}, status=403)
 
         transfer_to_outlet = str(getattr(obj, "to_outlet", "") or "")
+        from_outlet        = str(getattr(obj, "outlet_code", "") or "")
+
+        client, hms_db = get_hms_db()
+        is_dept_transfer = bool(
+            transfer_to_outlet and (
+                transfer_to_outlet.startswith("DPT") or
+                hms_db["hospital_stocktransfer_department"].find_one({"department_id": transfer_to_outlet})
+            )
+        )
 
         # Permission: Drug Purchase can approve any; real outlet can only approve if they are the recipient
+        # For department transfers, originating / issuing outlet can also approve
         if not is_drug_purchase and outlet_code != transfer_to_outlet:
-            return Response(
-                {"success": False, "error": "Only the receiving outlet can approve this transfer"},
-                status=403,
-            )
-
-        from_outlet    = str(getattr(obj, "outlet_code", "") or "")
+            if not (is_dept_transfer and (outlet_code == from_outlet or not outlet_code)):
+                return Response(
+                    {"success": False, "error": "Only the receiving outlet or issuing pharmacy can approve this transfer"},
+                    status=403,
+                )
         transfer_items = getattr(obj, "items", []) or []
         parsed_items   = parse_transfer_items(transfer_items)
         all_stocks     = list(PharmacyStock.objects.all())

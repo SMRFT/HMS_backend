@@ -505,14 +505,16 @@ def pharmacy_item_view(request, pk=None):
 
             search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
             if search:
-                reg = {"$regex": re.escape(search), "$options": "i"}
+                clean_s = re.escape(search)
+                # Anchored prefix: strictly matches items starting with search
+                prefix_reg = {"$regex": f"^{clean_s}", "$options": "i"}
                 _, db = get_hms_db()
 
                 # Look up matching categories in hospital_pharmacycategory by name
                 matched_cats = list(db["hospital_pharmacycategory"].find(
-                    {"category_name": reg},
+                    {"category_name": prefix_reg},
                     {"category_id": 1, "category_name": 1}
-                ))
+                ).limit(20))
                 cat_ids_for_search = []
                 for mc in matched_cats:
                     cid = mc.get("category_id")
@@ -525,9 +527,9 @@ def pharmacy_item_view(request, pk=None):
 
                 # Look up matching compositions in hospital_chemicalcomposition by name
                 matched_comps = list(db["hospital_chemicalcomposition"].find(
-                    {"composition_name": reg},
+                    {"composition_name": prefix_reg},
                     {"composition_id": 1, "composition_name": 1}
-                ))
+                ).limit(20))
                 comp_ids_for_search = []
                 for mcp in matched_comps:
                     cpid = mcp.get("composition_id")
@@ -539,12 +541,10 @@ def pharmacy_item_view(request, pk=None):
                         comp_ids_for_search.append(mcp.get("composition_name"))
 
                 or_clauses = [
-                    {"item_name": reg},
-                    {"item_last_name": reg},
-                    {"brand_name": reg},
-                    {"chemical_composition": reg},
-                    {"category": reg},
-                    {"hsn": reg}
+                    {"item_name": prefix_reg},
+                    {"item_code": prefix_reg},
+                    {"brand_name": prefix_reg},
+                    {"hsn": prefix_reg}
                 ]
                 if cat_ids_for_search:
                     or_clauses.append({"category": {"$in": list(set(cat_ids_for_search))}})

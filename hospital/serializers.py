@@ -46,11 +46,17 @@ class PharmacyItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["item_id"]
 
 
-from .models import StockTransfer
+from .models import StockTransfer, ExpiryMedicine
 class StockTransferSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model  = StockTransfer
+        fields = "__all__"
+
+class ExpiryMedicineSerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model  = ExpiryMedicine
         fields = "__all__"
 
 
@@ -405,9 +411,38 @@ class DischargeBillingSerializer(serializers.ModelSerializer):
 
 from .models import Summary
 class SummarySerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    approved_by_name = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Summary
         fields = '__all__'
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        elif isinstance(data, dict):
+            data = data.copy()
+        for field in ('surgeryDate', 'nextReviewDate', 'doa', 'dod', 'doaTime', 'dodTime', 'date'):
+            if field in data and (data[field] == '' or data[field] is None or (isinstance(data[field], str) and not data[field].strip())):
+                data[field] = None
+        return super().to_internal_value(data)
+
+    def get_created_by_name(self, obj):
+        emp_id = getattr(obj, 'created_by', None)
+        if not emp_id:
+            return ""
+        from .Views.dbcollection import get_employee_name_by_id
+        name = get_employee_name_by_id(emp_id)
+        return name if name and name != "Unknown" else str(emp_id)
+
+    def get_approved_by_name(self, obj):
+        emp_id = getattr(obj, 'approved_by', None)
+        if not emp_id:
+            return ""
+        from .Views.dbcollection import get_employee_name_by_id
+        name = get_employee_name_by_id(emp_id)
+        return name if name and name != "Unknown" else str(emp_id)
 
 
 from .models import EstimateBilling

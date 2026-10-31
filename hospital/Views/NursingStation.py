@@ -704,7 +704,14 @@ def get_medicine_ward_requests(request):
 
         # --- Batch-load item names ---
         all_item_ids = set()
+        all_bill_types = set()
         for doc in requests_data:
+            bt_val = doc.get("bill_type")
+            if bt_val is not None:
+                try:
+                    all_bill_types.add(int(bt_val))
+                except (ValueError, TypeError):
+                    all_bill_types.add(str(bt_val))
             for itm in (doc.get("medicine_particulars") or []):
                 if isinstance(itm, dict) and itm.get("item_id"):
                     try:
@@ -718,6 +725,15 @@ def get_medicine_ward_requests(request):
                 {"item_id": 1, "item_name": 1, "_id": 0}
             ):
                 item_name_map[itm.get("item_id")] = itm.get("item_name", "")
+
+        bill_name_map = {}
+        if all_bill_types:
+            for bt in mongo_db["hospital_billtype"].find(
+                {"bill_type": {"$in": list(all_bill_types)}},
+                {"bill_type": 1, "bill_name": 1, "_id": 0}
+            ):
+                bill_name_map[bt.get("bill_type")] = bt.get("bill_name", "")
+                bill_name_map[str(bt.get("bill_type"))] = bt.get("bill_name", "")
 
         formatted_data = []
         for doc in requests_data:
@@ -746,13 +762,16 @@ def get_medicine_ward_requests(request):
 
                 medicines.append({
                     "item_id": itm.get("item_id", ""),
-                    "item_name": item_name_map.get(item_id_int, ""),
+                    "item_name": item_name_map.get(item_id_int, itm.get("item_name", itm.get("itemName", ""))),
+                    "name": item_name_map.get(item_id_int, itm.get("item_name", itm.get("itemName", ""))),
                     "batch_number": itm.get("batch_number", ""),
                     "quantity": itm.get("quantity", itm.get("qty", 0)),
                     "dosage": itm.get("dosage", ""),
                     "noOfDays": itm.get("noOfDays", ""),
                     "dose": itm.get("dose", ""),
                     "doseunit": itm.get("doseunit", ""),
+                    "route": itm.get("route", ""),
+                    "price": itm.get("price", itm.get("mrp", 0)),
                     "instruction": itm.get("instruction", ""),
                     "is_deleted": itm.get("is_deleted", False),
                     "edit_history": itm.get("edit_history", []),
@@ -782,18 +801,27 @@ def get_medicine_ward_requests(request):
                     except Exception:
                         _req_date = str(_raw_dt)[:10]
 
+            raw_doc_id = doc.get("doctor_id") or doc.get("doctor") or ""
+            resolved_doctor_name = get_doctor_name_by_id(raw_doc_id) or str(raw_doc_id)
+            raw_bt = doc.get("bill_type")
+            resolved_bill_name = bill_name_map.get(raw_bt) or bill_name_map.get(str(raw_bt)) or doc.get("bill_type_no") or ""
+
             formatted_data.append({
+                "id": str(doc.get("_id")),
                 "Bill_id": doc.get("Bill_id"),
-                "reqId": str(doc.get("Bill_id")),
+                "bill_no": doc.get("bill_no", "") or str(doc.get("Bill_id") or ""),
+                "reqId": str(doc.get("Bill_id") or doc.get("_id")),
                 "uhid": doc.get("uhid", ""),
                 "ipNumber": doc.get("inpatient_number", ""),
                 "billType": doc.get("bill_type", ""),
                 "billTypeNo": doc.get("bill_type_no", ""),
-                "billName": doc.get("bill_type_no", ""),
+                "billName": resolved_bill_name,
                 "reqDate": _req_date,
                 "reqTime": _req_time,
                 "status": doc.get("billing_status", "Pending"),
-                "doctor": doc.get("doctor_id", ""),
+                "doctor": resolved_doctor_name,
+                "doctorId": str(raw_doc_id),
+                "doctorName": resolved_doctor_name,
                 "outlet_code": doc.get("outlet_code", ""),
                 "isDischarge": doc.get("billing_mode") == "DISCHARGE MEDICINE",
                 "medicines": medicines,
@@ -821,16 +849,40 @@ def update_medicine_ward_request(request):
     import traceback
     try:
         data = request.data
-        bill_id = data.get("Bill_id")
+        bill_id = data.get("Bill_id") or data.get("id") or data.get("reqId")
         updated_medicines = data.get("medicine_particulars", [])
         changed_by = data.get("auth-user-id", "system")
 
         if not bill_id:
             return Response({"success": False, "error": "Bill_id is required"}, status=400)
 
+        bill = None
         try:
-            bill = PharmacyBilling.objects.get(Bill_id=bill_id)
-        except PharmacyBilling.DoesNotExist:
+            if str(bill_id).isdigit():
+                bill = PharmacyBilling.objects.filter(Bill_id=int(bill_id)).first()
+            if not bill:
+                bill = PharmacyBilling.objects.filter(Bill_id=str(bill_id)).first()
+        except Exception:
+            bill = None
+
+        if not bill:
+            from bson import ObjectId
+            queries = []
+            if str(bill_id).isdigit():
+                queries.append({"Bill_id": int(bill_id)})
+                queries.append({"Bill_id": str(bill_id)})
+            if ObjectId.is_valid(str(bill_id)):
+                queries.append({"_id": ObjectId(bill_id)})
+            queries.append({"bill_no": str(bill_id)})
+            query = {"$or": queries} if len(queries) > 1 else queries[0]
+            doc = mongo_db["hospital_pharmacybilling"].find_one(query)
+            if doc and doc.get("Bill_id") is not None:
+                try:
+                    bill = PharmacyBilling.objects.filter(Bill_id=doc.get("Bill_id")).first()
+                except Exception:
+                    pass
+
+        if not bill:
             return Response({"success": False, "error": "Ward request not found"}, status=404)
 
         if bill.billing_status in ["Billed", "Cancelled"]:
@@ -1028,20 +1080,39 @@ def dosage_master_view(request):
 # @permission_classes([HasRoleAndDataPermission])
 def cancel_medicine_ward_request(request):
     try:
+        from bson import ObjectId
         data = request.data
-        request_id = data.get("id") # bill_no
+        request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
         
         if not request_id:
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
-        # For OPPharmacyBill, we might set billing_status to "Cancelled" or similar
-        # But looking at pharmacy.py, they seem to use billing_status for workflow.
-        # Use PyMongo to avoid Django ORM crashes with native arrays
-        collection = mongo_db["hospital_oppharmacybill"]
-        from bson import ObjectId
-        result = collection.update_one({"_id": ObjectId(request_id)}, {"$set": {"billing_status": "Cancelled"}})
+        queries = []
+        if str(request_id).isdigit():
+            queries.append({"Bill_id": int(request_id)})
+            queries.append({"Bill_id": str(request_id)})
+        if ObjectId.is_valid(str(request_id)):
+            queries.append({"_id": ObjectId(request_id)})
+        queries.append({"bill_no": str(request_id)})
+        queries.append({"_id": str(request_id)})
+        query = {"$or": queries} if len(queries) > 1 else queries[0]
+
+        # Primary collection: hospital_pharmacybilling
+        collection = mongo_db["hospital_pharmacybilling"]
+        result = collection.update_one(
+            query,
+            {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+        )
         
-        if result.modified_count > 0:
+        # Fallback collection if not found in primary
+        if result.matched_count == 0:
+            collection2 = mongo_db["hospital_oppharmacybill"]
+            result = collection2.update_one(
+                query,
+                {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+            )
+
+        if result.matched_count > 0:
             return Response({"success": True, "message": "Medicine ward request cancelled successfully"})
         else:
             return Response({"success": False, "error": "Request not found"}, status=404)
@@ -1054,47 +1125,75 @@ def cancel_medicine_ward_request(request):
 # @permission_classes([HasRoleAndDataPermission])
 def remove_individual_medicine_from_ward_request(request):
     try:
+        from bson import ObjectId
         data = request.data
-        request_id = data.get("id") # bill_no
+        request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
         item_id = data.get("item_id")
         item_name = data.get("item_name")
+        batch_number = data.get("batch_number")
         
         if not request_id:
             return Response({"success": False, "error": "Request ID is required"}, status=400)
             
-        # Step 1: Get the document via PyMongo
-        from bson import ObjectId
-        collection = mongo_db["hospital_oppharmacybill"]
-        doc = collection.find_one({"_id": ObjectId(request_id)})
+        queries = []
+        if str(request_id).isdigit():
+            queries.append({"Bill_id": int(request_id)})
+            queries.append({"Bill_id": str(request_id)})
+        if ObjectId.is_valid(str(request_id)):
+            queries.append({"_id": ObjectId(request_id)})
+        queries.append({"bill_no": str(request_id)})
+        queries.append({"_id": str(request_id)})
+        query = {"$or": queries} if len(queries) > 1 else queries[0]
+
+        collection = mongo_db["hospital_pharmacybilling"]
+        doc = collection.find_one(query)
+        if not doc:
+            collection = mongo_db["hospital_oppharmacybill"]
+            doc = collection.find_one(query)
+            
         if not doc:
             return Response({"success": False, "error": "Request not found"}, status=404)
             
         items = doc.get("medicine_particulars", [])
-            
-        # Step 2: Remove the medicine
+        if isinstance(items, str):
+            import json
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+
         new_items = []
         found = False
         for itm in items:
-            if item_id and str(itm.get("item_id", "")) == str(item_id):
+            if not isinstance(itm, dict):
+                continue
+            match_id = item_id and str(itm.get("item_id", "")) == str(item_id)
+            match_batch = not batch_number or str(itm.get("batch_number", "")) == str(batch_number)
+            if match_id and match_batch and not found:
                 found = True
                 continue
-            if not item_id and itm.get("itemName", "") == item_name:
+            if not item_id and itm.get("itemName", itm.get("item_name", "")) == item_name and not found:
                 found = True
                 continue
             new_items.append(itm)
             
         if found:
-            # Step 3: Recalculate total amount
-            new_total = sum(float(t.get("price", t.get("Price", 0))) for t in new_items)
+            new_total = round(sum(
+                float(t.get("price", t.get("Price", t.get("mrp", 0)))) * float(t.get("quantity", t.get("qty", 1)))
+                for t in new_items if not t.get("is_deleted")
+            ), 2)
             
-            collection.update_one(
-                {"_id": ObjectId(request_id)},
-                {"$set": {
-                    "medicine_particulars": new_items,
-                    "total_amount": new_total,
-                    "net_amount": new_total
-                }}
-            )
+            update_data = {
+                "medicine_particulars": new_items,
+                "total_amount": new_total,
+                "net_amount": new_total,
+                "lastmodified_date": datetime.now()
+            }
+            if len([t for t in new_items if not t.get("is_deleted")]) == 0:
+                update_data["billing_status"] = "Cancelled"
+                update_data["is_deleted"] = True
+
+            collection.update_one({"_id": doc["_id"]}, {"$set": update_data})
             
             return Response({
                 "success": True, 
@@ -1407,7 +1506,14 @@ def return_medicine_ward_request(request):
         data = request.data
         bill_id = data.get("Bill_id")
         returned_medicines = data.get("medicine_particulars", [])
-        changed_by = data.get("auth-user-id", "system")
+        changed_by = (
+            data.get("requested_by")
+            or data.get("auth-user-id")
+            or request.headers.get("auth-user-id")
+            or request.META.get("HTTP_AUTH_USER_ID")
+        )
+        if not changed_by or str(changed_by).strip().lower() in ["unknown", "none", "", "null"]:
+            changed_by = getattr(bill, "created_by", None) or "system"
 
         if not bill_id:
             return Response({"success": False, "error": "Bill_id is required"}, status=400)
@@ -1469,7 +1575,6 @@ def return_medicine_ward_request(request):
 
         pending_returns.append({
             "return_request_id": return_request_id,
-            "patient_name": request.data.get("patient_name", ""),
             "requested_by": changed_by,
             "requested_at": changed_at,
             "items": new_pending_items,

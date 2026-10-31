@@ -466,6 +466,28 @@ class StockTransfer(AuditModel):
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
 
+class ExpiryMedicine(AuditModel):
+    expiry_ref_number = models.CharField(max_length=30, unique=True)
+    outlet_code       = models.CharField(max_length=50, blank=True, default="")
+    items             = models.JSONField(default=list)
+    total_quantity    = models.IntegerField(default=0)
+    total_amount      = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    remarks           = models.TextField(blank=False, default="")
+    approved_by       = models.CharField(max_length=100, blank=True, default="")
+    approved_date     = models.DateTimeField(null=True, blank=True)
+    rejected_by       = models.CharField(max_length=100, blank=True, default="")
+    rejected_date     = models.DateTimeField(null=True, blank=True)
+    rejected_reason   = models.TextField(blank=True, default="")
+    IS_VERIFIED_CHOICES = [
+        ("Draft",    "Draft"),
+        ("Approved", "Approved"),
+        ("Rejected", "Rejected"),
+    ]
+    is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
+
+    def __str__(self):
+        return f"{self.expiry_ref_number} ({self.is_verified})"
+
 class PurchaseReturn(AuditModel):
     outlet_code               = models.CharField(max_length=50, blank=True, default="")
     items                     = models.JSONField(default=list)
@@ -968,6 +990,9 @@ class Admission(AuditModel):
     is_high_risk         = models.BooleanField(default=False)
     high_risk_reason     = models.TextField(blank=True, null=True)
     high_risk_date       = models.DateField(blank=True, null=True)
+
+    # ── Day Care ──────────────────────────────────────────────────────────────
+    is_day_care          = models.BooleanField(default=False)
  
     # ── Cancellation tracking ─────────────────────────────────────────────────
     is_cancelled        = models.BooleanField(default=False)
@@ -1066,6 +1091,13 @@ class DischargeBilling(AuditModel):
     edit_history      = models.JSONField(default=list)
 
     next_visit_date   = models.DateField(null=True, blank=True)
+
+    # ── Insurance Details ────────────────────────────────────────────────────
+    is_insurance_bill     = models.BooleanField(default=False)
+    claim_number          = models.CharField(max_length=100, blank=True, null=True)
+    id_card_number        = models.CharField(max_length=100, blank=True, null=True)
+    insurance_bill_number = models.CharField(max_length=100, blank=True, null=True)
+    company_name          = models.CharField(max_length=255, blank=True, null=True)
 
     def save(self, *args, **kwargs):
         if self.discharge_id is None:
@@ -1179,6 +1211,7 @@ class Summary(AuditModel):
     fieldsData = models.JSONField(blank=True, null=True)  # To store dynamic field data
     approve = models.BooleanField(default=False)
     approve_time = models.DateTimeField(null=True, blank=True)
+    approved_by = models.CharField(max_length=100, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
 

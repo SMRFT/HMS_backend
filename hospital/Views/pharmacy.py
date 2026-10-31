@@ -100,8 +100,8 @@ def get_pharmacy_stock(request):
             }, status=400)
 
         # ✅ Mongo connection
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        mongo_db = client["HMS"]
+        from .mongo_utils import get_hms_db
+        client, mongo_db = get_hms_db()
 
         # ✅ MATCH STOCK STRICTLY
         match_stage = {
@@ -119,7 +119,7 @@ def get_pharmacy_stock(request):
         # Prioritizing items whose names start with the search query ("starting letter filter")
         if search_query:
             import re
-            escaped_q = re.escape(search_query)
+            escaped_q = re.escape(search_query.strip())
             search_items = list(mongo_db.hospital_pharmacyitem.find(
                 {
                     "hospital_code": hospital_code,
@@ -131,25 +131,19 @@ def get_pharmacy_stock(request):
                 {"item_id": 1, "item_name": 1, "_id": 0}
             ).sort("item_name", 1).limit(100))
 
-            # Fallback if no starting-letter matches: match word boundary
-            if not search_items:
-                search_items = list(mongo_db.hospital_pharmacyitem.find(
-                    {
-                        "hospital_code": hospital_code,
-                        "branch_code": branch_code,
-                        "item_name": {"$regex": f"(?:^|\\s){escaped_q}", "$options": "i"},
-                        "is_active": True,
-                        "is_blocked": False
-                    },
-                    {"item_id": 1, "item_name": 1, "_id": 0}
-                ).sort("item_name", 1).limit(60))
-
             matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
             if not matching_ids:
                 return JsonResponse({
                     "success": True,
                     "count": 0,
-                    "data": []
+                    "total_records": 0,
+                    "total_pages": 1,
+                    "current_page": 1,
+                    "page_size": 10,
+                    "has_next": False,
+                    "has_previous": False,
+                    "data": [],
+                    "results": []
                 })
             match_stage["item_id"] = {"$in": matching_ids}
 
