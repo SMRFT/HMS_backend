@@ -241,7 +241,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
-    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',      
+    # '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',      
     r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
