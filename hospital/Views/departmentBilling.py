@@ -1407,6 +1407,14 @@ def billing_report_view(request):
             except:
                 query["bill_type"] = bill_type_param
 
+        bill_type_no_param = request.GET.get('billTypeNo')
+        if bill_type_no_param:
+            btypes = [b.strip() for b in bill_type_no_param.split(",") if b.strip()]
+            if len(btypes) == 1:
+                query["billTypeNo"] = btypes[0]
+            elif len(btypes) > 1:
+                query["billTypeNo"] = {"$in": btypes}
+
         # ── Doctor filter ──────────────────────────────────────
         doctor_param = request.GET.get('doctor')
         if doctor_param:
@@ -1416,6 +1424,11 @@ def billing_report_view(request):
         uhid_param = request.GET.get('uhid')
         if uhid_param:
             query["uhid"] = {"$regex": uhid_param, "$options": "i"}
+
+        # ── IP Number filter ───────────────────────────────────
+        ip_param = request.GET.get('ipNumber')
+        if ip_param:
+            query["ipNumber"] = {"$regex": f"^{re.escape(ip_param.strip())}$", "$options": "i"}
 
         # ── Patient type filter ────────────────────────────────
         patient_type_param = request.GET.get('patientType')
