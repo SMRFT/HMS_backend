@@ -20,7 +20,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/insurance-visits/?(\?.*)?$': 'HMS-P-ICD',
     
     r'^/_b_a_c_k_e_n_d/HMS/insurance-members/?(\?.*)?$': 'HMS-P-ICD',
-
+    r'^/_b_a_c_k_e_n_d/HMS/insurance-search-patient/?(\?.*)?$': 'HMS-P-ICD',
 
     # ==================== WARD REQUEST ====================
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
@@ -128,12 +128,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_expiry_report/?(\?.*)?$': 'HMS-P-PER',
 
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/get_stocktransfer_departments/?(\?.*)?$': 'HMS-P-ST',
-    '/_b_a_c_k_e_n_d/HMS/get_stocktransfer_departments/': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
-    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines/?(\?.*)?$': 'HMS-P-EM',
-    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines/[^/]+/?(\?.*)?$': 'HMS-P-EM',
-    r'^/_b_a_c_k_e_n_d/HMS/expiry-medicines-action/?(\?.*)?$': 'HMS-P-EMA',
 
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-PO',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
@@ -241,9 +236,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/op-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-API-UHID',           
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/doctor_list/': 'HMS-P-IB',                 
-    # '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',      
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-IB',                 
-
+    '/_b_a_c_k_e_n_d/HMS/bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                             
@@ -734,3 +727,6 @@ GEN_ACTION_MAPPING = {
     'DELETE': 'RW',
     'GET': 'R',
 }
+
+
+
