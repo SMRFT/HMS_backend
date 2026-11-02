@@ -34,6 +34,9 @@ admission_collection              = hms_db["hospital_admission"]
 patient_collection                = hms_db["hospital_patient"]
 hospital_insuranceprovider        = hms_db["hospital_insuranceprovider"]
 insurance_provider_collection     = hms_db["hospital_insuranceprovider"]
+cashcounter_collection            = hms_db["hospital_cashcounter"]
+cashcounter_shift_collection      = hms_db["hospital_cashcountershiftdetails"]
+hospital_room                     = hms_db["hospital_room"]
 
 import re
 
@@ -257,28 +260,87 @@ def get_employee_name_by_id(employee_id):
     return "Unknown"
 
 
-def resolve_created_by_name(created_by):
+def get_room_details(room_input, hospital_code=None, branch_code=None):
     """
-    Resolves the display name for `created_by`:
-    - If empty or None -> returns ""
-    - If it contains numbers (e.g. employeeId '60002', '1042') -> looks up employeeName via get_employee_name_by_id
-    - If lookup finds a valid name (not 'Unknown') -> returns that employeeName
-    - If it has only alphabets (e.g. 'admin', 'Sister Mary') or fallback -> returns created_by as it is
+    Looks up room details from hospital_room collection.
+    Matches room_number against room_input (e.g. '304 | 2', 'Room 304', '103', 'SR-304').
+    Returns dict: {
+        'room_category': ...,
+        'block': ...,
+        'nursing_station': ...,
+        'room_number': ...,
+        'description': ...,
+        'room_status': ...
+    }
     """
-    if not created_by:
-        return ""
-    val_str = str(created_by).strip()
-    if not val_str:
-        return ""
-    if any(c.isdigit() for c in val_str):
-        try:
-            emp_name = get_employee_name_by_id(val_str)
-            if emp_name and emp_name.strip().lower() != "unknown":
-                return emp_name
-        except Exception:
-            pass
-    return val_str
+    res = {
+        "room_category": "",
+        "block": "",
+        "nursing_station": "",
+        "room_number": "",
+        "description": "",
+        "room_status": ""
+    }
+    if not room_input:
+        return res
 
+    s = str(room_input).strip()
+    s_clean = re.sub(r'(?i)^room\s*', '', s).strip()
+    parts = re.split(r'\||/|\bbed\b', s_clean, flags=re.I)
+    candidate = parts[0].strip()
+
+    base_filter = {}
+    if hospital_code:
+        base_filter["hospital_code"] = hospital_code
+    if branch_code:
+        base_filter["branch_code"] = branch_code
+
+    # Priority 1: Exact match on candidate or original string
+    doc = hospital_room.find_one({**base_filter, "room_number": candidate})
+    if not doc and candidate.isdigit():
+        doc = hospital_room.find_one({**base_filter, "room_number": int(candidate)})
+    if not doc:
+        doc = hospital_room.find_one({**base_filter, "room_number": s})
+
+    # Priority 2: Case-insensitive match
+    if not doc:
+        doc = hospital_room.find_one({**base_filter, "room_number": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}})
+
+    # Priority 3: Suffix / prefix regex match (e.g., candidate '304' matches 'SR-304', or '103' matches '103')
+    if not doc:
+        num_match = re.search(r'\d+', candidate)
+        if num_match:
+            num = num_match.group(0)
+            doc = hospital_room.find_one({**base_filter, "room_number": {"$regex": f"(^|[-_a-zA-Z]){num}$", "$options": "i"}})
+            if not doc:
+                doc = hospital_room.find_one({**base_filter, "room_number": {"$regex": num, "$options": "i"}})
+
+    # Fallback without hospital_code / branch_code if not found
+    if not doc and base_filter:
+        doc = hospital_room.find_one({"room_number": candidate})
+        if not doc and candidate.isdigit():
+            doc = hospital_room.find_one({"room_number": int(candidate)})
+        if not doc:
+            doc = hospital_room.find_one({"room_number": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}})
+        if not doc:
+            num_match = re.search(r'\d+', candidate)
+            if num_match:
+                num = num_match.group(0)
+                doc = hospital_room.find_one({"room_number": {"$regex": f"(^|[-_a-zA-Z]){num}$", "$options": "i"}})
+                if not doc:
+                    doc = hospital_room.find_one({"room_number": {"$regex": num, "$options": "i"}})
+
+    if doc:
+        res["room_category"] = str(doc.get("room_category") or "").strip()
+        res["block"] = str(doc.get("block") or "").strip()
+        res["nursing_station"] = str(doc.get("nursing_station") or "").strip()
+        res["room_number"] = str(doc.get("room_number") or candidate).strip()
+        res["description"] = str(doc.get("description") or "").strip()
+        res["room_status"] = str(doc.get("room_status") or "").strip()
+    else:
+        res["room_number"] = candidate
+
+    return res
 
 
 def _clean_doctor_name_tokens(name):
@@ -727,3 +789,392 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
         "SGST_Amt": sgst_amt,
         "is_consumable_items": is_consumable
     }
+
+
+# ==============================================================================
+# Cash Counter & Bill Type Permission Engine (aud -> profile -> cashcounter)
+# ==============================================================================
+
+def extract_aud_employee_id(request_or_payload):
+    """
+    Extracts employee ID (aud) from user_payload dictionary, request headers/META,
+    or directly from a string/int.
+    """
+    if not request_or_payload:
+        return ""
+
+    if isinstance(request_or_payload, (str, int)):
+        return str(request_or_payload).strip()
+
+    if isinstance(request_or_payload, dict):
+        for key in ("aud", "employeeId", "employee_id", "auth-user-id", "user_id"):
+            if key in request_or_payload and request_or_payload[key]:
+                return str(request_or_payload[key]).strip()
+
+    req = request_or_payload
+    emp_id = None
+    if hasattr(req, "data") and isinstance(req.data, dict):
+        emp_id = (
+            req.data.get("auth-user-id")
+            or req.data.get("user_id")
+            or req.data.get("employeeId")
+            or req.data.get("aud")
+        )
+
+    if not emp_id and hasattr(req, "META"):
+        emp_id = (
+            req.META.get("HTTP_AUTH_USER_ID")
+            or req.META.get("HTTP_USER_ID")
+            or req.META.get("HTTP_EMPLOYEEID")
+        )
+
+    if not emp_id and hasattr(req, "headers"):
+        emp_id = req.headers.get("auth-user-id") or req.headers.get("user-id")
+
+    if not emp_id and hasattr(req, "META"):
+        auth_header = req.META.get("HTTP_AUTHORIZATION", "")
+        if auth_header:
+            try:
+                import jwt
+                token = auth_header.replace("Bearer ", "").strip()
+                payload = jwt.decode(token, options={"verify_signature": False})
+                emp_id = payload.get("aud") or payload.get("user_id") or payload.get("employeeId")
+            except Exception:
+                pass
+
+    return str(emp_id).strip() if emp_id else ""
+
+
+def get_employee_cashcounter_permissions(employee_id_or_request, hospital_code=None, branch_code=None, outlet_code=None):
+    """
+    1. Compares employeeId (from aud/user_payload) into backend_diagnostics_profile.
+    2. Takes hms_outlets and cashcounter from the matching profile.
+    3. Compares cashcounter into hospital_cashcounter collection matching counter code and outlet.
+    4. Returns the matched counter, permitted bill types, and allowed outlets.
+       Only the matched counter's bill types and outlets are permitted for this aud.
+    """
+    emp_id = extract_aud_employee_id(employee_id_or_request)
+    if not outlet_code and hasattr(employee_id_or_request, "headers"):
+        outlet_code = employee_id_or_request.headers.get("Outlet-Code") or getattr(employee_id_or_request, "data", {}).get("auth-outlet-code") if hasattr(employee_id_or_request, "data") and isinstance(employee_id_or_request.data, dict) else None
+    if not emp_id:
+        return {
+            "success": False,
+            "message": "No valid employee ID (aud) provided",
+            "employee_id": "",
+            "counter_id": None,
+            "counter_name": "",
+            "outlet": None,
+            "hms_outlets": [],
+            "allowed_outlets": [],
+            "allowed_bill_types": [],
+            "allowed_bill_names": [],
+            "bill_type_details": []
+        }
+
+    # 1. Compare aud into backend_diagnostics_profile
+    try:
+        search_query = {"employeeId": {"$in": [emp_id, int(emp_id) if emp_id.isdigit() else emp_id]}}
+    except Exception:
+        search_query = {"employeeId": str(emp_id)}
+
+    profile = profile_collection.find_one(search_query)
+    if not profile:
+        return {
+            "success": False,
+            "message": f"Profile not found for employee {emp_id}",
+            "employee_id": emp_id,
+            "counter_id": None,
+            "counter_name": "",
+            "outlet": None,
+            "hms_outlets": [],
+            "allowed_outlets": [],
+            "allowed_bill_types": [],
+            "allowed_bill_names": [],
+            "bill_type_details": []
+        }
+
+    emp_cashcounter = profile.get("cashcounter")
+    hms_outlets = profile.get("hms_outlets") or []
+    if not isinstance(hms_outlets, list):
+        hms_outlets = [hms_outlets]
+
+    if not emp_cashcounter:
+        return {
+            "success": False,
+            "message": f"No cashcounter assigned to employee {emp_id}",
+            "employee_id": emp_id,
+            "employee_name": profile.get("employeeName", ""),
+            "counter_id": None,
+            "counter_name": "",
+            "outlet": None,
+            "hms_outlets": hms_outlets,
+            "allowed_outlets": hms_outlets,
+            "allowed_bill_types": [],
+            "allowed_bill_names": [],
+            "bill_type_details": []
+        }
+
+    # 2. Compare cashcounter into hospital_cashcounter matching counter code and outlet
+    cashcounter_doc = None
+
+    # Priority 1: Match employee's assigned counter AND the active outlet
+    if outlet_code:
+        cc_outlet_query = {
+            "counter_id": emp_cashcounter,
+            "outlet": outlet_code,
+            "is_active": True
+        }
+        if hospital_code:
+            cc_outlet_query["hospital_code"] = hospital_code
+        if branch_code:
+            cc_outlet_query["branch_code"] = branch_code
+        cashcounter_doc = cashcounter_collection.find_one(cc_outlet_query)
+        if not cashcounter_doc:
+            cashcounter_doc = cashcounter_collection.find_one({
+                "counter_id": emp_cashcounter,
+                "outlet": outlet_code,
+                "is_active": True
+            })
+
+    # Priority 2: If user switched outlet and employee has permission for this outlet, match outlet's counter
+    if not cashcounter_doc and outlet_code and (outlet_code in hms_outlets or not hms_outlets):
+        switched_query = {
+            "outlet": outlet_code,
+            "is_active": True
+        }
+        if hospital_code:
+            switched_query["hospital_code"] = hospital_code
+        if branch_code:
+            switched_query["branch_code"] = branch_code
+        cashcounter_doc = cashcounter_collection.find_one(switched_query)
+        if not cashcounter_doc:
+            cashcounter_doc = cashcounter_collection.find_one({
+                "outlet": outlet_code,
+                "is_active": True
+            })
+
+    # Priority 3: Default to employee's assigned cashcounter
+    if not cashcounter_doc:
+        cc_query = {
+            "counter_id": emp_cashcounter,
+            "is_active": True
+        }
+        if hospital_code:
+            cc_query["hospital_code"] = hospital_code
+        if branch_code:
+            cc_query["branch_code"] = branch_code
+        cashcounter_doc = cashcounter_collection.find_one(cc_query)
+        if not cashcounter_doc and (hospital_code or branch_code):
+            cashcounter_doc = cashcounter_collection.find_one({
+                "counter_id": emp_cashcounter,
+                "is_active": True
+            })
+
+    if not cashcounter_doc:
+        return {
+            "success": False,
+            "message": f"Assigned cashcounter '{emp_cashcounter}' not found or inactive in hospital_cashcounter",
+            "employee_id": emp_id,
+            "employee_name": profile.get("employeeName", ""),
+            "counter_id": emp_cashcounter,
+            "counter_name": "",
+            "outlet": None,
+            "hms_outlets": hms_outlets,
+            "allowed_outlets": hms_outlets,
+            "allowed_bill_types": [],
+            "allowed_bill_names": [],
+            "bill_type_details": []
+        }
+
+    counter_id = cashcounter_doc.get("counter_id")
+    counter_name = cashcounter_doc.get("counter_name", "")
+    counter_outlet = cashcounter_doc.get("outlet")
+    bill_type_details = cashcounter_doc.get("bill_type") or []
+
+    allowed_bill_types = []
+    allowed_bill_names = []
+    for bt in bill_type_details:
+        b_id = bt.get("bill_type")
+        if b_id is not None:
+            try:
+                allowed_bill_types.append(int(b_id))
+            except (ValueError, TypeError):
+                allowed_bill_types.append(b_id)
+        b_name = bt.get("bill_name")
+        if b_name:
+            allowed_bill_names.append(str(b_name).strip().upper())
+
+    allowed_outlets = []
+    if counter_outlet:
+        allowed_outlets.append(counter_outlet)
+    for out in hms_outlets:
+        if out and out not in allowed_outlets:
+            allowed_outlets.append(out)
+
+    return {
+        "success": True,
+        "employee_id": emp_id,
+        "employee_name": profile.get("employeeName", ""),
+        "counter_id": counter_id,
+        "counter_name": counter_name,
+        "outlet": counter_outlet,
+        "hms_outlets": hms_outlets,
+        "allowed_outlets": allowed_outlets,
+        "allowed_bill_types": allowed_bill_types,
+        "allowed_bill_names": allowed_bill_names,
+        "bill_type_details": bill_type_details,
+        "cashcounter_details": {
+            "counter_id": counter_id,
+            "counter_name": counter_name,
+            "outlet": counter_outlet
+        }
+    }
+
+
+def validate_employee_cashcounter_access(
+    employee_id_or_request,
+    requested_counter=None,
+    requested_outlet=None,
+    requested_bill_type=None,
+    hospital_code=None,
+    branch_code=None
+):
+    """
+    Validates whether the employee (aud) is permitted to access the requested
+    counter, outlet, or bill_type.
+    If the employee is assigned to CC0002, requests for CC0001 or bill types not
+    in CC0002 will be blocked with an informative error message.
+
+    Returns: (is_allowed: bool, message: str, perms: dict)
+    """
+    perms = get_employee_cashcounter_permissions(
+        employee_id_or_request,
+        hospital_code=hospital_code,
+        branch_code=branch_code
+    )
+    if not perms.get("success"):
+        return False, perms.get("message", "Permission check failed"), perms
+
+    emp_id = perms["employee_id"]
+    assigned_counter = perms["counter_id"]
+
+    # 1. Counter Check
+    if requested_counter:
+        req_c = str(requested_counter).strip()
+        if req_c.upper() != str(assigned_counter).strip().upper():
+            return (
+                False,
+                f"Access blocked: Cashier {emp_id} is assigned to counter '{assigned_counter}' ({perms['counter_name']}) and cannot access counter '{requested_counter}'.",
+                perms
+            )
+
+    # 2. Outlet Check
+    if requested_outlet:
+        req_o = str(requested_outlet).strip().upper()
+        allowed_upper = [str(o).strip().upper() for o in perms["allowed_outlets"]]
+        if req_o not in allowed_upper:
+            return (
+                False,
+                f"Access blocked: Cashier {emp_id} is not permitted for outlet '{requested_outlet}'. Allowed outlets: {perms['allowed_outlets']}.",
+                perms
+            )
+
+    # 3. Bill Type Check
+    if requested_bill_type is not None:
+        try:
+            req_bt_int = int(requested_bill_type)
+        except (ValueError, TypeError):
+            req_bt_int = None
+        req_bt_str = str(requested_bill_type).strip().upper()
+
+        int_match = req_bt_int is not None and req_bt_int in perms["allowed_bill_types"]
+        name_match = req_bt_str in perms["allowed_bill_names"]
+
+        if not (int_match or name_match):
+            return (
+                False,
+                f"Access blocked: Bill type '{requested_bill_type}' is not allowed for counter '{assigned_counter}'. Allowed bill types: {perms['allowed_bill_types']}.",
+                perms
+            )
+
+    return True, "Access granted", perms
+
+
+def filter_bills_by_employee_counter(
+    employee_id_or_request,
+    bills_list,
+    bill_type_key="bill_type",
+    hospital_code=None,
+    branch_code=None
+):
+    """
+    Filters a list of bill dictionaries to strictly include only bills whose
+    bill_type belongs to the employee's assigned cash counter in hospital_cashcounter.
+    """
+    perms = get_employee_cashcounter_permissions(
+        employee_id_or_request,
+        hospital_code=hospital_code,
+        branch_code=branch_code
+    )
+    if not perms.get("success") or not perms.get("allowed_bill_types"):
+        return []
+
+    allowed_types = set(perms["allowed_bill_types"])
+    allowed_names = set(perms["allowed_bill_names"])
+
+    filtered = []
+    for bill in bills_list:
+        bt_val = bill.get(bill_type_key)
+        if bt_val is None:
+            bt_val = bill.get("type") or bill.get("bill_name")
+        try:
+            bt_int = int(bt_val)
+        except (ValueError, TypeError):
+            bt_int = None
+        bt_str = str(bt_val).strip().upper() if bt_val else ""
+
+        if (bt_int is not None and bt_int in allowed_types) or (bt_str in allowed_names):
+            filtered.append(bill)
+
+    return filtered
+
+
+def enforce_cashcounter_permission(
+    employee_id_or_request,
+    requested_counter=None,
+    requested_outlet=None,
+    requested_bill_type=None,
+    hospital_code=None,
+    branch_code=None
+):
+    """
+    Helper for view functions.
+    If access is denied, returns a DRF Response with status HTTP_403_FORBIDDEN.
+    If access is granted, returns None.
+    """
+    from rest_framework.response import Response
+    from rest_framework import status
+
+    allowed, message, perms = validate_employee_cashcounter_access(
+        employee_id_or_request,
+        requested_counter=requested_counter,
+        requested_outlet=requested_outlet,
+        requested_bill_type=requested_bill_type,
+        hospital_code=hospital_code,
+        branch_code=branch_code
+    )
+
+    if not allowed:
+        return Response(
+            {
+                "status": "error",
+                "code": "COUNTER_ACCESS_DENIED",
+                "message": message,
+                "assigned_counter": perms.get("counter_id"),
+                "allowed_bill_types": perms.get("allowed_bill_types", []),
+                "allowed_outlets": perms.get("allowed_outlets", [])
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    return None

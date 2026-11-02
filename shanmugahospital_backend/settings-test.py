@@ -125,8 +125,11 @@ CORS_ALLOW_HEADERS = [
     "Content-Type",
     "Branch-Code",
     "Outlet-Code",
-    "x-session-token"
-
+    "x-session-token",
+    "auth-user-id",
+    "auth-hospital-code",
+    "auth-branch-code",
+    "auth-outlet-code",
 ]
 CORS_ALLOW_ALL_ORIGINS = True
 # Internationalization

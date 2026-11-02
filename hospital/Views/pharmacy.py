@@ -30,7 +30,8 @@ from .dbcollection import (
     profile_collection, get_pharmacy_items_with_stock, resolve_medicine_stock_details,
     get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id,
     admission_collection, pharmacy_billing_collection,
-    hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name
+    hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name,
+    get_room_details, hospital_room
 )
 from ..counter_service import get_next_pharmacy_bill_no
 
@@ -54,6 +55,20 @@ def convert_decimals(obj):
     elif isinstance(obj, Decimal128):
         return float(obj.to_decimal())
     return obj
+
+
+def to_utc_iso(dt_val):
+    if not dt_val:
+        return ""
+    if isinstance(dt_val, datetime):
+        if dt_val.tzinfo is None:
+            return dt_val.isoformat() + "Z"
+        return dt_val.astimezone(timezone.utc).isoformat()
+    s = str(dt_val).strip()
+    if s and "T" in s and not s.endswith("Z") and "+" not in s:
+        return s + "Z"
+    return s
+
 
 
 
@@ -100,8 +115,8 @@ def get_pharmacy_stock(request):
             }, status=400)
 
         # ✅ Mongo connection
-        from .mongo_utils import get_hms_db
-        client, mongo_db = get_hms_db()
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        mongo_db = client["HMS"]
 
         # ✅ MATCH STOCK STRICTLY
         match_stage = {
@@ -119,7 +134,7 @@ def get_pharmacy_stock(request):
         # Prioritizing items whose names start with the search query ("starting letter filter")
         if search_query:
             import re
-            escaped_q = re.escape(search_query.strip())
+            escaped_q = re.escape(search_query)
             search_items = list(mongo_db.hospital_pharmacyitem.find(
                 {
                     "hospital_code": hospital_code,
@@ -131,19 +146,25 @@ def get_pharmacy_stock(request):
                 {"item_id": 1, "item_name": 1, "_id": 0}
             ).sort("item_name", 1).limit(100))
 
+            # Fallback if no starting-letter matches: match word boundary
+            if not search_items:
+                search_items = list(mongo_db.hospital_pharmacyitem.find(
+                    {
+                        "hospital_code": hospital_code,
+                        "branch_code": branch_code,
+                        "item_name": {"$regex": f"(?:^|\\s){escaped_q}", "$options": "i"},
+                        "is_active": True,
+                        "is_blocked": False
+                    },
+                    {"item_id": 1, "item_name": 1, "_id": 0}
+                ).sort("item_name", 1).limit(60))
+
             matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
             if not matching_ids:
                 return JsonResponse({
                     "success": True,
                     "count": 0,
-                    "total_records": 0,
-                    "total_pages": 1,
-                    "current_page": 1,
-                    "page_size": 10,
-                    "has_next": False,
-                    "has_previous": False,
-                    "data": [],
-                    "results": []
+                    "data": []
                 })
             match_stage["item_id"] = {"$in": matching_ids}
 
@@ -763,6 +784,8 @@ def save_pharmacy_bill(request):
             "success":         True,
             "Bill_id":         record.get("Bill_id"),
             "bill_no":         update_data.get("bill_no") or record.get("bill_no"),
+            "bill_date":       to_utc_iso(update_data.get("bill_date") or record.get("bill_date")),
+            "created_date":    to_utc_iso(record.get("created_date")),
             "estimate_no":     record.get("estimate_no"),
             "age":             update_data.get("age", record.get("age") or 0),
             "edit_reason":     update_data.get("edit_reason"),
@@ -836,6 +859,8 @@ def save_pharmacy_bill(request):
                 "success":         True,
                 "bill_no":         bill_no,
                 "Bill_id":         next_Bill_id,
+                "bill_date":       to_utc_iso(record_doc.get("bill_date")),
+                "created_date":    to_utc_iso(record_doc.get("created_date")),
                 "age":             record_doc.get("age", 0),
                 "doctor_id":       doc_id,
                 "doctor_name":     doc_name,
@@ -1793,6 +1818,29 @@ def collect_oppharmacy_payment(request):
             })
 
         # =====================================================
+        # VALIDATE EXACT AMOUNT (NO LOW / EXCESS AMOUNT ALLOWED)
+        # =====================================================
+        bill_net = float(bill.get("net_amount", 0) or 0)
+        paid_amt = float(payment_details.get("Paid_amount", 0) or 0)
+        if abs(paid_amt - bill_net) > 0.01:
+            if paid_amt < bill_net:
+                return Response({
+                    "success": False,
+                    "error": f"Paid amount (₹{paid_amt:,.2f}) is lower than Net Amount (₹{bill_net:,.2f}). Low amount / partial payment is not allowed."
+                })
+            else:
+                return Response({
+                    "success": False,
+                    "error": f"Paid amount (₹{paid_amt:,.2f}) is greater than Net Amount (₹{bill_net:,.2f}). Excess payment is not allowed."
+                })
+
+        method_str = str(payment_details.get("method", "")).strip().lower()
+        if method_str == "cash":
+            bill_payment_mode = "Cash"
+        else:
+            bill_payment_mode = "Credit"
+
+        # =====================================================
         # UPDATE STOCK
         # =====================================================
 
@@ -1830,14 +1878,27 @@ def collect_oppharmacy_payment(request):
                 "$set": {
                     "billing_status": "Paid",
                     "payment_details": payment_details,
+                    "payment_mode": bill_payment_mode,
                     "paid_date": datetime.utcnow(),
-
                     "cashier_id": cashier_id,
                     "shiftno": shiftno,
-                    "counter_id": counter_id
+                    "counter_id": counter_id,
+                    "lastmodified_by": cashier_id,
+                    "lastmodified_date": datetime.utcnow()
                 }
             }
         )
+
+        try:
+            PharmacyBilling.objects.filter(Bill_id=Bill_id).update(
+                billing_status="Paid",
+                payment_details=payment_details,
+                payment_mode=bill_payment_mode,
+                cashier_id=cashier_id,
+                shiftno=shiftno
+            )
+        except Exception as e:
+            print("Sync error with PharmacyBilling SQL model:", e)
 
         if update_result.modified_count == 0:
             return Response({
@@ -2213,6 +2274,7 @@ def pharmacy_medicinechart(request):
         # =========================================
         all_uhids = set()
         all_doc_ids = set()
+        all_created_by_ids = set()
         all_item_ids = set()
         bill_items_map = {}
 
@@ -2225,6 +2287,10 @@ def pharmacy_medicinechart(request):
             doc_id = bill.get("doctor_id")
             if doc_id:
                 all_doc_ids.add(str(doc_id).strip())
+
+            cb_id = bill.get("created_by")
+            if cb_id:
+                all_created_by_ids.add(str(cb_id).strip())
 
             raw_particulars = bill.get("medicine_particulars", [])
             items = parse_medicine_particulars(raw_particulars)
@@ -2374,6 +2440,23 @@ def pharmacy_medicinechart(request):
             except Exception as e:
                 print("profile_collection error:", e)
 
+        # 4b. Bulk fetch Employee Names (Prepared by) from profile_collection (dbcollection.py)
+        employee_map = {}
+        if all_created_by_ids:
+            try:
+                emp_query_ids = list(all_created_by_ids)
+                for x in all_created_by_ids:
+                    if str(x).isdigit():
+                        emp_query_ids.append(int(x))
+                for emp in profile_collection.find(
+                    {"employeeId": {"$in": emp_query_ids}},
+                    {"employeeId": 1, "employeeName": 1, "_id": 0}
+                ):
+                    eid_str = str(emp.get("employeeId")).strip()
+                    employee_map[eid_str] = emp.get("employeeName") or ""
+            except Exception as e:
+                print("profile_collection created_by bulk error:", e)
+
         # 5. Bulk fetch Pharmacy items & stock via common optimized function in dbcollection.py
         items_stock_data = get_pharmacy_items_with_stock(
             hospital_code=hospital_code,
@@ -2398,11 +2481,22 @@ def pharmacy_medicinechart(request):
 
             doc_name = doctor_map.get(doc_id_str) or get_doctor_name_by_id(doc_id_str)
 
+            # Resolve Prepared by Employee Name using dbcollection.py get_employee_name_by_id
+            cb_val = str(bill.get("created_by") or "").strip()
+            prep_by = employee_map.get(cb_val)
+            if not prep_by and cb_val:
+                resolved = get_employee_name_by_id(cb_val)
+                prep_by = resolved if resolved != "Unknown" else cb_val
+
+            final_prepared_by = prep_by or cb_val
+
             bill["patient_details"] = {
                 "patient_name": p_name,
                 "address": p_addr,
                 "mobile": p_mob,
-                "doctor_name": doc_name
+                "doctor_name": doc_name,
+                "prepared_by": final_prepared_by,
+                "created_by_name": final_prepared_by,
             }
             bill["patient_name"] = p_name
             bill["address"] = p_addr
@@ -2410,6 +2504,10 @@ def pharmacy_medicinechart(request):
             bill["mobile"] = p_mob
             bill["age"] = p_info.get("age") or str(bill.get("age") or "")
             bill["doctor_name"] = doc_name
+            bill["created_by_id"] = bill.get("created_by")
+            bill["created_by_name"] = final_prepared_by
+            bill["prepared_by"] = final_prepared_by
+            bill["created_by"] = final_prepared_by
 
             adm_info = admission_map.get(uhid_str, {})
             bill["admission_status"] = "ADMITTED" if adm_info.get("admitted") else "NOT ADMITTED"
@@ -2419,6 +2517,18 @@ def pharmacy_medicinechart(request):
             room_lbl = bill.get("room_no") or bill.get("ward_name") or adm_info.get("roomLabel") or ""
             bill["room_no"] = room_lbl
             bill["ward_name"] = room_lbl
+
+            # Resolve room_category, block, nursing_station from hospital_room in dbcollection.py
+            room_info = get_room_details(room_lbl, hospital_code=hospital_code, branch_code=branch_code)
+            bill["room_details"] = room_info
+            bill["room_category"] = room_info.get("room_category") or ""
+            bill["block"] = room_info.get("block") or ""
+            bill["nursing_station"] = room_info.get("nursing_station") or ""
+            bill["patient_details"]["room_category"] = bill["room_category"]
+            bill["patient_details"]["block"] = bill["block"]
+            bill["patient_details"]["nursing_station"] = bill["nursing_station"]
+            bill["patient_details"]["room_details"] = room_info
+
             adm_cust_type = adm_info.get("customer_type") or ""
             pat_cust_type = p_info.get("customer_type") or ""
             bill_cust_type = bill.get("customer_type") or ""
@@ -3274,7 +3384,7 @@ def finalize_bill(request):
 
             "bill_no":         new_bill_no,
 
-            "bill_date":       bill_date,
+            "bill_date":       to_utc_iso(bill_date),
 
             "doctor_id":       doc_id,
 

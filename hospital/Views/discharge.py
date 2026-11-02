@@ -2818,6 +2818,22 @@ def create_dialysis_discharge_summary(request):
         # PAYLOAD
         # ============================================
 
+        icd_val = data.get("icd") or data.get("id_no")
+        raw_advice = data.get("advice_on_discharge")
+        if isinstance(raw_advice, str):
+            raw_s = raw_advice.strip()
+            if raw_s.startswith("[") and raw_s.endswith("]"):
+                try:
+                    parsed_advice = json.loads(raw_s)
+                except Exception:
+                    parsed_advice = raw_advice
+            else:
+                parsed_advice = raw_advice
+        elif isinstance(raw_advice, list):
+            parsed_advice = raw_advice
+        else:
+            parsed_advice = str(raw_advice or "")
+
         payload = {
             "name":       data.get("name"),
             "age":        data.get("age"),
@@ -2825,7 +2841,8 @@ def create_dialysis_discharge_summary(request):
 
             "uhid":       data.get("uhid"),
             "consultant": data.get("consultant"),
-            "id_no":      data.get("id_no"),
+            "icd":        icd_val,
+            "id_no":      icd_val,
             "insurance":  data.get("insurance", ""),
 
             "address":   data.get("address"),
@@ -2852,10 +2869,7 @@ def create_dialysis_discharge_summary(request):
 
             "condition_on_discharge": data.get("condition_on_discharge"),
 
-            "advice_on_discharge":
-                json.loads(data.get("advice_on_discharge"))
-                if isinstance(data.get("advice_on_discharge"), str)
-                else data.get("advice_on_discharge", []),
+            "advice_on_discharge": parsed_advice,
 
             "next_hd_session_on": data.get("next_hd_session_on"),
         }
