@@ -2305,3 +2305,76 @@ def get_crash_cart_monthly_report(request):
         import traceback
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_ward_bill_types(request):
+    """
+    Dedicated endpoint for Ward Management (Nursing Station) bill types.
+    Decoupled from cashier outlet filtering; returns only bill types configured
+    for Ward Management modules (ward_medicine, ward_lab, ward_radiology).
+    Accepts optional ?module=medicine | lab | radiology
+    """
+    client = None
+    try:
+        mongo_uri = os.getenv("GLOBAL_DB_HOST")
+        client = MongoClient(mongo_uri)
+        db = client["HMS"]
+        collection = db["hospital_billtype"]
+
+        module = (request.GET.get("module") or "").strip().lower()
+
+        query = {"is_active": True}
+
+        if module in ["medicine", "pharma", "pharmacy"]:
+            query["ward_medicine"] = True
+        elif module == "lab":
+            query["ward_lab"] = True
+        elif module in ["radiology", "rad", "scan"]:
+            query["ward_radiology"] = True
+        else:
+            query["$or"] = [
+                {"ward_medicine": True},
+                {"ward_lab": True},
+                {"ward_radiology": True},
+                {"ward_request": True}
+            ]
+
+        # Hospital / Branch scoping if provided
+        branch_code = request.data.get("auth-branch-code")
+        hospital_code = request.data.get("auth-hospital-code")
+        if hospital_code and hospital_code != "system":
+            query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            query["branch_code"] = branch_code
+
+        bill_types = list(collection.find(
+            query,
+            {
+                "_id": 0,
+                "bill_type": 1,
+                "bill_name": 1,
+                "billTypeNo": 1,
+                "outlet_code": 1,
+                "is_allowDiscount": 1,
+                "ward_medicine": 1,
+                "ward_lab": 1,
+                "ward_radiology": 1,
+                "ward_request": 1,
+            }
+        ).sort("bill_name", 1))
+
+        return Response({
+            "success": True,
+            "billTypes": bill_types,
+            "count": len(bill_types)
+        }, status=200)
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+    finally:
+        if client:
+            client.close()

@@ -406,6 +406,7 @@ urlpatterns = [
     path("cancel_radiology_ward_request/", NursingStation.cancel_radiology_ward_request, name="cancel_radiology_ward_request"),
     path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
     path("dosage_master/", NursingStation.dosage_master_view, name="dosage_master"),
+    path("ward-bill-types/", NursingStation.get_ward_bill_types, name="get_ward_bill_types"),
     
     # Package Master
     path('investigation-prices/', package_crud.get_bill_types, name='get_bill_types'),
@@ -437,6 +438,7 @@ urlpatterns = [
     path('bill-types/create/', billType.create_bill_type, name='create_bill_type'),
     path('bill-types/update/<int:bill_type_int>/', billType.update_bill_type, name='update_bill_type'),
     path('bill-types/delete/<int:bill_type_int>/', billType.delete_bill_type, name='delete_bill_type'),
+    path('bill-types/bulk-ward-config/', billType.bulk_update_ward_billtype_config, name='bulk_update_ward_billtype_config'),
     path('investigation-price/patch-bill-type/', billType.patch_bill_type_prices, name='patch_bill_type_prices'),
 
     # Reports
