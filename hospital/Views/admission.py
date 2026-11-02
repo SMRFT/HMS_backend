@@ -357,7 +357,6 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
         "attender_phone":        getattr(adm, "attender_phone", "") or "",
         "is_high_risk":       bool(getattr(adm, "is_high_risk", False)),
         "high_risk_reason":   getattr(adm, "high_risk_reason", None),
-        "is_day_care":        bool(getattr(adm, "is_day_care", False)),
         "high_risk_date":     getattr(adm, "high_risk_date", None).isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
         "edit_history":       eh,
         "is_cancelled":       getattr(adm, "is_cancelled", False),
@@ -1020,7 +1019,6 @@ def admission_view(request):
                     "is_high_risk":          bool(adm.get("is_high_risk", False)),
                     "high_risk_reason":      adm.get("high_risk_reason") or "",
                     "high_risk_date":        hr_dt_iso,
-                    "is_day_care":           bool(adm.get("is_day_care", False)),
                     "room_details":      _safe_list(adm.get("room_details")),
                     "roomShitingDetails":_safe_list(adm.get("roomShitingDetails")),
                     "advance_payments":  _safe_list(adm.get("advance_payments")),
@@ -1179,10 +1177,6 @@ def admission_view(request):
                 final_age = None
                 final_age_type = _normalize_age_type(age_type_val)
 
-            # Day Care handling
-            is_day_care_raw = data.get("is_day_care")
-            is_day_care = is_day_care_raw in [True, "true", "True", "1", 1]
-
             # High Risk Alert handling
             is_high_risk_raw = data.get("is_high_risk")
             is_high_risk = is_high_risk_raw in [True, "true", "True", "1", 1]
@@ -1230,7 +1224,6 @@ def admission_view(request):
                 mlc_type=mlc_type, mlc_doc=mlc_doc_name, mlc_remarks=mlc_remarks,
                 attender_name=attender_name, attender_relationship=attender_relationship, attender_phone=attender_phone,
                 is_high_risk=is_high_risk, high_risk_reason=high_risk_reason, high_risk_date=high_risk_date,
-                is_day_care=is_day_care,
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
@@ -1257,7 +1250,6 @@ def admission_view(request):
                 "is_high_risk": is_high_risk,
                 "high_risk_reason": high_risk_reason,
                 "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
-                "is_day_care": is_day_care,
                 "edit_history": [],
                 "is_cancelled": False,
                 "cancelled_by": None,
@@ -1278,7 +1270,6 @@ def admission_view(request):
                 "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
                 "attender_name": attender_name or "", "attender_relationship": attender_relationship or "", "attender_phone": attender_phone or "",
                 "is_high_risk": is_high_risk, "high_risk_reason": high_risk_reason or "", "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
-                "is_day_care": is_day_care,
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "edit_history": [],
@@ -1399,7 +1390,6 @@ def admission_detail(request, ipNumber):
                 'is_high_risk':          bool(getattr(adm, 'is_high_risk', False)),
                 'high_risk_reason':      getattr(adm, 'high_risk_reason', '') or "",
                 'high_risk_date':        adm.high_risk_date.isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
-                'is_day_care':           bool(getattr(adm, 'is_day_care', False)),
                 'advance_payments':  ap,
                 # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
@@ -1473,11 +1463,6 @@ def admission_detail(request, ipNumber):
                     adm.attender_relationship = str(get_val(data.get('attenderRelationship')) or '')
                 if 'attenderPhone' in data and not getattr(adm, 'attender_phone', None):
                     adm.attender_phone = str(get_val(data.get('attenderPhone')) or '')
-
-                # Handle Day Care edit
-                if 'is_day_care' in data:
-                    idc_val = get_val(data.get('is_day_care'))
-                    adm.is_day_care = idc_val in [True, "true", "True", "1", 1]
 
                 # Handle High Risk Alert edit
                 if 'is_high_risk' in data:

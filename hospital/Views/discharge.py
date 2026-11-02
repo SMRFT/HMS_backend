@@ -1503,7 +1503,9 @@ def search_discharge_patient(request):
         "ip_number":            admission_doc.get("ipNumber"),
         "ipNumber":             admission_doc.get("ipNumber"),
         "admission_date":       adm_str,
-        "patient_type":         patient_doc.get("customer_type") or admission_doc.get("patient_type", ""),
+        "patient_type":         admission_doc.get("customer_type") or patient_doc.get("customer_type") or admission_doc.get("patient_type", ""),
+        "customer_type":        admission_doc.get("customer_type") or patient_doc.get("customer_type") or "",
+        "insurance_company":    admission_doc.get("insurance_company") or "",
         "company":              company_name,
         "company_code":         raw_company,
         "room_no":              current_room,
@@ -1638,7 +1640,7 @@ def search_discharge_patient(request):
                                 "test_id":        None,
                                 "doctor":         doc_name or doc_id,
                                 "payment_status": "Pending",
-                                "package_name":   f"Room {r_no} ({room_cat})" if room_cat else f"Room {r_no}",
+                                "package_name":   "",
                                 "source":         "hospital_room_services",
                             })
 
@@ -1668,7 +1670,7 @@ def search_discharge_patient(request):
                                 "test_id":        None,
                                 "doctor":         doc_name or doc_id,
                                 "payment_status": "Pending",
-                                "package_name":   f"Room {r_no} Kit",
+                                "package_name":   "",
                                 "source":         "hospital_room_kits",
                             })
 
