@@ -123,8 +123,11 @@ CORS_ALLOW_HEADERS = [
     "Authorization",
     "Content-Type",
     "Branch-Code",
-    "Outlet-Code"
-
+    "Outlet-Code",
+    "auth-user-id",
+    "auth-hospital-code",
+    "auth-branch-code",
+    "auth-outlet-code",
 ]
 WHO_ICD_CLIENT_ID = os.getenv("WHO_ICD_CLIENT_ID")
 WHO_ICD_CLIENT_SECRET = os.getenv("WHO_ICD_CLIENT_SECRET")

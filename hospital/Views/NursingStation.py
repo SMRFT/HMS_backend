@@ -1930,9 +1930,21 @@ def get_ward_return_details(request):
             qs = qs.filter(uhid=uhid)
         if from_date and to_date:
             try:
-                start_dt = datetime.strptime(from_date, "%Y-%m-%d")
-                end_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                start_dt = timezone.make_aware(datetime.strptime(from_date, "%Y-%m-%d")) if timezone.is_naive(datetime.strptime(from_date, "%Y-%m-%d")) else datetime.strptime(from_date, "%Y-%m-%d")
+                end_dt = timezone.make_aware(datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)) if timezone.is_naive(datetime.strptime(to_date, "%Y-%m-%d")) else datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
                 qs = qs.filter(ward_return_bill_date__gte=start_dt, ward_return_bill_date__lt=end_dt)
+            except Exception:
+                pass
+        elif from_date:
+            try:
+                start_dt = timezone.make_aware(datetime.strptime(from_date, "%Y-%m-%d")) if timezone.is_naive(datetime.strptime(from_date, "%Y-%m-%d")) else datetime.strptime(from_date, "%Y-%m-%d")
+                qs = qs.filter(ward_return_bill_date__gte=start_dt)
+            except Exception:
+                pass
+        elif to_date:
+            try:
+                end_dt = timezone.make_aware(datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)) if timezone.is_naive(datetime.strptime(to_date, "%Y-%m-%d")) else datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                qs = qs.filter(ward_return_bill_date__lt=end_dt)
             except Exception:
                 pass
 
