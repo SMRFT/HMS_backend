@@ -62,6 +62,7 @@ from .Views import (
     Shanmuga360,
     insurance_packages,
     Tanuh,
+    tumourboard,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -323,6 +324,15 @@ urlpatterns = [
     path('jrd-reports/create/', jrdReport.create_jrd_report, name='jrd_create'),
     re_path(r'^jrd-reports/update/(?P<jrd_id>\d+)/$', jrdReport.update_jrd_report, name='update_jrd_report'),
     re_path(r'^jrd-reports/delete/(?P<jrd_id>\d+)/$', jrdReport.delete_jrd_report, name='delete_jrd_report'),
+
+    # Tumour Board Certification
+    path('tumour-board-templates/', tumourboard.get_tumour_board_templates, name='get_tumour_board_templates'),
+    path('tumour-board-patients/search/', tumourboard.search_tumour_board_patients, name='search_tumour_board_patients'),
+    path('tumour-board-patients/detail/', tumourboard.get_tumour_board_patient_detail, name='get_tumour_board_patient_detail'),
+    path('tumour-board-certificates/', tumourboard.list_tumour_board_certificates, name='list_tumour_board_certificates'),
+    path('tumour-board-certificates/save/', tumourboard.save_tumour_board_certificate, name='save_tumour_board_certificate'),
+    re_path(r'^tumour-board-certificates/delete/(?P<cert_id>[\w%/-]+)/$', tumourboard.delete_tumour_board_certificate, name='delete_tumour_board_certificate'),
+    re_path(r'^tumour-board-certificates/approve/(?P<cert_id>[\w%/-]+)/$', tumourboard.approve_tumour_board_certificate, name='approve_tumour_board_certificate'),
     
     # Summary
     path('summaries/', summary.get_summaries, name='get_summaries'),
