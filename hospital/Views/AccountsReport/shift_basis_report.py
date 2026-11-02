@@ -55,7 +55,7 @@ def shift_basis_accounts_report(request):
         if hospital_code: mongo_query["hospital_code"] = hospital_code
         if branch_code: mongo_query["branch_code"] = branch_code
         if outlet_code_filter and outlet_code_filter != "all":
-            mongo_query["outlet_code"] = outlet_code_filter
+            mongo_query["$or"] = [{"outlet_code": outlet_code_filter}, {"outlet": outlet_code_filter}, {"SelectedOutlet": outlet_code_filter}]
         if shiftno_filter:
             mongo_query["shift_no"] = shiftno_filter
 
@@ -92,18 +92,16 @@ def shift_basis_accounts_report(request):
         patients = list(db["hospital_patient"].find({"uhid": {"$in": uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1}))
         patient_map = {p["uhid"]: f"{p['firstName']} {p['lastName']}" for p in patients}
         
-        # 5. Fetch Cashier Names (Global DB)
+        # 5. Fetch Cashier Names (Global DB) reusing existing client
         cashier_ids = list(set([r["cashier_id"] for r in report_data if r["cashier_id"]]))
         cashier_name_map = {}
         try:
-            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            g_db = g_client['Global']
+            g_db = client['Global']
             profiles = list(g_db['backend_diagnostics_profile'].find(
                 {"employeeId": {"$in": cashier_ids}},
                 {"employeeId": 1, "employeeName": 1, "_id": 0}
             ))
             cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            g_client.close()
         except: pass
 
         # Final Polish
