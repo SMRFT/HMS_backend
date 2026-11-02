@@ -352,7 +352,7 @@ PAGE_MAPPING = {
 
     # Employee Master
     r'^/_b_a_c_k_e_n_d/HMS/employee-master/?(\?.*)?$': 'HMS-P-CCC',
-    r'^/_b_a_c_k_e_n_d/HMS/employee-master/(?:[^] +)' :'HMS-P-CCC', 
+    r'^/_b_a_c_k_e_n_d/HMS/employee-master(?:/[^/]+)+/?(\\?.*)?$': 'HMS-P-CCC',
 
     #Package Master:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  
