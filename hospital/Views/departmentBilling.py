@@ -782,6 +782,10 @@ def get_bill_types(request):
                 "billTypeNo": 1,
                 "outlet_code": 1,
                 "is_allowDiscount": 1,
+                "ward_medicine": 1,
+                "ward_lab": 1,
+                "ward_radiology": 1,
+                "ward_request": 1,
             }
         ))
 
@@ -839,6 +843,10 @@ def get_invest_bill_types(request):
                 "billTypeNo": 1,
                 "outlet_code": 1,
                 "is_allowDiscount": 1,
+                "ward_medicine": 1,
+                "ward_lab": 1,
+                "ward_radiology": 1,
+                "ward_request": 1,
             }
         ))
 

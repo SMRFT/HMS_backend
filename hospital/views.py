@@ -906,6 +906,17 @@ def patient_visit_list(request):
                     'changes': formatted_changes
                 })
 
+            g_type = getattr(p, 'guardian_type', None)
+            if not g_type or (p.gender and str(p.gender).upper().startswith('M') and g_type == 'W/o'):
+                g_type = 'S/o'
+            elif not g_type:
+                g_type = 'D/o' if (p.gender and str(p.gender).upper().startswith('F')) else 'S/o'
+            g_name = getattr(p, 'guardian_name', None) or getattr(p, 'spouse_name', '') or ''
+            perm_addr = getattr(p, 'permanent_address', '') or ''
+            area_val = getattr(p, 'area', '') or ''
+            city_val = getattr(p, 'city', '') or ''
+            dist_val = getattr(p, 'district', '') or ''
+
             data.append({
                 "uhid": p.uhid,
                 "patientName": full_name,
@@ -915,6 +926,12 @@ def patient_visit_list(request):
                 "doctor": bill.doctor_id, 
                 "doctorName": resolved_doc_name,
                 "spouseName": p.spouse_name or '',
+                "guardianType": g_type,
+                "guardianName": g_name,
+                "permanentAddress": perm_addr,
+                "area": area_val,
+                "city": city_val,
+                "district": dist_val,
                 "address": full_address,
                 "visitType": visit_type,
                 "billNumber": bill.bill_number,
