@@ -203,11 +203,42 @@ def fetch_detailed_billing_data(db, ccc_records):
             continue
         by_category.setdefault(cat, []).append(r)
         
-    # Bulk fetch helper for collections
+    # Bulk fetch helper for collections with projection for high speed
+    PROJECTIONS = {
+        "hospital_pharmacybilling": {
+            "bill_no": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1,
+            "payment_mode": 1, "payment_method": 1, "payment_details": 1, "items": 1,
+            "medicine_particulars": 1, "inpatient_number": 1, "ip_no": 1, "admission_id": 1
+        },
+        "hospital_investbilling": {
+            "investBillNo": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1,
+            "payment_mode": 1, "payment_details": 1, "item": 1, "billTypeNo": 1
+        },
+        "hospital_billing": {
+            "bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "payment_mode": 1,
+            "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1
+        },
+        "hospital_dischargebilling": {
+            "bill_no": 1, "uhid": 1, "ip_number": 1, "net_amount": 1, "total_amount": 1,
+            "payment_mode": 1, "payment_details": 1, "items": 1
+        },
+        "hospital_salesreturn": {
+            "return_bill_no": 1, "uhid": 1, "bill_no": 1, "return_amount": 1, "payment_mode": 1,
+            "payment_details": 1, "medicine_particulars": 1, "inpatient_number": 1
+        },
+        "hospital_receiptandpayment": {
+            "voucher_no": 1, "uhid": 1, "amount": 1, "voucher_type": 1, "payment_mode": 1,
+            "account_head": 1, "description": 1
+        }
+    }
     def fetch_docs(collection_name, field_name, bill_numbers):
         if not bill_numbers:
             return {}
-        docs = list(db[collection_name].find({field_name: {"$in": bill_numbers}}))
+        proj = PROJECTIONS.get(collection_name)
+        if proj:
+            docs = list(db[collection_name].find({field_name: {"$in": bill_numbers}}, proj))
+        else:
+            docs = list(db[collection_name].find({field_name: {"$in": bill_numbers}}))
         return {str(d[field_name]): d for d in docs if field_name in d}
 
     # Helper to get bill numbers
@@ -244,7 +275,10 @@ def fetch_detailed_billing_data(db, ccc_records):
     advance_nums = get_bill_nums(advance_bills)
     advance_map = {}
     if advance_nums:
-        adms = list(db["hospital_admission"].find({"advance_payments.bill_no": {"$in": advance_nums}}))
+        adms = list(db["hospital_admission"].find(
+            {"advance_payments.bill_no": {"$in": advance_nums}},
+            {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "customer_type": 1, "insurance_company": 1, "company_code": 1}
+        ))
         for adm in adms:
             pays = adm.get("advance_payments", [])
             for p in pays:
@@ -579,17 +613,32 @@ def discharge_bills_report(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
 
+        f_d = _parse_date(from_f) if from_f else None
+        t_d = _parse_date(to_f) if to_f else None
+
         mongo_q = {
-            "is_cancelled": {"$ne": True}
+            "is_cancelled": False
         }
-        if status_f and status_f.lower() != "all":
+        if status_f and status_f.lower() not in ("all", "billed"):
             mongo_q["status"] = status_f
+        elif status_f and status_f.lower() == "billed":
+            # Cash discharge bills include both Billed and Paid (settled)
+            mongo_q["status"] = {"$in": ["Billed", "Paid"]}
         if outlet_f and outlet_f.lower() != "all":
             mongo_q["$or"] = [{"outlet_code": outlet_f}, {"outlet": outlet_f}]
         if hospital_code:
             mongo_q["hospital_code"] = hospital_code
         if branch_code:
             mongo_q["branch_code"] = branch_code
+
+        if f_d or t_d:
+            date_filter = {}
+            if f_d:
+                date_filter["$gte"] = datetime.combine(f_d, datetime.min.time())
+            if t_d:
+                date_filter["$lte"] = datetime.combine(t_d, datetime.max.time())
+            if date_filter:
+                mongo_q["$or"] = [{"bill_date": date_filter}, {"created_date": date_filter}]
 
         discharge_docs = list(db["hospital_dischargebilling"].find(mongo_q))
 
@@ -811,27 +860,53 @@ def advance_registration_report(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
         
+        f_d = _parse_date(from_f) if from_f else None
+        t_d = _parse_date(to_f) if to_f else None
+
         adm_query = {
-            "is_cancelled": {"$ne": True},
+            "is_cancelled": False,
             "advance_payments": {"$exists": True, "$ne": []}
         }
         if hospital_code:
             adm_query["hospital_code"] = hospital_code
         if branch_code:
             adm_query["branch_code"] = branch_code
+        if outlet_f and str(outlet_f).lower() != "all":
+            adm_query["$or"] = [{"outlet_code": outlet_f}, {"outlet": outlet_f}]
+
+        if f_d or t_d:
+            f_dt = datetime.combine(f_d, datetime.min.time()) if f_d else datetime.min
+            t_dt = datetime.combine(t_d, datetime.max.time()) if t_d else datetime.max
+            adm_query["$or"] = [
+                {"advance_payments.date": {"$gte": f_dt, "$lte": t_dt}},
+                {"advance_payments.created_date": {"$gte": f_dt, "$lte": t_dt}},
+                {"admissionDateTime": {"$gte": f_dt, "$lte": t_dt}},
+                {"created_date": {"$gte": f_dt, "$lte": t_dt}}
+            ]
             
-        admissions = list(db["hospital_admission"].find(adm_query))
+        admissions = list(db["hospital_admission"].find(
+            adm_query,
+            {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "company_code": 1, "companyCode": 1, "insuranceCompanyName": 1, "insurance_company": 1, "customer_type": 1, "room_details": 1}
+        ))
         
         # Bulk lookup insurance providers from hospital_insuranceprovider
         ins_docs = list(db["hospital_insuranceprovider"].find({}, {"company_code": 1, "company_name": 1}))
         insurance_code_to_name = {str(ins.get("company_code")).strip(): str(ins.get("company_name", "")).strip() for ins in ins_docs if ins.get("company_code")}
 
-        # Also query cashcountercollection for cashier mapping if available
+        # Query cashcountercollection scoped to date range
         ccc_map = {}
         try:
-            ccc_docs = list(db["hospital_cashcountercollection"].find({
+            ccc_q = {
                 "billing_category": {"$in": ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "advance", "Advance", "CentralCashCounter"]}
-            }))
+            }
+            if f_d or t_d:
+                f_dt = datetime.combine(f_d, datetime.min.time()) if f_d else datetime.min
+                t_dt = datetime.combine(t_d, datetime.max.time()) if t_d else datetime.max
+                ccc_q["created_date"] = {"$gte": f_dt, "$lte": t_dt}
+            ccc_docs = list(db["hospital_cashcountercollection"].find(
+                ccc_q,
+                {"bill_number": 1, "bill_no": 1, "payment_mode": 1, "payment_details": 1, "created_by": 1}
+            ))
             for c in ccc_docs:
                 b_num = c.get("bill_number") or c.get("bill_no")
                 if b_num and b_num not in ccc_map:
@@ -839,29 +914,29 @@ def advance_registration_report(request):
         except Exception:
             pass
 
-        # Cashier names lookup from Global DB
+        # Cashier names lookup from Global DB (reusing client directly)
         cashier_name_map = {}
         try:
-            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            g_db = g_client['Global']
-            profiles = list(g_db['backend_diagnostics_profile'].find(
+            profiles = list(client['Global']['backend_diagnostics_profile'].find(
                 {},
                 {"employeeId": 1, "employeeName": 1, "_id": 0}
             ))
             cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles if p.get('employeeId')}
-            g_client.close()
         except Exception:
             pass
 
-        client.close()
-        
-        # UHID to Patient Mapping
+        # UHID to Patient Mapping via fast Mongo query
         uhids = list(set(str(a.get("uhid")).strip() for a in admissions if a.get("uhid")))
-        patients = Patient.objects.filter(uhid__in=uhids)
+        patient_docs = list(db["hospital_patient"].find(
+            {"uhid": {"$in": uhids}},
+            {"uhid": 1, "firstName": 1, "lastName": 1, "company_code": 1, "customer_type": 1, "mobilePhone": 1}
+        )) if uhids else []
         patient_map = {}
-        for p in patients:
-            k = str(p.uhid).strip().upper()
+        for p in patient_docs:
+            k = str(p.get("uhid", "")).strip().upper()
             patient_map[k] = p
+
+        client.close()
         
         report_data = []
         f_d = _parse_date(from_f) if from_f else None
@@ -872,7 +947,9 @@ def advance_registration_report(request):
             uhid_key = str(uhid_raw).strip().upper() if uhid_raw else ""
             p = patient_map.get(uhid_key)
             
-            comp_code = str(adm.get("company_code") or adm.get("companyCode") or (p.company_code if p else "") or "").strip()
+            p_comp = (p.get("company_code") if isinstance(p, dict) else getattr(p, "company_code", "")) if p else ""
+            p_cust = (p.get("customer_type") if isinstance(p, dict) else getattr(p, "customer_type", "")) if p else ""
+            comp_code = str(adm.get("company_code") or adm.get("companyCode") or p_comp or "").strip()
             comp_name = adm.get('insuranceCompanyName') or adm.get('insurance_company') or insurance_code_to_name.get(comp_code) or comp_code or "GENERAL / PRIVATE"
 
             if is_insurance:
@@ -880,7 +957,7 @@ def advance_registration_report(request):
                     comp_code or 
                     adm.get('insuranceCompanyName') or 
                     adm.get('insurance_company') or 
-                    (p and getattr(p, 'customer_type', '').lower() == 'insurance')
+                    (str(p_cust).lower() == 'insurance')
                 )
                 if not has_insurance:
                     continue
@@ -930,7 +1007,10 @@ def advance_registration_report(request):
                 
                 # Patient Name lookup
                 if p:
-                    p_name = " ".join(filter(None, [getattr(p, 'salutation', ''), p.firstName, p.lastName])).strip()
+                    p_sal = p.get('salutation', '') if isinstance(p, dict) else getattr(p, 'salutation', '')
+                    p_fn = p.get('firstName', '') if isinstance(p, dict) else getattr(p, 'firstName', '')
+                    p_ln = p.get('lastName', '') if isinstance(p, dict) else getattr(p, 'lastName', '')
+                    p_name = " ".join(filter(None, [p_sal, p_fn, p_ln])).strip()
                 else:
                     p_name = adm.get("patient_name") or adm.get("patientname") or pay.get("patient_name") or "Patient"
                 
@@ -1003,20 +1083,22 @@ def advance_registration_report(request):
 # @permission_classes([HasRoleAndDataPermission])
 def bill_cancel_report(request):
     try:
+        params = request.data if request.method == "POST" else request.GET
+        from_date = params.get("from_date")
+        to_date = params.get("to_date")
+        f_dt = _parse_date(from_date) if from_date else None
+        t_dt = _parse_date(to_date) if to_date else None
+
         # Connect MongoDB
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
-        
-        # 1. Fetch cancelled discharge billing where is_cancelled = True or status = "Cancelled"
+
         discharge_query = {
             "$or": [
                 {"is_cancelled": True},
                 {"status": "Cancelled"}
             ]
         }
-        discharge_bills = list(db["hospital_dischargebilling"].find(discharge_query))
-        
-        # 2. Fetch admissions containing cancelled advance payments or cancelled admission itself
         admission_query = {
             "$or": [
                 {"is_cancelled": True},
@@ -1025,7 +1107,34 @@ def bill_cancel_report(request):
                 {"advance_payments.is_cancelled": True}
             ]
         }
-        admissions = list(db["hospital_admission"].find(admission_query))
+        if f_dt or t_dt:
+            date_filter = {}
+            if f_dt:
+                date_filter["$gte"] = datetime.combine(f_dt, datetime.min.time())
+            if t_dt:
+                date_filter["$lte"] = datetime.combine(t_dt, datetime.max.time())
+            discharge_query["$and"] = [
+                {"$or": [{"is_cancelled": True}, {"status": "Cancelled"}]},
+                {"$or": [{"bill_date": date_filter}, {"created_date": date_filter}, {"cancelled_date": date_filter}, {"lastmodified_date": date_filter}]}
+            ]
+            del discharge_query["$or"]
+            admission_query["$and"] = [
+                {"$or": [{"is_cancelled": True}, {"status": "Cancelled"}, {"advance_payments.status": "Cancelled"}, {"advance_payments.is_cancelled": True}]},
+                {"$or": [{"admissionDateTime": date_filter}, {"created_date": date_filter}, {"lastmodified_date": date_filter}, {"advance_payments.created_date": date_filter}]}
+            ]
+            del admission_query["$or"]
+
+        # 1. Fetch cancelled discharge billing
+        discharge_bills = list(db["hospital_dischargebilling"].find(
+            discharge_query,
+            {"bill_no": 1, "estimate_number": 1, "discharge_id": 1, "uhid": 1, "bill_date": 1, "created_date": 1, "lastmodified_date": 1, "net_amount": 1, "total_amount": 1, "created_by": 1, "lastmodified_by": 1, "remarks": 1, "disc_reason": 1}
+        ))
+        
+        # 2. Fetch admissions containing cancelled advance payments
+        admissions = list(db["hospital_admission"].find(
+            admission_query,
+            {"ipNumber": 1, "uhid": 1, "admissionDateTime": 1, "created_date": 1, "lastmodified_date": 1, "is_cancelled": 1, "created_by": 1, "lastmodified_by": 1, "remarks": 1, "mlc_remarks": 1, "advance_payments": 1}
+        ))
         
         # 3. Gather all unique UHIDs
         uhids = []
@@ -1297,14 +1406,13 @@ def credit_card_report(request):
         cashier_ids = list(set([r["cashier_id"] for r in raw_rows if r.get("cashier_id")]))
         cashier_name_map = {}
         try:
-            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            g_db = g_client['Global']
+            g_db = client['Global']
             profiles = list(g_db['backend_diagnostics_profile'].find(
                 {"employeeId": {"$in": cashier_ids}},
                 {"employeeId": 1, "employeeName": 1, "_id": 0}
             ))
             cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            g_client.close()
+            pass
         except: pass
 
         for r in raw_rows:
@@ -1517,14 +1625,13 @@ def cash_bills_report(request):
         cashier_ids = list(set([r["cashier_id"] for r in raw_rows if r.get("cashier_id")]))
         cashier_name_map = {}
         try:
-            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            g_db = g_client['Global']
+            g_db = client['Global']
             profiles = list(g_db['backend_diagnostics_profile'].find(
                 {"employeeId": {"$in": cashier_ids}},
                 {"employeeId": 1, "employeeName": 1, "_id": 0}
             ))
             cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            g_client.close()
+            pass
         except: pass
 
         for r in raw_rows:
@@ -2229,10 +2336,18 @@ def debit_bills_report(request):
         if not rows:
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             db = client["HMS"]
-            dch_q = {}
+            dch_q = {"is_cancelled": False}
             if outlet_code and outlet_code.lower() != "all":
                 dch_q["$or"] = [{"outlet_code": outlet_code}, {"outlet": outlet_code}]
-            dch_docs = list(db["hospital_dischargebilling"].find(dch_q))
+            if f_date or t_date:
+                df = {}
+                if f_date: df["$gte"] = datetime.combine(f_date, datetime.min.time())
+                if t_date: df["$lte"] = datetime.combine(t_date, datetime.max.time())
+                dch_q["$or"] = [{"bill_date": df}, {"created_date": df}]
+            dch_docs = list(db["hospital_dischargebilling"].find(
+                dch_q,
+                {"bill_no": 1, "estimate_number": 1, "uhid": 1, "bill_date": 1, "created_date": 1, "net_amount": 1, "total_amount": 1, "payment_details": 1, "paid_amount": 1, "pending_amount": 1, "CashierID": 1, "created_by": 1}
+            ))
             client.close()
 
             uhids = list(set(d.get("uhid") for d in dch_docs if d.get("uhid")))
@@ -2324,11 +2439,16 @@ def audit_report(request):
                     })
 
         # 2. Pharmacy Billing (per medicine item qty edits)
+        f_dt = datetime.combine(f_date, datetime.min.time()) if f_date else None
+        t_dt = datetime.combine(t_date, datetime.max.time()) if t_date else None
+
         item_ids = set()
         pharmacy_events = []
         pharm_bills = PharmacyBilling.objects.all()
         if outlet_code and outlet_code.lower() != "all":
             pharm_bills = pharm_bills.filter(outlet_code=outlet_code)
+        if f_dt and t_dt:
+            pharm_bills = pharm_bills.filter(bill_date__range=(f_dt, t_dt))
         for bill in pharm_bills:
             meds = bill.medicine_particulars if isinstance(bill.medicine_particulars, list) else []
             for med in meds:
@@ -2369,6 +2489,8 @@ def audit_report(request):
         ret_bills = SalesReturn.objects.all()
         if outlet_code and outlet_code.lower() != "all":
             ret_bills = ret_bills.filter(outlet_code=outlet_code)
+        if f_dt and t_dt:
+            ret_bills = ret_bills.filter(return_bill_date__range=(f_dt, t_dt))
         for ret in ret_bills:
             meds = ret.medicine_particulars if isinstance(ret.medicine_particulars, list) else []
             for med in meds:
@@ -2489,14 +2611,29 @@ def sales_tax_register(request):
             if t_date and d and d > t_date: return False
             return True
 
+        f_dt = datetime.combine(f_date, datetime.min.time()) if f_date else None
+        t_dt = datetime.combine(t_date, datetime.max.time()) if t_date else None
+
         sale_bills_qs = PharmacyBilling.objects.filter(billing_status="Paid")
         if outlet_code and outlet_code.lower() != "all":
             sale_bills_qs = sale_bills_qs.filter(outlet_code=outlet_code)
+        if f_dt and t_dt:
+            sale_bills_qs = sale_bills_qs.filter(bill_date__range=(f_dt, t_dt))
+        elif f_dt:
+            sale_bills_qs = sale_bills_qs.filter(bill_date__gte=f_dt)
+        elif t_dt:
+            sale_bills_qs = sale_bills_qs.filter(bill_date__lte=t_dt)
         sale_bills = list(sale_bills_qs) if report_type in ("all", "sales", "sale") else []
 
         returns_qs = SalesReturn.objects.all()
         if outlet_code and outlet_code.lower() != "all":
             returns_qs = returns_qs.filter(outlet_code=outlet_code)
+        if f_dt and t_dt:
+            returns_qs = returns_qs.filter(return_bill_date__range=(f_dt, t_dt))
+        elif f_dt:
+            returns_qs = returns_qs.filter(return_bill_date__gte=f_dt)
+        elif t_dt:
+            returns_qs = returns_qs.filter(return_bill_date__lte=t_dt)
         returns = list(returns_qs) if report_type in ("all", "returns", "return") else []
 
         return_bill_nos = {r.bill_no for r in returns if r.bill_no}
@@ -2907,7 +3044,24 @@ def stock_report_ip_op(request):
             if t_date and d and d > t_date: return False
             return True
 
-        bills = list(PharmacyBilling.objects.filter(billing_status="Paid"))
+        outlet_f = request.GET.get("outlet_code") or request.GET.get("outlet")
+        hospital_code, branch_code = _auth_scope(request)
+        bills_qs = PharmacyBilling.objects.filter(billing_status="Paid")
+        if outlet_f and outlet_f.lower() != "all":
+            bills_qs = bills_qs.filter(outlet_code=outlet_f)
+        if hospital_code:
+            bills_qs = bills_qs.filter(hospital_code=hospital_code)
+        if branch_code:
+            bills_qs = bills_qs.filter(branch_code=branch_code)
+        if f_date and t_date:
+            f_dt = datetime.combine(f_date, datetime.min.time())
+            t_dt = datetime.combine(t_date, datetime.max.time())
+            bills_qs = bills_qs.filter(bill_date__range=(f_dt, t_dt))
+        elif f_date:
+            bills_qs = bills_qs.filter(bill_date__gte=datetime.combine(f_date, datetime.min.time()))
+        elif t_date:
+            bills_qs = bills_qs.filter(bill_date__lte=datetime.combine(t_date, datetime.max.time()))
+        bills = list(bills_qs)
         item_ids = set()
         for b in bills:
             for med in (b.medicine_particulars or []):
@@ -3362,6 +3516,12 @@ def discount_bills_report(request):
 
         raw_records = []
 
+        date_filter = {}
+        if f_d:
+            date_filter["$gte"] = datetime.combine(f_d, datetime.min.time())
+        if t_d:
+            date_filter["$lte"] = datetime.combine(t_d, datetime.max.time())
+
         # ── 1. PHARMACY BILLING ────────────────────────────────────────────────
         pharm_q = {
             "is_deleted": {"$ne": True}
@@ -3370,6 +3530,8 @@ def discount_bills_report(request):
         if branch_code: pharm_q["branch_code"] = branch_code
         if outlet_code and str(outlet_code).strip().lower() != "all":
             pharm_q["outlet_code"] = outlet_code
+        if date_filter:
+            pharm_q["$or"] = [{"bill_date": date_filter}, {"created_date": date_filter}]
 
         pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q))
         for doc in pharm_docs:
@@ -3462,6 +3624,8 @@ def discount_bills_report(request):
         if branch_code: inv_q["branch_code"] = branch_code
         if outlet_code and str(outlet_code).strip().lower() != "all":
             inv_q["outlet_code"] = outlet_code
+        if date_filter:
+            inv_q["$or"] = [{"created_date": date_filter}, {"bill_date": date_filter}]
 
         inv_docs = list(db["hospital_investbilling"].find(inv_q))
         for doc in inv_docs:
@@ -3560,12 +3724,17 @@ def discount_bills_report(request):
 
         # ── 3. DISCHARGE BILLING ──────────────────────────────────────────────
         disch_q = {
-            "is_cancelled": {"$ne": True}
+            "is_cancelled": False
         }
         if hospital_code: disch_q["hospital_code"] = hospital_code
         if branch_code: disch_q["branch_code"] = branch_code
+        if date_filter:
+            disch_q["$or"] = [{"bill_date": date_filter}, {"created_date": date_filter}]
 
-        disch_docs = list(db["hospital_dischargebilling"].find(disch_q))
+        disch_docs = list(db["hospital_dischargebilling"].find(
+            disch_q,
+            {"bill_no": 1, "sh_bill_no": 1, "estimate_number": 1, "discharge_id": 1, "bill_date": 1, "created_date": 1, "discount_amount": 1, "total_disc": 1, "discount_percent": 1, "total_amount": 1, "net_amount": 1, "disc_reason": 1, "remarks": 1, "payment_details": 1, "payment_mode": 1, "uhid": 1, "patient_name": 1, "ip_number": 1, "created_by": 1, "CashierID": 1, "outlet_code": 1}
+        ))
         for doc in disch_docs:
             b_date_val = doc.get("bill_date") or doc.get("created_date")
             b_date = _parse_date(b_date_val)
@@ -3665,14 +3834,13 @@ def discount_bills_report(request):
         cashier_ids = list(set([r["cashier_id"] for r in raw_records if r.get("cashier_id")]))
         cashier_name_map = {}
         try:
-            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            g_db = g_client['Global']
+            g_db = client['Global']
             profiles = list(g_db['backend_diagnostics_profile'].find(
                 {"employeeId": {"$in": cashier_ids}},
                 {"employeeId": 1, "employeeName": 1, "_id": 0}
             ))
             cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            g_client.close()
+            pass
         except:
             pass
 

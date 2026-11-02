@@ -51,11 +51,11 @@ def sales_return_report_view(request):
         except ValueError:
             return Response({"error": "Invalid date format. Use YYYY-MM-DD"}, status=400)
 
-        records = list(
-            SalesReturn.objects.filter(
-                return_bill_date__range=(start_date, end_date)
-            ).order_by('-return_bill_date')
-        )
+        outlet_code = request.GET.get('outlet_code') or request.GET.get('outlet')
+        qs = SalesReturn.objects.filter(return_bill_date__range=(start_date, end_date))
+        if outlet_code and outlet_code.lower() != 'all':
+            qs = qs.filter(outlet_code=outlet_code)
+        records = list(qs.order_by('-return_bill_date'))
 
         if not records:
             return Response({
