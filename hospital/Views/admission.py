@@ -873,6 +873,7 @@ def admission_view(request):
             to_date_str   = request.GET.get('to_date',          '').strip()
             status_filter = request.GET.get('status',           '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
+            doctor_name   = request.GET.get('doctor_name',      '').strip()
             ip_filter     = request.GET.get('ip_number',        '').strip()
             uhid_filter   = request.GET.get('uhid',             '').strip()
 
@@ -893,17 +894,65 @@ def admission_view(request):
             if uhid_filter:
                 query["uhid"] = {"$regex": f"^{re.escape(uhid_filter)}$", "$options": "i"}
 
-            if status_filter == 'Admitted':
+            st_lower = status_filter.lower()
+            if st_lower == 'admitted':
                 query["is_admitted"] = True
                 query["is_discharged"] = False
                 query["is_cancelled"] = {"$ne": True}
-            elif status_filter == 'Discharged':
+            elif st_lower == 'discharged':
                 query["is_discharged"] = True
-            elif status_filter == 'Cancelled':
+            elif st_lower == 'cancelled':
                 query["is_cancelled"] = True
 
+            and_conditions = []
+
+            # Doctor filter tokens (match employee ID or doctor name across admittingDoctor and consultingDoctor)
+            doc_tokens = []
             if doctor_filter and doctor_filter.lower() != "all":
-                query["admittingDoctor"] = {"$regex": re.escape(doctor_filter), "$options": "i"}
+                doc_tokens.append(doctor_filter)
+            if doctor_name and doctor_name.lower() != "all":
+                doc_tokens.append(doctor_name)
+                cleaned = re.sub(r'^(dr\.?|mr\.?|mrs\.?|ms\.?)\s+', '', doctor_name, flags=re.I).strip()
+                if cleaned:
+                    doc_tokens.append(cleaned)
+                    for part in cleaned.split():
+                        part = part.strip(".,() ")
+                        if len(part) >= 3:
+                            doc_tokens.append(part)
+
+            if doc_tokens:
+                doc_clauses = []
+                for tok in set(doc_tokens):
+                    doc_clauses.append({"admittingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
+                    doc_clauses.append({"consultingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
+                    doc_clauses.append({"admittingDoctorName": {"$regex": re.escape(tok), "$options": "i"}})
+                and_conditions.append({"$or": doc_clauses})
+
+            customer_type_filter = request.GET.get('customer_type', '').strip()
+            if customer_type_filter and customer_type_filter.lower() != "all":
+                if customer_type_filter.lower() == "insurance":
+                    and_conditions.append({
+                        "$or": [
+                            {"customer_type": {"$regex": "^insurance", "$options": "i"}},
+                            {"customerType": {"$regex": "^insurance", "$options": "i"}},
+                            {"company_code": {"$exists": True, "$ne": ""}},
+                            {"insurance_company": {"$exists": True, "$ne": ""}},
+                            {"insuranceCompanyName": {"$exists": True, "$ne": ""}},
+                        ]
+                    })
+                else:
+                    and_conditions.append({
+                        "$or": [
+                            {"customer_type": {"$regex": f"^{re.escape(customer_type_filter)}$", "$options": "i"}},
+                            {"customerType": {"$regex": f"^{re.escape(customer_type_filter)}$", "$options": "i"}},
+                        ]
+                    })
+
+            if and_conditions:
+                if len(and_conditions) == 1:
+                    query.update(and_conditions[0])
+                else:
+                    query["$and"] = and_conditions
 
             # Date Range Filter
             from_date = to_date = None
@@ -994,7 +1043,51 @@ def admission_view(request):
                 result.append(d)
 
             _enrich_admissions_batch(result, hospital_code)
-            return JsonResponse({"success": True, "data": result, "count": len(result)})
+
+            # In-memory post-enrichment filtering (guarantees accurate match even when customer_type was enriched from patient)
+            filtered_result = []
+            for d in result:
+                # 1. Status check
+                if st_lower == 'admitted':
+                    if not (d.get("is_admitted") and not d.get("is_discharged") and not d.get("is_cancelled")):
+                        continue
+                elif st_lower == 'discharged':
+                    if not d.get("is_discharged"):
+                        continue
+                elif st_lower == 'cancelled':
+                    if not d.get("is_cancelled"):
+                        continue
+
+                # 2. Doctor check
+                if doc_tokens:
+                    doc_match = False
+                    fields_to_check = [
+                        str(d.get("admittingDoctor") or "").lower(),
+                        str(d.get("consultingDoctor") or "").lower(),
+                        str(d.get("admittingDoctorName") or "").lower(),
+                    ]
+                    for tok in doc_tokens:
+                        tok_low = tok.lower()
+                        if any(tok_low in f for f in fields_to_check):
+                            doc_match = True
+                            break
+                    if not doc_match:
+                        continue
+
+                # 3. Customer type check
+                if customer_type_filter and customer_type_filter.lower() != "all":
+                    ct_low = str(d.get("customer_type") or d.get("customerType") or "").strip().lower()
+                    if customer_type_filter.lower() == "insurance":
+                        is_ins = (ct_low == "insurance" or bool(d.get("company_code")) or bool(d.get("insurance_company")) or bool(d.get("insuranceCompanyName")))
+                        if not is_ins:
+                            continue
+                    else:
+                        if ct_low != customer_type_filter.lower():
+                            continue
+
+                filtered_result.append(d)
+
+            return JsonResponse({"success": True, "data": filtered_result, "count": len(filtered_result)})
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"error": str(e)}, status=500)

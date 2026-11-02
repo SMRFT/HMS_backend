@@ -990,6 +990,7 @@ class Admission(AuditModel):
     is_high_risk         = models.BooleanField(default=False)
     high_risk_reason     = models.TextField(blank=True, null=True)
     high_risk_date       = models.DateField(blank=True, null=True)
+
  
     # ── Cancellation tracking ─────────────────────────────────────────────────
     is_cancelled        = models.BooleanField(default=False)
@@ -1887,7 +1888,7 @@ class ReceiptAndPayment(AuditModel):
 
     shiftno = models.CharField(max_length=100)
     CashierID      = models.CharField(max_length=100,null=True, blank=True)
-    CashCounter    = models.CharField(max_length=100)
+    CashCounter    = models.CharField(max_length=100, null=True, blank=True)
 
     def __str__(self):
         return f"{self.voucher_no} - {self.account_head}"
@@ -2118,6 +2119,7 @@ class DialysisDischargeSummary(AuditModel):
 
     uhid = models.CharField(max_length=100)
     consultant = models.CharField(max_length=255,null=True, blank=True)
+    icd = models.CharField(max_length=100, null=True, blank=True)
     id_no = models.CharField(max_length=100,null=True, blank=True)
     insurance = models.CharField(max_length=255, blank=True, default="")
 
@@ -2139,17 +2141,25 @@ class DialysisDischargeSummary(AuditModel):
     next_hd_session_on = models.DateField()
 
     def _parse_json_field(self, value):
-        """Safely parse a field that may already be a list or a JSON string."""
-        if isinstance(value, list):
+        """Safely parse a field that may already be a list or a JSON string or plain string."""
+        if isinstance(value, (list, dict)):
             return value
         if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, ValueError):
-                return []
+            val_s = value.strip()
+            if (val_s.startswith("[") and val_s.endswith("]")) or (val_s.startswith("{") and val_s.endswith("}")):
+                try:
+                    return json.loads(val_s)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            return value
         return []
 
     def save(self, *args, **kwargs):
+
+        if not self.icd and self.id_no:
+            self.icd = self.id_no
+        elif not self.id_no and self.icd:
+            self.id_no = self.icd
 
         # ==========================================
         # NORMAL DJANGO SAVE
@@ -2177,6 +2187,8 @@ class DialysisDischargeSummary(AuditModel):
                 update_query,
                 {
                     "$set": {
+                        "icd": self.icd or self.id_no,
+                        "id_no": self.id_no or self.icd,
                         "blood_investigations": self._parse_json_field(self.blood_investigations),
                         "hd_sessions": self._parse_json_field(self.hd_sessions),
                         "complications_during_hd": self._parse_json_field(self.complications_during_hd),

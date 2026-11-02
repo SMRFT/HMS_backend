@@ -62,6 +62,7 @@ from .Views import (
     Shanmuga360,
     insurance_packages,
     Tanuh,
+    employee_master,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -155,6 +156,7 @@ urlpatterns = [
 
     # Stock Transfer URLs
     path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
+    path('get_stocktransfer_departments/', stocktransfer.get_stocktransfer_departments, name='get_stocktransfer_departments'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock-detail'),
     path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
@@ -418,7 +420,9 @@ urlpatterns = [
 
     # Insurance Packages Master & Items API
     path('insurance-packages/schemes/', insurance_packages.get_insurance_package_schemes, name='get_insurance_package_schemes'),
-    path('insurance-packages/items/', insurance_packages.get_insurance_package_items, name='get_insurance_package_items'),
+    path('insurance-packages/items/', insurance_packages.insurance_package_items_list_create, name='insurance_package_items'),
+    path('insurance-packages/items/<str:item_id>/', insurance_packages.insurance_package_item_detail, name='insurance_package_item_detail'),
+    path('insurance-packages/items/<str:item_id>/toggle-active/', insurance_packages.toggle_insurance_package_item_active, name='insurance_package_toggle_active'),
     path('insurance-packages/', insurance_packages.insurance_packages_hub, name='insurance_packages_hub'),
 
     # Investigation Price Master
@@ -529,7 +533,7 @@ urlpatterns = [
     path('shelf-master/', stores.shelf_master_list_create, name='shelf_master_list_create'),
     path('shelf-master/<str:pk>/', stores.shelf_master_detail, name='shelf_master_detail'),
     path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
-    path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
+    path('stores-grn/<path:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
     path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
@@ -820,6 +824,10 @@ urlpatterns = [
     # Tanuh
     path('tanuh_breast_cancer_screening/', Tanuh.tanuh_breast_cancer_screening, name='tanuh_breast_cancer_screening'),
     path('tanuh_student_surveyor_registration/', Tanuh.tanuh_student_surveyor_registration, name='tanuh_student_surveyor_registration'),
+
+    # Employee Master
+    path('employee-master/', employee_master.employee_master_list, name='employee_master_list'),
+    path('employee-master/<str:employee_id>/', employee_master.employee_master_detail, name='employee_master_detail'),
 ]
 
 

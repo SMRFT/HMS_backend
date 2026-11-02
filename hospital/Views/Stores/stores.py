@@ -1133,24 +1133,48 @@ def stores_grn_list_create(request):
             serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
             return Response(serializer.data)
 
-        # Auto-generate GRN number
+        # Auto-generate GRN number in format: 2627/00022316
         if not data.get('grn_number'):
-            # SGRN252600001
             fy_str = get_financial_year_string()
-            prefix = f"SGRN{fy_str}"
+            prefix = f"{fy_str}/"
             
-            # Simple sequence generator
-            last_record = storesGRN.objects.filter(grn_number__startswith=prefix).order_by('-created_date').first()
-            if last_record and last_record.grn_number:
-                try:
-                    last_sequence = int(last_record.grn_number.replace(prefix, ''))
-                    new_sequence = last_sequence + 1
-                except ValueError:
+            try:
+                from ..dbcollection import hms_db
+                col = hms_db['hospital_storesgrn']
+                
+                # Check for highest 8-digit sequence in current FY
+                # Supports both new format ("2627/00022316") and legacy format ("SGRN2627262700022316", "SGRN262700022316")
+                pattern = rf'^(?:{fy_str}/|SGRN{fy_str}{fy_str}|SGRN{fy_str})(\d{{8}})$'
+                max_seq = 0
+                for doc in col.find({'grn_number': {'$regex': pattern}}, {'grn_number': 1}):
+                    grn_no = str(doc.get('grn_number') or '')
+                    m = re.match(pattern, grn_no)
+                    if m:
+                        try:
+                            seq = int(m.group(1))
+                            if seq > max_seq:
+                                max_seq = seq
+                        except ValueError:
+                            pass
+                
+                new_sequence = max_seq + 1
+                new_grn_number = f"{prefix}{new_sequence:08d}"
+                while col.find_one({'grn_number': new_grn_number}):
+                    new_sequence += 1
+                    new_grn_number = f"{prefix}{new_sequence:08d}"
+                
+                data['grn_number'] = new_grn_number
+            except Exception:
+                last_record = storesGRN.objects.filter(grn_number__startswith=prefix).order_by('-created_date').first()
+                if last_record and last_record.grn_number:
+                    try:
+                        last_sequence = int(last_record.grn_number.split('/')[1])
+                        new_sequence = last_sequence + 1
+                    except (IndexError, ValueError):
+                        new_sequence = 1
+                else:
                     new_sequence = 1
-            else:
-                new_sequence = 1
-            
-            data['grn_number'] = f"{prefix}{new_sequence:05d}"
+                data['grn_number'] = f"{prefix}{new_sequence:08d}"
             
         # Initial Payment Status
         if 'payment_status' not in data or not data['payment_status']:
@@ -1246,6 +1270,9 @@ def stores_grn_detail(request, pk):
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
     try:
+        if pk:
+            import urllib.parse
+            pk = urllib.parse.unquote(str(pk)).strip('/')
         grn = storesGRN.objects.filter(grn_number=pk, is_active__in=[True]).first()
         if not grn:
             from bson import ObjectId

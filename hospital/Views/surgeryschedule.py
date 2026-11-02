@@ -16,6 +16,7 @@ from ..models import ImplantRequest, VelavanItems
 from bson.decimal128 import Decimal128
 from django.http import JsonResponse
 from ..models import Admission, Patient, InsuranceProvider
+from .dbcollection import resolve_created_by_name, get_employee_name_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -1458,7 +1459,9 @@ def get_ot_medicine_ward_requests(request):
                 "billName": bill_name,
                 "reqDate": req_date,
                 "reqTime": req_time,
-                "userName": doc.get("created_by", ""),
+                "userName": resolve_created_by_name(doc.get("created_by", "")) or doc.get("created_by", ""),
+                "created_by": doc.get("created_by", ""),
+                "created_by_name": resolve_created_by_name(doc.get("created_by", "")),
                 "requestNo": doc.get("estimate_no", ""),
                 "doctorName": doctor_name,          # ✅ Resolved from Global DB
                 "doctor_id": doctor_id,
@@ -1946,6 +1949,7 @@ def get_implant_requests(request):
                     "reqDate":     created.strftime("%d-%m-%Y") if created else "",
                     "reqTime":     created.strftime("%I:%M %p") if created else "",
                     "created_by":  rec.created_by or "",
+                    "created_by_name": resolve_created_by_name(rec.created_by or ""),
                     "branch_code": rec.branch_code or "",
                 }
             )
@@ -2060,6 +2064,7 @@ def get_ward_implant_requests(request):
                     "reqDate":     created.strftime("%d-%m-%Y") if created else "",
                     "reqTime":     created.strftime("%I:%M %p") if created else "",
                     "created_by":  rec.created_by or "",
+                    "created_by_name": resolve_created_by_name(rec.created_by or ""),
                     "branch_code": rec.branch_code or "",
                 }
             )
@@ -2435,6 +2440,7 @@ def list_implant_requests_report(request):
                 "reqTime":       created.strftime("%I:%M %p") if created else "",
                 "createdDateSort": created.isoformat() if created else "",
                 "created_by":    rec.created_by or "",
+                "created_by_name": resolve_created_by_name(rec.created_by or ""),
                 "branch_code":   rec.branch_code or "",
             })
 

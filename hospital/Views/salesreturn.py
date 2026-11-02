@@ -16,7 +16,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.db import DatabaseError
 from django.utils import timezone
-from django.db.models import Max
+from django.db.models import Max, Q
 
 # Auth/permissions
 import os
@@ -155,124 +155,183 @@ def get_salesreturn_details(request):
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from datetime import date
 from ..models import Patient
+
+def _get_patient_dict(patient):
+    # ── Admission (safe for Djongo) ──────────────────────────────────────
+    try:
+        from ..models import Admission
+        admissions = Admission.objects.filter(
+            uhid=patient.uhid
+        ).order_by('-admissionDateTime')
+
+        active_admission = None
+        for adm in admissions:
+            if adm.is_admitted:
+                active_admission = adm
+                break
+    except Exception:
+        active_admission = None
+
+    ip_number = active_admission.ipNumber if active_admission else (getattr(patient, "ip_number", "") or "")
+
+    # ── Age calculation ──────────────────────────────────────────────────
+    age_data = {"years": 0, "months": 0, "days": 0}
+    dob_raw = patient.dob
+    dob = None
+
+    if dob_raw:
+        if isinstance(dob_raw, datetime):
+            dob = dob_raw.date()
+        elif isinstance(dob_raw, date):
+            dob = dob_raw
+        elif isinstance(dob_raw, str) and dob_raw.strip():
+            clean_dob = dob_raw.strip().split("T")[0]
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+                try:
+                    dob = datetime.strptime(clean_dob, fmt).date()
+                    break
+                except ValueError:
+                    pass
+
+    if dob:
+        today_date = date.today()
+        years  = today_date.year  - dob.year
+        months = today_date.month - dob.month
+        days   = today_date.day   - dob.day
+
+        if days < 0:
+            months -= 1
+            days += 30
+        if months < 0:
+            years  -= 1
+            months += 12
+
+        age_data = {"years": max(0, years), "months": max(0, months), "days": max(0, days)}
+    elif getattr(patient, "age", None):
+        try:
+            age_val = int(patient.age)
+            age_data = {"years": age_val, "months": 0, "days": 0}
+        except (ValueError, TypeError):
+            pass
+
+    sal = (patient.salutation or "").strip()
+    fn  = (patient.firstName or "").strip()
+    ln  = (patient.lastName or "").strip()
+    if fn and ln:
+        if (
+            fn.lower() == ln.lower()
+            or fn.lower().endswith(ln.lower())
+            or fn.lower().replace(" ", "") == ln.lower().replace(" ", "")
+        ):
+            ln = ""
+        elif ln.lower().startswith(fn.lower()):
+            fn = ""
+    full_name = f"{sal} {fn} {ln}".strip()
+    words = full_name.split()
+    if len(words) >= 2 and len(words) % 2 == 0:
+        half = len(words) // 2
+        if [w.lower() for w in words[:half]] == [w.lower() for w in words[half:]]:
+            words = words[:half]
+    clean_words = []
+    for idx, w in enumerate(words):
+        if idx > 0 and len(w) > 1 and w.lower() == words[idx - 1].lower():
+            continue
+        clean_words.append(w)
+    name = " ".join(clean_words).strip()
+
+    mobile = getattr(patient, "mobilePhone", "") or getattr(patient, "mobile", "") or ""
+
+    return {
+        "uhid":       patient.uhid,
+        "ip_number":  ip_number,
+        "name":       name,
+        "gender":     patient.gender or "",
+        "age":        age_data,
+        "mobile":     mobile,
+    }
 
 
 @api_view(["GET"])
 def salesreturn_get_patientdetails(request):
     try:
         uhid = request.GET.get("uhid", "").strip()
- 
+
         if not uhid:
             return Response({
                 "status": "error",
                 "message": "UHID is required"
             }, status=status.HTTP_400_BAD_REQUEST)
- 
-        # ── FIX #2: partial match — "7878" finds "S025/007878" ──────────────
-        # Try exact match first; fall back to substring match
-        patient = Patient.objects.filter(uhid=uhid).first()
-        if not patient:
-            patient = Patient.objects.filter(uhid__icontains=uhid).first()
- 
-        if not patient:
+
+        # ── Smart UHID Matching (Identical to Pharmacy Billing patient_details) ──
+        clean_uhid = str(uhid).strip()
+        uhid_cond = (
+            Q(uhid__iexact=clean_uhid) |
+            Q(uhid__iendswith=clean_uhid) |
+            Q(uhid__iendswith=f'/{clean_uhid}')
+        )
+
+        if '/' in clean_uhid:
+            parts = clean_uhid.split('/', 1)
+            prefix, num_part = parts[0].strip(), parts[1].strip()
+            if num_part.isdigit():
+                padded_num = num_part.zfill(6)
+                if prefix:
+                    uhid_cond |= Q(uhid__iexact=f'{prefix}/{padded_num}')
+                else:
+                    uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+            else:
+                if prefix:
+                    uhid_cond |= Q(uhid__icontains=clean_uhid)
+        elif clean_uhid.isdigit():
+            padded_num = clean_uhid.zfill(6)
+            uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+            uhid_cond |= Q(uhid__iendswith=padded_num)
+        else:
+            uhid_cond |= Q(uhid__icontains=clean_uhid)
+
+        matching_patients = list(Patient.objects.filter(uhid_cond).order_by('-id')[:25])
+        if not matching_patients:
+            matching_patients = list(Patient.objects.filter(
+                Q(uhid__icontains=clean_uhid) |
+                Q(ip_number__iexact=clean_uhid) |
+                Q(ip_number__icontains=clean_uhid)
+            ).order_by('-id')[:25])
+
+        if not matching_patients:
             return Response({
                 "status": "error",
                 "message": "Patient not found"
             }, status=status.HTTP_404_NOT_FOUND)
- 
-        # ── Admission (safe for Djongo) ──────────────────────────────────────
-        try:
-            from ..models import Admission
-            admissions = Admission.objects.filter(
-                uhid=patient.uhid
-            ).order_by('-admissionDateTime')
- 
-            active_admission = None
-            for adm in admissions:
-                if adm.is_admitted:
-                    active_admission = adm
-                    break
-        except Exception:
-            active_admission = None
- 
-        ip_number = active_admission.ipNumber if active_admission else ""
- 
-        # ── Age calculation ──────────────────────────────────────────────────
-        age_data = {"years": 0, "months": 0, "days": 0}
-        dob_raw = patient.dob
-        dob = None
 
-        if dob_raw:
-            if isinstance(dob_raw, datetime):
-                dob = dob_raw.date()
-            elif isinstance(dob_raw, date):
-                dob = dob_raw
-            elif isinstance(dob_raw, str) and dob_raw.strip():
-                clean_dob = dob_raw.strip().split("T")[0]
-                for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-                    try:
-                        dob = datetime.strptime(clean_dob, fmt).date()
-                        break
-                    except ValueError:
-                        pass
+        # Prioritize patient with pharmacy bills in the last 30 days
+        client, db = _get_db()
+        bill_col = db["hospital_pharmacybilling"]
+        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        patient_bills_map = {}
+        uhid_list = [p.uhid for p in matching_patients if p.uhid]
+        if uhid_list:
+            found_bills = bill_col.find(
+                {
+                    "uhid": {"$in": uhid_list},
+                    "billing_status": {"$in": ["Paid", "Billed"]},
+                    "bill_date": {"$gte": cutoff_date}
+                },
+                {"uhid": 1}
+            )
+            for fb in found_bills:
+                u = fb.get("uhid")
+                patient_bills_map[u] = patient_bills_map.get(u, 0) + 1
+        client.close()
 
-        if dob:
-            today_date = date.today()
-            years  = today_date.year  - dob.year
-            months = today_date.month - dob.month
-            days   = today_date.day   - dob.day
+        matching_patients.sort(key=lambda p: (patient_bills_map.get(p.uhid, 0), str(p.id or 0)), reverse=True)
 
-            if days < 0:
-                months -= 1
-                days += 30
-            if months < 0:
-                years  -= 1
-                months += 12
+        formatted_patients = [_get_patient_dict(p) for p in matching_patients]
 
-            age_data = {"years": max(0, years), "months": max(0, months), "days": max(0, days)}
-        elif getattr(patient, "age", None):
-            try:
-                age_val = int(patient.age)
-                age_data = {"years": age_val, "months": 0, "days": 0}
-            except (ValueError, TypeError):
-                pass
- 
-        sal = (patient.salutation or "").strip()
-        fn  = (patient.firstName or "").strip()
-        ln  = (patient.lastName or "").strip()
-        if fn and ln:
-            if (
-                fn.lower() == ln.lower()
-                or fn.lower().endswith(ln.lower())
-                or fn.lower().replace(" ", "") == ln.lower().replace(" ", "")
-            ):
-                ln = ""
-            elif ln.lower().startswith(fn.lower()):
-                fn = ""
-        full_name = f"{sal} {fn} {ln}".strip()
-        words = full_name.split()
-        if len(words) >= 2 and len(words) % 2 == 0:
-            half = len(words) // 2
-            if [w.lower() for w in words[:half]] == [w.lower() for w in words[half:]]:
-                words = words[:half]
-        clean_words = []
-        for idx, w in enumerate(words):
-            if idx > 0 and len(w) > 1 and w.lower() == words[idx - 1].lower():
-                continue
-            clean_words.append(w)
-        name = " ".join(clean_words).strip()
- 
         return Response({
             "status": "success",
-            "data": {
-                "uhid":       patient.uhid,
-                "ip_number":  ip_number,
-                "name":       name,
-                "gender":     patient.gender,
-                "age":        age_data,
-            }
+            "data": formatted_patients[0],
+            "patients": formatted_patients,
         }, status=status.HTTP_200_OK)
  
     except Exception as e:
@@ -312,18 +371,73 @@ def salesreturn_get_uhid_bills(request):
         bill_col = db["hospital_pharmacybilling"]
  
         cutoff_date = datetime.utcnow() - timedelta(days=30)
- 
-        # Build query — support partial UHID (numeric suffix after slash)
-        # e.g. "7878" should match "S025/007878"
-        # We use a regex so partial input works both for exact and substring
+
+        # Build patterns matching Pharmacy billing UHID search logic
+        clean_uhid = str(uhid_input).strip()
+        patterns = [clean_uhid]
+
+        if '/' in clean_uhid:
+            parts = clean_uhid.split('/', 1)
+            prefix, num_part = parts[0].strip(), parts[1].strip()
+            if num_part.isdigit():
+                padded = num_part.zfill(6)
+                if prefix:
+                    patterns.append(f"{prefix}/{padded}")
+                else:
+                    patterns.append(f"/{padded}")
+                    patterns.append(padded)
+        elif clean_uhid.isdigit():
+            padded = clean_uhid.zfill(6)
+            patterns.append(padded)
+            patterns.append(f"/{padded}")
+
+        # Also find canonical UHIDs from Patient model
+        try:
+            uhid_cond = (
+                Q(uhid__iexact=clean_uhid) |
+                Q(uhid__iendswith=clean_uhid) |
+                Q(uhid__iendswith=f'/{clean_uhid}')
+            )
+            if '/' in clean_uhid:
+                parts = clean_uhid.split('/', 1)
+                prefix, num_part = parts[0].strip(), parts[1].strip()
+                if num_part.isdigit():
+                    padded_num = num_part.zfill(6)
+                    if prefix:
+                        uhid_cond |= Q(uhid__iexact=f'{prefix}/{padded_num}')
+                    else:
+                        uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+            elif clean_uhid.isdigit():
+                padded_num = clean_uhid.zfill(6)
+                uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+
+            canonical_uhids = list(Patient.objects.filter(uhid_cond).values_list("uhid", flat=True)[:10])
+            for cu in canonical_uhids:
+                if cu:
+                    patterns.append(cu)
+        except Exception:
+            pass
+
         import re
-        escaped = re.escape(uhid_input)
- 
+        or_clauses = []
+        for pat in set(patterns):
+            if not pat:
+                continue
+            esc = re.escape(pat)
+            if pat.startswith("/"):
+                or_clauses.append({"uhid": {"$regex": f"{esc}$", "$options": "i"}})
+            elif "/" in pat:
+                or_clauses.append({"uhid": {"$regex": f"^{esc}$", "$options": "i"}})
+                or_clauses.append({"uhid": {"$regex": esc, "$options": "i"}})
+            else:
+                or_clauses.append({"uhid": {"$regex": f"/{esc}$", "$options": "i"}})
+                or_clauses.append({"uhid": {"$regex": f"{esc}$", "$options": "i"}})
+                or_clauses.append({"uhid": {"$regex": esc, "$options": "i"}})
+
+            or_clauses.append({"inpatient_number": {"$regex": esc, "$options": "i"}})
+
         query = {
-            "$or": [
-                {"uhid": {"$regex": escaped, "$options": "i"}},
-                {"inpatient_number": {"$regex": escaped, "$options": "i"}}
-            ],
+            "$or": or_clauses,
             "billing_status":  {"$in": ["Paid", "Billed"]},
             "bill_date":       {"$gte": cutoff_date},
         }
@@ -507,12 +621,16 @@ def get_salesreturn_billdetails(request):
         item_return_map = {}
 
         for item in medicine_particulars:
-            key        = (str(item.get("item_id")), str(item.get("batch_number", "")))
-            billed_qty = int(item.get("qty", 0))
+            key = (str(item.get("item_id")), str(item.get("batch_number", "")))
+            raw_qty = item.get("quantity") if item.get("quantity") is not None else item.get("qty", 0)
+            try:
+                billed_qty = float(raw_qty or 0)
+            except (ValueError, TypeError):
+                billed_qty = 0.0
 
             # Sum all return_qty values across every sales_return history entry
             total_returned = sum(
-                int(h.get("return_qty", 0))
+                float(h.get("return_qty") or h.get("return_quantity") or 0)
                 for h in item.get("edit_history", [])
                 if h.get("action") == "sales_return"
             )
@@ -521,7 +639,7 @@ def get_salesreturn_billdetails(request):
                 "billed_qty":      billed_qty,
                 "total_returned":  total_returned,
                 # remaining qty that can still be returned
-                "remaining_qty":   max(0, billed_qty - total_returned),
+                "remaining_qty":   max(0.0, billed_qty - total_returned),
                 "fully_returned":  total_returned >= billed_qty and billed_qty > 0,
             }
 
@@ -562,13 +680,23 @@ def get_salesreturn_billdetails(request):
                 continue
 
             # Remaining qty to return (original qty if never returned)
-            remaining_qty    = summary.get("remaining_qty", item.get("qty", 0))
-            billed_qty       = summary.get("billed_qty",    item.get("qty", 0))
-            total_returned   = summary.get("total_returned", 0)
+            raw_qty = item.get("quantity") if item.get("quantity") is not None else item.get("qty", 0)
+            try:
+                parsed_qty = float(raw_qty or 0)
+            except (ValueError, TypeError):
+                parsed_qty = 0.0
+
+            remaining_qty    = summary.get("remaining_qty", parsed_qty)
+            billed_qty       = summary.get("billed_qty",    parsed_qty)
+            total_returned   = summary.get("total_returned", 0.0)
 
             # Pro-rate calculated_price to the remaining qty
-            original_calc_price = item.get("calculated_price", 0)
-            per_unit_price      = (original_calc_price / billed_qty) if billed_qty > 0 else 0
+            try:
+                original_calc_price = float(item.get("calculated_price") or 0)
+            except (ValueError, TypeError):
+                original_calc_price = 0.0
+
+            per_unit_price      = (original_calc_price / billed_qty) if billed_qty > 0 else 0.0
             remaining_calc_price = round(per_unit_price * remaining_qty, 2)
 
             # 🔹 ITEM MASTER
@@ -588,6 +716,11 @@ def get_salesreturn_billdetails(request):
                 "outlet_code": outlet_code
             })
 
+            try:
+                item_price = float(item.get("price") or 0)
+            except (ValueError, TypeError):
+                item_price = 0.0
+
             items_data.append({
                 "item_id":            item_id,
                 "item_name":          item_name,
@@ -597,7 +730,7 @@ def get_salesreturn_billdetails(request):
                 "billed_qty":         billed_qty,
                 "already_returned":   total_returned,           # how many already returned
                 "qty":                remaining_qty,            # returnable qty
-                "price":              item.get("price", 0),
+                "price":              item_price,
                 "calculated_price":   remaining_calc_price,     # pro-rated to remaining qty
                 "mrp":                convert_decimal(stock.get("mrp")) if stock else 0,
                 "expiry_date":        stock.get("expiry_date") if stock else None,
@@ -876,11 +1009,15 @@ def OP_salesreturn_billdetails(request):
                 for mp in current_bill.get("medicine_particulars", []):
                     if (int(mp.get("item_id", -1)) == item_id and
                             str(mp.get("batch_number", "")) == batch_number):
-                        # Original qty is stored as `qty` on the billing document
-                        original_qty = float(mp.get("qty", billed_qty))
+                        # Original qty is stored as `quantity` or `qty` on the billing document
+                        raw_mp_qty = mp.get("quantity") if mp.get("quantity") is not None else mp.get("qty", billed_qty)
+                        try:
+                            original_qty = float(raw_mp_qty)
+                        except (ValueError, TypeError):
+                            original_qty = float(billed_qty or 0)
                         # Sum every previous sales_return entry
                         total_prev_returned = sum(
-                            float(h.get("return_qty", 0))
+                            float(h.get("return_qty") or h.get("return_quantity") or 0)
                             for h in mp.get("edit_history", [])
                             if h.get("action") == "sales_return"
                         )
