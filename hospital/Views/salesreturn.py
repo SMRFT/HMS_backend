@@ -621,12 +621,16 @@ def get_salesreturn_billdetails(request):
         item_return_map = {}
 
         for item in medicine_particulars:
-            key        = (str(item.get("item_id")), str(item.get("batch_number", "")))
-            billed_qty = int(item.get("qty", 0))
+            key = (str(item.get("item_id")), str(item.get("batch_number", "")))
+            raw_qty = item.get("quantity") if item.get("quantity") is not None else item.get("qty", 0)
+            try:
+                billed_qty = float(raw_qty or 0)
+            except (ValueError, TypeError):
+                billed_qty = 0.0
 
             # Sum all return_qty values across every sales_return history entry
             total_returned = sum(
-                int(h.get("return_qty", 0))
+                float(h.get("return_qty") or h.get("return_quantity") or 0)
                 for h in item.get("edit_history", [])
                 if h.get("action") == "sales_return"
             )
@@ -635,7 +639,7 @@ def get_salesreturn_billdetails(request):
                 "billed_qty":      billed_qty,
                 "total_returned":  total_returned,
                 # remaining qty that can still be returned
-                "remaining_qty":   max(0, billed_qty - total_returned),
+                "remaining_qty":   max(0.0, billed_qty - total_returned),
                 "fully_returned":  total_returned >= billed_qty and billed_qty > 0,
             }
 
@@ -676,13 +680,23 @@ def get_salesreturn_billdetails(request):
                 continue
 
             # Remaining qty to return (original qty if never returned)
-            remaining_qty    = summary.get("remaining_qty", item.get("qty", 0))
-            billed_qty       = summary.get("billed_qty",    item.get("qty", 0))
-            total_returned   = summary.get("total_returned", 0)
+            raw_qty = item.get("quantity") if item.get("quantity") is not None else item.get("qty", 0)
+            try:
+                parsed_qty = float(raw_qty or 0)
+            except (ValueError, TypeError):
+                parsed_qty = 0.0
+
+            remaining_qty    = summary.get("remaining_qty", parsed_qty)
+            billed_qty       = summary.get("billed_qty",    parsed_qty)
+            total_returned   = summary.get("total_returned", 0.0)
 
             # Pro-rate calculated_price to the remaining qty
-            original_calc_price = item.get("calculated_price", 0)
-            per_unit_price      = (original_calc_price / billed_qty) if billed_qty > 0 else 0
+            try:
+                original_calc_price = float(item.get("calculated_price") or 0)
+            except (ValueError, TypeError):
+                original_calc_price = 0.0
+
+            per_unit_price      = (original_calc_price / billed_qty) if billed_qty > 0 else 0.0
             remaining_calc_price = round(per_unit_price * remaining_qty, 2)
 
             # 🔹 ITEM MASTER
@@ -702,6 +716,11 @@ def get_salesreturn_billdetails(request):
                 "outlet_code": outlet_code
             })
 
+            try:
+                item_price = float(item.get("price") or 0)
+            except (ValueError, TypeError):
+                item_price = 0.0
+
             items_data.append({
                 "item_id":            item_id,
                 "item_name":          item_name,
@@ -711,7 +730,7 @@ def get_salesreturn_billdetails(request):
                 "billed_qty":         billed_qty,
                 "already_returned":   total_returned,           # how many already returned
                 "qty":                remaining_qty,            # returnable qty
-                "price":              item.get("price", 0),
+                "price":              item_price,
                 "calculated_price":   remaining_calc_price,     # pro-rated to remaining qty
                 "mrp":                convert_decimal(stock.get("mrp")) if stock else 0,
                 "expiry_date":        stock.get("expiry_date") if stock else None,
@@ -990,11 +1009,15 @@ def OP_salesreturn_billdetails(request):
                 for mp in current_bill.get("medicine_particulars", []):
                     if (int(mp.get("item_id", -1)) == item_id and
                             str(mp.get("batch_number", "")) == batch_number):
-                        # Original qty is stored as `qty` on the billing document
-                        original_qty = float(mp.get("qty", billed_qty))
+                        # Original qty is stored as `quantity` or `qty` on the billing document
+                        raw_mp_qty = mp.get("quantity") if mp.get("quantity") is not None else mp.get("qty", billed_qty)
+                        try:
+                            original_qty = float(raw_mp_qty)
+                        except (ValueError, TypeError):
+                            original_qty = float(billed_qty or 0)
                         # Sum every previous sales_return entry
                         total_prev_returned = sum(
-                            float(h.get("return_qty", 0))
+                            float(h.get("return_qty") or h.get("return_quantity") or 0)
                             for h in mp.get("edit_history", [])
                             if h.get("action") == "sales_return"
                         )
