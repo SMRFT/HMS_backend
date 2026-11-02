@@ -28,16 +28,31 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/insurance-search-patient/?(\?.*)?$': 'HMS-P-ICD',
 
     # ==================== WARD REQUEST ====================
+    r'^/_b_a_c_k_e_n_d/HMS/wardrequest/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/location-mapping/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/update_admission_status/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/dosage_master/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get-all-outlets/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/ward-bill-types/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/cancel_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/remove_individual_medicine/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_medicine_ward_requests/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/return_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_pending_ward_returns/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/approve_ward_return/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_ward_return_details/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_radiology_ward_requests/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/save_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/cancel_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/remove_individual_radiology/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/remove_individual_test/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_LabBillType_list/?(\?.*)?$': 'HMS-P-WR',
     
 
 
@@ -335,6 +350,9 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/doctor_schedule_upsert(?:/[^/]+)+/$': 'HMS-P-DRM',   
     r'^/_b_a_c_k_e_n_d/HMS/doctor-report/?.*': 'HMS-API-DLD',   
 
+    # Employee Master
+    r'^/_b_a_c_k_e_n_d/HMS/employee-master/?(\?.*)?$': 'HMS-P-CCC',
+
     #Package Master:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices/': 'HMS-P-IPKG',                  
     '/_b_a_c_k_e_n_d/HMS/lab-items/': 'HMS-P-IPKG',                 
@@ -358,7 +376,8 @@ PAGE_MAPPING = {
     '/_b_a_c_k_e_n_d/HMS/investigation-price/patch-bill-type/': 'HMS-P-BT',       
     r'^/_b_a_c_k_e_n_d/HMS/bill-types_get/?(\?.*)?$': 'HMS-P-BT',                  
     r'^/_b_a_c_k_e_n_d/HMS/bill-types/update(?:/[^/]+)+/$': 'HMS-P-BTE',                  
-    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-BTD',                  
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/delete(?:/[^/]+)+/$': 'HMS-P-BTD',
+    r'^/_b_a_c_k_e_n_d/HMS/bill-types/bulk-ward-config/?(\?.*)?$': 'HMS-P-BTE',                  
 
     #Investigation Prices:
     '/_b_a_c_k_e_n_d/HMS/investigation-prices_get/': 'HMS-P-IP',                  

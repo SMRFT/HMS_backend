@@ -991,8 +991,6 @@ class Admission(AuditModel):
     high_risk_reason     = models.TextField(blank=True, null=True)
     high_risk_date       = models.DateField(blank=True, null=True)
 
-    # ── Day Care ──────────────────────────────────────────────────────────────
-    is_day_care          = models.BooleanField(default=False)
  
     # ── Cancellation tracking ─────────────────────────────────────────────────
     is_cancelled        = models.BooleanField(default=False)
