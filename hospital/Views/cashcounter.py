@@ -2339,15 +2339,23 @@ def update_mainblock_pendingbills(request):
 # @permission_classes([HasRoleAndDataPermission])
 def get_shift_summary_report(request):
     try:
+        from django.db.models import Q
         data = request.data
         from_date = data.get("from_date")
         to_date = data.get("to_date")
+        outlet_code = data.get("outlet_code") or data.get("outlet")
+        shiftno = data.get("shiftno") or data.get("shift_no")
         hospital_code = data.get("auth-hospital-code") 
         branch_code = data.get("auth-branch-code")
-        queryset = Cashcountershiftdetails.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        )
+        queryset = Cashcountershiftdetails.objects.all()
+        if hospital_code:
+            queryset = queryset.filter(hospital_code=hospital_code)
+        if branch_code:
+            queryset = queryset.filter(branch_code=branch_code)
+        if outlet_code and str(outlet_code).lower() != "all":
+            queryset = queryset.filter(Q(outlet_code=outlet_code) | Q(SelectedOutlet=outlet_code))
+        if shiftno:
+            queryset = queryset.filter(shiftno=shiftno)
         if from_date:
             queryset = queryset.filter(date__gte=from_date)
         if to_date:

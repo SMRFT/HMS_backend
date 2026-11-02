@@ -104,6 +104,23 @@ def generate_custom_id_without_fy(model_class, id_field_name, prefix, sequence_l
 
 # --- Item Master Views ---
 
+def get_employee_name_map():
+    """
+    Build employeeId -> employeeName mapping from Global.backend_diagnostics_profile.
+    """
+    try:
+        from ..dbcollection import profile_collection
+        emp_map = {}
+        for p in profile_collection.find({}, {"employeeId": 1, "employeeName": 1, "name": 1, "_id": 1}):
+            eid = str(p.get("employeeId") or p.get("_id") or "").strip()
+            name = str(p.get("employeeName") or p.get("name") or "").strip()
+            if eid and name:
+                emp_map[eid] = name
+        return emp_map
+    except Exception as e:
+        print(f"Error building employee_name_map: {e}")
+        return {}
+
 
 @api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
@@ -1500,6 +1517,7 @@ def get_stores_intents(request):
     }
 
     data = list(intent_collection.find(query).sort("created_date", -1))
+    emp_map = get_employee_name_map()
 
     for d in data:
         d["_id"] = str(d["_id"])
@@ -1507,6 +1525,10 @@ def get_stores_intents(request):
         # ✅ Department name
         dept_code = d.get("department")
         d["department_name"] = dept_map.get(dept_code) or dept_code or "General"
+
+        # Map created_by to employeeName from backend_diagnostics_profile
+        cb = str(d.get("created_by") or d.get("user") or "").strip()
+        d["created_by_name"] = emp_map.get(cb) or cb or "Department User"
 
         # ✅ Add stock inside items
         for item in d.get("items", []):
@@ -4046,6 +4068,11 @@ def stores_indent_return_list_create(request):
 
         serializer = StoresIndentReturnSerializer(qs, many=True)
         return_list = serializer.data
+
+        emp_map = get_employee_name_map()
+        for r in return_list:
+            cb = str(r.get("created_by") or r.get("user") or "").strip()
+            r["created_by_name"] = emp_map.get(cb) or cb or "Department User"
 
         if search_query:
             sq = search_query.lower()
