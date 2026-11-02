@@ -16,6 +16,7 @@ ER_db = client["ER_Billing"]
 
 profile_collection                = global_db["backend_diagnostics_profile"]
 department_collection             = global_db["backend_diagnostics_Departments"]
+designation_collection            = global_db["backend_diagnostics_Designation"]
 user_collection                   = global_db["backend_diagnostics_user"]
 company_secretary_collection      = hms_db["hospital_licencemasterdetails"]  
 MHC_Package                       = hms_db["hospital_MHC_Package"] 

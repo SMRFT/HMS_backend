@@ -62,6 +62,7 @@ from .Views import (
     Shanmuga360,
     insurance_packages,
     Tanuh,
+    employee_master,
 )
 from .Views.AccountsReport import (
     shift_basis_report,
@@ -821,6 +822,10 @@ urlpatterns = [
     # Tanuh
     path('tanuh_breast_cancer_screening/', Tanuh.tanuh_breast_cancer_screening, name='tanuh_breast_cancer_screening'),
     path('tanuh_student_surveyor_registration/', Tanuh.tanuh_student_surveyor_registration, name='tanuh_student_surveyor_registration'),
+
+    # Employee Master
+    path('employee-master/', employee_master.employee_master_list, name='employee_master_list'),
+    path('employee-master/<str:employee_id>/', employee_master.employee_master_detail, name='employee_master_detail'),
 ]
 
 
