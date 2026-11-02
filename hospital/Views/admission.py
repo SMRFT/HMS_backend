@@ -357,6 +357,7 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
         "attender_phone":        getattr(adm, "attender_phone", "") or "",
         "is_high_risk":       bool(getattr(adm, "is_high_risk", False)),
         "high_risk_reason":   getattr(adm, "high_risk_reason", None),
+        "is_day_care":        bool(getattr(adm, "is_day_care", False)),
         "high_risk_date":     getattr(adm, "high_risk_date", None).isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
         "edit_history":       eh,
         "is_cancelled":       getattr(adm, "is_cancelled", False),
@@ -873,6 +874,7 @@ def admission_view(request):
             to_date_str   = request.GET.get('to_date',          '').strip()
             status_filter = request.GET.get('status',           '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
+            doctor_name   = request.GET.get('doctor_name',      '').strip()
             ip_filter     = request.GET.get('ip_number',        '').strip()
             uhid_filter   = request.GET.get('uhid',             '').strip()
 
@@ -893,17 +895,65 @@ def admission_view(request):
             if uhid_filter:
                 query["uhid"] = {"$regex": f"^{re.escape(uhid_filter)}$", "$options": "i"}
 
-            if status_filter == 'Admitted':
+            st_lower = status_filter.lower()
+            if st_lower == 'admitted':
                 query["is_admitted"] = True
                 query["is_discharged"] = False
                 query["is_cancelled"] = {"$ne": True}
-            elif status_filter == 'Discharged':
+            elif st_lower == 'discharged':
                 query["is_discharged"] = True
-            elif status_filter == 'Cancelled':
+            elif st_lower == 'cancelled':
                 query["is_cancelled"] = True
 
+            and_conditions = []
+
+            # Doctor filter tokens (match employee ID or doctor name across admittingDoctor and consultingDoctor)
+            doc_tokens = []
             if doctor_filter and doctor_filter.lower() != "all":
-                query["admittingDoctor"] = {"$regex": re.escape(doctor_filter), "$options": "i"}
+                doc_tokens.append(doctor_filter)
+            if doctor_name and doctor_name.lower() != "all":
+                doc_tokens.append(doctor_name)
+                cleaned = re.sub(r'^(dr\.?|mr\.?|mrs\.?|ms\.?)\s+', '', doctor_name, flags=re.I).strip()
+                if cleaned:
+                    doc_tokens.append(cleaned)
+                    for part in cleaned.split():
+                        part = part.strip(".,() ")
+                        if len(part) >= 3:
+                            doc_tokens.append(part)
+
+            if doc_tokens:
+                doc_clauses = []
+                for tok in set(doc_tokens):
+                    doc_clauses.append({"admittingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
+                    doc_clauses.append({"consultingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
+                    doc_clauses.append({"admittingDoctorName": {"$regex": re.escape(tok), "$options": "i"}})
+                and_conditions.append({"$or": doc_clauses})
+
+            customer_type_filter = request.GET.get('customer_type', '').strip()
+            if customer_type_filter and customer_type_filter.lower() != "all":
+                if customer_type_filter.lower() == "insurance":
+                    and_conditions.append({
+                        "$or": [
+                            {"customer_type": {"$regex": "^insurance", "$options": "i"}},
+                            {"customerType": {"$regex": "^insurance", "$options": "i"}},
+                            {"company_code": {"$exists": True, "$ne": ""}},
+                            {"insurance_company": {"$exists": True, "$ne": ""}},
+                            {"insuranceCompanyName": {"$exists": True, "$ne": ""}},
+                        ]
+                    })
+                else:
+                    and_conditions.append({
+                        "$or": [
+                            {"customer_type": {"$regex": f"^{re.escape(customer_type_filter)}$", "$options": "i"}},
+                            {"customerType": {"$regex": f"^{re.escape(customer_type_filter)}$", "$options": "i"}},
+                        ]
+                    })
+
+            if and_conditions:
+                if len(and_conditions) == 1:
+                    query.update(and_conditions[0])
+                else:
+                    query["$and"] = and_conditions
 
             # Date Range Filter
             from_date = to_date = None
@@ -970,6 +1020,7 @@ def admission_view(request):
                     "is_high_risk":          bool(adm.get("is_high_risk", False)),
                     "high_risk_reason":      adm.get("high_risk_reason") or "",
                     "high_risk_date":        hr_dt_iso,
+                    "is_day_care":           bool(adm.get("is_day_care", False)),
                     "room_details":      _safe_list(adm.get("room_details")),
                     "roomShitingDetails":_safe_list(adm.get("roomShitingDetails")),
                     "advance_payments":  _safe_list(adm.get("advance_payments")),
@@ -994,7 +1045,51 @@ def admission_view(request):
                 result.append(d)
 
             _enrich_admissions_batch(result, hospital_code)
-            return JsonResponse({"success": True, "data": result, "count": len(result)})
+
+            # In-memory post-enrichment filtering (guarantees accurate match even when customer_type was enriched from patient)
+            filtered_result = []
+            for d in result:
+                # 1. Status check
+                if st_lower == 'admitted':
+                    if not (d.get("is_admitted") and not d.get("is_discharged") and not d.get("is_cancelled")):
+                        continue
+                elif st_lower == 'discharged':
+                    if not d.get("is_discharged"):
+                        continue
+                elif st_lower == 'cancelled':
+                    if not d.get("is_cancelled"):
+                        continue
+
+                # 2. Doctor check
+                if doc_tokens:
+                    doc_match = False
+                    fields_to_check = [
+                        str(d.get("admittingDoctor") or "").lower(),
+                        str(d.get("consultingDoctor") or "").lower(),
+                        str(d.get("admittingDoctorName") or "").lower(),
+                    ]
+                    for tok in doc_tokens:
+                        tok_low = tok.lower()
+                        if any(tok_low in f for f in fields_to_check):
+                            doc_match = True
+                            break
+                    if not doc_match:
+                        continue
+
+                # 3. Customer type check
+                if customer_type_filter and customer_type_filter.lower() != "all":
+                    ct_low = str(d.get("customer_type") or d.get("customerType") or "").strip().lower()
+                    if customer_type_filter.lower() == "insurance":
+                        is_ins = (ct_low == "insurance" or bool(d.get("company_code")) or bool(d.get("insurance_company")) or bool(d.get("insuranceCompanyName")))
+                        if not is_ins:
+                            continue
+                    else:
+                        if ct_low != customer_type_filter.lower():
+                            continue
+
+                filtered_result.append(d)
+
+            return JsonResponse({"success": True, "data": filtered_result, "count": len(filtered_result)})
         except Exception as e:
             traceback.print_exc()
             return JsonResponse({"error": str(e)}, status=500)
@@ -1084,6 +1179,10 @@ def admission_view(request):
                 final_age = None
                 final_age_type = _normalize_age_type(age_type_val)
 
+            # Day Care handling
+            is_day_care_raw = data.get("is_day_care")
+            is_day_care = is_day_care_raw in [True, "true", "True", "1", 1]
+
             # High Risk Alert handling
             is_high_risk_raw = data.get("is_high_risk")
             is_high_risk = is_high_risk_raw in [True, "true", "True", "1", 1]
@@ -1131,6 +1230,7 @@ def admission_view(request):
                 mlc_type=mlc_type, mlc_doc=mlc_doc_name, mlc_remarks=mlc_remarks,
                 attender_name=attender_name, attender_relationship=attender_relationship, attender_phone=attender_phone,
                 is_high_risk=is_high_risk, high_risk_reason=high_risk_reason, high_risk_date=high_risk_date,
+                is_day_care=is_day_care,
                 room_details=room_details, roomShitingDetails=[], advance_payments=[],
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
@@ -1157,6 +1257,7 @@ def admission_view(request):
                 "is_high_risk": is_high_risk,
                 "high_risk_reason": high_risk_reason,
                 "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
+                "is_day_care": is_day_care,
                 "edit_history": [],
                 "is_cancelled": False,
                 "cancelled_by": None,
@@ -1177,6 +1278,7 @@ def admission_view(request):
                 "mlc_type": mlc_type or "", "mlc_doc": mlc_doc_name or "", "mlc_remarks": mlc_remarks or "",
                 "attender_name": attender_name or "", "attender_relationship": attender_relationship or "", "attender_phone": attender_phone or "",
                 "is_high_risk": is_high_risk, "high_risk_reason": high_risk_reason or "", "high_risk_date": high_risk_date.isoformat() if high_risk_date else None,
+                "is_day_care": is_day_care,
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "edit_history": [],
@@ -1297,6 +1399,7 @@ def admission_detail(request, ipNumber):
                 'is_high_risk':          bool(getattr(adm, 'is_high_risk', False)),
                 'high_risk_reason':      getattr(adm, 'high_risk_reason', '') or "",
                 'high_risk_date':        adm.high_risk_date.isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
+                'is_day_care':           bool(getattr(adm, 'is_day_care', False)),
                 'advance_payments':  ap,
                 # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
@@ -1370,6 +1473,11 @@ def admission_detail(request, ipNumber):
                     adm.attender_relationship = str(get_val(data.get('attenderRelationship')) or '')
                 if 'attenderPhone' in data and not getattr(adm, 'attender_phone', None):
                     adm.attender_phone = str(get_val(data.get('attenderPhone')) or '')
+
+                # Handle Day Care edit
+                if 'is_day_care' in data:
+                    idc_val = get_val(data.get('is_day_care'))
+                    adm.is_day_care = idc_val in [True, "true", "True", "1", 1]
 
                 # Handle High Risk Alert edit
                 if 'is_high_risk' in data:

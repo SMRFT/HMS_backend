@@ -165,7 +165,7 @@ def process_registration_refund(request):
             bill_no=bill_no,
             uhid=uhid,
             refund_amount=refund_amt_dec,
-            bill_type=bill.billtype,
+            bill_type=getattr(bill, 'bill_type', None),
             remarks=remarks,
             status='Pending',
             created_by=employee_id,

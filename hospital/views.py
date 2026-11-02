@@ -242,6 +242,25 @@ def patientCreateView(request):
             payment_method = request.data.get('payment_method', None)
             doctor_id = request.data.get('employeeId', None)
 
+            # Determine payment status, timing and method
+            payment_status = request.data.get('payment_status')
+            payment_timing = request.data.get('payment_timing', 'pay_now')
+            cust_type = str(request.data.get('customer_type') or request.data.get('customerType') or getattr(patient, 'customer_type', '')).strip().lower()
+
+            if not payment_status:
+                if payment_timing == 'pay_later':
+                    payment_status = 'Pending'
+                else:
+                    payment_status = 'Paid' if (total_fees and total_fees > 0) else 'Pending'
+
+            if not payment_method:
+                if payment_status == 'Pending':
+                    payment_method = 'Insurance Credit' if cust_type == 'insurance' else 'Pay Later'
+                else:
+                    payment_method = 'Cash'
+
+            paid_date = timezone.now() if payment_status == 'Paid' else None
+
             # Determine bill_type based on outlet_code
             bill_type = None
             if outlet_code == "OLET004":
@@ -255,6 +274,8 @@ def patientCreateView(request):
                 consulting_fee=consulting_fee,
                 total_fees=total_fees,
                 payment_method=payment_method,
+                payment_status=payment_status,
+                paid_date=paid_date,
                 doctor_id=doctor_id,
                 created_by=employee_id,
                 lastmodified_by=employee_id,

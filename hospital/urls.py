@@ -9,6 +9,7 @@ from .Views import (
     inventory,
     medicine_requisition,
     stocktransfer,
+    expirymedicine,
     chandra_ocr,
     package_crud,
     pharmacy,
@@ -71,7 +72,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report
 from .Views.INPatientcare import ip_patient_analysis
 from .Views.Complaints import complaints
 from .Views.QRScan import qrscan
@@ -154,10 +155,16 @@ urlpatterns = [
 
     # Stock Transfer URLs
     path('get_active_outlets/', stocktransfer.get_active_stock_outlets, name='get_active_stock_outlets'),
+    path('get_stocktransfer_departments/', stocktransfer.get_stocktransfer_departments, name='get_stocktransfer_departments'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock'),
     re_path(r'^_b_a_c_k_e_n_d/HMS/pharmacy-stock/(?P<pk>\d+)/?$', stocktransfer.pharmacy_stock_view, name='pharmacy-stock-detail'),
     path('stock-transfer/', stocktransfer.stock_transfer_view, name='stock_transfer_list'),
     path("stock-transfer-action/", stocktransfer.stock_transfer_action_view, name="stock_transfer_action"),
+
+    # Expiry Medicines URLs
+    path('expiry-medicines/', expirymedicine.expiry_medicine_view, name='expiry_medicines_list'),
+    re_path(r'^expiry-medicines/(?P<pk>[^/]+)/?$', expirymedicine.expiry_medicine_view, name='expiry_medicines_detail'),
+    path("expiry-medicines-action/", expirymedicine.expiry_medicine_action_view, name="expiry_medicines_action"),
 
     path("purchase-return/", purchasereturn.purchase_return_view, name="purchase-return-list"),
     path("purchase-return/<str:pk>/", purchasereturn.purchase_return_view, name="purchase-return-detail"),
@@ -254,6 +261,7 @@ urlpatterns = [
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),
     path("discharge-billing/<str:pk>/cancel/", discharge.cancel_discharge_billing, name="discharge-billing-cancel"),
+    path("discharge-billing/<str:pk>/convert-to-insurance/", discharge.convert_bill_to_insurance, name="discharge-billing-convert-insurance"),
     path("discharge-billing/send-visit-reminders/", discharge.send_discharge_visit_reminders_api, name="discharge-billing-send-visit-reminders"),
     path("send-discharge-visit-reminder/", discharge.send_single_discharge_visit_reminder_api, name="send-single-discharge-visit-reminder"),
     path("patient-next-visit-logs/", discharge.patient_next_visit_logs_api, name="patient-next-visit-logs"),
@@ -410,7 +418,9 @@ urlpatterns = [
 
     # Insurance Packages Master & Items API
     path('insurance-packages/schemes/', insurance_packages.get_insurance_package_schemes, name='get_insurance_package_schemes'),
-    path('insurance-packages/items/', insurance_packages.get_insurance_package_items, name='get_insurance_package_items'),
+    path('insurance-packages/items/', insurance_packages.insurance_package_items_list_create, name='insurance_package_items'),
+    path('insurance-packages/items/<str:item_id>/', insurance_packages.insurance_package_item_detail, name='insurance_package_item_detail'),
+    path('insurance-packages/items/<str:item_id>/toggle-active/', insurance_packages.toggle_insurance_package_item_active, name='insurance_package_toggle_active'),
     path('insurance-packages/', insurance_packages.insurance_packages_hub, name='insurance_packages_hub'),
 
     # Investigation Price Master
@@ -434,6 +444,7 @@ urlpatterns = [
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
+    path('insurance-credit-report/', insurance_credit_report.insurance_credit_report_view, name='insurance_credit_report'),
     path('ip-patient-analysis/', ip_patient_analysis.ip_patient_analysis_view, name='ip_patient_analysis'),
     path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
@@ -519,7 +530,7 @@ urlpatterns = [
     path('shelf-master/', stores.shelf_master_list_create, name='shelf_master_list_create'),
     path('shelf-master/<str:pk>/', stores.shelf_master_detail, name='shelf_master_detail'),
     path('stores-grn/', stores.stores_grn_list_create, name='stores_grn_list_create'),
-    path('stores-grn/<str:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
+    path('stores-grn/<path:pk>/', stores.stores_grn_detail, name='stores_grn_detail'),
     path('stores-intent/', stores.get_stores_intents, name='get_stores_intents'),
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
