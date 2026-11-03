@@ -2882,4 +2882,51 @@ class MRD(AuditModel):
         return f"{self.mrd_id} | {self.ip_no} ({self.status})"
 
 
+class TumourBoard(AuditModel):
+    certificate_id   = models.CharField(max_length=50, unique=True, db_index=True)
+    uhid             = models.CharField(max_length=50, db_index=True)
+    ip_op_number     = models.CharField(max_length=50, blank=True, null=True)
+    patient_name     = models.CharField(max_length=150)
+    age              = models.CharField(max_length=20, blank=True, null=True)
+    gender           = models.CharField(max_length=20, blank=True, null=True)
+    phone            = models.CharField(max_length=30, blank=True, null=True)
+    certificate_date = models.CharField(max_length=30, blank=True, null=True)
+    template_id      = models.IntegerField(default=1)
+    template_name    = models.CharField(max_length=150, default="Tumour Board Certificate")
+    primary_site     = models.CharField(max_length=255, blank=True, null=True)
+    stage            = models.CharField(max_length=100, blank=True, null=True)
+    board_remarks    = models.TextField(blank=True, null=True)
+    field_values     = models.JSONField(default=dict, blank=True)
+    is_approved      = models.BooleanField(default=False)
+    status           = models.CharField(max_length=30, default="Draft")
+    approved_by      = models.CharField(max_length=100, blank=True, null=True)
+    approved_by_name = models.CharField(max_length=150, blank=True, null=True)
+    approved_date    = models.CharField(max_length=50, blank=True, null=True)
+    created_by_name  = models.CharField(max_length=150, blank=True, null=True)
+    is_deleted       = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "hospital_tumourBoard"
+        ordering = ["-created_date"]
+
+    def __str__(self):
+        return f"{self.certificate_id} - {self.patient_name} ({self.uhid})"
+
+
+class TumourTemplate(AuditModel):
+    template_id   = models.IntegerField(unique=True)
+    template_name = models.CharField(max_length=150)
+    is_template   = models.BooleanField(default=True)
+    version       = models.CharField(max_length=20, default="1.0")
+    description   = models.TextField(blank=True, null=True)
+    fields        = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = "hospital_tumourTemplate"
+
+    def __str__(self):
+        return f"{self.template_id} - {self.template_name}"
+
+
+
 
