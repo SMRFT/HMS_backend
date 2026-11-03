@@ -134,7 +134,7 @@ def _get_auth(request, request_data):
 def _get_collection():
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
     db     = client.HMS
-    return db.hospital_purchase_returns
+    return db.hospital_purchasereturn
 
 
 def _serialize_doc(doc):
@@ -166,7 +166,7 @@ def _serialize_doc(doc):
 # BILL-NO GENERATOR  (format: 2627/000001)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter, enrich_employee_names
 from pymongo import ASCENDING, DESCENDING
 from django.db.models import Q
 
@@ -180,14 +180,15 @@ def _current_fin_year():
 def _next_purchase_return_bill_no():
     prefix = f"{_current_fin_year()}/"
     client, hms_db = get_hms_db()
-    top_doc = list(hms_db["hospital_purchase_returns"].find(
+    docs = list(hms_db["hospital_purchasereturn"].find(
         {"purchase_return_bill_no": {"$regex": f"^{prefix}"}},
         {"purchase_return_bill_no": 1}
-    ).sort("purchase_return_bill_no", DESCENDING).limit(1))
+    ))
     max_seq = 0
-    if top_doc:
+    for d in docs:
+        bno = str(d.get("purchase_return_bill_no", "") or "")
         try:
-            seq = int(str(top_doc[0].get("purchase_return_bill_no", "")).split("/")[-1])
+            seq = int(bno.split("/")[-1])
             if seq > max_seq:
                 max_seq = seq
         except (ValueError, IndexError):
@@ -218,33 +219,49 @@ def get_grn_items(request):
     try:
         client, hms_db = get_hms_db()
 
-        if vendor_id:
-            try:
-                v_id = int(vendor_id)
-            except ValueError:
-                v_id = None
-                
-            if v_id is not None:
-                grn_doc = hms_db["hospital_grn"].find_one({
+        grn_doc = hms_db["hospital_grn"].find_one({
+            "hospital_code": hospital_code,
+            "branch_code": branch_code,
+            "grn_number": grn_number
+        })
+        if not grn_doc:
+            grn_doc = hms_db["hospital_grn"].find_one({
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "grn_number": {"$regex": f"^{re.escape(grn_number)}$", "$options": "i"}
+            })
+
+        vendor_info = None
+        outlet_val = ""
+        if grn_doc:
+            outlet_val = grn_doc.get("outlet_code", "")
+            db_vendor_id = str(grn_doc.get("vendor_id", "")).strip()
+            if db_vendor_id:
+                v_query = [
+                    {"vendor_id": db_vendor_id},
+                    {"vendor_code": db_vendor_id}
+                ]
+                if db_vendor_id.isdigit():
+                    v_query.append({"vendor_id": int(db_vendor_id)})
+                vdoc = hms_db["hospital_vendor"].find_one({
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
-                    "grn_number": grn_number
+                    "$or": v_query
                 })
-                if not grn_doc:
-                    return Response({"success": False, "error": f"GRN {grn_number} not found in records."})
-                
-                db_vendor_id = str(grn_doc.get("vendor_id", "")).strip()
-                if db_vendor_id != str(v_id):
-                    def _vname(vid_str):
-                        vdoc = hms_db["hospital_vendor"].find_one({
-                            "hospital_code": hospital_code, "branch_code": branch_code, "vendor_id": str(vid_str)
-                        })
-                        if vdoc:
-                            return vdoc.get("name") or vdoc.get("vendor_name") or vid_str
-                        return vid_str
-                    db_vname = _vname(db_vendor_id)
-                    sel_vname = _vname(str(v_id))
-                    return Response({"success": False, "error": f"GRN {grn_number} belongs to vendor '{db_vname}', not the selected vendor ('{sel_vname}')!"})
+                if vdoc:
+                    vendor_info = {
+                        "vendor_id": str(vdoc.get("vendor_id", "")),
+                        "vendor_code": str(vdoc.get("vendor_code", "") or vdoc.get("vendor_id", "")),
+                        "name": str(vdoc.get("name", "") or vdoc.get("vendor_name", "")).upper(),
+                        "phone": vdoc.get("phone", ""),
+                        "email": vdoc.get("email", ""),
+                    }
+                else:
+                    vendor_info = {
+                        "vendor_id": db_vendor_id,
+                        "vendor_code": db_vendor_id,
+                        "name": str(grn_doc.get("vendor_name", "") or db_vendor_id).upper(),
+                    }
 
         stock_docs = list(hms_db["hospital_pharmacystock"].find({
             "hospital_code": hospital_code,
@@ -296,7 +313,7 @@ def get_grn_items(request):
             if hms_db["hospital_grn"].find_one({"hospital_code": hospital_code, "branch_code": branch_code, "grn_number": grn_number}):
                 return Response({"success": False, "error": f"GRN {grn_number} exists, but no items found in PharmacyStock. Stock may not have been updated."})
 
-        return Response({"success": True, "data": results})
+        return Response({"success": True, "data": results, "vendor": vendor_info, "outlet_code": outlet_val})
 
     except Exception as e:
         logger.error(f"[get_grn_items] Error: {e}", exc_info=True)
@@ -416,7 +433,8 @@ def purchase_return_view(request, pk=None):
                         hospital_code=hospital_code,
                         branch_code=branch_code,
                     )
-                    enriched = _enrich_purchase_returns_batch([PurchaseReturnSerializer(pr).data], hospital_code, branch_code)[0]
+                    enriched = _enrich_purchase_returns_batch([PurchaseReturnSerializer(pr).data], hospital_code, branch_code)
+                    enriched = enrich_employee_names(enriched)[0]
                     return Response({"success": True, "data": enriched})
                 except PurchaseReturn.DoesNotExist:
                     return Response({"success": False, "error": "Record not found"}, status=404)
@@ -453,7 +471,7 @@ def purchase_return_view(request, pk=None):
                 return _enrich_purchase_returns_batch(data_list, hospital_code, branch_code)
 
             return Response(paginate_mongo_query(
-                "hospital_purchase_returns",
+                "hospital_purchasereturn",
                 filter_q,
                 sort=[("created_date", DESCENDING)],
                 request=request,

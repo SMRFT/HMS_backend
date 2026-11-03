@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from ..models import PharmacyItem, PharmacyStock, PhysicalStockEntry
 from ..serializers import PhysicalStockEntrySerializer
 from pyauth.auth import HasRoleAndDataPermission
-from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter, enrich_employee_names
 from pymongo import ASCENDING, DESCENDING
 from django.db.models import Q
 
@@ -140,7 +140,7 @@ def physical_stock_entry_view(request, pk=None):
                         branch_code=branch_code,
                         is_active=True,
                     )
-                    return Response(PhysicalStockEntrySerializer(entry).data)
+                    return Response(enrich_employee_names(PhysicalStockEntrySerializer(entry).data))
                 except PhysicalStockEntry.DoesNotExist:
                     return Response({"error": "Entry not found"}, status=404)
 
@@ -288,6 +288,8 @@ def physical_stock_approval_view(request, pk=None):
                     {"batch_number": reg},
                     {"approval_notes": reg}
                 ]
+
+            filter_q = apply_date_filter(filter_q, request, "created_date")
 
             return Response(paginate_mongo_query(
                 "hospital_physicalstockentry",

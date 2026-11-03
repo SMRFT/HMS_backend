@@ -5,10 +5,13 @@ Designed to handle 1,000,000+ records with sub-50ms query response times.
 
 import os
 import re
+import logging
 from datetime import datetime, date
 from decimal import Decimal
 from bson import Decimal128, ObjectId
 from pymongo import MongoClient, ASCENDING, DESCENDING
+
+logger = logging.getLogger(__name__)
 
 _mongo_client = None
 _indexes_ensured = False
@@ -183,6 +186,164 @@ def _is_unspecified(val):
     return s in ("null", "none", "undefined", "", "all", "false", "0")
 
 
+def _extract_pagination_params(request=None, page=None, page_size=None):
+    """
+    Extracts (page_num, limit_num, is_unpaginated) with support for:
+    - DRF request.query_params and Django request.GET
+    - 'page' / 'p'
+    - 'page_size' / 'limit' / 'pageSize' / 'per_page' / 'perPage'
+    - Defaulting: if page is supplied without size, default size=10
+                  if size is supplied without page, default page=1
+    - Unpaginated mode when neither is specified or 'all'/'null' is requested
+    """
+    params = {}
+    if request is not None:
+        if hasattr(request, "query_params") and request.query_params:
+            params = request.query_params
+        elif hasattr(request, "GET") and request.GET:
+            params = request.GET
+
+    raw_page = params.get("page") if params else None
+    if raw_page is None and params:
+        raw_page = params.get("p")
+
+    raw_size = None
+    if params:
+        raw_size = (
+            params.get("page_size")
+            or params.get("limit")
+            or params.get("pageSize")
+            or params.get("per_page")
+            or params.get("perPage")
+        )
+
+    if raw_page is None and page is not None:
+        raw_page = page
+    if raw_size is None and page_size is not None:
+        raw_size = page_size
+
+    # If neither is specified or explicitly unspecified (e.g. 'all', 'null')
+    if (raw_page is None and raw_size is None) or (_is_unspecified(raw_page) and _is_unspecified(raw_size)):
+        return 1, 10, True
+
+    if _is_unspecified(raw_page):
+        p_num = 1
+    else:
+        try:
+            p_num = max(1, int(raw_page))
+        except (ValueError, TypeError):
+            p_num = 1
+
+    if _is_unspecified(raw_size):
+        s_num = 10
+    else:
+        try:
+            s_num = max(1, min(1000, int(raw_size)))
+        except (ValueError, TypeError):
+            s_num = 10
+
+    return p_num, s_num, False
+
+
+def enrich_employee_names(data_list, fields=None):
+    """
+    Enriches a list of record dicts with employee names from Global.backend_diagnostics_profile.
+    Maps employee IDs (e.g. '50887', '60380', 'LMI001') to employee names (e.g. 'Sivasundari').
+    Populates:
+      - '<field>_name': employee name
+      - '<field>': employee name (if it was an ID)
+      - '<field>_id': original employee ID
+    """
+    if not data_list:
+        return data_list
+
+    is_single = False
+    if isinstance(data_list, dict):
+        data_list = [data_list]
+        is_single = True
+
+    if fields is None:
+        fields = (
+            "created_by", "lastmodified_by", "modified_by",
+            "approved_by", "rejected_by", "entered_by",
+            "verified_by", "edited_by", "cancelled_by",
+            "received_by", "checked_by", "dispatched_by",
+            "requested_by", "action_by", "user", "recorded_by"
+        )
+
+    emp_ids = set()
+    for r in data_list:
+        if not isinstance(r, dict):
+            continue
+        for f in fields:
+            val = r.get(f)
+            if val is not None:
+                sval = str(val).strip()
+                if sval and sval not in ("-", "None", "null", "system", "SYSTEM"):
+                    emp_ids.add(sval)
+
+    if not emp_ids:
+        return data_list[0] if is_single else data_list
+
+    emp_name_map = {}
+    try:
+        client, _ = get_hms_db()
+        global_db = client["Global"]
+
+        id_queries = []
+        for eid in emp_ids:
+            id_queries.append({"employeeId": eid})
+            if eid.isdigit():
+                num_val = int(eid)
+                id_queries.append({"employeeId": num_val})
+                id_queries.append({"employeeId": f"{num_val:04d}"})
+                id_queries.append({"employeeId": f"{num_val:05d}"})
+                id_queries.append({"employeeId": f"{num_val:06d}"})
+            id_queries.append({"userId": eid})
+
+        profiles = list(global_db["backend_diagnostics_profile"].find(
+            {"$or": id_queries},
+            {"employeeId": 1, "userId": 1, "employeeName": 1, "name": 1, "firstName": 1, "lastName": 1}
+        ))
+
+        for p in profiles:
+            name = (
+                p.get("employeeName")
+                or p.get("name")
+                or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+            )
+            if name:
+                eid_raw = p.get("employeeId")
+                if eid_raw is not None:
+                    emp_name_map[str(eid_raw).strip()] = name
+                    if str(eid_raw).strip().isdigit():
+                        emp_name_map[str(int(str(eid_raw).strip()))] = name
+                uid_raw = p.get("userId")
+                if uid_raw:
+                    emp_name_map[str(uid_raw).strip()] = name
+    except Exception as e:
+        logger.error(f"Error enriching employee names: {e}")
+
+    for r in data_list:
+        if not isinstance(r, dict):
+            continue
+        for f in fields:
+            val = r.get(f)
+            if val is not None:
+                sval = str(val).strip()
+                name = emp_name_map.get(sval)
+                if not name and sval.isdigit():
+                    name = emp_name_map.get(str(int(sval)))
+                if name:
+                    r[f"{f}_name"] = name
+                    r[f"{f}_id"] = val
+                    r[f] = name
+                else:
+                    r.setdefault(f"{f}_name", val)
+
+    return data_list[0] if is_single else data_list
+
+
 def paginate_mongo_query(
     collection_name,
     filter_query=None,
@@ -207,42 +368,13 @@ def paginate_mongo_query(
     filter_query = filter_query or {}
     sort_spec = sort or [("_id", DESCENDING)]
 
-    is_unpaginated = False
-
-    if request is not None and hasattr(request, "GET"):
-        has_page = "page" in request.GET
-        has_page_size = ("page_size" in request.GET) or ("limit" in request.GET)
-        raw_page = request.GET.get("page")
-        raw_page_size = request.GET.get("page_size") or request.GET.get("limit")
-
-        # If neither is mentioned, or if either is not mentioned or null/empty/all/undefined:
-        if not has_page or not has_page_size or _is_unspecified(raw_page) or _is_unspecified(raw_page_size):
-            is_unpaginated = True
-        else:
-            try:
-                page_num = int(raw_page)
-                limit_num = int(raw_page_size)
-                if page_num < 1 or limit_num < 1:
-                    is_unpaginated = True
-            except (ValueError, TypeError):
-                is_unpaginated = True
-    else:
-        # No request object provided: check explicit page/page_size parameters
-        if _is_unspecified(page) or _is_unspecified(page_size):
-            is_unpaginated = True
-        else:
-            try:
-                page_num = int(page)
-                limit_num = int(page_size)
-                if page_num < 1 or limit_num < 1:
-                    is_unpaginated = True
-            except (ValueError, TypeError):
-                is_unpaginated = True
+    page_num, limit_num, is_unpaginated = _extract_pagination_params(request, page, page_size)
 
     # ── Return all data if unpaginated ───────────────────────────
     if is_unpaginated:
         cursor = coll.find(filter_query, projection).sort(sort_spec)
         docs = clean_docs(list(cursor))
+        docs = enrich_employee_names(docs)
         if enrich_fn and callable(enrich_fn):
             docs = enrich_fn(docs)
         total_records = len(docs)
@@ -267,6 +399,7 @@ def paginate_mongo_query(
 
     cursor = coll.find(filter_query, projection).sort(sort_spec).skip(skip_count).limit(limit_num)
     docs = clean_docs(list(cursor))
+    docs = enrich_employee_names(docs)
 
     if enrich_fn and callable(enrich_fn):
         docs = enrich_fn(docs)
@@ -297,39 +430,12 @@ def paginate_queryset(
     Paginate a Django QuerySet using index slicing [start:end] and DRF ModelSerializer.
     If page and page_size are null or not mentioned in frontend, returns all data.
     """
-    is_unpaginated = False
-
-    if request is not None and hasattr(request, "GET"):
-        has_page = "page" in request.GET
-        has_page_size = ("page_size" in request.GET) or ("limit" in request.GET)
-        raw_page = request.GET.get("page")
-        raw_page_size = request.GET.get("page_size") or request.GET.get("limit")
-
-        if not has_page or not has_page_size or _is_unspecified(raw_page) or _is_unspecified(raw_page_size):
-            is_unpaginated = True
-        else:
-            try:
-                page_num = int(raw_page)
-                limit_num = int(raw_page_size)
-                if page_num < 1 or limit_num < 1:
-                    is_unpaginated = True
-            except (ValueError, TypeError):
-                is_unpaginated = True
-    else:
-        if _is_unspecified(page) or _is_unspecified(page_size):
-            is_unpaginated = True
-        else:
-            try:
-                page_num = int(page)
-                limit_num = int(page_size)
-                if page_num < 1 or limit_num < 1:
-                    is_unpaginated = True
-            except (ValueError, TypeError):
-                is_unpaginated = True
+    page_num, limit_num, is_unpaginated = _extract_pagination_params(request, page, page_size)
 
     if is_unpaginated:
         serializer = serializer_class(queryset, many=True)
         data = serializer.data
+        data = enrich_employee_names(data)
         if enrich_fn and callable(enrich_fn):
             data = enrich_fn(data)
         total_records = len(data)
@@ -355,6 +461,7 @@ def paginate_queryset(
     page_items = queryset[start:end]
     serializer = serializer_class(page_items, many=True)
     serialized_data = serializer.data
+    serialized_data = enrich_employee_names(serialized_data)
 
     if enrich_fn and callable(enrich_fn):
         serialized_data = enrich_fn(serialized_data)
@@ -378,15 +485,23 @@ def apply_date_filter(filter_q, request, date_field="created_date"):
     Applies date filtering to MongoDB filter_q from request query params.
     Supports:
       - 'date': single date YYYY-MM-DD
-      - 'from_date' and 'to_date': date range
+      - 'from_date' / 'fromDate' and 'to_date' / 'toDate': date range
     Supports both BSON Date objects and ISO strings in MongoDB.
     """
-    if request is None or not hasattr(request, "GET"):
+    if request is None:
         return filter_q
 
-    date_param = str(request.GET.get("date", "") or "").strip()
-    from_date_param = str(request.GET.get("from_date", "") or "").strip()
-    to_date_param = str(request.GET.get("to_date", "") or "").strip()
+    params = {}
+    if hasattr(request, "query_params") and request.query_params:
+        params = request.query_params
+    elif hasattr(request, "GET") and request.GET:
+        params = request.GET
+    else:
+        return filter_q
+
+    date_param = str(params.get("date", "") or "").strip()
+    from_date_param = str(params.get("from_date", "") or params.get("fromDate", "") or "").strip()
+    to_date_param = str(params.get("to_date", "") or params.get("toDate", "") or "").strip()
 
     from_val = from_date_param or date_param
     to_val = to_date_param or date_param

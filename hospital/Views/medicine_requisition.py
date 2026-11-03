@@ -33,7 +33,7 @@ def _current_fin_year():
     return f"{str(from_yr)[-2:]}{str(from_yr + 1)[-2:]}"
 
 
-from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter
+from .mongo_utils import get_hms_db, paginate_queryset, paginate_mongo_query, clean_doc, clean_docs, apply_date_filter, enrich_employee_names
 from pymongo import ASCENDING, DESCENDING
 from django.db.models import Q
 
@@ -101,7 +101,7 @@ def medicine_requisition_view(request, pk=None):
                         hospital_code=hospital_code,
                         branch_code=branch_code
                     )
-                    return Response({"success": True, "data": MedicineRequisitionSerializer(mr).data})
+                    return Response({"success": True, "data": enrich_employee_names(MedicineRequisitionSerializer(mr).data)})
                 except MedicineRequisition.DoesNotExist:
                     return Response({"success": False, "error": "Record not found"}, status=404)
 

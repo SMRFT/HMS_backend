@@ -171,6 +171,8 @@ _EMPLOYEE_FIELDS = (
     "purchased_by",
     "stock_restocked_by",
     "edited_by",
+    "lastmodified_by",
+    "modified_by",
 )
 
 

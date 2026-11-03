@@ -168,20 +168,36 @@ def _enrich_po_list_batch(po_list: list) -> list:
     client, hms_db = get_hms_db()
 
     # 1. Collect unique vendor_ids and employee_ids
-    vendor_ids = list({p.get("vendor_id") for p in po_list if p.get("vendor_id") and not p.get("vendor_name")})
+    raw_vids = {p.get("vendor_id") for p in po_list if p.get("vendor_id") is not None}
+    vendor_ids_all = set()
+    for vid in raw_vids:
+        vendor_ids_all.add(vid)
+        try:
+            vendor_ids_all.add(int(vid))
+        except (ValueError, TypeError):
+            pass
+        vendor_ids_all.add(str(vid))
+
     emp_ids = set()
     for p in po_list:
-        for f in ("approved_by", "rejected_by"):
+        for f in ("approved_by", "rejected_by", "created_by", "lastmodified_by", "modified_by"):
             eid = str(p.get(f, "") or "").strip()
             if eid and eid != "system":
                 emp_ids.add(eid)
 
     # 2. Batch lookup vendors
     vendor_map = {}
-    if vendor_ids:
+    vendor_email_map = {}
+    if vendor_ids_all:
         try:
-            for v in hms_db["hospital_vendor"].find({"vendor_id": {"$in": vendor_ids}}, {"vendor_id": 1, "name": 1}):
-                vendor_map[v.get("vendor_id")] = v.get("name", "")
+            for v in hms_db["hospital_vendor"].find({"vendor_id": {"$in": list(vendor_ids_all)}}, {"vendor_id": 1, "name": 1, "email": 1}):
+                vid_val = v.get("vendor_id")
+                v_name = v.get("name", "") or ""
+                v_em = v.get("email", "") or ""
+                vendor_map[vid_val] = v_name
+                vendor_map[str(vid_val)] = v_name
+                vendor_email_map[vid_val] = v_em
+                vendor_email_map[str(vid_val)] = v_em
         except Exception:
             pass
 
@@ -197,8 +213,11 @@ def _enrich_po_list_batch(po_list: list) -> list:
 
     # 4. Enrich
     for p in po_list:
-        if not p.get("vendor_name") and p.get("vendor_id") in vendor_map:
-            p["vendor_name"] = vendor_map[p.get("vendor_id")]
+        vid = p.get("vendor_id")
+        if not p.get("vendor_name") and (vid in vendor_map or str(vid) in vendor_map):
+            p["vendor_name"] = vendor_map.get(vid) or vendor_map.get(str(vid)) or ""
+        if not p.get("vendor_email"):
+            p["vendor_email"] = vendor_email_map.get(vid) or vendor_email_map.get(str(vid)) or ""
         if p.get("vendor_name"):
             p["vendor_name"] = str(p["vendor_name"]).upper()
 
@@ -207,11 +226,15 @@ def _enrich_po_list_batch(po_list: list) -> list:
                 if isinstance(it, dict) and it.get("medicine_name"):
                     it["medicine_name"] = str(it["medicine_name"]).upper()
 
-        app_by = str(p.get("approved_by", "") or "").strip()
-        p["approved_by_name"] = emp_map.get(app_by, app_by) if app_by else ""
-
-        rej_by = str(p.get("rejected_by", "") or "").strip()
-        p["rejected_by_name"] = emp_map.get(rej_by, rej_by) if rej_by else ""
+        for f in ("approved_by", "rejected_by", "created_by", "lastmodified_by", "modified_by"):
+            val_id = str(p.get(f, "") or "").strip()
+            if val_id and val_id in emp_map:
+                p[f"{f}_name"] = emp_map[val_id]
+                p[f"{f}_id"] = val_id
+                p[f] = emp_map[val_id]
+            else:
+                p[f"{f}_name"] = val_id
+                p[f"{f}_id"] = val_id
 
     return po_list
 
@@ -221,18 +244,25 @@ def _enrich_po(po) -> dict:
     data["items"] = _read_items_from_instance(po)
 
     vendor_name = data.get("vendor_name", "") or ""
-    if not vendor_name:
-        try:
-            vendor_name = Vendor.objects.get(vendor_id=po.vendor_id).name or ""
-        except Exception:
-            vendor_name = ""
+    vendor_email = data.get("vendor_email", "") or ""
+    try:
+        v_obj = Vendor.objects.get(vendor_id=po.vendor_id)
+        if not vendor_name:
+            vendor_name = v_obj.name or ""
+        if not vendor_email:
+            vendor_email = getattr(v_obj, "email", "") or ""
+    except Exception:
+        pass
     data["vendor_name"] = vendor_name
+    data["vendor_email"] = vendor_email
 
-    approved_by_id = str(data.get("approved_by", "") or "").strip()
-    data["approved_by_name"] = _get_employee_name(approved_by_id) if approved_by_id else ""
-
-    rejected_by_id = str(data.get("rejected_by", "") or "").strip()
-    data["rejected_by_name"] = _get_employee_name(rejected_by_id) if rejected_by_id else ""
+    for f in ("approved_by", "rejected_by", "created_by", "lastmodified_by", "modified_by"):
+        val_id = str(data.get(f, "") or "").strip()
+        val_name = _get_employee_name(val_id) if val_id else ""
+        data[f"{f}_name"] = val_name or val_id
+        data[f"{f}_id"] = val_id
+        if val_name:
+            data[f] = val_name
 
     return data
 
@@ -722,6 +752,12 @@ def purchase_order_email_view(request):
             "success": False,
             "error": "Purchase Order not found."
         }, status=404)
+
+    if obj.status != "Approved":
+        return Response({
+            "success": False,
+            "error": f"Cannot send email for a Purchase Order with status '{obj.status}'. Only Approved POs can be emailed."
+        }, status=400)
 
     po_data = _enrich_po(obj)
 
