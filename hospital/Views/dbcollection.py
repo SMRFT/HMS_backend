@@ -39,6 +39,7 @@ cashcounter_collection            = hms_db["hospital_cashcounter"]
 cashcounter_shift_collection      = hms_db["hospital_cashcountershiftdetails"]
 hospital_room                     = hms_db["hospital_room"]
 hospital_tumour_board_collection  = hms_db["hospital_tumourBoard"]
+hospital_tumour_template_collection = hms_db["hospital_tumourTemplate"]
 
 import re
 

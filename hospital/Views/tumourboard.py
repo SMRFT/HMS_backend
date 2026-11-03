@@ -1,5 +1,6 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
+from pyauth.auth import HasRoleAndDataPermission
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime, date
@@ -9,6 +10,7 @@ from bson import ObjectId, Decimal128
 from .dbcollection import (
     hms_db,
     hospital_tumour_board_collection,
+    hospital_tumour_template_collection,
     patient_collection,
     admission_collection,
     get_employee_name_by_id,
@@ -37,255 +39,249 @@ def serialize_doc(doc):
 
 DEFAULT_TUMOUR_BOARD_TEMPLATE = {
     "template_id": 1,
-    "template_name": "Tumour Board Certificate",
+    "template_name": "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)",
     "is_template": True,
     "version": "1.0",
-    "description": "Multidisciplinary Tumour Board Clinical Assessment & Certification Template",
+    "description": "Multidisciplinary Tumour Board Clinical Assessment & Certification for AB-PMJAY / CMCHIS / CGHS / State Health Schemes",
     "created_at": "2026-11-02T10:00:00",
-    "fields": [
-        # Section 1: Clinical Presentation & History
+    "header_fields": [
         {
-            "key": "clinical_history",
-            "label": "1. Clinical History & Presentation",
+            "key": "meeting_date",
+            "label": "Date of Board Meeting",
+            "type": "date",
+            "required": True,
+            "grid_cols": 3,
+        },
+        {
+            "key": "tms_case_ref_no",
+            "label": "TMS Case/Ref. No",
+            "type": "text",
+            "placeholder": "Enter TMS Case/Ref No",
+            "required": False,
+            "grid_cols": 3,
+        },
+        {
+            "key": "patient_name",
+            "label": "Patient Name",
+            "type": "text",
+            "placeholder": "Patient Full Name",
+            "required": True,
+            "grid_cols": 4,
+        },
+        {
+            "key": "age",
+            "label": "Age",
+            "type": "text",
+            "placeholder": "Age",
+            "required": True,
+            "grid_cols": 1,
+        },
+        {
+            "key": "gender",
+            "label": "Gender",
+            "type": "select",
+            "value_options": ["Male", "Female", "Other"],
+            "required": True,
+            "grid_cols": 1,
+        },
+        {
+            "key": "scheme_name",
+            "label": "Scheme Name",
+            "type": "select",
+            "value_options": ["CMCHIS", "PM-JAY", "CGHS", "Other Scheme"],
+            "default_value": "CMCHIS",
+            "required": True,
+            "grid_cols": 3,
+        },
+        {
+            "key": "ip_op_number",
+            "label": "IPD / Registration No",
+            "type": "text",
+            "placeholder": "Enter IPD / Reg No",
+            "required": False,
+            "grid_cols": 3,
+        },
+        {
+            "key": "uhid",
+            "label": "UHID No",
+            "type": "text",
+            "placeholder": "Enter UHID",
+            "required": True,
+            "grid_cols": 3,
+        },
+        {
+            "key": "phone",
+            "label": "Contact Phone",
+            "type": "text",
+            "placeholder": "Mobile Number",
+            "required": False,
+            "grid_cols": 3,
+        },
+        {
+            "key": "scheme_card_id",
+            "label": "Patient Scheme Card ID / URN / Beneficiary ID",
+            "type": "text",
+            "placeholder": "Scheme Card ID / URN / Beneficiary ID",
+            "required": False,
+            "grid_cols": 6,
+        },
+        {
+            "key": "primary_referral_dept",
+            "label": "Primary Referral Department",
+            "type": "text",
+            "placeholder": "e.g. Surgical Oncology / Medical Oncology",
+            "required": False,
+            "grid_cols": 3,
+        },
+        {
+            "key": "treating_consultant",
+            "label": "Treating Consultant",
+            "type": "text",
+            "placeholder": "Treating Consultant Doctor",
+            "required": False,
+            "grid_cols": 3,
+        },
+    ],
+    "fields": [
+        # Section 1: CLINICAL DIAGNOSIS & STAGING
+        {
+            "key": "site_of_malignancy",
+            "label": "Site of Malignancy",
+            "type": "text",
+            "section": "1. CLINICAL DIAGNOSIS & STAGING",
+            "placeholder": "Enter primary site of malignancy (e.g. Right Breast Upper Outer Quadrant, Rectum, Tongue)",
+            "default_value": "",
+            "required": True,
+            "grid_cols": 12,
+        },
+        {
+            "key": "histopathology_ihc_details",
+            "label": "Histopathology (HPE) / IHC Report Details",
             "type": "textarea",
-            "section": "1. Clinical Presentation & History",
-            "placeholder": "Enter chief complaints, history of present illness, clinical course, and physical examination findings...",
+            "section": "1. CLINICAL DIAGNOSIS & STAGING",
+            "placeholder": "Enter biopsy findings, morphology, IHC markers (ER, PR, HER2, Ki-67, etc.)...",
             "default_value": "",
             "required": False,
             "grid_cols": 12,
             "rows": 3,
         },
         {
-            "key": "ecog_ps",
-            "label": "ECOG Performance Status",
-            "type": "select",
-            "section": "1. Clinical Presentation & History",
-            "value_options": [
-                "ECOG 0 - Fully active, able to carry on all pre-disease performance without restriction",
-                "ECOG 1 - Restricted in strenuous activity; ambulatory and able to carry out light work",
-                "ECOG 2 - Ambulatory, capable of all self-care, unable to carry out work; up >50% waking hours",
-                "ECOG 3 - Capable of only limited self-care; confined to bed/chair >50% waking hours",
-                "ECOG 4 - Completely disabled; cannot carry on any self-care; totally confined to bed/chair",
-            ],
-            "default_value": "ECOG 1 - Restricted in strenuous activity; ambulatory and able to carry out light work",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "comorbidities",
-            "label": "Co-morbidities & Past Medical History",
+            "key": "tnm_staging",
+            "label": "TNM Staging: TNM [          ]",
             "type": "text",
-            "section": "1. Clinical Presentation & History",
-            "placeholder": "e.g. Hypertension, Type 2 DM, CAD, Bronchial Asthma, None",
-            "default_value": "None significant",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "habits_risk_factors",
-            "label": "Habits / Risk Factors / Family History",
-            "type": "text",
-            "section": "1. Clinical Presentation & History",
-            "placeholder": "e.g. Non-smoker, Non-alcoholic, Family history of malignancy",
+            "section": "1. CLINICAL DIAGNOSIS & STAGING",
+            "placeholder": "e.g. cT2 N1 M0 / pT3 N2a M0",
             "default_value": "",
             "required": False,
-            "grid_cols": 12,
+            "grid_cols": 6,
+        },
+        {
+            "key": "stage",
+            "label": "Stage: [ I / II / III / IV ]",
+            "type": "select",
+            "section": "1. CLINICAL DIAGNOSIS & STAGING",
+            "value_options": [
+                "Stage I",
+                "Stage II",
+                "Stage III",
+                "Stage IV",
+            ],
+            "default_value": "Stage II",
+            "required": True,
+            "grid_cols": 6,
         },
 
-        # Section 2: Diagnostic & Pathological Workup
+        # Section 2: PROPOSED ONCOLOGY PACKAGE DETAILS
         {
-            "key": "primary_site",
-            "label": "Primary Tumour Site / Organ",
+            "key": "package_code",
+            "label": "PM-JAY Package Code",
             "type": "text",
-            "section": "2. Diagnostic & Pathological Workup",
-            "placeholder": "e.g. Right Breast Upper Outer Quadrant, Lung Left Upper Lobe, Rectum, Tongue",
+            "section": "2. PROPOSED ONCOLOGY PACKAGE DETAILS",
+            "placeholder": "Enter PM-JAY / CMCHIS Package Code",
+            "default_value": "",
+            "required": False,
+            "grid_cols": 6,
+        },
+        {
+            "key": "procedure_regimen_name",
+            "label": "Name of Procedure / Regimen",
+            "type": "text",
+            "section": "2. PROPOSED ONCOLOGY PACKAGE DETAILS",
+            "placeholder": "Enter procedure name or chemotherapy regimen",
             "default_value": "",
             "required": True,
             "grid_cols": 6,
         },
+
+        # Section 3: MULTI-MODAL MANAGEMENT PLAN APPROVED BY THE BOARD
         {
-            "key": "histological_grade",
-            "label": "Histological Grade / Differentiation",
-            "type": "select",
-            "section": "2. Diagnostic & Pathological Workup",
-            "value_options": [
-                "Grade 1 - Well Differentiated (Low Grade)",
-                "Grade 2 - Moderately Differentiated (Intermediate Grade)",
-                "Grade 3 - Poorly Differentiated (High Grade)",
-                "Grade 4 - Undifferentiated / Anaplastic",
-                "Not Applicable / Unspecified",
-            ],
-            "default_value": "Grade 2 - Moderately Differentiated (Intermediate Grade)",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "histopathology",
-            "label": "Biopsy / Histopathology Findings",
-            "type": "textarea",
-            "section": "2. Diagnostic & Pathological Workup",
-            "placeholder": "Histopathology biopsy findings, morphology, lymphovascular invasion, perineural invasion...",
+            "key": "surgical_oncology",
+            "label": "Surgical Oncology Plan",
+            "type": "checkbox_text",
+            "section": "3. MULTI-MODAL MANAGEMENT PLAN APPROVED BY THE BOARD",
+            "check_label": "Surgical Oncology",
+            "placeholder": "Details of surgical procedure, margins...",
             "default_value": "",
+            "checked_default": False,
             "required": False,
             "grid_cols": 12,
-            "rows": 3,
         },
         {
-            "key": "clinical_stage_tnm",
-            "label": "TNM Staging (Clinical / Pathological)",
-            "type": "text",
-            "section": "2. Diagnostic & Pathological Workup",
-            "placeholder": "e.g. cT2 N1 M0 or pT3 N2a M0",
+            "key": "medical_oncology",
+            "label": "Medical Oncology Plan",
+            "type": "checkbox_text",
+            "section": "3. MULTI-MODAL MANAGEMENT PLAN APPROVED BY THE BOARD",
+            "check_label": "Medical Oncology",
+            "placeholder": "Details of chemotherapy regimen, cycles, dosage...",
             "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "stage_group",
-            "label": "Overall Clinical Stage Group",
-            "type": "select",
-            "section": "2. Diagnostic & Pathological Workup",
-            "value_options": [
-                "Stage I",
-                "Stage IA",
-                "Stage IB",
-                "Stage II",
-                "Stage IIA",
-                "Stage IIB",
-                "Stage III",
-                "Stage IIIA",
-                "Stage IIIB",
-                "Stage IIIC",
-                "Stage IV",
-                "Stage IVA",
-                "Stage IVB",
-                "Recurrent / Metastatic Disease",
-            ],
-            "default_value": "Stage IIA",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "imaging_findings",
-            "label": "Radiology / Imaging Workup (CT / MRI / PET-CT)",
-            "type": "textarea",
-            "section": "2. Diagnostic & Pathological Workup",
-            "placeholder": "Findings of CECT Thorax/Abdomen, Whole Body 18F-FDG PET-CT, Brain MRI...",
-            "default_value": "",
+            "checked_default": False,
             "required": False,
             "grid_cols": 12,
-            "rows": 3,
         },
         {
-            "key": "biomarkers",
-            "label": "Biomarkers & Molecular Pathology",
-            "type": "text",
-            "section": "2. Diagnostic & Pathological Workup",
-            "placeholder": "e.g. ER: Positive (80%), PR: Positive (60%), HER2: Negative (1+), Ki-67: 35%, MSI-H, PD-L1 TPS > 50%",
+            "key": "radiation_oncology",
+            "label": "Radiation Oncology Plan",
+            "type": "checkbox_text",
+            "section": "3. MULTI-MODAL MANAGEMENT PLAN APPROVED BY THE BOARD",
+            "check_label": "Radiation Oncology",
+            "placeholder": "Details of radiotherapy dose, fractions, technique (IMRT/VMAT/SRS)...",
             "default_value": "",
+            "checked_default": False,
+            "required": False,
+            "grid_cols": 12,
+        },
+        {
+            "key": "palliative_care",
+            "label": "Palliative Care Plan",
+            "type": "checkbox_text",
+            "section": "3. MULTI-MODAL MANAGEMENT PLAN APPROVED BY THE BOARD",
+            "check_label": "Palliative Care",
+            "placeholder": "Details of symptom control, pain management, supportive care...",
+            "default_value": "",
+            "checked_default": False,
             "required": False,
             "grid_cols": 12,
         },
 
-        # Section 3: Multidisciplinary Board Discussion
-        {
-            "key": "discussion_summary",
-            "label": "3. Multidisciplinary Discussion Summary",
-            "type": "textarea",
-            "section": "3. Multidisciplinary Board Discussion",
-            "placeholder": "Summary of case discussion points, review of discordant findings, multi-specialty inputs...",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 12,
-            "rows": 3,
-        },
-        {
-            "key": "treatment_intent",
-            "label": "Treatment Intent",
-            "type": "select",
-            "section": "3. Multidisciplinary Board Discussion",
-            "value_options": [
-                "Curative Intent",
-                "Definitive Chemoradiation",
-                "Neoadjuvant (Pre-operative) Therapy",
-                "Adjuvant (Post-operative) Therapy",
-                "Palliative / Supportive Care",
-                "Metastasectomy / Oligometastatic Directed Therapy",
-                "Active Surveillance / Observation",
-            ],
-            "default_value": "Curative Intent",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "meeting_date",
-            "label": "Tumour Board Meeting Date",
-            "type": "date",
-            "section": "3. Multidisciplinary Board Discussion",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
-
-        # Section 4: Specific Recommendations / Board Remarks (EXACT MATCH TO ATTACHED IMAGE)
+        # Section 4: SPECIFIC RECOMMENDATIONS / BOARD REMARKS
         {
             "key": "board_remarks",
             "label": "4. SPECIFIC RECOMMENDATIONS / BOARD REMARKS",
             "type": "textarea",
-            "section": "4. Specific Recommendations / Board Remarks",
-            "placeholder": "Enter overall multidisciplinary tumour board recommendations, proposed sequencing of therapies, surgical approaches, chemotherapeutic regimens, radiation planning, supportive care...",
+            "section": "4. SPECIFIC RECOMMENDATIONS / BOARD REMARKS",
+            "placeholder": "Enter detailed multidisciplinary tumour board recommendations, sequencing of therapies, review dates...",
             "default_value": "",
             "required": True,
             "grid_cols": 12,
             "rows": 5,
         },
-        {
-            "key": "systemic_therapy",
-            "label": "Systemic Medical Oncology Regimen",
-            "type": "text",
-            "section": "4. Specific Recommendations / Board Remarks",
-            "placeholder": "e.g. Neoadjuvant Chemotherapy: 4 cycles AC followed by 4 cycles Paclitaxel q2w",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "radiation_therapy",
-            "label": "Radiation Oncology Plan",
-            "type": "text",
-            "section": "4. Specific Recommendations / Board Remarks",
-            "placeholder": "e.g. Adjuvant Radiation Therapy to chest wall and supraclavicular fossa (50 Gy in 25 fractions)",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "surgical_plan",
-            "label": "Surgical Oncology Plan",
-            "type": "text",
-            "section": "4. Specific Recommendations / Board Remarks",
-            "placeholder": "e.g. Modified Radical Mastectomy (MRM) / Breast Conservation Surgery (BCS) post NACT",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
-        {
-            "key": "palliative_followup",
-            "label": "Follow-up & Supportive Care",
-            "type": "text",
-            "section": "4. Specific Recommendations / Board Remarks",
-            "placeholder": "e.g. Review in OPD with repeat imaging post 3rd cycle; cardiac evaluation (ECHO)",
-            "default_value": "",
-            "required": False,
-            "grid_cols": 6,
-        },
 
-        # Section 5: Board Signatures & Certification (EXACT MATCH TO ATTACHED IMAGE)
+        # Section 5: BOARD CERTIFICATION & SIGNATURES
         {
             "key": "certification_statement",
             "label": "Board Certification Statement",
             "type": "declaration",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "default_value": "We hereby certify that the case details of the aforementioned patient have been reviewed thoroughly by the Multidisciplinary Tumour Board, and the recommended treatment modalities conform to established oncology guidelines for standard patient care.",
             "required": True,
             "grid_cols": 12,
@@ -294,7 +290,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "medical_oncologist_name",
             "label": "Medical Oncologist Name",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Dr. Name",
             "default_value": "",
             "required": False,
@@ -304,7 +300,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "medical_oncologist_reg",
             "label": "Medical Oncologist Reg. No",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Reg. No",
             "default_value": "",
             "required": False,
@@ -314,7 +310,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "radiation_oncologist_name",
             "label": "Radiation Oncologist Name",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Dr. Name",
             "default_value": "",
             "required": False,
@@ -324,7 +320,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "radiation_oncologist_reg",
             "label": "Radiation Oncologist Reg. No",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Reg. No",
             "default_value": "",
             "required": False,
@@ -334,7 +330,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "surgical_oncologist_name",
             "label": "Surgical Oncologist Name",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Dr. Name",
             "default_value": "",
             "required": False,
@@ -344,7 +340,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "surgical_oncologist_reg",
             "label": "Surgical Oncologist Reg. No",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Reg. No",
             "default_value": "",
             "required": False,
@@ -354,7 +350,7 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
             "key": "medical_superintendent_name",
             "label": "Medical Superintendent / Director Name",
             "type": "text",
-            "section": "5. Board Certification & Signatures",
+            "section": "5. BOARD CERTIFICATION & SIGNATURES",
             "placeholder": "Medical Superintendent / Director",
             "default_value": "Medical Superintendent / Director",
             "required": False,
@@ -364,13 +360,55 @@ DEFAULT_TUMOUR_BOARD_TEMPLATE = {
 }
 
 
+INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE = {
+    "template_id": 2,
+    "template_name": "Multidisciplinary Tumour Board Certificate (Institutional)",
+    "is_template": True,
+    "version": "1.0",
+    "description": "Comprehensive Institutional Multidisciplinary Clinical Oncology Assessment & Treatment Plan",
+    "created_at": "2026-11-02T10:00:00",
+    "header_fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["header_fields"],
+    "fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["fields"],
+}
+
+
 def ensure_templates_seeded():
-    """Ensure template_id: 1 exists in hospital_tumourBoard collection."""
+    """Ensure templates exist in hospital_tumourTemplate collection."""
     try:
-        col = hospital_tumour_board_collection
-        existing = col.find_one({"template_id": 1, "is_template": True})
-        if not existing:
+        col = hospital_tumour_template_collection
+        # Template 1
+        existing1 = col.find_one({"template_id": 1})
+        if not existing1:
             col.insert_one(DEFAULT_TUMOUR_BOARD_TEMPLATE.copy())
+        else:
+            col.update_one(
+                {"template_id": 1},
+                {
+                    "$set": {
+                        "template_name": DEFAULT_TUMOUR_BOARD_TEMPLATE["template_name"],
+                        "description": DEFAULT_TUMOUR_BOARD_TEMPLATE["description"],
+                        "header_fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["header_fields"],
+                        "fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["fields"],
+                    }
+                },
+            )
+
+        # Template 2 (for multi-template selection modal)
+        existing2 = col.find_one({"template_id": 2})
+        if not existing2:
+            col.insert_one(INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE.copy())
+        else:
+            col.update_one(
+                {"template_id": 2},
+                {
+                    "$set": {
+                        "template_name": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["template_name"],
+                        "description": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["description"],
+                        "header_fields": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["header_fields"],
+                        "fields": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["fields"],
+                    }
+                },
+            )
     except Exception as e:
         print("Warning: could not seed tumour board template:", e)
 
@@ -378,16 +416,16 @@ def ensure_templates_seeded():
 # ── Templates API ─────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def get_tumour_board_templates(request):
     """
-    Return all available Tumour Board templates from hospital_tumourBoard collection.
+    Return all available Tumour Board templates from hospital_tumourTemplate collection.
     Seeds template_id: 1 if collection has no templates.
     """
     try:
         ensure_templates_seeded()
-        col = hospital_tumour_board_collection
-        templates = list(col.find({"is_template": True}, {"_id": 0}))
+        col = hospital_tumour_template_collection
+        templates = list(col.find({}))
         if not templates:
             templates = [DEFAULT_TUMOUR_BOARD_TEMPLATE]
         return Response({"success": True, "data": serialize_doc(templates)}, status=status.HTTP_200_OK)
@@ -398,7 +436,7 @@ def get_tumour_board_templates(request):
 # ── Patient Search & Details API ──────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def search_tumour_board_patients(request):
     """
     Search patients by UHID, patient name, or IP number for Tumour Board autocomplete.
@@ -489,7 +527,7 @@ def search_tumour_board_patients(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def get_tumour_board_patient_detail(request):
     """
     Fetch comprehensive patient demographic & admission info for auto-filling by UHID.
@@ -546,7 +584,7 @@ def get_tumour_board_patient_detail(request):
 # ── Certificate CRUD & Approval APIs ──────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def list_tumour_board_certificates(request):
     """
     List stored Tumour Board patient certificates from hospital_tumourBoard collection.
@@ -560,7 +598,11 @@ def list_tumour_board_certificates(request):
         search_patient = request.GET.get("patient_name", "").strip()
         search_status = request.GET.get("status", "").strip()
 
-        query = {"is_template": {"$ne": True}, "is_deleted": {"$ne": True}}
+        query = {
+            "is_template": {"$ne": True},
+            "is_deleted": {"$ne": True},
+            "is_active": {"$ne": False},
+        }
 
         if search_uhid:
             query["uhid"] = {"$regex": re.escape(search_uhid), "$options": "i"}
@@ -592,6 +634,11 @@ def list_tumour_board_certificates(request):
             if not created_by_name and created_by:
                 created_by_name = resolve_created_by_name(created_by) or str(created_by)
 
+            lastmod_by = d.get("lastmodified_by") or d.get("updated_by") or ""
+            lastmod_by_name = d.get("lastmodified_by_name") or ""
+            if not lastmod_by_name and lastmod_by:
+                lastmod_by_name = resolve_created_by_name(lastmod_by) or str(lastmod_by)
+
             approved_by = d.get("approved_by") or ""
             approved_by_name = d.get("approved_by_name") or ""
             if not approved_by_name and approved_by:
@@ -606,13 +653,17 @@ def list_tumour_board_certificates(request):
                 "age": d.get("age", ""),
                 "gender": d.get("gender", ""),
                 "phone": d.get("phone", ""),
-                "address": d.get("address", ""),
-                "attending_doctor": d.get("attending_doctor", ""),
                 "certificate_date": d.get("certificate_date", ""),
+                "meeting_date": d.get("meeting_date") or d.get("certificate_date", ""),
+                "tms_case_ref_no": d.get("tms_case_ref_no", "") or d.get("field_values", {}).get("tms_case_ref_no", ""),
+                "scheme_name": d.get("scheme_name", "") or d.get("field_values", {}).get("scheme_name", "CMCHIS"),
+                "scheme_card_id": d.get("scheme_card_id", "") or d.get("field_values", {}).get("scheme_card_id", ""),
+                "primary_referral_dept": d.get("primary_referral_dept", "") or d.get("field_values", {}).get("primary_referral_dept", ""),
+                "treating_consultant": d.get("treating_consultant", "") or d.get("field_values", {}).get("treating_consultant", ""),
                 "template_id": d.get("template_id", 1),
-                "template_name": d.get("template_name", "Tumour Board Certificate"),
-                "primary_site": d.get("primary_site", "") or d.get("field_values", {}).get("primary_site", ""),
-                "stage": d.get("stage", "") or d.get("field_values", {}).get("stage_group", "") or d.get("field_values", {}).get("clinical_stage_tnm", ""),
+                "template_name": d.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)"),
+                "primary_site": d.get("primary_site", "") or d.get("field_values", {}).get("site_of_malignancy", "") or d.get("field_values", {}).get("primary_site", ""),
+                "stage": d.get("stage", "") or d.get("field_values", {}).get("stage", "") or d.get("field_values", {}).get("stage_group", "") or d.get("field_values", {}).get("clinical_stage_tnm", ""),
                 "board_remarks": d.get("board_remarks", "") or d.get("field_values", {}).get("board_remarks", ""),
                 "field_values": d.get("field_values", {}),
                 "is_approved": bool(d.get("is_approved", False)),
@@ -624,6 +675,9 @@ def list_tumour_board_certificates(request):
                 "created_by_name": created_by_name,
                 "created_at": d.get("created_at", ""),
                 "updated_at": d.get("updated_at", ""),
+                "lastmodified_by": lastmod_by,
+                "lastmodified_by_name": lastmod_by_name,
+                "lastmodified_date": d.get("lastmodified_date") or d.get("updated_at", ""),
             })
 
         return Response({"success": True, "data": serialize_doc(results)}, status=status.HTTP_200_OK)
@@ -632,7 +686,7 @@ def list_tumour_board_certificates(request):
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def save_tumour_board_certificate(request):
     """
     Create or update a Tumour Board certificate.
@@ -653,9 +707,25 @@ def save_tumour_board_certificate(request):
 
         field_values = payload.get("field_values") or {}
         # Also extract top-level primary site / stage / remarks for easy indexing
-        primary_site = field_values.get("primary_site") or payload.get("primary_site", "")
-        stage = field_values.get("stage_group") or field_values.get("clinical_stage_tnm") or payload.get("stage", "")
+        primary_site = (
+            field_values.get("site_of_malignancy")
+            or field_values.get("primary_site")
+            or payload.get("primary_site", "")
+        )
+        stage = (
+            field_values.get("stage")
+            or field_values.get("stage_group")
+            or field_values.get("clinical_stage_tnm")
+            or payload.get("stage", "")
+        )
         board_remarks = field_values.get("board_remarks") or payload.get("board_remarks", "")
+
+        meeting_date = payload.get("meeting_date") or payload.get("certificate_date") or date.today().strftime("%Y-%m-%d")
+        tms_case_ref_no = payload.get("tms_case_ref_no") or field_values.get("tms_case_ref_no", "")
+        scheme_name = payload.get("scheme_name") or field_values.get("scheme_name", "CMCHIS")
+        scheme_card_id = payload.get("scheme_card_id") or field_values.get("scheme_card_id", "")
+        primary_referral_dept = payload.get("primary_referral_dept") or field_values.get("primary_referral_dept", "")
+        treating_consultant = payload.get("treating_consultant") or field_values.get("treating_consultant", "")
 
         user_id = request.headers.get("X-Employee-Id") or payload.get("created_by") or "HMS-STAFF"
         user_name = resolve_created_by_name(user_id) or str(user_id)
@@ -685,17 +755,24 @@ def save_tumour_board_certificate(request):
                 "age": payload.get("age", ""),
                 "gender": payload.get("gender", ""),
                 "phone": payload.get("phone", ""),
-                "address": payload.get("address", ""),
-                "attending_doctor": payload.get("attending_doctor", ""),
                 "certificate_date": payload.get("certificate_date") or existing.get("certificate_date", today_date),
+                "meeting_date": meeting_date,
+                "tms_case_ref_no": tms_case_ref_no,
+                "scheme_name": scheme_name,
+                "scheme_card_id": scheme_card_id,
+                "primary_referral_dept": primary_referral_dept,
+                "treating_consultant": treating_consultant,
                 "template_id": payload.get("template_id", existing.get("template_id", 1)),
-                "template_name": payload.get("template_name", existing.get("template_name", "Tumour Board Certificate")),
+                "template_name": payload.get("template_name", existing.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)")),
                 "primary_site": primary_site,
                 "stage": stage,
                 "board_remarks": board_remarks,
                 "field_values": field_values,
                 "updated_at": now_str,
                 "updated_by": user_id,
+                "lastmodified_by": user_id,
+                "lastmodified_by_name": user_name,
+                "lastmodified_date": now_str,
             }
 
             col.update_one({"_id": existing["_id"]}, {"$set": update_data})
@@ -725,11 +802,15 @@ def save_tumour_board_certificate(request):
             "age": payload.get("age", ""),
             "gender": payload.get("gender", ""),
             "phone": payload.get("phone", ""),
-            "address": payload.get("address", ""),
-            "attending_doctor": payload.get("attending_doctor", ""),
             "certificate_date": payload.get("certificate_date") or today_date,
+            "meeting_date": meeting_date,
+            "tms_case_ref_no": tms_case_ref_no,
+            "scheme_name": scheme_name,
+            "scheme_card_id": scheme_card_id,
+            "primary_referral_dept": primary_referral_dept,
+            "treating_consultant": treating_consultant,
             "template_id": payload.get("template_id", 1),
-            "template_name": payload.get("template_name", "Tumour Board Certificate"),
+            "template_name": payload.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)"),
             "primary_site": primary_site,
             "stage": stage,
             "board_remarks": board_remarks,
@@ -740,6 +821,10 @@ def save_tumour_board_certificate(request):
             "created_by_name": user_name,
             "created_at": now_str,
             "updated_at": now_str,
+            "lastmodified_by": user_id,
+            "lastmodified_by_name": user_name,
+            "lastmodified_date": now_str,
+            "is_active": True,
             "is_deleted": False,
         }
 
@@ -758,10 +843,10 @@ def save_tumour_board_certificate(request):
 
 
 @api_view(["DELETE"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def delete_tumour_board_certificate(request, cert_id):
     """
-    Delete a certificate before approval.
+    Delete a certificate before approval (Soft Delete: is_active: False, is_deleted: True).
     Disallows deleting if approved.
     """
     try:
@@ -781,14 +866,30 @@ def delete_tumour_board_certificate(request, cert_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        col.delete_one({"_id": existing["_id"]})
+        user_id = request.headers.get("X-Employee-Id") or "HMS-STAFF"
+        user_name = resolve_created_by_name(user_id) or str(user_id)
+        now_str = datetime.now().isoformat()
+
+        # Soft delete: set is_active: False, is_deleted: True
+        col.update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": {
+                    "is_active": False,
+                    "is_deleted": True,
+                    "deleted_at": now_str,
+                    "deleted_by": user_id,
+                    "deleted_by_name": user_name,
+                }
+            },
+        )
         return Response({"success": True, "message": "Certificate deleted successfully."}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["PATCH", "POST"])
-@permission_classes([AllowAny])
+@permission_classes([HasRoleAndDataPermission])
 def approve_tumour_board_certificate(request, cert_id):
     """
     Approve a Tumour Board certificate.

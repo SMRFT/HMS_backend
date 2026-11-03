@@ -299,6 +299,27 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/preview-mhc-reminders/.*$': 'HMS-P-MHC',
     r'^/_b_a_c_k_e_n_d/HMS/mhc-reports(?:/[^/]+)+/$': 'HMS-P-MHC',
 
+    # ==================== TUMOUR BOARD CERTIFICATION ====================
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-templates/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-templates/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-patients/search/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-patients/search/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-patients/detail/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-patients/detail/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-patient-detail/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-patient-detail/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/save/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-certificates/save/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/edit/?(\?.*)?$': 'HMS-P-TBCE',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-certificates/edit/': 'HMS-P-TBCE',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/approve(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-TBCA',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/approve/.*$': 'HMS-P-TBCA',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/delete(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-TBCD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/delete/.*$': 'HMS-P-TBCD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates/?(\?.*)?$': 'HMS-P-TBC',
+    '/_b_a_c_k_e_n_d/HMS/tumour-board-certificates/': 'HMS-P-TBC',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/tumour-board-certificates(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-TBC',
+
      #Investigation Reports (RD):      
     r'^/_b_a_c_k_e_n_d/HMS/anc-register/?(\?.*)?$': 'HMS-API-JRD',  
     r'^/_b_a_c_k_e_n_d/HMS/jrd-reports/?(\?.*)?$': 'HMS-API-JRD',  
