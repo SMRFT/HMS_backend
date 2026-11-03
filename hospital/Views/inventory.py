@@ -770,6 +770,81 @@ def _grn_number_from_draft(draft_number, purchase_category):
     return f"{cat_prefix}/{fin_year}/{seq}"
 
 
+def _enrich_grn_items(data_list):
+    if not data_list:
+        return data_list
+
+    emp_ids = set()
+    for r in data_list:
+        for k in ("created_by", "entered_by", "verified_by", "lastmodified_by", "edited_by"):
+            val = r.get(k)
+            if val and any(c.isdigit() for c in str(val)):
+                emp_ids.add(str(val).strip())
+
+    emp_name_map = {}
+    if emp_ids:
+        try:
+            client, _ = get_hms_db()
+            global_db = client["Global"]
+            id_query = []
+            for eid in emp_ids:
+                id_query.append({"employeeId": eid})
+                if eid.isdigit():
+                    num_val = int(eid)
+                    id_query.append({"employeeId": num_val})
+                    id_query.append({"employeeId": f"{num_val:04d}"})
+                    id_query.append({"employeeId": f"{num_val:05d}"})
+                    id_query.append({"employeeId": f"{num_val:06d}"})
+                id_query.append({"userId": eid})
+
+            profiles = list(global_db["backend_diagnostics_profile"].find(
+                {"$or": id_query},
+                {"employeeId": 1, "userId": 1, "employeeName": 1, "name": 1, "firstName": 1, "lastName": 1}
+            ))
+            for p in profiles:
+                name = (
+                    p.get("employeeName")
+                    or p.get("name")
+                    or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+                )
+                if name:
+                    if p.get("employeeId") is not None:
+                        emp_name_map[str(p.get("employeeId")).strip()] = name
+                    if p.get("userId"):
+                        emp_name_map[str(p.get("userId")).strip()] = name
+        except Exception as e:
+            logger.error(f"Error enriching employee names: {e}")
+
+    def _get_emp_name(val):
+        if not val:
+            return ""
+        s = str(val).strip()
+        return emp_name_map.get(s, s)
+
+    for r in data_list:
+        if isinstance(r.get("items"), str):
+            try:
+                r["items"] = json.loads(r["items"])
+            except Exception:
+                pass
+
+        c_by = r.get("entered_by") or r.get("created_by") or ""
+        r["entered_by"] = _get_emp_name(c_by)
+        r["entered_by_name"] = _get_emp_name(c_by)
+        r["created_by_name"] = _get_emp_name(r.get("created_by"))
+
+        v_by = r.get("verified_by") or (r.get("lastmodified_by") if r.get("status") == "Verified" else "")
+        r["verified_by"] = _get_emp_name(v_by) if v_by else ""
+        r["verified_by_name"] = _get_emp_name(v_by) if v_by else ""
+        if r.get("lastmodified_by"):
+            r["lastmodified_by_name"] = _get_emp_name(r.get("lastmodified_by"))
+
+        if r.get("edited_by"):
+            r["edited_by_name"] = _get_emp_name(r.get("edited_by"))
+
+    return data_list
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GRN VIEW — HIGH PERFORMANCE + PAGINATION + HOSPITAL/BRANCH FILTER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -815,7 +890,7 @@ def grn_view(request, pk=None):
                 if not grn:
                     return Response({"error": "GRN not found"}, status=404)
 
-                return Response(GRNSerializer(grn).data)
+                return Response(_enrich_grn_items([GRNSerializer(grn).data])[0])
 
             filter_q = {}
             if hospital_code and hospital_code != "system":
@@ -840,15 +915,6 @@ def grn_view(request, pk=None):
                 filter_q["status"] = status_f
 
             filter_q = apply_date_filter(filter_q, request, "created_date")
-
-            def _enrich_grn_items(data_list):
-                for r in data_list:
-                    if isinstance(r.get("items"), str):
-                        try:
-                            r["items"] = json.loads(r["items"])
-                        except Exception:
-                            pass
-                return data_list
 
             return Response(paginate_mongo_query(
                 "hospital_grn",
@@ -892,7 +958,7 @@ def grn_view(request, pk=None):
                 created_date=timezone.now(),
                 is_active=True,
             )
-            return Response({"success": True, "data": GRNSerializer(saved).data}, status=201)
+            return Response({"success": True, "data": _enrich_grn_items([GRNSerializer(saved).data])[0]}, status=201)
  
         logger.error("GRN POST errors: %s", serializer.errors)
         return Response({"success": False, "error": serializer.errors}, status=400)
@@ -1051,7 +1117,7 @@ def grn_view(request, pk=None):
                     created_date             = timezone.now(),
                 )
  
-        return Response({"success": True, "data": GRNSerializer(saved).data})
+        return Response({"success": True, "data": _enrich_grn_items([GRNSerializer(saved).data])[0]})
     
 
 @api_view(["GET"])
@@ -1782,3 +1848,223 @@ def get_pharmacy_item_tracking(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def pharmacy_item_purchase_history(request):
+    """
+    Returns the comprehensive Purchase History for a pharmacy item across all GRNs,
+    matching the modal with:
+    Ref, P.Date, Supplier, Unit, Quantity, Batch, P.Rate, Mrp, Inv Date, Order Number, Type, Expiry, Packing
+    Supports supplier filtering and pagination.
+    """
+    try:
+        item_id = request.GET.get("item_id")
+        if not item_id:
+            return Response({"success": False, "error": "item_id is required"}, status=400)
+
+        supplier_filter = request.GET.get("supplier", "").strip()
+        page = max(1, int(request.GET.get("page", 1)))
+        page_size = max(1, int(request.GET.get("page_size", 10)))
+
+        _, db = get_hms_db()
+
+        id_list = [item_id]
+        if str(item_id).isdigit():
+            id_list.append(int(item_id))
+        id_list.append(str(item_id))
+
+        # Query GRNs containing this item
+        query = {"items.item_id": {"$in": id_list}}
+        grns = list(db["hospital_grn"].find(
+            query,
+            {
+                "grn_number": 1,
+                "date": 1,
+                "vendor_id": 1,
+                "invoice_no": 1,
+                "invoice_date": 1,
+                "po_number": 1,
+                "purchase_category": 1,
+                "grn_type": 1,
+                "items": 1,
+                "_id": 0,
+            }
+        ))
+
+        # Collect vendor IDs for batch name lookup
+        vendor_ids = list({g.get("vendor_id") for g in grns if g.get("vendor_id") is not None})
+        v_query_ids = []
+        for vid in vendor_ids:
+            v_query_ids.append(vid)
+            if str(vid).isdigit():
+                v_query_ids.append(int(vid))
+            v_query_ids.append(str(vid))
+
+        vendor_map = {}
+        if v_query_ids:
+            for v in db["hospital_vendor"].find({"vendor_id": {"$in": v_query_ids}}, {"vendor_id": 1, "name": 1, "_id": 0}):
+                vendor_map[str(v.get("vendor_id"))] = v.get("name") or ""
+                if str(v.get("vendor_id")).isdigit():
+                    vendor_map[int(v.get("vendor_id"))] = v.get("name") or ""
+
+        all_records = []
+        suppliers_set = {}
+        seen_grn_batches = set()
+
+        for g in grns:
+            vid = g.get("vendor_id")
+            vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
+            if vid:
+                suppliers_set[str(vid)] = vname
+
+            p_date_raw = g.get("date")
+            p_date_str = "—"
+            p_date_sort = ""
+            if p_date_raw:
+                if hasattr(p_date_raw, "strftime"):
+                    p_date_str = p_date_raw.strftime("%d/%m/%Y")
+                    p_date_sort = p_date_raw.strftime("%Y%m%d%H%M%S")
+                else:
+                    p_date_str = str(p_date_raw)[:10]
+                    p_date_sort = str(p_date_raw)
+
+            inv_date_raw = g.get("invoice_date")
+            inv_date_str = "—"
+            if inv_date_raw:
+                if hasattr(inv_date_raw, "strftime"):
+                    inv_date_str = inv_date_raw.strftime("%d/%m/%Y")
+                else:
+                    inv_date_str = str(inv_date_raw)[:10]
+
+            for itm in g.get("items", []):
+                cur_id = itm.get("item_id")
+                if cur_id in id_list or str(cur_id) in [str(x) for x in id_list]:
+                    batch_no = str(itm.get("batch") or itm.get("batch_number") or "—").strip()
+                    grn_no = str(g.get("grn_number") or g.get("invoice_no") or "—").strip()
+                    seen_grn_batches.add((grn_no, batch_no))
+
+                    exp = itm.get("expiry")
+                    if not exp and (itm.get("expiry_year") or itm.get("expiry_month")):
+                        exp = f"{itm.get('expiry_year', '')}/{itm.get('expiry_month', '')}"
+
+                    p_rate = itm.get("packing_price") or itm.get("purchase_cost") or itm.get("unit_price") or "0"
+                    mrp = itm.get("mrp") or "0"
+
+                    try:
+                        p_rate_fmt = f"{float(p_rate):.2f}"
+                    except (ValueError, TypeError):
+                        p_rate_fmt = str(p_rate)
+
+                    try:
+                        mrp_fmt = f"{float(mrp):.2f}"
+                    except (ValueError, TypeError):
+                        mrp_fmt = str(mrp)
+
+                    all_records.append({
+                        "ref": grn_no,
+                        "p_date": p_date_str,
+                        "p_date_sort": p_date_sort,
+                        "supplier_id": str(vid or ""),
+                        "supplier": vname,
+                        "unit": str(itm.get("unit") or "1"),
+                        "quantity": str(itm.get("quantity") or "0"),
+                        "batch": batch_no,
+                        "p_rate": p_rate_fmt,
+                        "mrp": mrp_fmt,
+                        "inv_date": inv_date_str,
+                        "order_number": g.get("po_number") or g.get("order_number") or "—",
+                        "type": g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE (IP)",
+                        "expiry": exp or "—",
+                        "packing": str(itm.get("packing") or "1"),
+                    })
+
+        # Also enrich from hospital_pharmacystock if any batch was created outside GRN
+        stock_cursor = db["hospital_pharmacystock"].find({"item_id": {"$in": id_list}})
+        for stk in stock_cursor:
+            stk_grn = str(stk.get("grn_number") or stk.get("invoice_no") or "—").strip()
+            stk_batch = str(stk.get("batch_number") or "—").strip()
+            if (stk_grn, stk_batch) not in seen_grn_batches and (stk_grn != "—" or stk_batch != "—"):
+                seen_grn_batches.add((stk_grn, stk_batch))
+                vid = stk.get("vendor_id")
+                vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
+                if vid:
+                    suppliers_set[str(vid)] = vname
+
+                c_date = stk.get("created_date")
+                p_date_str = "—"
+                p_date_sort = ""
+                if c_date:
+                    if hasattr(c_date, "strftime"):
+                        p_date_str = c_date.strftime("%d/%m/%Y")
+                        p_date_sort = c_date.strftime("%Y%m%d%H%M%S")
+                    else:
+                        p_date_str = str(c_date)[:10]
+
+                exp_date = stk.get("expiry_date")
+                exp_str = "—"
+                if exp_date:
+                    if hasattr(exp_date, "strftime"):
+                        exp_str = exp_date.strftime("%m/%Y")
+                    else:
+                        exp_str = str(exp_date)[:7]
+
+                p_rate = stk.get("packing_price") or stk.get("purchase_cost") or "0"
+                mrp = stk.get("mrp") or "0"
+
+                all_records.append({
+                    "ref": stk_grn,
+                    "p_date": p_date_str,
+                    "p_date_sort": p_date_sort,
+                    "supplier_id": str(vid or ""),
+                    "supplier": vname,
+                    "unit": "1",
+                    "quantity": str(stk.get("total_stock") or "0"),
+                    "batch": stk_batch,
+                    "p_rate": f"{float(p_rate):.2f}" if str(p_rate).replace(".", "", 1).isdigit() else str(p_rate),
+                    "mrp": f"{float(mrp):.2f}" if str(mrp).replace(".", "", 1).isdigit() else str(mrp),
+                    "inv_date": "—",
+                    "order_number": "—",
+                    "type": "MEDICINE PURCHASE (IP)",
+                    "expiry": exp_str,
+                    "packing": "1",
+                })
+
+        # Sort descending by purchase date
+        all_records.sort(key=lambda r: r.get("p_date_sort") or "", reverse=True)
+
+        # Filter by supplier if requested
+        filtered = all_records
+        if supplier_filter and str(supplier_filter).strip().upper() not in ["ALL", ""]:
+            s_up = str(supplier_filter).strip().upper()
+            filtered = [
+                r for r in all_records
+                if str(r.get("supplier_id")).strip() == str(supplier_filter).strip()
+                or str(r.get("supplier")).strip().upper() == s_up
+            ]
+
+        total_records = len(filtered)
+        import math
+        total_pages = max(1, math.ceil(total_records / page_size))
+        start = (page - 1) * page_size
+        paged = filtered[start:start + page_size]
+
+        unique_suppliers = sorted(
+            [{"vendor_id": k, "name": v} for k, v in suppliers_set.items() if v and v != "—"],
+            key=lambda x: x["name"]
+        )
+
+        return Response({
+            "success": True,
+            "total_records": total_records,
+            "total_pages": total_pages,
+            "current_page": page,
+            "page_size": page_size,
+            "suppliers": unique_suppliers,
+            "records": paged,
+        })
+
+    except Exception as e:
+        logger.error("[pharmacy_item_purchase_history] %s", e, exc_info=True)
+        return Response({"success": False, "error": str(e)}, status=500)

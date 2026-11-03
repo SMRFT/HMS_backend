@@ -119,6 +119,7 @@ urlpatterns = [
     path("pharmacy_items/", inventory.pharmacy_item_view, name="pharmacy-item-list-alt"),
     path("pharmacy_items/<int:pk>/", inventory.pharmacy_item_view, name="pharmacy-item-detail-alt"),
     path("get_pharmacy_item_tracking/", inventory.get_pharmacy_item_tracking, name="get_pharmacy_item_tracking"),
+    path("pharmacy_item_purchase_history/", inventory.pharmacy_item_purchase_history, name="pharmacy_item_purchase_history"),
 
     # Pharmacy Category URLs
     path("pharmacy-category/", inventory.pharmacycategory_view, name="pharmacy-category-list"),

@@ -132,6 +132,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/?(\?.*)?$': 'HMS-P-VND',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_items/[^/]+/?(\?.*)?$': 'HMS-P-PID',
     r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_item_tracking/?(\?.*)?$': 'HMS-P-PID',
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy_item_purchase_history/?(\?.*)?$': 'HMS-P-PID',
 
     r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
