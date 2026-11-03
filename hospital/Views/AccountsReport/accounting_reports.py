@@ -216,11 +216,13 @@ def fetch_detailed_billing_data(db, ccc_records):
         },
         "hospital_billing": {
             "bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "payment_mode": 1,
-            "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1
+            "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1,
+            "discount_amount": 1, "discount": 1, "advance_amount": 1, "advance": 1, "scheme": 1, "company_name": 1, "status": 1, "is_cancelled": 1
         },
         "hospital_dischargebilling": {
             "bill_no": 1, "uhid": 1, "ip_number": 1, "net_amount": 1, "total_amount": 1,
-            "payment_mode": 1, "payment_details": 1, "items": 1
+            "payment_mode": 1, "payment_details": 1, "items": 1,
+            "advance_amount": 1, "discount_amount": 1, "sales_return": 1, "patient_debit": 1, "company_name": 1, "insurance_company": 1, "card_number": 1, "status": 1, "is_cancelled": 1
         },
         "hospital_salesreturn": {
             "return_bill_no": 1, "uhid": 1, "bill_no": 1, "return_amount": 1, "payment_mode": 1,
@@ -367,13 +369,51 @@ def fetch_detailed_billing_data(db, ccc_records):
             
         elif cat in ["Billing", "Registration", "RegistrationBills"] and bill_no in billing_map:
             d = billing_map[bill_no]
+            bt_no = d.get("billTypeNo")
+            bt_name = billtype_map.get(bt_no) if bt_no else None
+            if not bt_name and d.get("bill_type") is not None:
+                bt_name = billtype_id_map.get(str(d.get("bill_type")).strip())
+            display_type = bt_name or "REGISTRATION(SH)"
+            
+            p_mode = (d.get("payment_details") or {}).get("method") or d.get("payment_mode") or d.get("payment_method") or "Cash"
+            tot_fees = _to_float(d.get("total_fees"))
+            disc_amt = _to_float(d.get("discount_amount") or d.get("discount") or 0)
+            adv_amt = _to_float(d.get("advance_amount") or d.get("advance") or 0)
+            
+            mode_str = str(p_mode).strip().lower()
+            is_cash = mode_str in ["cash", ""]
+            is_bank = any(b in mode_str for b in ["bank", "card", "visa", "upi", "pos", "online", "cheque", "neft"])
+            is_credit = any(c in mode_str for c in ["credit", "scheme", "insurance", "tpa", "cghs", "echs", "esic"])
+            
+            gross_val = tot_fees if tot_fees > 0 else _to_float(r.get("collected_amount"))
+            cash_val = gross_val if is_cash else 0.0
+            bank_val = gross_val if is_bank else 0.0
+            credit_val = gross_val if is_credit else 0.0
+            if not is_cash and not is_bank and not is_credit:
+                cash_val = gross_val
+                
+            flag_val = "C" if is_cash else "R"
+            scheme_sub = d.get("company_name") or d.get("scheme") or ("VISA CARD" if "card" in mode_str or "visa" in mode_str else "")
+            is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            
             detail.update({
                 "type": "Registration",
-                "type_name": "REGISTRATION(SH)",
+                "type_name": display_type,
+                "billTypeNo": bt_no or "",
                 "uhid": d.get("uhid"),
-                "net_amount": _to_float(d.get("total_fees")),
-                "display_amount": _to_float(d.get("total_fees")),
-                "payment_mode": d.get("payment_mode") or d.get("payment_method") or "Cash",
+                "op_number": d.get("uhid"),
+                "gross": gross_val,
+                "cash": cash_val,
+                "credit": credit_val,
+                "bank": bank_val,
+                "flag": flag_val,
+                "scheme": scheme_sub,
+                "discount": disc_amt,
+                "advance": adv_amt,
+                "is_cancelled": is_canc,
+                "net_amount": tot_fees,
+                "display_amount": tot_fees,
+                "payment_mode": p_mode,
                 "payment_details": d.get("payment_details") or {},
                 "items": d.get("items") or []
             })
@@ -382,12 +422,47 @@ def fetch_detailed_billing_data(db, ccc_records):
             d = discharge_map[bill_no]
             pd = d.get("payment_details") or {}
             p_mode = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or "Cash"
+            tot_amt = _to_float(d.get("total_amount") or d.get("gross_amount") or d.get("net_amount"))
+            net_amt = _to_float(d.get("net_amount") or d.get("paid_amount"))
+            adv_amt = _to_float(d.get("advance_amount") or 0)
+            disc_amt = _to_float(d.get("discount_amount") or 0)
+            sr_amt = _to_float(d.get("sales_return") or 0)
+            pdebit_amt = _to_float(d.get("patient_debit") or 0)
+            
+            mode_str = str(p_mode).strip().lower()
+            is_cash = mode_str in ["cash", ""]
+            is_bank = any(b in mode_str for b in ["bank", "card", "visa", "upi", "pos", "online", "cheque", "neft"])
+            is_credit = any(c in mode_str for c in ["credit", "scheme", "insurance", "tpa", "cghs", "echs", "esic"])
+            
+            gross_val = tot_amt
+            cash_val = net_amt if is_cash else 0.0
+            bank_val = net_amt if is_bank else 0.0
+            credit_val = net_amt if is_credit else 0.0
+            if not is_cash and not is_bank and not is_credit:
+                cash_val = net_amt
+                
+            flag_val = "C" if is_cash else "R"
+            scheme_sub = d.get("insurance_company") or d.get("company_name") or ("VISA CARD" if "card" in mode_str or "visa" in mode_str else "")
+            is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            
             detail.update({
                 "type": "Discharge",
                 "type_name": "DISCHARGE",
                 "uhid": d.get("uhid"),
-                "net_amount": _to_float(d.get("net_amount") or d.get("paid_amount")),
-                "display_amount": _to_float(d.get("net_amount") or d.get("paid_amount")),
+                "ip_number": d.get("ip_number") or "",
+                "gross": gross_val,
+                "cash": cash_val,
+                "credit": credit_val,
+                "bank": bank_val,
+                "flag": flag_val,
+                "scheme": scheme_sub,
+                "advance": adv_amt,
+                "discount": disc_amt,
+                "sales_return": sr_amt,
+                "patient_debit": pdebit_amt,
+                "is_cancelled": is_canc,
+                "net_amount": net_amt,
+                "display_amount": net_amt,
                 "payment_mode": p_mode,
                 "payment_details": pd,
                 "items": d.get("items") or []

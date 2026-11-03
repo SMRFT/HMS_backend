@@ -85,9 +85,26 @@ def bill_wise_report(request):
                 r["type"] = "Miscellaneous"
                 
             if type_filter and type_filter != "All":
-                tf_norm = type_filter.replace(" ", "").lower()
-                rt_norm = str(r["type"]).replace(" ", "").lower()
-                if tf_norm != rt_norm:
+                tf = str(type_filter).strip().lower()
+                tf_norm = tf.replace(" ", "").replace("_", "").replace("-", "")
+                
+                # Check against type, type_name, billTypeNo, and billing category
+                r_type = str(r.get("type", "")).strip().lower()
+                r_typename = str(r.get("type_name", "")).strip().lower()
+                r_btn = str(r.get("billTypeNo", "")).strip().lower()
+                
+                r_type_norm = r_type.replace(" ", "").replace("_", "").replace("-", "")
+                r_typename_norm = r_typename.replace(" ", "").replace("_", "").replace("-", "")
+                r_btn_norm = r_btn.replace(" ", "").replace("_", "").replace("-", "")
+                
+                matches = (
+                    tf_norm == r_type_norm or
+                    tf_norm == r_typename_norm or
+                    tf_norm == r_btn_norm or
+                    tf_norm in r_typename_norm or
+                    r_typename_norm in tf_norm
+                )
+                if not matches:
                     continue
             if patient_filter and patient_filter != r["uhid"]:
                 continue
@@ -126,8 +143,12 @@ def bill_wise_report(request):
 
         client.close()
         
-        # Sort by date
-        report_data.sort(key=lambda x: x["bill_date"] or "", reverse=True)
+        # Sort primarily by type_name (bill type group), then by bill_date / bill_no
+        report_data.sort(key=lambda x: (
+            str(x.get("type_name") or x.get("type") or "").upper(),
+            x.get("bill_date") or "",
+            x.get("bill_no") or ""
+        ))
 
         return Response({
             "success": True,
