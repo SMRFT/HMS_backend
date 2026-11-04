@@ -482,6 +482,17 @@ class CashcountershiftdetailsSerializer(serializers.ModelSerializer):
         model = Cashcountershiftdetails
         fields = '__all__'
 
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            data = data.copy()
+            for key in ["SelectedOutlet", "outlet_code", "hospital_code", "branch_code", "CashierID", "CashCounter", "created_by", "created_br", "ShiftStatus"]:
+                val = data.get(key)
+                if isinstance(val, (list, tuple)):
+                    data[key] = str(val[0]).strip() if val else ""
+                elif val is not None:
+                    data[key] = str(val).strip()
+        return super().to_internal_value(data)
+
     def validate_OpeningBalance(self, value):
         return self._clean_decimal(value)
 

@@ -1158,6 +1158,10 @@ def convert_decimal(value):
 # GET RETURN BILLS
 # ---------------------------------------------------
 
+# ---------------------------------------------------
+# GET RETURN BILLS
+# ---------------------------------------------------
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_return_bills(request):
@@ -1176,6 +1180,13 @@ def get_return_bills(request):
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
         employee_id   = data.get("auth-user-id")
+
+        print("---- get_return_bills request.data ----")
+        print("hospital_code:", repr(hospital_code))
+        print("branch_code  :", repr(branch_code))
+        print("outlet_code  :", repr(outlet_code))
+        print("employee_id  :", repr(employee_id))
+        print("all keys     :", list(data.keys()))
 
         # ---------------------------------------------------
         # CURRENT DATE
@@ -1239,7 +1250,16 @@ def get_return_bills(request):
         # CHECK HMS OUTLETS
         # ---------------------------------------------------
 
-        hms_outlets = profile_data.get("hms_outlets", [])
+        hms_outlets = [
+            str(o).strip()
+            for o in (profile_data.get("hms_outlets") or [])
+        ]
+
+        # outlet may arrive as a list or with stray whitespace
+        if isinstance(outlet_code, (list, tuple)):
+            outlet_code = outlet_code[0] if outlet_code else None
+
+        outlet_code = str(outlet_code).strip() if outlet_code else None
 
         if outlet_code not in hms_outlets:
 
@@ -1247,6 +1267,7 @@ def get_return_bills(request):
                 {
                     "status": "error",
                     "message": "Outlet not mapped for employee",
+                    "received_outlet": repr(outlet_code),
                     "employee_outlets": hms_outlets
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -1641,5 +1662,3 @@ def get_return_bills(request):
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
- 
-

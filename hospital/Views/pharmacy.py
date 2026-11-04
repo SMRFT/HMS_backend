@@ -77,29 +77,28 @@ def to_utc_iso(dt_val):
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_stock(request):
     try:
-        # ✅ Get values safely from request data, GET params, headers or fallback
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-        hospital_code = (
-            request.GET.get("hospital_code")
-            or data.get("auth-hospital-code")
-            or request.headers.get("auth-hospital-code")
-            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-            or "SH001"
+        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+        raw_outlet    = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+
+        header_outlet = (
+            request.headers.get("Outlet-Code")
+            or request.headers.get("outlet-code")
+            or request.META.get("HTTP_OUTLET_CODE")
+            or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
         )
-        branch_code = (
-            request.GET.get("branch_code")
-            or data.get("auth-branch-code")
-            or request.headers.get("auth-branch-code")
-            or request.META.get("HTTP_AUTH_BRANCH_CODE")
-            or "SHB001"
-        )
-        outlet_code = (
-            request.GET.get("outlet_code")
-            or data.get("auth-outlet-code")
-            or request.headers.get("auth-outlet-code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or "OLET001"
-        )
+        if header_outlet:
+            outlet_code = header_outlet
+        elif isinstance(raw_outlet, (list, tuple)):
+            if len(raw_outlet) == 1:
+                outlet_code = raw_outlet[0]
+            elif raw_outlet:
+                outlet_code = {"$in": list(raw_outlet)}
+            else:
+                outlet_code = None
+        else:
+            outlet_code = raw_outlet
 
         search_query = (
             request.GET.get("search")
@@ -118,12 +117,14 @@ def get_pharmacy_stock(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         mongo_db = client["HMS"]
 
-        # ✅ MATCH STOCK STRICTLY
-        match_stage = {
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code   
-        }
+        # ✅ MATCH STOCK DYNAMICALLY
+        match_stage = {}
+        if hospital_code:
+            match_stage["hospital_code"] = hospital_code
+        if branch_code:
+            match_stage["branch_code"] = branch_code
+        if outlet_code:
+            match_stage["outlet_code"] = outlet_code
 
         # Filter to active batches with total_stock > 0 to avoid scanning tens of thousands of historical 0-stock batches
         include_zero_stock = request.GET.get("include_zero_stock") or data.get("include_zero_stock")
@@ -936,8 +937,26 @@ def get_pharmacy_BillType(request):
  
     hospital_code = request.data.get("auth-hospital-code") 
     branch_code   = request.data.get("auth-branch-code") 
-    outlet_code   = request.data.get("auth-outlet-code") 
-    print(request.data.get)
+    raw_outlet    = request.data.get("auth-outlet-code") 
+
+    header_outlet = (
+        request.headers.get("Outlet-Code")
+        or request.headers.get("outlet-code")
+        or request.META.get("HTTP_OUTLET_CODE")
+        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+    )
+    if header_outlet:
+        outlet_code = header_outlet
+    elif isinstance(raw_outlet, (list, tuple)):
+        if len(raw_outlet) == 1:
+            outlet_code = raw_outlet[0]
+        elif raw_outlet:
+            outlet_code = {"$in": list(raw_outlet)}
+        else:
+            outlet_code = None
+    else:
+        outlet_code = raw_outlet
+
     print("hospital_code:", hospital_code)
     print("branch_code:", branch_code)
     print("outlet_code:", outlet_code)
@@ -3886,13 +3905,35 @@ def pharmacy_view_bills(request):
     # =========================================================
     # ✅ Outlet Validation
     # =========================================================
-    if request_outlet not in emp_outlets:
-        return Response({
-            "success": False,
-            "message": f"Outlet {request_outlet} not mapped to employee"
-        }, status=403)
+    header_outlet = (
+        request.headers.get("Outlet-Code")
+        or request.headers.get("outlet-code")
+        or request.META.get("HTTP_OUTLET_CODE")
+        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+    )
 
-    matched_outlet = request_outlet
+    if isinstance(request_outlet, (list, tuple)):
+        valid_outlets = [o for o in request_outlet if o in emp_outlets]
+        if not valid_outlets:
+            return Response({
+                "success": False,
+                "message": f"Outlet {request_outlet} not mapped to employee"
+            }, status=403)
+        if header_outlet and header_outlet in valid_outlets:
+            matched_outlet = header_outlet
+        elif header_outlet and header_outlet in emp_outlets:
+            matched_outlet = header_outlet
+        elif len(valid_outlets) == 1:
+            matched_outlet = valid_outlets[0]
+        else:
+            matched_outlet = header_outlet or valid_outlets[0]
+    else:
+        if request_outlet not in emp_outlets:
+            return Response({
+                "success": False,
+                "message": f"Outlet {request_outlet} not mapped to employee"
+            }, status=403)
+        matched_outlet = header_outlet if (header_outlet and header_outlet in emp_outlets) else request_outlet
 
     # =========================================================
     # ✅ Get All Bill Types
@@ -3961,8 +4002,11 @@ def pharmacy_view_bills(request):
         "billing_status__in": ["Billed", "Paid", "Processing", "deleted"],
         "hospital_code": hospital_code,
         "branch_code": branch_code,
-        "outlet_code": matched_outlet,
     }
+    if isinstance(matched_outlet, (list, tuple)):
+        bill_filters["outlet_code__in"] = list(matched_outlet)
+    else:
+        bill_filters["outlet_code"] = matched_outlet
 
     if bill_type_param and bill_type_param != "ALL":
         try:
@@ -4073,7 +4117,7 @@ def pharmacy_view_bills(request):
                 "Bill_id": {"$in": missing_med_bill_ids},
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet_code": matched_outlet
+                "outlet_code": {"$in": list(matched_outlet)} if isinstance(matched_outlet, (list, tuple)) else matched_outlet
             },
             {
                 "Bill_id": 1,
@@ -4108,7 +4152,7 @@ def pharmacy_view_bills(request):
     items_stock_data = get_pharmacy_items_with_stock(
         hospital_code=hospital_code,
         branch_code=branch_code,
-        outlet_code=matched_outlet,
+        outlet_code=matched_outlet[0] if isinstance(matched_outlet, (list, tuple)) and matched_outlet else matched_outlet,
         item_ids=list(all_item_ids)
     ) if all_item_ids else {"items": {}, "stock_by_item": {}, "stock_by_batch": {}}
 
