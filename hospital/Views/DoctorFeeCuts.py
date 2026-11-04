@@ -1,5 +1,7 @@
 import os
 import datetime
+import time
+import re
 import traceback
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -24,11 +26,72 @@ def to_float(val):
     except (ValueError, TypeError):
         return 0.0
 
-def get_db():
-    mongo_host = os.getenv('GLOBAL_DB_HOST') or 'mongodb://localhost:27017/'
-    client = MongoClient(mongo_host)
-    return client['HMS']
+def normalize_datetime(raw_val):
+    """
+    Safely converts any datetime, date, Mongo dict, or ISO string to a naive datetime.datetime.
+    Prevents TypeError with date.replace(tzinfo=None) or date vs datetime comparisons.
+    """
+    if raw_val is None:
+        return None
+    dt = None
+    if isinstance(raw_val, datetime.datetime):
+        dt = raw_val
+    elif isinstance(raw_val, datetime.date):
+        dt = datetime.datetime.combine(raw_val, datetime.time.min)
+    elif isinstance(raw_val, dict) and '$date' in raw_val:
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw_val['$date']).replace("Z", "+00:00"))
+        except Exception:
+            pass
+    elif isinstance(raw_val, str) and raw_val.strip():
+        s = raw_val.strip()
+        try:
+            dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            try:
+                dt = datetime.datetime.strptime(s[:10], "%Y-%m-%d")
+            except Exception:
+                pass
 
+    if dt is not None and timezone.is_aware(dt):
+        dt = timezone.make_naive(dt)
+    return dt
+
+_mongo_client = None
+
+def get_mongo_client():
+    global _mongo_client
+    if _mongo_client is None:
+        mongo_host = os.getenv('GLOBAL_DB_HOST') or 'mongodb://localhost:27017/'
+        _mongo_client = MongoClient(mongo_host, maxPoolSize=50, connect=True)
+    return _mongo_client
+
+def get_db():
+    return get_mongo_client()['HMS']
+
+_providers_cache = None
+_providers_cache_time = 0
+
+def _get_providers_map(db):
+    global _providers_cache, _providers_cache_time
+    now = time.time()
+    if _providers_cache is not None and (now - _providers_cache_time < 300):
+        return _providers_cache
+    providers = {}
+    try:
+        for p in db['hospital_insuranceprovider'].find({}, {"_id": 0, "company_code": 1, "company_name": 1}):
+            if p.get('company_code'):
+                providers[p['company_code']] = p.get('company_name', '')
+    except Exception:
+        pass
+    if not providers:
+        try:
+            providers = {p.company_code: p.company_name for p in InsuranceProvider.objects.all() if p.company_code}
+        except Exception:
+            pass
+    _providers_cache = providers
+    _providers_cache_time = now
+    return providers
 
 def _bulk_get_employee_names(emp_ids: set) -> dict:
     """
@@ -40,10 +103,8 @@ def _bulk_get_employee_names(emp_ids: set) -> dict:
     if not clean_ids:
         return {}
     try:
-        mongo_host = os.getenv('GLOBAL_DB_HOST') or 'mongodb://localhost:27017/'
         global_db_name = os.getenv('GLOBAL_DB_NAME') or 'Global'
-        client = MongoClient(mongo_host)
-        global_db = client[global_db_name]
+        global_db = get_mongo_client()[global_db_name]
         cursor = global_db['backend_diagnostics_profile'].find(
             {"employeeId": {"$in": clean_ids}},
             {"employeeId": 1, "employeeName": 1, "_id": 0}
@@ -65,10 +126,8 @@ def _bulk_get_employee_profiles(emp_ids: set) -> dict:
     if not clean_ids:
         return {}
     try:
-        mongo_host = os.getenv('GLOBAL_DB_HOST') or 'mongodb://localhost:27017/'
         global_db_name = os.getenv('GLOBAL_DB_NAME') or 'Global'
-        client = MongoClient(mongo_host)
-        global_db = client[global_db_name]
+        global_db = get_mongo_client()[global_db_name]
         cursor = global_db['backend_diagnostics_profile'].find(
             {"employeeId": {"$in": clean_ids}},
             {"employeeId": 1, "employeeName": 1, "email": 1, "officialEmail": 1, "personalEmail": 1, "_id": 0}
@@ -150,10 +209,8 @@ def get_patient_admission_details(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_admitted_doctor_fee_patients(request):
     """
-    Fetch all admitted patients (is_admitted=True) from Admission model,
-    and retrieve total fee (total_amount), discount_amount, net_amount, medicines_amount, implant_amount from DischargeBilling
-    (fallback to EstimateBilling if DischargeBilling not found),
-    along with doctor breakdown and Doctor Fee Cut details.
+    Fetch admitted patients with discharge billing and doctor fee cuts breakdown.
+    High-performance indexed lookup with batch queries and zero N+1 roundtrips.
     """
     hospital_code = request.headers.get("auth-hospital-code") or "system"
     company_filter = request.GET.get('company')
@@ -178,59 +235,187 @@ def get_admitted_doctor_fee_patients(request):
 
     try:
         db = get_db()
-        
-        # Get all active admitted patients (is_admitted=True, is_cancelled != True)
-        query = {"is_admitted": True, "is_cancelled": {"$ne": True}}
-        admissions = list(db['hospital_admission'].find(query).sort("admissionDateTime", -1))
-        
-        # Cache Insurance Providers for fast company_name lookup
-        providers = {}
-        try:
-            for p in db['hospital_insuranceprovider'].find({}, {"_id": 0, "company_code": 1, "company_name": 1}):
-                if p.get('company_code'):
-                    providers[p['company_code']] = p.get('company_name', '')
-        except Exception:
-            pass
-        if not providers:
-            providers = {p.company_code: p.company_name for p in InsuranceProvider.objects.all() if p.company_code}
+        providers = _get_providers_map(db)
 
-        # Step 1: Pre-process admissions and fetch billing records + collect all doctor IDs
-        parsed_admissions = []
+        # 1. Date condition
+        date_cond = {}
+        if from_dt:
+            date_cond["$gte"] = from_dt
+        if to_dt:
+            date_cond["$lte"] = to_dt
+
+        candidate_ips = set()
+        bills_by_ip = {}
+
+        bill_fields = {
+            "ip_number": 1, "ipNumber": 1, "uhid": 1, "patient_name": 1, "customer_type": 1,
+            "company_code": 1, "insurance_company": 1, "total_amount": 1, "discount_amount": 1,
+            "total_disc": 1, "net_amount": 1, "medicines_amount": 1, "implant_amount": 1,
+            "bill_date": 1, "created_date": 1, "items": 1, "discharge_id": 1
+        }
+
+        # 2. Query DischargeBilling in date range
+        bill_query = {"is_active": {"$ne": False}, "is_cancelled": {"$ne": True}}
+        if date_cond:
+            bill_query["bill_date"] = date_cond
+
+        limit_count = 1500 if date_cond else 300
+        bills_cursor = db['hospital_dischargebilling'].find(
+            bill_query, bill_fields
+        ).sort([("discharge_id", -1), ("_id", -1)]).limit(limit_count)
+
+        for b in bills_cursor:
+            ip = (b.get('ip_number') or b.get('ipNumber') or '').strip()
+            if ip and ip not in bills_by_ip:
+                bills_by_ip[ip] = b
+                candidate_ips.add(ip)
+
+        # Also candidate IPs from DoctorFeeCuts in date range
+        if date_cond:
+            cut_query = {"is_active": {"$ne": False}, "date": date_cond}
+            for c in db['hospital_doctorfeecuts'].find(cut_query, {"ip_number": 1}):
+                ip = (c.get('ip_number') or '').strip()
+                if ip:
+                    candidate_ips.add(ip)
+
+            # Also candidate IPs from Admissions in date range
+            adm_query = {"is_cancelled": {"$ne": True}, "admissionDateTime": date_cond}
+            for a in db['hospital_admission'].find(adm_query, {"ipNumber": 1}).limit(500):
+                ip = (a.get('ipNumber') or '').strip()
+                if ip:
+                    candidate_ips.add(ip)
+
+        # 3. Handle search_query (Search by IP, UHID, patient name)
+        if search_query:
+            regex_pat = re.escape(search_query)
+            for a in db['hospital_admission'].find(
+                {
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"ipNumber": {"$regex": regex_pat, "$options": "i"}},
+                        {"uhid": {"$regex": regex_pat, "$options": "i"}},
+                        {"patient_name": {"$regex": regex_pat, "$options": "i"}}
+                    ]
+                },
+                {"ipNumber": 1}
+            ).limit(100):
+                ip = (a.get('ipNumber') or '').strip()
+                if ip:
+                    candidate_ips.add(ip)
+
+            for b in db['hospital_dischargebilling'].find(
+                {
+                    "is_active": {"$ne": False},
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"ip_number": {"$regex": regex_pat, "$options": "i"}},
+                        {"uhid": {"$regex": regex_pat, "$options": "i"}},
+                        {"patient_name": {"$regex": regex_pat, "$options": "i"}}
+                    ]
+                },
+                bill_fields
+            ).sort([("discharge_id", -1), ("_id", -1)]).limit(100):
+                ip = (b.get('ip_number') or b.get('ipNumber') or '').strip()
+                if ip:
+                    candidate_ips.add(ip)
+                    if ip not in bills_by_ip:
+                        bills_by_ip[ip] = b
+
+        # 4. Fetch missing bills for any candidate IPs
+        missing_ips = [ip for ip in candidate_ips if ip not in bills_by_ip]
+        if missing_ips:
+            for b in db['hospital_dischargebilling'].find(
+                {
+                    "$or": [{"ip_number": {"$in": missing_ips}}, {"ipNumber": {"$in": missing_ips}}],
+                    "is_active": {"$ne": False},
+                    "is_cancelled": {"$ne": True}
+                },
+                bill_fields
+            ).sort([("discharge_id", -1), ("_id", -1)]):
+                ip = (b.get('ip_number') or b.get('ipNumber') or '').strip()
+                if ip and ip not in bills_by_ip:
+                    bills_by_ip[ip] = b
+
+        # Only retain IPs that have a discharge billing (required by business workflow)
+        candidate_ips = [ip for ip in candidate_ips if ip in bills_by_ip]
+        if not candidate_ips:
+            return Response({"success": True, "data": []})
+
+        # 5. Batch fetch admissions for all candidate IPs in ONE query
+        admissions = list(db['hospital_admission'].find(
+            {"ipNumber": {"$in": candidate_ips}, "is_cancelled": {"$ne": True}},
+            {
+                "ipNumber": 1, "uhid": 1, "patient_name": 1, "patientName": 1, "customer_type": 1,
+                "company_code": 1, "insurance_company": 1, "admissionDateTime": 1,
+                "created_at": 1, "admittingDoctor": 1
+            }
+        ))
+        adm_by_ip = {a.get('ipNumber'): a for a in admissions if a.get('ipNumber')}
+
+        # 6. Batch fetch claims for all candidate IPs in ONE query
+        claims = list(db['hospital_doctorfeecuts'].find(
+            {"ip_number": {"$in": candidate_ips}, "is_active": {"$ne": False}}
+        ).sort("_id", -1))
+        claim_by_ip = {}
+        for c in claims:
+            ip = (c.get('ip_number') or '').strip()
+            if ip and ip not in claim_by_ip:
+                claim_by_ip[ip] = c
+
+        # 7. Collect UHIDs and batch fetch patients in ONE query
+        all_uhids = set()
+        for ip in candidate_ips:
+            adm = adm_by_ip.get(ip)
+            bill = bills_by_ip.get(ip)
+            uhid = (adm.get('uhid') if adm else None) or (bill.get('uhid') if bill else None)
+            if uhid:
+                all_uhids.add(uhid)
+
+        patient_by_uhid = {}
+        if all_uhids:
+            patients = list(db['hospital_patient'].find(
+                {"uhid": {"$in": list(all_uhids)}},
+                {"uhid": 1, "firstName": 1, "lastName": 1, "customer_type": 1, "company_code": 1, "insurance_company": 1}
+            ))
+            patient_by_uhid = {p.get('uhid'): p for p in patients if p.get('uhid')}
+
+        # 8. Process items & collect doctor IDs
+        parsed_items = []
         all_doctor_ids = set()
 
-        for adm in admissions:
-            ip_number = adm.get('ipNumber', '')
-            uhid = adm.get('uhid', '')
-            
-            patient = db['hospital_patient'].find_one({"uhid": uhid}) if uhid else None
-            
-            customer_type = adm.get('customer_type', '') or (patient.get('customer_type', '') if patient else '') or 'General'
-            company_code = adm.get('company_code', '') or (patient.get('company_code', '') if patient else '') or ''
-            company_name = providers.get(company_code, '') or adm.get('insurance_company', '') or (patient.get('insurance_company', '') if patient else '') or ''
+        for ip in candidate_ips:
+            bill = bills_by_ip[ip]
+            adm = adm_by_ip.get(ip, {})
+            uhid = adm.get('uhid') or bill.get('uhid') or ''
+            patient = patient_by_uhid.get(uhid)
 
-            # Apply Customer Type Filter
+            customer_type = adm.get('customer_type', '') or bill.get('customer_type', '') or (patient.get('customer_type', '') if patient else '') or 'General'
+            company_code = adm.get('company_code', '') or bill.get('company_code', '') or (patient.get('company_code', '') if patient else '') or ''
+            company_name = providers.get(company_code, '') or adm.get('insurance_company', '') or bill.get('insurance_company', '') or (patient.get('insurance_company', '') if patient else '') or ''
+
+            # Filter customer type
             if customer_type_filter and customer_type_filter.upper() != 'ALL':
                 if customer_type.lower() != customer_type_filter.lower():
                     continue
 
-            # Apply Insurance Company Filter
+            # Filter company
             if company_filter and company_filter != 'ALL':
                 if company_name.lower() != company_filter.lower() and company_code.lower() != company_filter.lower():
                     continue
 
-            # Construct patient name
+            # Patient name
             patient_name = ""
             if patient:
                 patient_name = f"{patient.get('firstName', '')} {patient.get('lastName', '')}".strip()
             if not patient_name:
-                patient_name = adm.get('patient_name', '') or 'N/A'
+                patient_name = adm.get('patient_name') or adm.get('patientName') or bill.get('patient_name') or 'N/A'
 
-            # Apply search query (IP Number, UHID, Patient Name, Customer Type, Company Name)
+            # Filter search query
             if search_query:
                 q = search_query
                 match = (
-                    q in (ip_number or '').lower() or 
-                    q in (uhid or '').lower() or 
+                    q in (ip or '').lower() or
+                    q in (uhid or '').lower() or
                     q in patient_name.lower() or
                     q in customer_type.lower() or
                     q in company_name.lower()
@@ -238,18 +423,25 @@ def get_admitted_doctor_fee_patients(request):
                 if not match:
                     continue
 
-            # Fetch Billing summary strictly from DischargeBilling
-            bill = db['hospital_dischargebilling'].find_one(
-                {
-                    "$or": [{"ip_number": ip_number}, {"ipNumber": ip_number}],
-                    "is_active": {"$ne": False},
-                    "is_cancelled": {"$ne": True}
-                },
-                sort=[("discharge_id", -1), ("_id", -1)]
-            )
-            # If admission ipNumber is not available in Discharge Billing, skip it
-            if not bill:
+            claim = claim_by_ip.get(ip)
+
+            # Date check
+            record_date_raw = claim.get('date') if claim else None
+            if not record_date_raw:
+                record_date_raw = bill.get('bill_date') or bill.get('created_date') or adm.get('admissionDateTime') or adm.get('created_at')
+
+            record_dt = normalize_datetime(record_date_raw)
+
+            if from_dt and record_dt and record_dt < from_dt:
                 continue
+            if to_dt and record_dt and record_dt > to_dt:
+                continue
+
+            # Status filter
+            status = claim.get('status', 'Pending') if claim else 'Pending'
+            if status_filter and status_filter.upper() != 'ALL':
+                if status.lower() != status_filter.lower():
+                    continue
 
             total_amount = to_float(bill.get('total_amount'))
             discount_amount = to_float(bill.get('discount_amount') or bill.get('total_disc'))
@@ -257,46 +449,16 @@ def get_admitted_doctor_fee_patients(request):
             medicines_amount = to_float(bill.get('medicines_amount'))
             implant_amount = to_float(bill.get('implant_amount'))
 
-            # Extract Doctors from Billing Items
-            raw_doctors = []
-            if bill and isinstance(bill.get('items'), list):
-                for item in bill['items']:
-                    docs_list = item.get('doctors', [])
-                    if isinstance(docs_list, list):
-                        for doc in docs_list:
-                            if isinstance(doc, dict):
-                                fee = to_float(doc.get('doctor_fee') or doc.get('fee') or doc.get('amount') or 0.0)
-                                if doc.get('surgeon_id'):
-                                    doc_id = str(doc['surgeon_id'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Surgeon", "fee": fee})
-                                if doc.get('anaesthetist_id'):
-                                    doc_id = str(doc['anaesthetist_id'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Anaesthetist", "fee": fee})
-                                if doc.get('additional_anaesthetists'):
-                                    doc_id = str(doc['additional_anaesthetists'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Additional Anaesthetist", "fee": fee})
-                                if doc.get('additional_doctors'):
-                                    doc_id = str(doc['additional_doctors'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Additional Doctor", "fee": fee})
-                                if doc.get('doctor_id'):
-                                    doc_id = str(doc['doctor_id'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Doctor", "fee": fee})
-                                if doc.get('employee_id'):
-                                    doc_id = str(doc['employee_id'])
-                                    all_doctor_ids.add(doc_id)
-                                    raw_doctors.append({"id": doc_id, "role": "Doctor", "fee": fee})
+            raw_doctors = _extract_raw_doctors_from_billing(bill)
+            for d in raw_doctors:
+                all_doctor_ids.add(d['id'])
 
-            bill_date = bill.get('bill_date') or bill.get('created_date')
-
-            parsed_admissions.append({
-                "adm": adm,
-                "ip_number": ip_number,
+            parsed_items.append({
+                "ip_number": ip,
                 "uhid": uhid,
+                "adm": adm,
+                "bill": bill,
+                "claim": claim,
                 "patient_name": patient_name,
                 "customer_type": customer_type,
                 "company_code": company_code,
@@ -306,27 +468,24 @@ def get_admitted_doctor_fee_patients(request):
                 "net_amount": net_amount,
                 "medicines_amount": medicines_amount,
                 "implant_amount": implant_amount,
-                "bill_date": bill_date,
-                "raw_doctors": raw_doctors
+                "bill_date": bill.get('bill_date') or bill.get('created_date'),
+                "raw_doctors": raw_doctors,
+                "record_dt": record_dt,
+                "status": status
             })
 
-        # Step 2: Resolve doctor employee names in bulk
+        # 9. Bulk resolve doctor employee names
         emp_name_map = _bulk_get_employee_names(all_doctor_ids)
 
-        # Step 3: Build final payload
+        # 10. Build final results
         results = []
-        for item in parsed_admissions:
+        for item in parsed_items:
             ip_number = item['ip_number']
             uhid = item['uhid']
             adm = item['adm']
+            claim = item['claim']
+            status = item['status']
 
-            # Existing DoctorFeeCuts record for this IP Number
-            claim = db['hospital_doctorfeecuts'].find_one(
-                {"ip_number": ip_number, "is_active": {"$ne": False}},
-                sort=[("_id", -1)]
-            )
-
-            status = (claim.get('status')) if claim else 'Pending'
             approved_by = claim.get('approved_by') if claim else None
             approved_date_raw = claim.get('approved_date') if claim else None
             if isinstance(approved_date_raw, (datetime.datetime, datetime.date)):
@@ -335,41 +494,6 @@ def get_admitted_doctor_fee_patients(request):
                 approved_date = str(approved_date_raw)
             else:
                 approved_date = None
-
-            # Date check
-            record_date_raw = claim.get('date') if claim else None
-            if not record_date_raw:
-                record_date_raw = item.get('bill_date') or adm.get('admissionDateTime') or adm.get('created_at')
-
-            record_dt = None
-            if isinstance(record_date_raw, (datetime.datetime, datetime.date)):
-                if isinstance(record_date_raw, datetime.date) and not isinstance(record_date_raw, datetime.datetime):
-                    record_dt = datetime.datetime.combine(record_date_raw, datetime.time.min)
-                else:
-                    record_dt = record_date_raw
-            elif isinstance(record_date_raw, dict) and '$date' in record_date_raw:
-                try:
-                    record_dt = datetime.datetime.fromisoformat(str(record_date_raw['$date']).replace("Z", "+00:00"))
-                except Exception:
-                    pass
-            elif record_date_raw:
-                try:
-                    record_dt = datetime.datetime.fromisoformat(str(record_date_raw).replace("Z", "+00:00"))
-                except Exception:
-                    try:
-                        record_dt = datetime.datetime.strptime(str(record_date_raw)[:10], "%Y-%m-%d")
-                    except Exception:
-                        pass
-
-            if record_dt and timezone.is_aware(record_dt):
-                record_dt = timezone.make_naive(record_dt)
-
-            if from_dt and record_dt:
-                if record_dt < from_dt:
-                    continue
-            if to_dt and record_dt:
-                if record_dt > to_dt:
-                    continue
 
             stored_bd = claim.get('doctor_breakdown', []) if claim else []
             stored_map = {}
@@ -415,7 +539,6 @@ def get_admitted_doctor_fee_patients(request):
                     "approved_amount": app_fee
                 })
 
-            # Extract discharge doctor fees
             discharge_doctor_fees = []
             for d in item['raw_doctors']:
                 doc_id = d['id']
@@ -427,11 +550,6 @@ def get_admitted_doctor_fee_patients(request):
                     "role": d['role'],
                     "doctor_fee": fee_val
                 })
-
-            # Apply status filter (ALL, Pending, Requested, Approved)
-            if status_filter and status_filter.upper() != 'ALL':
-                if status.lower() != status_filter.lower():
-                    continue
 
             results.append({
                 "ipNumber": ip_number,
@@ -458,6 +576,13 @@ def get_admitted_doctor_fee_patients(request):
                 "approved_date": approved_date,
             })
 
+        def _get_sort_key(r):
+            d = r.get('bill_date') or r.get('admission_date')
+            if isinstance(d, (datetime.datetime, datetime.date)):
+                return d
+            return datetime.datetime.min
+
+        results.sort(key=_get_sort_key, reverse=True)
         return Response({"success": True, "data": results})
 
     except Exception as e:
@@ -486,21 +611,7 @@ def save_doctor_fee_claim(request):
         billing_doc = db['hospital_dischargebilling'].find_one({"ip_number": ip_number, "is_cancelled": {"$ne": True}}, sort=[("discharge_id", -1)])
 
         bill_date_raw = billing_doc.get('bill_date') or billing_doc.get('created_date') if billing_doc else None
-        bill_date = None
-        if isinstance(bill_date_raw, (datetime.datetime, datetime.date)):
-            bill_date = bill_date_raw
-        elif isinstance(bill_date_raw, dict) and '$date' in bill_date_raw:
-            try:
-                bill_date = datetime.datetime.fromisoformat(str(bill_date_raw['$date']).replace("Z", "+00:00"))
-            except Exception:
-                bill_date = timezone.now()
-        elif bill_date_raw:
-            try:
-                bill_date = datetime.datetime.fromisoformat(str(bill_date_raw).replace("Z", "+00:00"))
-            except Exception:
-                bill_date = timezone.now()
-        else:
-            bill_date = timezone.now()
+        bill_date = normalize_datetime(bill_date_raw) or timezone.now()
 
         doctor_breakdown_in = data.get('doctor_breakdown') or []
         cleaned_breakdown = []
@@ -751,39 +862,7 @@ def get_doctor_fee_cuts_report(request):
     try:
         db = get_db()
         
-        # 1. Get all active admissions
-        admissions = list(db['hospital_admission'].find({"is_cancelled": {"$ne": True}}))
-        adm_by_ip = {a.get('ipNumber'): a for a in admissions if a.get('ipNumber')}
-        
-        # 2. Get billing records directly from hospital_dischargebilling
-        billing_docs = list(db['hospital_dischargebilling'].find({"is_cancelled": {"$ne": True}}))
-        billing_by_ip = {b.get('ip_number'): b for b in billing_docs if b.get('ip_number')}
-        
-        # 3. Get doctor fee cut records from hospital_doctorfeecuts
-        fee_cut_query = {"is_active": {"$ne": False}}
-        if status_filter and status_filter.upper() != 'ALL':
-            fee_cut_query["status"] = status_filter
-
-        fee_cuts = list(db['hospital_doctorfeecuts'].find(fee_cut_query))
-        fee_cuts_by_ip = {f.get('ip_number'): f for f in fee_cuts if f.get('ip_number')}
-
-        # 4. Collect all doctor IDs for employee name bulk resolution
-        emp_ids = set()
-        for b in billing_docs:
-            for item in b.get('items', []):
-                for doc in item.get('doctors', []):
-                    for k, v in doc.items():
-                        if k.endswith('_id') and v:
-                            emp_ids.add(str(v).strip())
-
-        for f in fee_cuts:
-            for bd in f.get('doctor_breakdown', []):
-                if bd.get('doctor_id'):
-                    emp_ids.add(str(bd.get('doctor_id')).strip())
-
-        emp_profile_map = _bulk_get_employee_profiles(emp_ids)
-
-        # 5. Parse date boundaries
+        # 1. Parse date boundaries
         from_dt = None
         to_dt = None
         if from_date_str:
@@ -796,6 +875,60 @@ def get_doctor_fee_cuts_report(request):
                 to_dt = datetime.datetime.strptime(to_date_str[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59)
             except Exception:
                 pass
+
+        date_cond = {}
+        if from_dt:
+            date_cond["$gte"] = from_dt
+        if to_dt:
+            date_cond["$lte"] = to_dt
+
+        # 2. Get billing records (filtered by bill_date if date given)
+        bill_query = {"is_cancelled": {"$ne": True}}
+        if date_cond:
+            bill_query["bill_date"] = date_cond
+
+        billing_docs = list(db['hospital_dischargebilling'].find(bill_query).limit(1000 if date_cond else 300))
+        billing_by_ip = {b.get('ip_number'): b for b in billing_docs if b.get('ip_number')}
+
+        # 3. Get doctor fee cut records from hospital_doctorfeecuts
+        fee_cut_query = {"is_active": {"$ne": False}}
+        if status_filter and status_filter.upper() != 'ALL':
+            fee_cut_query["status"] = status_filter
+        if date_cond:
+            fee_cut_query["date"] = date_cond
+
+        fee_cuts = list(db['hospital_doctorfeecuts'].find(fee_cut_query))
+        fee_cuts_by_ip = {f.get('ip_number'): f for f in fee_cuts if f.get('ip_number')}
+
+        # Also load bills for any fee cuts IPs that weren't in billing_by_ip
+        extra_cut_ips = [ip for ip in fee_cuts_by_ip.keys() if ip not in billing_by_ip]
+        if extra_cut_ips:
+            for b in db['hospital_dischargebilling'].find({"ip_number": {"$in": extra_cut_ips}, "is_cancelled": {"$ne": True}}):
+                ip = b.get('ip_number')
+                if ip and ip not in billing_by_ip:
+                    billing_by_ip[ip] = b
+
+        all_ip_numbers = set(list(billing_by_ip.keys()))
+
+        # 4. Get admissions for ONLY these IP numbers in ONE batch query
+        admissions = list(db['hospital_admission'].find({"ipNumber": {"$in": list(all_ip_numbers)}, "is_cancelled": {"$ne": True}})) if all_ip_numbers else []
+        adm_by_ip = {a.get('ipNumber'): a for a in admissions if a.get('ipNumber')}
+
+        # 5. Collect all doctor IDs for employee name bulk resolution
+        emp_ids = set()
+        for b in billing_by_ip.values():
+            for item in b.get('items', []):
+                for doc in item.get('doctors', []):
+                    for k, v in doc.items():
+                        if k.endswith('_id') and v:
+                            emp_ids.add(str(v).strip())
+
+        for f in fee_cuts:
+            for bd in f.get('doctor_breakdown', []):
+                if bd.get('doctor_id'):
+                    emp_ids.add(str(bd.get('doctor_id')).strip())
+
+        emp_profile_map = _bulk_get_employee_profiles(emp_ids)
 
         # 6. Group by Doctor ID
         doctors_data = {}  # doctor_id -> { doctor_id, doctor_name, email, patients: [], total_billed, total_requested, total_approved }
@@ -817,18 +950,11 @@ def get_doctor_fee_cuts_report(request):
             if not record_date_raw:
                 record_date_raw = bill.get('bill_date') or bill.get('created_date') or claim.get('approved_date') or adm.get('admissionDateTime')
 
-            record_dt = None
-            if isinstance(record_date_raw, (datetime.datetime, datetime.date)):
-                record_dt = record_date_raw
-            elif record_date_raw:
-                try:
-                    record_dt = datetime.datetime.fromisoformat(str(record_date_raw).replace("Z", "+00:00"))
-                except Exception:
-                    pass
+            record_dt = normalize_datetime(record_date_raw)
 
-            if from_dt and record_dt and record_dt.replace(tzinfo=None) < from_dt:
+            if from_dt and record_dt and record_dt < from_dt:
                 continue
-            if to_dt and record_dt and record_dt.replace(tzinfo=None) > to_dt:
+            if to_dt and record_dt and record_dt > to_dt:
                 continue
 
             record_date_formatted = record_dt.strftime("%Y-%m-%d") if record_dt else str(record_date_raw or '')[:10]
@@ -842,7 +968,7 @@ def get_doctor_fee_cuts_report(request):
                 ""
             )
             if not patient_name and uhid and uhid != 'N/A':
-                p_obj = db['hospital_patient'].find_one({"uhid": uhid})
+                p_obj = db['hospital_patient'].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1})
                 if p_obj:
                     patient_name = f"{p_obj.get('firstName', '')} {p_obj.get('lastName', '')}".strip()
 
@@ -1055,16 +1181,9 @@ def send_monthly_doctor_fee_cut_emails(request):
 
         for f in fee_cuts:
             rec_date_raw = f.get('date') or f.get('approved_date') or f.get('created_date')
-            rec_dt = None
-            if isinstance(rec_date_raw, (datetime.datetime, datetime.date)):
-                rec_dt = rec_date_raw
-            elif rec_date_raw:
-                try:
-                    rec_dt = datetime.datetime.fromisoformat(str(rec_date_raw).replace("Z", "+00:00"))
-                except Exception:
-                    pass
+            rec_dt = normalize_datetime(rec_date_raw)
 
-            if rec_dt and (from_dt <= rec_dt.replace(tzinfo=None) <= to_dt):
+            if rec_dt and (from_dt <= rec_dt <= to_dt):
                 filtered_fee_cuts.append((f, rec_dt))
                 for bd in f.get('doctor_breakdown', []):
                     if bd.get('doctor_id'):

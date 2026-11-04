@@ -10,6 +10,12 @@ from django.utils import timezone
 from bson import ObjectId
 from pathlib import Path
 from dotenv import load_dotenv
+
+_backend_env = Path(__file__).resolve().parent.parent.parent / '.env'
+if _backend_env.exists():
+    load_dotenv(dotenv_path=_backend_env)
+else:
+    load_dotenv()
 import pytz
 import os
 import re
@@ -17,6 +23,7 @@ import json
 import requests
 import logging
 from ..models import CommunicationLog, Patient
+from .dbcollection import hms_db, global_db
 
 logger = logging.getLogger(__name__)
 
@@ -71,27 +78,33 @@ def get_mhc_investigations(request):
     package_id_filter = request.GET.get('package_id')
     uhid_filter = request.GET.get('uhid')
 
-    branch_code = request.data.get('auth-branch-code', 'system')
-    hospital_code = request.data.get('auth-hospital-code', 'system')
+    branch_code = (
+        request.data.get('auth-branch-code')
+        or request.headers.get('Branch-Code')
+        or request.headers.get('auth-branch-code')
+        or request.GET.get('branch_code')
+    )
+    hospital_code = (
+        request.data.get('auth-hospital-code')
+        or request.headers.get('Hospital-Code')
+        or request.headers.get('auth-hospital-code')
+        or request.GET.get('hospital_code')
+    )
 
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    global_db = client['Global']
-
-    invest_billing_coll = db['hospital_investbilling']
-    mhc_report_coll = db['hospital_mhcreport']
-    patient_coll = db['hospital_patient']
-    package_coll = db['hospital_package']
-    refund_coll = db['hospital_investrefund']
+    invest_billing_coll = hms_db['hospital_investbilling']
+    mhc_report_coll = hms_db['hospital_mhcreport']
+    patient_coll = hms_db['hospital_patient']
+    package_coll = hms_db['hospital_package']
+    refund_coll = hms_db['hospital_investrefund']
     diagnostics_profile_coll = global_db['backend_diagnostics_profile']
 
     try:
         # 1. Billing Query
         billing_filter = {'billTypeNo': 'PACK', 'is_active': True}
 
-        if hospital_code:
+        if hospital_code and hospital_code != 'system':
             billing_filter['hospital_code'] = hospital_code
-        if branch_code:
+        if branch_code and branch_code != 'system':
             billing_filter['branch_code'] = branch_code
         if invest_bill_no_filter:
             billing_filter['investBillNo'] = invest_bill_no_filter
@@ -142,9 +155,9 @@ def get_mhc_investigations(request):
 
         # 3. Batch Reports
         report_filter = {'investBillNo': {'$in': invest_bill_nos}, 'is_active': True}
-        if hospital_code:
+        if hospital_code and hospital_code != 'system':
             report_filter['hospital_code'] = hospital_code
-        if branch_code:
+        if branch_code and branch_code != 'system':
             report_filter['branch_code'] = branch_code
 
         mhc_reports = list(mhc_report_coll.find(report_filter, {'_id': 0}))
@@ -159,11 +172,10 @@ def get_mhc_investigations(request):
             if bill_key:
                 report_map[bill_key] = r
 
-        # 4. Batch Patients (Comprehensive ORM + MongoDB Multi-Variant Lookup)
+        # 4. Batch Patients (Direct High-Speed MongoDB Indexed Lookup)
         uhid_list = list({str(r['uhid']).strip() for r in billing_records if r.get('uhid', '').strip()})
         patient_map = {}
         if uhid_list:
-            # Build search variations (e.g. S026/00541, 00541, 541, s026/00541)
             search_tokens = set()
             for u in uhid_list:
                 clean_u = u.strip()
@@ -177,53 +189,37 @@ def get_mhc_investigations(request):
                     search_tokens.add(num_str)
                     search_tokens.add(num_str.lstrip('0'))
 
-            # A. Query Django ORM Patient model
             try:
-                from ..models import Patient
-                from django.db.models import Q
-
-                orm_q = Q(uhid__in=list(search_tokens))
-                for u in uhid_list:
-                    orm_q |= Q(uhid__iexact=u)
-                    if '/' in u:
-                        suf = u.split('/')[-1]
-                        orm_q |= Q(uhid__iendswith=suf) | Q(uhid__iendswith=suf.lstrip('0'))
-
-                orm_patients = Patient.objects.filter(orm_q)
-                for p in orm_patients:
-                    p_uhid = str(p.uhid).strip()
-                    p_data = {
-                        'uhid': p_uhid,
-                        'salutation': getattr(p, 'salutation', '') or '',
-                        'firstName': getattr(p, 'firstName', '') or '',
-                        'lastName': getattr(p, 'lastName', '') or '',
-                        'gender': getattr(p, 'gender', '') or '',
-                        'age': getattr(p, 'age', '') or '',
-                        'dob': getattr(p, 'dob', None),
-                        'mobilePhone': getattr(p, 'mobilePhone', '') or getattr(p, 'phone', '') or '',
-                        'phone': getattr(p, 'phone', '') or getattr(p, 'mobilePhone', '') or '',
-                    }
-                    patient_map[p_uhid] = p_data
-                    patient_map[p_uhid.upper()] = p_data
-                    patient_map[p_uhid.lower()] = p_data
-                    if '/' in p_uhid:
-                        suf = p_uhid.split('/')[-1]
-                        patient_map[suf] = p_data
-                        patient_map[suf.lstrip('0')] = p_data
-            except Exception as e:
-                logger.warning(f"Django Patient ORM lookup warning: {e}")
-
-            # B. Query MongoDB hospital_patient collection
-            try:
+                patient_projection = {
+                    '_id': 0,
+                    'uhid': 1,
+                    'salutation': 1,
+                    'firstName': 1,
+                    'first_name': 1,
+                    'middleName': 1,
+                    'middle_name': 1,
+                    'lastName': 1,
+                    'last_name': 1,
+                    'patient_name': 1,
+                    'patientName': 1,
+                    'name': 1,
+                    'gender': 1,
+                    'Gender': 1,
+                    'age': 1,
+                    'age_type': 1,
+                    'dob': 1,
+                    'mobilePhone': 1,
+                    'phone': 1,
+                }
                 mongo_patients = list(patient_coll.find({
                     'uhid': {'$in': list(search_tokens)}
-                }))
+                }, patient_projection))
                 for p in mongo_patients:
                     p_uhid = str(p.get('uhid', '')).strip()
                     if p_uhid:
-                        patient_map.setdefault(p_uhid, p)
-                        patient_map.setdefault(p_uhid.upper(), p)
-                        patient_map.setdefault(p_uhid.lower(), p)
+                        patient_map[p_uhid] = p
+                        patient_map[p_uhid.upper()] = p
+                        patient_map[p_uhid.lower()] = p
                         if '/' in p_uhid:
                             suf = p_uhid.split('/')[-1]
                             patient_map.setdefault(suf, p)
@@ -352,8 +348,8 @@ def get_mhc_investigations(request):
                 'doctorName': doctor_name,
                 'referredBy': ref_id,
                 'referredByName': referred_by_name,
-                'paymentMethod': record.get('paymentMethod', 'Cash'),
-                'paymentStatus': record.get('paymentStatus', 'Pending'),
+                'paymentMethod': record.get('paymentMethod') or record.get('payment_method') or 'Cash',
+                'paymentStatus': record.get('paymentStatus') or record.get('payment_status') or 'Pending',
                 'total': record.get('total', 0),
                 'finalPrice': record.get('finalPrice', 0),
                 'is_emergency': bool(record.get('is_emergency', False)),
@@ -405,8 +401,7 @@ def get_mhc_investigations(request):
     except Exception as e:
         logger.exception("get_mhc_investigations failed")
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -422,9 +417,7 @@ def get_mhc_format(request):
     package_id = request.GET.get('package_id')
     gender = request.GET.get('gender', '').strip().lower()
 
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhc_formats']
+    collection = hms_db['hospital_mhc_formats']
 
     try:
         # Build query for package_id
@@ -475,8 +468,7 @@ def get_mhc_format(request):
     except Exception as e:
         logger.exception("get_mhc_format failed")
         return JsonResponse({'success': False, 'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -490,9 +482,7 @@ def create_mhc_report(request):
     POST /mhc-reports/
     Creates or updates an MHC report in hospital_mhcreport.
     """
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         data = request.data
@@ -609,8 +599,7 @@ def create_mhc_report(request):
     except Exception as e:
         logger.exception("create_mhc_report failed")
         return JsonResponse({'error': str(e)}, status=400)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -619,9 +608,7 @@ def create_mhc_report(request):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_mhc_report_by_bill(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         report = collection.find_one({'investBillNo': investBillNo, 'is_active': True})
@@ -631,8 +618,7 @@ def get_mhc_report_by_bill(request, investBillNo):
         return JsonResponse(_serialize_report(report), safe=False)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -642,9 +628,7 @@ def get_mhc_report_by_bill(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def edit_mhc_report(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -670,8 +654,7 @@ def edit_mhc_report(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -681,9 +664,7 @@ def edit_mhc_report(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def approve_mhc_report(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -700,8 +681,7 @@ def approve_mhc_report(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -711,9 +691,7 @@ def approve_mhc_report(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def soft_delete_mhc_report(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -736,8 +714,7 @@ def soft_delete_mhc_report(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -747,9 +724,7 @@ def soft_delete_mhc_report(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def update_mhc_slot(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -803,8 +778,7 @@ def update_mhc_slot(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -814,9 +788,7 @@ def update_mhc_slot(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def mhc_patient_checkin(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -856,8 +828,7 @@ def mhc_patient_checkin(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -867,9 +838,7 @@ def mhc_patient_checkin(request, investBillNo):
 @api_view(['PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def mhc_dispatch_report(request, investBillNo):
-    client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-    db = client['HMS']
-    collection = db['hospital_mhcreport']
+    collection = hms_db['hospital_mhcreport']
 
     try:
         user_id = request.data.get('auth-user-id', 'system')
@@ -887,8 +856,7 @@ def mhc_dispatch_report(request, investBillNo):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-    finally:
-        client.close()
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
