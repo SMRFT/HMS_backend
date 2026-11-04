@@ -260,6 +260,7 @@ urlpatterns = [
 
     # Discharge URLs
     path("search-discharge-patient/", discharge.search_discharge_patient, name="search-discharge-patient"),
+    path("discharge-billing/signatories/", discharge.get_discharge_signatories, name="discharge-signatories"),
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),

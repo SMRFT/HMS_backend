@@ -581,6 +581,86 @@ def get_tumour_board_patient_detail(request):
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# ── Date & Audit Helpers ───────────────────────────────────────────────────────
+
+def _parse_to_datetime(val, default_now=False):
+    """
+    Parse a value (datetime, date, or date string) into a naive BSON datetime.datetime object.
+    Supports formats like 'YYYY-MM-DD', ISO 'YYYY-MM-DDTHH:MM:SS...', 'DD-MM-YYYY', etc.
+    """
+    if val is None or val == "":
+        return datetime.now() if default_now else None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None) if val.tzinfo else val
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
+    if isinstance(val, str):
+        v = val.strip()
+        if not v:
+            return datetime.now() if default_now else None
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(v[:10], fmt)
+            except Exception:
+                pass
+    return datetime.now() if default_now else None
+
+
+def _format_display_date(val):
+    """Format datetime or date string to YYYY-MM-DD for JSON responses."""
+    if not val:
+        return ""
+    if isinstance(val, (datetime, date)):
+        return val.strftime("%Y-%m-%d")
+    val_str = str(val).strip()
+    return val_str[:10] if len(val_str) >= 10 else val_str
+
+
+def _format_display_iso(val):
+    """Format datetime or date string to ISO format for JSON responses."""
+    if not val:
+        return ""
+    if isinstance(val, (datetime, date)):
+        return val.isoformat()
+    return str(val).strip()
+
+
+def _get_auth_user_info(request, fallback_id="system", fallback_name=None):
+    """
+    Extract authenticated user credentials from request data or headers.
+    Prioritizes auth-user-id from pyauth token decoding or request headers.
+    """
+    data = request.data if isinstance(request.data, dict) else {}
+    headers = request.headers if hasattr(request, "headers") else {}
+
+    user_id = (
+        data.get("auth-user-id")
+        or headers.get("auth-user-id")
+        or headers.get("Auth-User-Id")
+        or headers.get("X-Employee-Id")
+        or headers.get("X-User-Id")
+        or (data.get("created_by") if isinstance(data, dict) else None)
+        or fallback_id
+    )
+    user_id = str(user_id).strip() if user_id else "system"
+
+    user_name = (
+        data.get("auth-user-name")
+        or headers.get("auth-user-name")
+        or headers.get("Auth-User-Name")
+        or fallback_name
+        or resolve_created_by_name(user_id)
+        or str(user_id)
+    )
+    user_name = str(user_name).strip() if user_name else user_id
+
+    return user_id, user_name
+
+
 # ── Certificate CRUD & Approval APIs ──────────────────────────────────────────
 
 @api_view(["GET"])
@@ -617,11 +697,32 @@ def list_tumour_board_certificates(request):
                 query["is_approved"] = {"$ne": True}
 
         if from_date and to_date:
-            query["certificate_date"] = {"$gte": from_date, "$lte": to_date}
+            from_dt = _parse_to_datetime(from_date)
+            to_dt = _parse_to_datetime(to_date)
+            if to_dt:
+                to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            query["$or"] = [
+                {"certificate_date": {"$gte": from_date, "$lte": to_date}},
+                {"certificate_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_at": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+            ]
         elif from_date:
-            query["certificate_date"] = {"$gte": from_date}
+            from_dt = _parse_to_datetime(from_date)
+            query["$or"] = [
+                {"certificate_date": {"$gte": from_date}},
+                {"certificate_date": {"$gte": from_dt}},
+                {"created_at": {"$gte": from_dt}},
+            ]
         elif to_date:
-            query["certificate_date"] = {"$lte": to_date}
+            to_dt = _parse_to_datetime(to_date)
+            if to_dt:
+                to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            query["$or"] = [
+                {"certificate_date": {"$lte": to_date}},
+                {"certificate_date": {"$lte": to_dt}},
+                {"created_at": {"$lte": to_dt}},
+            ]
 
         docs = list(col.find(query).sort("created_at", -1))
 
@@ -644,6 +745,11 @@ def list_tumour_board_certificates(request):
             if not approved_by_name and approved_by:
                 approved_by_name = resolve_created_by_name(approved_by) or str(approved_by)
 
+            deleted_by = d.get("deleted_by") or ""
+            deleted_by_name = d.get("deleted_by_name") or ""
+            if not deleted_by_name and deleted_by:
+                deleted_by_name = resolve_created_by_name(deleted_by) or str(deleted_by)
+
             results.append({
                 "id": d_id,
                 "certificate_id": d.get("certificate_id", f"TBC-{d_id[-6:]}"),
@@ -653,8 +759,8 @@ def list_tumour_board_certificates(request):
                 "age": d.get("age", ""),
                 "gender": d.get("gender", ""),
                 "phone": d.get("phone", ""),
-                "certificate_date": d.get("certificate_date", ""),
-                "meeting_date": d.get("meeting_date") or d.get("certificate_date", ""),
+                "certificate_date": _format_display_date(d.get("certificate_date")),
+                "meeting_date": _format_display_date(d.get("meeting_date") or d.get("certificate_date")),
                 "tms_case_ref_no": d.get("tms_case_ref_no", "") or d.get("field_values", {}).get("tms_case_ref_no", ""),
                 "scheme_name": d.get("scheme_name", "") or d.get("field_values", {}).get("scheme_name", "CMCHIS"),
                 "scheme_card_id": d.get("scheme_card_id", "") or d.get("field_values", {}).get("scheme_card_id", ""),
@@ -670,14 +776,18 @@ def list_tumour_board_certificates(request):
                 "status": "Approved" if d.get("is_approved") else "Draft",
                 "approved_by": approved_by,
                 "approved_by_name": approved_by_name,
-                "approved_date": d.get("approved_date", ""),
+                "approved_date": _format_display_iso(d.get("approved_date")),
                 "created_by": created_by,
                 "created_by_name": created_by_name,
-                "created_at": d.get("created_at", ""),
-                "updated_at": d.get("updated_at", ""),
+                "created_at": _format_display_iso(d.get("created_at") or d.get("created_date")),
+                "created_date": _format_display_iso(d.get("created_date") or d.get("created_at")),
+                "updated_at": _format_display_iso(d.get("updated_at") or d.get("lastmodified_date")),
                 "lastmodified_by": lastmod_by,
                 "lastmodified_by_name": lastmod_by_name,
-                "lastmodified_date": d.get("lastmodified_date") or d.get("updated_at", ""),
+                "lastmodified_date": _format_display_iso(d.get("lastmodified_date") or d.get("updated_at")),
+                "deleted_by": deleted_by,
+                "deleted_by_name": deleted_by_name,
+                "deleted_date": _format_display_iso(d.get("deleted_date") or d.get("deleted_at")),
             })
 
         return Response({"success": True, "data": serialize_doc(results)}, status=status.HTTP_200_OK)
@@ -690,6 +800,7 @@ def list_tumour_board_certificates(request):
 def save_tumour_board_certificate(request):
     """
     Create or update a Tumour Board certificate.
+    Stores audit credentials from auth-user-id and all dates in BSON datetime format.
     Disallows edits if certificate has already been approved.
     """
     try:
@@ -720,18 +831,40 @@ def save_tumour_board_certificate(request):
         )
         board_remarks = field_values.get("board_remarks") or payload.get("board_remarks", "")
 
-        meeting_date = payload.get("meeting_date") or payload.get("certificate_date") or date.today().strftime("%Y-%m-%d")
         tms_case_ref_no = payload.get("tms_case_ref_no") or field_values.get("tms_case_ref_no", "")
         scheme_name = payload.get("scheme_name") or field_values.get("scheme_name", "CMCHIS")
         scheme_card_id = payload.get("scheme_card_id") or field_values.get("scheme_card_id", "")
         primary_referral_dept = payload.get("primary_referral_dept") or field_values.get("primary_referral_dept", "")
         treating_consultant = payload.get("treating_consultant") or field_values.get("treating_consultant", "")
 
-        user_id = request.headers.get("X-Employee-Id") or payload.get("created_by") or "HMS-STAFF"
-        user_name = resolve_created_by_name(user_id) or str(user_id)
+        # Extract audit credentials from auth-user-id
+        user_id, user_name = _get_auth_user_info(request, fallback_id=payload.get("created_by") or "system")
 
-        now_str = datetime.now().isoformat()
-        today_date = date.today().strftime("%Y-%m-%d")
+        branch_code = (
+            request.data.get("auth-branch-code")
+            or request.headers.get("Branch-Code")
+            or request.headers.get("auth-branch-code")
+            or payload.get("branch_code", "")
+        )
+        outlet_code = (
+            request.data.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("auth-outlet-code")
+            or payload.get("outlet_code", "")
+        )
+        hospital_code = (
+            request.data.get("auth-hospital-code")
+            or request.headers.get("Hospital-Code")
+            or request.headers.get("auth-hospital-code")
+            or payload.get("hospital_code", "")
+        )
+
+        # Dates stored as BSON datetime objects
+        now_dt = datetime.now()
+        raw_cert_date = payload.get("certificate_date") or payload.get("meeting_date")
+        cert_dt = _parse_to_datetime(raw_cert_date, default_now=True)
+        raw_meeting_date = payload.get("meeting_date") or payload.get("certificate_date")
+        meeting_dt = _parse_to_datetime(raw_meeting_date, default_now=True)
 
         # Check existing record
         existing = None
@@ -748,6 +881,9 @@ def save_tumour_board_certificate(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            existing_cert_dt = _parse_to_datetime(existing.get("certificate_date"))
+            existing_meeting_dt = _parse_to_datetime(existing.get("meeting_date"))
+
             update_data = {
                 "uhid": uhid,
                 "ip_op_number": payload.get("ip_op_number", ""),
@@ -755,8 +891,8 @@ def save_tumour_board_certificate(request):
                 "age": payload.get("age", ""),
                 "gender": payload.get("gender", ""),
                 "phone": payload.get("phone", ""),
-                "certificate_date": payload.get("certificate_date") or existing.get("certificate_date", today_date),
-                "meeting_date": meeting_date,
+                "certificate_date": cert_dt or existing_cert_dt or now_dt,
+                "meeting_date": meeting_dt or existing_meeting_dt or cert_dt or now_dt,
                 "tms_case_ref_no": tms_case_ref_no,
                 "scheme_name": scheme_name,
                 "scheme_card_id": scheme_card_id,
@@ -768,11 +904,11 @@ def save_tumour_board_certificate(request):
                 "stage": stage,
                 "board_remarks": board_remarks,
                 "field_values": field_values,
-                "updated_at": now_str,
+                "updated_at": now_dt,
                 "updated_by": user_id,
                 "lastmodified_by": user_id,
                 "lastmodified_by_name": user_name,
-                "lastmodified_date": now_str,
+                "lastmodified_date": now_dt,
             }
 
             col.update_one({"_id": existing["_id"]}, {"$set": update_data})
@@ -802,8 +938,8 @@ def save_tumour_board_certificate(request):
             "age": payload.get("age", ""),
             "gender": payload.get("gender", ""),
             "phone": payload.get("phone", ""),
-            "certificate_date": payload.get("certificate_date") or today_date,
-            "meeting_date": meeting_date,
+            "certificate_date": cert_dt,
+            "meeting_date": meeting_dt,
             "tms_case_ref_no": tms_case_ref_no,
             "scheme_name": scheme_name,
             "scheme_card_id": scheme_card_id,
@@ -819,11 +955,15 @@ def save_tumour_board_certificate(request):
             "status": "Draft",
             "created_by": user_id,
             "created_by_name": user_name,
-            "created_at": now_str,
-            "updated_at": now_str,
+            "created_at": now_dt,
+            "created_date": now_dt,
             "lastmodified_by": user_id,
             "lastmodified_by_name": user_name,
-            "lastmodified_date": now_str,
+            "lastmodified_date": now_dt,
+            "updated_at": now_dt,
+            "branch_code": branch_code,
+            "outlet_code": outlet_code,
+            "hospital_code": hospital_code,
             "is_active": True,
             "is_deleted": False,
         }
@@ -847,6 +987,7 @@ def save_tumour_board_certificate(request):
 def delete_tumour_board_certificate(request, cert_id):
     """
     Delete a certificate before approval (Soft Delete: is_active: False, is_deleted: True).
+    Stores audit credentials from auth-user-id and deleted_date as datetime.
     Disallows deleting if approved.
     """
     try:
@@ -866,20 +1007,24 @@ def delete_tumour_board_certificate(request, cert_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user_id = request.headers.get("X-Employee-Id") or "HMS-STAFF"
-        user_name = resolve_created_by_name(user_id) or str(user_id)
-        now_str = datetime.now().isoformat()
+        user_id, user_name = _get_auth_user_info(request, fallback_id="system")
+        now_dt = datetime.now()
 
-        # Soft delete: set is_active: False, is_deleted: True
+        # Soft delete: set is_active: False, is_deleted: True with audit timestamps in datetime format
         col.update_one(
             {"_id": existing["_id"]},
             {
                 "$set": {
                     "is_active": False,
                     "is_deleted": True,
-                    "deleted_at": now_str,
+                    "deleted_at": now_dt,
+                    "deleted_date": now_dt,
                     "deleted_by": user_id,
                     "deleted_by_name": user_name,
+                    "lastmodified_by": user_id,
+                    "lastmodified_by_name": user_name,
+                    "lastmodified_date": now_dt,
+                    "updated_at": now_dt,
                 }
             },
         )
@@ -893,7 +1038,8 @@ def delete_tumour_board_certificate(request, cert_id):
 def approve_tumour_board_certificate(request, cert_id):
     """
     Approve a Tumour Board certificate.
-    Sets is_approved: True, locks certificate, and stamps approval metadata.
+    Sets is_approved: True, locks certificate, stamps approval credentials from auth-user-id,
+    and stores approved_date in BSON datetime format.
     """
     try:
         col = hospital_tumour_board_collection
@@ -912,17 +1058,20 @@ def approve_tumour_board_certificate(request, cert_id):
                 status=status.HTTP_200_OK,
             )
 
-        user_id = request.headers.get("X-Employee-Id") or request.data.get("approved_by") or "HMS-APPROVER"
-        user_name = resolve_created_by_name(user_id) or str(user_id)
-        now_str = datetime.now().isoformat()
+        data = request.data if isinstance(request.data, dict) else {}
+        user_id, user_name = _get_auth_user_info(request, fallback_id=data.get("approved_by") or "system")
+        now_dt = datetime.now()
 
         update_fields = {
             "is_approved": True,
             "status": "Approved",
             "approved_by": user_id,
             "approved_by_name": user_name,
-            "approved_date": now_str,
-            "updated_at": now_str,
+            "approved_date": now_dt,
+            "lastmodified_by": user_id,
+            "lastmodified_by_name": user_name,
+            "lastmodified_date": now_dt,
+            "updated_at": now_dt,
         }
 
         col.update_one({"_id": existing["_id"]}, {"$set": update_fields})
@@ -930,7 +1079,8 @@ def approve_tumour_board_certificate(request, cert_id):
             {
                 "success": True,
                 "message": "Certificate approved successfully. Certificate printing is now enabled.",
-                "approved_date": now_str,
+                "approved_date": _format_display_iso(now_dt),
+                "approved_by": user_id,
                 "approved_by_name": user_name,
             },
             status=status.HTTP_200_OK,

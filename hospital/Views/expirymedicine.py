@@ -295,8 +295,8 @@ def expiry_medicine_view(request, pk=None):
         # Outlet filter (if param provided, use param; otherwise if user is logged into an outlet, filter by that)
         outlet_param = request.GET.get("outlet_code", None)
         if outlet_param is not None:
-            if outlet_param in ("", "null", "None", "system", "__DRUG_PURCHASE__"):
-                filter_q["$or"] = [{"outlet_code": ""}, {"outlet_code": None}]
+            if outlet_param in ("", "null", "None", "system", "__DRUG_PURCHASE__", "OLET006"):
+                filter_q["$or"] = [{"outlet_code": ""}, {"outlet_code": None}, {"outlet_code": "OLET006"}]
             else:
                 filter_q["outlet_code"] = outlet_param
         elif user_outlet:
