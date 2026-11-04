@@ -9,7 +9,7 @@ def main():
     """Run administrative tasks."""
     
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
     
     environment = os.getenv('ENV_CLASSIFICATION', 'local')
 

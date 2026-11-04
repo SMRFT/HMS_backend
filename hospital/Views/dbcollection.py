@@ -1,14 +1,7 @@
 from pymongo import MongoClient
 import os
-from pathlib import Path
 from dotenv import load_dotenv
-
-# Ensure .env is loaded from HMS_backend directory
-_backend_env = Path(__file__).resolve().parent.parent.parent / '.env'
-if _backend_env.exists():
-    load_dotenv(dotenv_path=_backend_env)
-else:
-    load_dotenv()
+load_dotenv(override=True)
 
 # Create Mongo client (single place)
 mongo_url = os.getenv("GLOBAL_DB_HOST")

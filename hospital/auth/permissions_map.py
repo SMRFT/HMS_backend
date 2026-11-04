@@ -597,7 +597,7 @@ PAGE_MAPPING = {
          '/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/': 'HMS-P-PMC',
          r'^/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/?(\?.*)?$': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/substitute_medicine/': 'HMS-P-PSM',
-         '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PCB',
+         '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
          r'^/_b_a_c_k_e_n_d/HMS/searchby_ip/?(\?.*)?$': 'HMS-P-PSIP',
          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCIPAB',
