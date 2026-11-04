@@ -1,5 +1,7 @@
 from pymongo import MongoClient
 import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 # Create Mongo client (single place)
 mongo_url = os.getenv("GLOBAL_DB_HOST")
