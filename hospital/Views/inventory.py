@@ -1063,10 +1063,23 @@ def grn_view(request, pk=None):
             DEPT_CODE_MAP = {
                 "OP PHARMACY":   "OLET002",
                 "IP PHARMACY":   "OLET001",
-                "DRUG PURCHASE": "",
+                "DRUG PURCHASE": "OLET006",
             }
- 
-            outlet_code     = DEPT_CODE_MAP.get(saved.purchase_category, "OLET002")
+
+            outlet_code = DEPT_CODE_MAP.get(saved.purchase_category)
+            if not outlet_code:
+                try:
+                    client, hms_db = get_hms_db()
+                    out_doc = hms_db["hospital_outlets"].find_one({
+                        "outlet_name": {"$regex": f"^{re.escape(str(saved.purchase_category or ''))}$", "$options": "i"},
+                        "is_active": True
+                    })
+                    if out_doc and out_doc.get("outlet_code"):
+                        outlet_code = out_doc.get("outlet_code")
+                except Exception:
+                    pass
+            if not outlet_code:
+                outlet_code = "OLET006" if str(saved.purchase_category or "").strip().upper() == "DRUG PURCHASE" else "OLET002"
             assigned_grn_no = saved.grn_number
  
             try:
