@@ -777,6 +777,7 @@ def get_lab_ward_requests(request):
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "status": doc.get("status", "Result Pending"),
+                "cancelReason": doc.get("cancel_reason", ""),
                 "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
                 "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
                 "userName": doc.get("created_by", ""),
@@ -1101,29 +1102,35 @@ def cancel_lab_ward_request(request):
 
         request_id = data.get("id")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
 
         from bson import ObjectId
 
         collection = mongo_db["hospital_investbilling"]
 
-        
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         result = collection.update_one(
 
             {"_id": ObjectId(request_id), "is_ward_request": True},
 
-            {"$set": {"is_active": False, "status": "Cancelled"}}
+            {"$set": {
+                "is_active": False,
+                "status": "Cancelled",
+                "cancel_reason": cancel_reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_date": datetime.now()
+            }}
 
         )
-
-        
 
         if result.modified_count > 0:
 
@@ -1999,13 +2006,17 @@ def cancel_medicine_ward_request(request):
 
         request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
+
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         queries = []
 
@@ -2025,6 +2036,15 @@ def cancel_medicine_ward_request(request):
 
         query = {"$or": queries} if len(queries) > 1 else queries[0]
 
+        update_payload = {
+            "billing_status": "Cancelled",
+            "is_deleted": True,
+            "cancel_reason": cancel_reason,
+            "cancelled_by": cancelled_by,
+            "cancelled_date": datetime.now(),
+            "lastmodified_date": datetime.now()
+        }
+
         # Primary collection: hospital_pharmacybilling
 
         collection = mongo_db["hospital_pharmacybilling"]
@@ -2033,11 +2053,9 @@ def cancel_medicine_ward_request(request):
 
             query,
 
-            {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+            {"$set": update_payload}
 
         )
-
-        
 
         # Fallback collection if not found in primary
 
@@ -2049,7 +2067,7 @@ def cancel_medicine_ward_request(request):
 
                 query,
 
-                {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+                {"$set": update_payload}
 
             )
 
@@ -2307,6 +2325,7 @@ def get_radiology_ward_requests(request):
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "status": doc.get("status", "Result Pending"),
+                "cancelReason": doc.get("cancel_reason", ""),
                 "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
                 "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
                 "userName": doc.get("created_by", ""),
@@ -2663,29 +2682,35 @@ def cancel_radiology_ward_request(request):
 
         request_id = data.get("id")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
 
         from bson import ObjectId
 
         collection = mongo_db["hospital_investbilling"]
 
-        
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         result = collection.update_one(
 
             {"_id": ObjectId(request_id), "is_ward_request": True, "ward_request_type": "RADIOLOGY"},
 
-            {"$set": {"is_active": False, "status": "Cancelled"}}
+            {"$set": {
+                "is_active": False,
+                "status": "Cancelled",
+                "cancel_reason": cancel_reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_date": datetime.now()
+            }}
 
         )
-
-        
 
         if result.modified_count > 0:
 
