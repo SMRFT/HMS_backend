@@ -455,6 +455,8 @@ def _normalise_decimals(obj):
 
 
 _employee_name_cache = {}
+_employee_designation_cache = {}
+_manager_cache = {}
 
 def _resolve_employee_name(emp_id):
     if not emp_id:
@@ -479,6 +481,93 @@ def _resolve_employee_name(emp_id):
     except Exception:
         pass
     return emp_str
+
+
+def _resolve_employee_designation(emp_id):
+    """
+    Match created_by id with profile, get the designation field (e.g. DESIG003),
+    match with backend_diagnostics_Designation collection on Designation_code,
+    and format designation for discharge bill (e.g. INSURANCE ASSISTANT MANAGER).
+    """
+    if not emp_id:
+        return ""
+    emp_str = str(emp_id).strip()
+    if not emp_str:
+        return ""
+    if emp_str in _employee_designation_cache:
+        return _employee_designation_cache[emp_str]
+    try:
+        client, _ = get_hms_db()
+        db = client["Global"]
+        profile = db["backend_diagnostics_profile"].find_one(
+            {"employeeId": emp_str},
+            {"designation": 1, "department": 1}
+        )
+        if profile:
+            desig_code = profile.get("designation")
+            if desig_code:
+                desig_doc = db["backend_diagnostics_Designation"].find_one(
+                    {"Designation_code": str(desig_code).strip()}
+                )
+                if not desig_doc:
+                    desig_doc = db["backend_diagnostics_Designation"].find_one(
+                        {"Designation_code": {"$regex": f"^{re.escape(str(desig_code).strip())}$", "$options": "i"}}
+                    )
+                if desig_doc:
+                    desig_name = (desig_doc.get("designation") or desig_doc.get("decription") or "").strip()
+                    if desig_name:
+                        upper_desig = desig_name.upper()
+                        if "INSURANCE" not in upper_desig:
+                            final_desig = f"INSURANCE {upper_desig}"
+                        else:
+                            final_desig = upper_desig
+                        _employee_designation_cache[emp_str] = final_desig
+                        return final_desig
+    except Exception as e:
+        logger.error(f"Error resolving employee designation for {emp_id}: {e}")
+
+    return ""
+
+
+def _resolve_insurance_manager():
+    """
+    department: 'DEPT017', designation: 'DESIG027' in profile.
+    Get and display name in the right side of the page with GENERAL INSURANCE MANAGER.
+    """
+    try:
+        client, _ = get_hms_db()
+        db = client["Global"]
+        profile = db["backend_diagnostics_profile"].find_one({
+            "$or": [
+                {"department": "DEPT017", "designation": "DESIG027"},
+                {"department": {"$regex": "^DEPT017$", "$options": "i"}, "designation": {"$regex": "^DESIG027$", "$options": "i"}},
+                {"department": {"$regex": "insurance", "$options": "i"}, "designation": {"$regex": "^DESIG027$", "$options": "i"}},
+                {"department": {"$in": ["DEPT017", "Insurance"]}, "employeeId": "50012"},
+                {"department": {"$in": ["DEPT017", "Insurance"]}, "employeeName": {"$regex": "Kausalya", "$options": "i"}}
+            ]
+        })
+        if not profile:
+            profile = db["backend_diagnostics_profile"].find_one({
+                "$or": [
+                    {"employeeId": "50012"},
+                    {"employeeName": {"$regex": "Kausalya", "$options": "i"}},
+                    {"department": {"$in": ["DEPT017", "Insurance"]}}
+                ]
+            })
+        if profile:
+            name = (profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or "").strip()
+            if name:
+                return {
+                    "name": name.upper(),
+                    "designation": "GENERAL INSURANCE MANAGER"
+                }
+    except Exception as e:
+        logger.error(f"Error resolving insurance manager: {e}")
+
+    return {
+        "name": "",
+        "designation": "GENERAL INSURANCE MANAGER"
+    }
 
 
 def _batch_resolve_employees(emp_ids):
@@ -695,6 +784,10 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
 
     created_by_val = doc.get("created_by")
     created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
+    created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
+    mgr = _resolve_insurance_manager()
+    manager_name = mgr.get("name", "")
+    manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
 
     bd = doc.get("bill_date")
     bd_str = bd.isoformat() if isinstance(bd, (_datetime, _date)) else (str(bd)[:10] if bd else None)
@@ -728,8 +821,11 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "id_card_number":        doc.get("id_card_number") or "",
         "insurance_bill_number": doc.get("insurance_bill_number") or "",
         "company_name":          doc.get("company_name") or "",
-        "created_by":        created_by_val,
-        "created_by_name":   created_by_name,
+        "created_by":             created_by_val,
+        "created_by_name":        created_by_name,
+        "created_by_designation": created_by_designation,
+        "manager_name":           manager_name,
+        "manager_designation":    manager_designation,
         "created_date":      _safe_isoformat(doc.get("created_date")),
         "lastmodified_by":   doc.get("lastmodified_by"),
         "lastmodified_date": _safe_isoformat(doc.get("lastmodified_date")),
@@ -831,6 +927,10 @@ def _obj_to_dict(obj):
 
     created_by_val = getattr(obj, "created_by", None)
     created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
+    created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
+    mgr = _resolve_insurance_manager()
+    manager_name = mgr.get("name", "")
+    manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
 
     return {
         "id":                discharge_id,
@@ -861,8 +961,11 @@ def _obj_to_dict(obj):
         "id_card_number":        getattr(obj, "id_card_number", "") or "",
         "insurance_bill_number": getattr(obj, "insurance_bill_number", "") or "",
         "company_name":          getattr(obj, "company_name", "") or "",
-        "created_by":        created_by_val,
-        "created_by_name":   created_by_name,
+        "created_by":             created_by_val,
+        "created_by_name":        created_by_name,
+        "created_by_designation": created_by_designation,
+        "manager_name":           manager_name,
+        "manager_designation":    manager_designation,
         "created_date":      _safe_isoformat(getattr(obj, "created_date", None)),
         "lastmodified_by":   getattr(obj, "lastmodified_by", None),
         "lastmodified_date": _safe_isoformat(getattr(obj, "lastmodified_date", None)),
@@ -3590,3 +3693,38 @@ def patient_next_visit_logs_api(request):
 
 
 
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_discharge_signatories(request):
+    """
+    Returns the resolved signatories for Discharge Billing:
+    - Left side: Bill Prepared By (name + designation resolved from backend_diagnostics_Designation)
+    - Right side: General Insurance Manager (profile with department: DEPT017 & designation: DESIG027)
+    """
+    created_by = (
+        request.GET.get("created_by") or
+        request.data.get("auth-user-id") or
+        request.headers.get("auth-user-id") or
+        request.headers.get("User-Id") or
+        ""
+    )
+    prepared_by_name = _resolve_employee_name(created_by) if created_by else ""
+    prepared_by_desig = _resolve_employee_designation(created_by) if created_by else ""
+    mgr = _resolve_insurance_manager()
+
+    return Response({
+        "success": True,
+        "data": {
+            "prepared_by": {
+                "id": str(created_by),
+                "name": (prepared_by_name or "").upper(),
+                "designation": prepared_by_desig.upper()
+            },
+            "manager": {
+                "name": (mgr.get("name") or "").upper(),
+                "designation": mgr.get("designation", "GENERAL INSURANCE MANAGER").upper()
+            }
+        }
+    })
