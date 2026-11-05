@@ -39,7 +39,12 @@ def save_laundry_request(request):
             ipNumber = data.get('ipNumber', '')
             patient_name = data.get('patient_name', '')
             wardName = data.get('wardName', '')
-            roomNo = data.get('roomNo', '')
+            raw_r = str(data.get('roomNo') or data.get('room_no') or '').strip()
+            if raw_r in ['', '-', 'None', 'null']:
+                raw_r = str(data.get('wardName') or data.get('ward_name') or '').strip()
+            if raw_r in ['-', 'None', 'null']:
+                raw_r = ''
+            roomNo = raw_r
             bedNo = data.get('bedNo', '')
             items = data.get('items', [])
             total_amount = float(data.get('total_amount', 0.00))

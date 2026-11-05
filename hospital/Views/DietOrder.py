@@ -41,7 +41,12 @@ def save_diet_order(request):
         ip_number        = data.get("inpatient_number") or data.get("ipNumber", "")
         patient_name     = data.get("patient_name", "")
         ward_name        = data.get("ward_name", "")
-        room_no          = data.get("room_no", "")
+        raw_r = str(data.get("room_no") or data.get("roomNo") or "").strip()
+        if raw_r in ["", "-", "None", "null"]:
+            raw_r = str(data.get("ward_name") or data.get("wardName") or "").strip()
+        if raw_r in ["-", "None", "null"]:
+            raw_r = ""
+        room_no          = raw_r
         food_items       = data.get("food_items", "")
         diet_type        = data.get("diet_type", "")
         special_diet_note = data.get("special_diet_note", "")

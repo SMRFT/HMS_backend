@@ -398,6 +398,7 @@ urlpatterns = [
     # Nursing Station / Ward Requests
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
     path("update_admission_status/", NursingStation.update_admission_status, name="update_admission_status"),
+    path("check-patient-billing-clearance/", NursingStation.check_patient_billing_clearance, name="check-patient-billing-clearance"),
     path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
     path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
@@ -406,6 +407,8 @@ urlpatterns = [
     path("save_lab_ward_request/", NursingStation.save_lab_ward_request, name="save_lab_ward_request"),
     path("cancel_lab_ward_request/", NursingStation.cancel_lab_ward_request, name="cancel_lab_ward_request"),
     path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
+    path("cancel_individual_ward_request_item/", NursingStation.cancel_individual_ward_request_item, name="cancel_individual_ward_request_item"),
+    path("update_ward_request_item_status/", NursingStation.update_ward_request_item_status, name="update_ward_request_item_status"),
     path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
     path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
     path("return_medicine_ward_request/", NursingStation.return_medicine_ward_request, name="return_medicine_ward_request"),
