@@ -31,7 +31,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/wardrequest/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/location-mapping/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_admission_status/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/check-patient-billing-clearance/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/dosage_master/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get-all-outlets/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/ward-bill-types/?(\?.*)?$': 'HMS-P-WR',
@@ -51,8 +50,6 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/remove_individual_radiology/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/remove_individual_test/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/get_LabBillType_list/?(\?.*)?$': 'HMS-P-WR',
@@ -500,10 +497,6 @@ PAGE_MAPPING = {
     
     '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
     '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/': 'HMS-P-WR',
-    '/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/': 'HMS-P-WR',
     '/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/': 'HMS-P-IB',
     r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-IB',    
                
@@ -610,7 +603,8 @@ PAGE_MAPPING = {
          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCIPAB',
           r'/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/?(\?.*)?$': 'HMS-P-PHVSB',
           r'/_b_a_c_k_e_n_d/HMS/PharmacyBillanalysis/?(\?.*)?$': 'HMS-P-PHVSB',
-
+         r'/_b_a_c_k_e_n_d/HMS/PharmacyItemPatientAnalysis/?(\?.*)?$': 'HMS-P-PHVSB',
+         r'/_b_a_c_k_e_n_d/HMS/search_pharmacy_items/?(\?.*)?$': 'HMS-P-PHVSB',
          r'/_b_a_c_k_e_n_d/HMS/admissionstatus/?(\?.*)?$': 'HMS-P-PAS',
 
         #  salesreturn urls
@@ -625,6 +619,8 @@ PAGE_MAPPING = {
         r'^/_b_a_c_k_e_n_d/HMS/OP_salesreturn_billdetails/?(\?.*)?$': 'HMS-P-OPSRBD',
         '/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/': 'HMS-P-PGSRD',
         r'^/_b_a_c_k_e_n_d/HMS/get_salesreturn_details/?(\?.*)?$': 'HMS-P-PGSRD',
+        '/_b_a_c_k_e_n_d/HMS/get_salesreturn_print_details/': 'HMS-P-PGSRD',
+        r'^/_b_a_c_k_e_n_d/HMS/get_salesreturn_print_details/?(\?.*)?$': 'HMS-P-PGSRD',
 
 
         '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCOPPB',

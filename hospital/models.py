@@ -577,6 +577,7 @@ class PharmacyBilling(AuditModel):
     billing_mode = models.CharField(max_length=20)
     payment_details = models.JSONField(null=True, blank=True)
     Esimated_id=models.CharField(max_length=150)
+    billed_id = models.CharField(max_length=150, blank=True, null=True)
     edit_reason = models.TextField(null=True, blank=True)
     edited_by = models.CharField(max_length=150)
     is_deleted= models.BooleanField(default=False)
