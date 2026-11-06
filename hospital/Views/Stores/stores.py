@@ -15,7 +15,7 @@ from .serializer import (
     get_department_candidates,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
-    StoresIndentReturnSerializer, ItemOpeningStockLogSerializer
+    StoresIndentReturnSerializer, ItemOpeningStockLogSerializer, get_lookup_maps
 )
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -1519,12 +1519,29 @@ def get_stores_intents(request):
     data = list(intent_collection.find(query).sort("created_date", -1))
     emp_map = get_employee_name_map()
 
+    ns_map = {}
+    try:
+        ns_collection = db["hospital_nursingstation"]
+        for ns in ns_collection.find({"is_active": True}, {"ward_id": 1, "ward_name": 1}):
+            w_id = str(ns.get("ward_id"))
+            w_name = ns.get("ward_name")
+            if w_id and w_name:
+                ns_map[w_id] = w_name
+                ns_map[str(ns.get("_id"))] = w_name
+    except Exception:
+        pass
+
     for d in data:
         d["_id"] = str(d["_id"])
 
         # ✅ Department name
         dept_code = d.get("department")
         d["department_name"] = dept_map.get(dept_code) or dept_code or "General"
+
+        # ✅ Nursing Station name mapping (single field: nursing_station)
+        ns_val = d.get("nursing_station") or d.get("nursing_station_name")
+        if ns_val:
+            d["nursing_station"] = ns_map.get(str(ns_val), str(ns_val))
 
         # Map created_by to employeeName from backend_diagnostics_profile
         cb = str(d.get("created_by") or d.get("user") or "").strip()
@@ -3345,12 +3362,27 @@ def stores_previous_day_stock_report(request):
 
     target_date_str = target_date.strftime("%Y-%m-%d")
 
+    cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+
     # Fetch all items
+    cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+
     items_qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('itemName')
     if department_filter:
-        items_qs = items_qs.filter(department=department_filter)
+        dept_str = str(department_filter).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        items_qs = items_qs.filter(q_dept)
     if group_filter:
-        items_qs = items_qs.filter(group=group_filter)
+        grp_f_str = str(group_filter).strip()
+        grp_obj = Group.objects.filter(Q(group_id=grp_f_str) | Q(group_name__iexact=grp_f_str)).first()
+        g_candidates = [grp_f_str]
+        if grp_obj:
+            if grp_obj.group_id: g_candidates.append(grp_obj.group_id)
+            if grp_obj.group_name: g_candidates.append(grp_obj.group_name)
+        items_qs = items_qs.filter(group__in=list(set(g_candidates)))
 
     # Inward for target date from GRN
     inward_map = {}
@@ -3412,9 +3444,19 @@ def stores_previous_day_stock_report(request):
         i_id = str(itm.item_id)
         i_name = itm.itemName
 
+        grp_code = str(itm.group or '').strip()
+        grp_name = group_map.get(grp_code) or grp_code
+        cat_code = str(itm.category or '').strip()
+        cat_name = cat_map.get(cat_code) or cat_code
+
         if search_query:
             sq = search_query.lower()
-            if sq not in i_name.lower() and sq not in i_id.lower():
+            if (sq not in i_name.lower() and 
+                sq not in i_id.lower() and 
+                sq not in grp_name.lower() and 
+                sq not in cat_name.lower() and
+                sq not in grp_code.lower() and
+                sq not in cat_code.lower()):
                 continue
 
         current_stock = safe_float(itm.total_quantity)
@@ -3438,9 +3480,13 @@ def stores_previous_day_stock_report(request):
         stock_records.append({
             'item_id': i_id,
             'item_name': i_name,
-            'department': itm.department or 'Stores',
-            'group': itm.group or '',
-            'category': itm.category or '',
+            'department': dept_map.get(str(itm.department)) or itm.department or 'Stores',
+            'group': grp_name,
+            'group_name': grp_name,
+            'group_code': grp_code,
+            'category': cat_name,
+            'category_name': cat_name,
+            'category_code': cat_code,
             'rack_no': itm.rack_no or '',
             'shelf_no': itm.shelf_no or '',
             'opening_stock': round(opening, 2),
@@ -3602,6 +3648,8 @@ def stores_non_moving_items_report(request):
     department_filter = request.query_params.get('department') or request.GET.get('department')
     group_filter = request.query_params.get('group') or request.GET.get('group')
 
+    cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+
     today = datetime.now().date()
     cutoff_date = today - timedelta(days=days_threshold)
 
@@ -3687,12 +3735,21 @@ def stores_non_moving_items_report(request):
         total_idle_qty += qty
         total_idle_value += idle_value
 
+        grp_code = str(itm.group or '').strip()
+        grp_name = group_map.get(grp_code) or grp_code
+        cat_code = str(itm.category or '').strip()
+        cat_name = cat_map.get(cat_code) or cat_code
+
         non_moving_items.append({
             'item_id': i_id,
             'item_name': i_name,
-            'department': itm.department or 'Stores',
-            'group': itm.group or '',
-            'category': itm.category or '',
+            'department': dept_map.get(str(itm.department)) or itm.department or 'Stores',
+            'group': grp_name,
+            'group_name': grp_name,
+            'group_code': grp_code,
+            'category': cat_name,
+            'category_name': cat_name,
+            'category_code': cat_code,
             'rack_no': itm.rack_no or '',
             'shelf_no': itm.shelf_no or '',
             'stock_on_hand': qty,
@@ -3881,12 +3938,21 @@ def stores_reorder_level_report(request):
         est_cost = suggested_reorder_qty * unit_price
         total_reorder_est_cost += est_cost
 
+        grp_code = str(itm.group or '').strip()
+        grp_name = group_map.get(grp_code) or grp_code
+        cat_code = str(itm.category or '').strip()
+        cat_name = cat_map.get(cat_code) or cat_code
+
         report_items.append({
             'item_id': i_id,
             'item_name': i_name,
-            'department': itm.department or 'Stores',
-            'group': itm.group or '',
-            'category': itm.category or '',
+            'department': dept_map.get(str(itm.department)) or itm.department or 'Stores',
+            'group': grp_name,
+            'group_name': grp_name,
+            'group_code': grp_code,
+            'category': cat_name,
+            'category_name': cat_name,
+            'category_code': cat_code,
             'ved_category': itm.ved_category or 'D',
             'abc_category': itm.abc_category or 'C',
             'rack_no': itm.rack_no or '',

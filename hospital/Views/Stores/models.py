@@ -176,6 +176,8 @@ class storesIntent(AuditModel):
     date = models.DateField()
     items = djongo_models.JSONField(default=list, blank=True)
     department = models.CharField(max_length=50,null=True,blank=True)
+    nursing_station = models.CharField(max_length=150,null=True,blank=True)
+    nursing_station_id = models.CharField(max_length=50,null=True,blank=True)
     is_approved = models.BooleanField(default=False)    
     
     def __str__(self):

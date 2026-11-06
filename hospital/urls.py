@@ -63,6 +63,7 @@ from .Views import (
     insurance_packages,
     Tanuh,
     employee_master,
+    report_config_views,
     tumourboard,
 )
 from .auth import permissions_map
@@ -221,6 +222,8 @@ urlpatterns = [
 
     # Central Cash Counter
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
+    path('admin_close_shift/', cashcounter.admin_close_shift, name='admin_close_shift'),
+    path('admin_close_cashcounter_shift/', cashcounter.admin_close_shift, name='admin_close_cashcounter_shift'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
     path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
@@ -404,6 +407,8 @@ urlpatterns = [
     path("check-patient-billing-clearance/", NursingStation.check_patient_billing_clearance, name="check-patient-billing-clearance"),
     path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
+    path("hospital_nursingstation/", NursingStation.get_wards_list, name="hospital_nursingstation_list"),
+    path("hospital-nursingstations/", NursingStation.get_wards_list, name="hospital_nursingstations_list"),
     path("uhidadmissionstatus/", NursingStation.uhidadmissionstatus, name="uhidadmissionstatus"),
     path("get_LabBillType_list/", NursingStation.get_LabBillType_list, name="get_LabBillType_list"),
     path("get_lab_ward_requests/", NursingStation.get_lab_ward_requests, name="get_lab_ward_requests"),
@@ -849,6 +854,13 @@ urlpatterns = [
     # Employee Master
     path('employee-master/', employee_master.employee_master_list, name='employee_master_list'),
     path('employee-master/<str:employee_id>/', employee_master.employee_master_detail, name='employee_master_detail'),
+
+    # Report Master & Dynamic Report Allocation Configuration
+    path('report-master/', report_config_views.report_master_list_create, name='report_master_list_create'),
+    path('report-master/<str:report_id>/', report_config_views.report_master_detail, name='report_master_detail'),
+    path('report-configuration-master/', report_config_views.report_configuration_master_view, name='report_configuration_master_view'),
+    path('report-configuration-copy/', report_config_views.report_configuration_copy_view, name='report_configuration_copy_view'),
+    path('my-report-permissions/', report_config_views.my_report_permissions_view, name='my_report_permissions_view'),
 ]
 
 
