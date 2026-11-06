@@ -374,19 +374,27 @@ def get_wards_list(request):
 
             {"is_active": True},      # filter
 
-            {"_id": 1, "ward_name": 1}  # projection (include _id)
+            {"_id": 1, "ward_name": 1, "ward_id": 1}  # projection (include _id, ward_id, ward_name)
 
-        )
+        ).sort("ward_id", 1)
 
         wards = []
 
         for d in wards_cursor:
 
+            w_id = d.get("ward_id")
+            w_name = d.get("ward_name", "")
             wards.append({
 
                 "id": str(d["_id"]),
 
-                "ward_name": d.get("ward_name", "")
+                "ward_id": w_id,
+
+                "ward_name": w_name,
+
+                "nursing_station_id": str(w_id) if w_id is not None else str(d["_id"]),
+
+                "nursing_station_name": w_name
 
             })
 

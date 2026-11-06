@@ -442,10 +442,11 @@ def cash_counter_shiftdetails(request):
         except Cashcountershiftdetails.DoesNotExist:
             return Response({"success": False, "message": "Shift not found"})
 
-        if shift.CashierID != employee_id:
+        is_admin_or_manager = data.get("force_close") is True or data.get("is_admin") is True
+        if shift.CashierID != employee_id and not is_admin_or_manager:
             return Response({
                 "success": False,
-                "message": "Shift must be closed by the same cashier who opened it."
+                "message": "Shift must be closed by the same cashier who opened it, or by an administrator."
             }, status=403)
 
         if shift.ShiftStatus != "active":
@@ -794,6 +795,300 @@ def recalculate_and_update_shift_details(shift_no):
         print(f"[recalculate_and_update_shift_details] Error: {e}")
         traceback.print_exc()
 
+
+# =====================================================
+# ✅ DEDICATED ADMIN CLOSE SHIFT API
+# =====================================================
+@api_view(["POST", "PATCH"])
+@permission_classes([HasRoleAndDataPermission])
+def admin_close_shift(request):
+    """
+    Dedicated Administrator API to close an active cash counter shift.
+    Allows administrators and managers to close shifts on behalf of any cashier,
+    recalculating collection totals, recording remitted and submitted transactions,
+    updating shift status to inactive, and logging administrator audit details.
+    """
+    try:
+        data = request.data or {}
+
+        shift_no = data.get("shiftno") or data.get("shift_no")
+        if not shift_no:
+            return Response({"success": False, "message": "shiftno is required"}, status=400)
+
+        admin_id = (
+            data.get("admin_id")
+            or data.get("auth-user-id")
+            or request.META.get("HTTP_AUTH_USER_ID")
+            or request.headers.get("auth-user-id")
+            or extract_aud_employee_id(request)
+            or "ADMIN"
+        )
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or request.headers.get("Hospital-Code")
+            or "SH001"
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or request.META.get("HTTP_BRANCH_CODE")
+            or request.headers.get("Branch-Code")
+            or "SHB001"
+        )
+        outlet_code = (
+            data.get("auth-outlet-code")
+            or data.get("outlet_code")
+            or data.get("SelectedOutlet")
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+        )
+        remarks = data.get("remarks") or data.get("reason") or "Closed by Administrator"
+
+        # 1. Fetch shift via PyMongo directly to avoid Djongo localhost issues
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        col = db["hospital_cashcountershiftdetails"]
+
+        # Priority 1: Match by exact MongoDB _id if sent from frontend
+        shift_id = data.get("_id") or data.get("id")
+        m_shift = None
+        if shift_id:
+            from bson.objectid import ObjectId
+            try:
+                m_shift = col.find_one({"_id": ObjectId(str(shift_id))})
+            except Exception:
+                pass
+
+        # Priority 2: Match ACTIVE shift with this shiftno
+        if not m_shift or m_shift.get("ShiftStatus") != "active":
+            active_shift = col.find_one({"shiftno": shift_no, "ShiftStatus": "active"})
+            if active_shift:
+                m_shift = active_shift
+
+        # Priority 3: Match shift by shiftno where closingTime is None
+        if not m_shift or m_shift.get("ShiftStatus") != "active":
+            unclosed_shift = col.find_one({"shiftno": shift_no, "closingTime": None})
+            if unclosed_shift:
+                m_shift = unclosed_shift
+
+        # Priority 4: Match latest shift by StartingTime / _id
+        if not m_shift:
+            m_shift = col.find_one({"shiftno": shift_no}, sort=[("StartingTime", -1), ("_id", -1)])
+
+        if not m_shift:
+            client.close()
+            return Response({"success": False, "message": f"Shift {shift_no} not found"}, status=404)
+
+        # Check if already closed, but search for active duplicate before failing
+        if m_shift.get("ShiftStatus") != "active" and not m_shift.get("is_active") and m_shift.get("closingTime") is not None:
+            active_fallback = col.find_one({
+                "shiftno": shift_no,
+                "$or": [{"ShiftStatus": "active"}, {"closingTime": None}, {"is_active": True}]
+            })
+            if active_fallback:
+                m_shift = active_fallback
+            else:
+                client.close()
+                return Response({"success": False, "message": f"Shift {shift_no} is already closed"}, status=400)
+
+        closing_time = data.get("closingTime") or timezone.now()
+
+        # 2. Recalculate totals
+        totals = calculate_shift_collection(shift_no)
+        collected_amount = float(safe_dec(totals.get('total_collection', 0)))
+        sales_return = float(safe_dec(totals.get('sales_return', 0)))
+
+        def to_num(val, default=0.0):
+            if val is None:
+                return default
+            try:
+                if hasattr(val, 'to_decimal'):
+                    return float(val.to_decimal())
+                return float(val)
+            except Exception:
+                return default
+
+        opening_balance = to_num(m_shift.get("OpeningBalance", 0))
+        remitted_val = to_num(data.get("RemittedToBank"), to_num(m_shift.get("RemittedToBank", 0)))
+        submitted_val = to_num(data.get("SubmittedToAccount"), to_num(m_shift.get("SubmittedToAccount", 0)))
+        handover_val = to_num(data.get("HandOverAmount"), to_num(m_shift.get("HandOverAmount", 0)))
+
+        closing_balance = opening_balance + collected_amount - remitted_val - submitted_val - handover_val
+
+        # 3. Update MongoDB shift document
+        update_fields = {
+            "ShiftStatus": "inactive",
+            "is_active": False,
+            "closingTime": closing_time,
+            "ClosingBalance": Decimal128(f"{closing_balance:.2f}"),
+            "collected_Amount": Decimal128(f"{collected_amount:.2f}"),
+            "SalesReturnAmount": Decimal128(f"{sales_return:.2f}"),
+            "RemittedToBank": Decimal128(f"{remitted_val:.2f}"),
+            "SubmittedToAccount": Decimal128(f"{submitted_val:.2f}"),
+            "HandOverAmount": Decimal128(f"{handover_val:.2f}"),
+            "closed_by_admin": True,
+            "admin_id": str(admin_id),
+            "admin_close_remarks": remarks,
+            "lastmodified_by": str(admin_id),
+            "lastmodified_date": timezone.now()
+        }
+        # Update the exact document by _id
+        col.update_one({"_id": m_shift["_id"]}, {"$set": update_fields})
+
+        # Also close any other active duplicates with this shiftno to eliminate ghost active shifts
+        col.update_many(
+            {"shiftno": shift_no, "ShiftStatus": "active"},
+            {"$set": {
+                "ShiftStatus": "inactive",
+                "is_active": False,
+                "closingTime": closing_time,
+                "lastmodified_by": str(admin_id),
+                "lastmodified_date": timezone.now()
+            }}
+        )
+
+        # 4. Also update Django ORM instance if possible
+        try:
+            orm_shift = Cashcountershiftdetails.objects.filter(shiftno=shift_no).first()
+            if orm_shift:
+                orm_shift.ShiftStatus = "inactive"
+                orm_shift.is_active = False
+                orm_shift.closingTime = closing_time
+                orm_shift.ClosingBalance = safe_dec(closing_balance)
+                orm_shift.collected_Amount = safe_dec(collected_amount)
+                orm_shift.SalesReturnAmount = safe_dec(sales_return)
+                orm_shift.RemittedToBank = safe_dec(remitted_val)
+                orm_shift.SubmittedToAccount = safe_dec(submitted_val)
+                orm_shift.HandOverAmount = safe_dec(handover_val)
+                orm_shift.lastmodified_by = str(admin_id)
+                orm_shift.lastmodified_date = timezone.now()
+                orm_shift.save()
+        except Exception as orm_err:
+            print("Notice: ORM shift save skipped/error:", orm_err)
+
+        # 5. Record Remitted to Bank in hospital_cashcountercollection
+        counter_code = m_shift.get("CashCounter", "")
+        shift_branch = branch_code or m_shift.get("branch_code", "SHB001")
+        shift_outlet = outlet_code or m_shift.get("outlet_code") or m_shift.get("SelectedOutlet", "")
+        shift_hospital = hospital_code or m_shift.get("hospital_code", "SH001")
+
+        if remitted_val > 0:
+            existing_remit = db["hospital_cashcountercollection"].find_one({
+                "shift_no": shift_no,
+                "billing_category": "remitted",
+                "transaction_type": "remitted"
+            })
+            if not existing_remit:
+                bill_no_remit = generate_accounts_bill_no(db, timezone.now())
+                db["hospital_cashcountercollection"].insert_one({
+                    "created_by": str(admin_id),
+                    "created_date": timezone.now(),
+                    "lastmodified_by": str(admin_id),
+                    "lastmodified_date": timezone.now(),
+                    "branch_code": shift_branch,
+                    "outlet_code": shift_outlet,
+                    "hospital_code": shift_hospital,
+                    "counter_code": counter_code,
+                    "shift_no": shift_no,
+                    "billing_category": "remitted",
+                    "bill_number": bill_no_remit,
+                    "transaction_type": "remitted",
+                    "collected_amount": Decimal128(f"{remitted_val:.2f}"),
+                    "Returned_amount": Decimal128("0.00"),
+                    "remarks": f"Remitted to Bank on admin closing ({remarks})"
+                })
+            else:
+                db["hospital_cashcountercollection"].update_one(
+                    {"_id": existing_remit["_id"]},
+                    {"$set": {
+                        "collected_amount": Decimal128(f"{remitted_val:.2f}"),
+                        "lastmodified_by": str(admin_id),
+                        "lastmodified_date": timezone.now()
+                    }}
+                )
+
+        # 6. Record Submitted to Account in hospital_cashcountercollection
+        if submitted_val > 0:
+            existing_submit = db["hospital_cashcountercollection"].find_one({
+                "shift_no": shift_no,
+                "billing_category": "submit",
+                "transaction_type": "submit"
+            })
+            if not existing_submit:
+                bill_no_submit = generate_accounts_bill_no(db, timezone.now())
+                db["hospital_cashcountercollection"].insert_one({
+                    "created_by": str(admin_id),
+                    "created_date": timezone.now(),
+                    "lastmodified_by": str(admin_id),
+                    "lastmodified_date": timezone.now(),
+                    "branch_code": shift_branch,
+                    "outlet_code": shift_outlet,
+                    "hospital_code": shift_hospital,
+                    "counter_code": counter_code,
+                    "shift_no": shift_no,
+                    "billing_category": "submit",
+                    "bill_number": bill_no_submit,
+                    "transaction_type": "submit",
+                    "collected_amount": Decimal128(f"{submitted_val:.2f}"),
+                    "Returned_amount": Decimal128("0.00"),
+                    "remarks": f"Submitted to Account on admin closing ({remarks})"
+                })
+            else:
+                db["hospital_cashcountercollection"].update_one(
+                    {"_id": existing_submit["_id"]},
+                    {"$set": {
+                        "collected_amount": Decimal128(f"{submitted_val:.2f}"),
+                        "lastmodified_by": str(admin_id),
+                        "lastmodified_date": timezone.now()
+                    }}
+                )
+
+        # 7. Prepare response data
+        counter_name = counter_code
+        try:
+            cc = db["hospital_cashcounter"].find_one({"counter_id": counter_code})
+            if cc and cc.get("counter_name"):
+                counter_name = cc.get("counter_name")
+        except:
+            pass
+
+        client.close()
+
+        resp_data = {
+            "shiftno": shift_no,
+            "CashierID": m_shift.get("CashierID"),
+            "CashCounter": counter_code,
+            "CashCounterName": counter_name,
+            "OpeningBalance": opening_balance,
+            "ClosingBalance": round(closing_balance, 2),
+            "collected_Amount": round(collected_amount, 2),
+            "RemittedToBank": round(remitted_val, 2),
+            "SubmittedToAccount": round(submitted_val, 2),
+            "HandOverAmount": round(handover_val, 2),
+            "ShiftStatus": "inactive",
+            "StartingTime": str(m_shift.get("StartingTime")),
+            "closingTime": str(closing_time),
+            "date": str(m_shift.get("date")),
+            "is_active": False,
+            "closed_by_admin": True,
+            "admin_id": str(admin_id),
+            "admin_close_remarks": remarks
+        }
+
+        return Response({
+            "success": True,
+            "message": f"Shift {shift_no} successfully closed by administrator ({admin_id}).",
+            "data": resp_data
+        })
+
+    except Exception as e:
+        import traceback
+        err_str = traceback.format_exc()
+        print("❌ admin_close_shift ERROR:\n", err_str)
+        return Response({
+            "success": False,
+            "message": f"Error closing shift: {str(e)}",
+            "traceback": err_str
+        }, status=500)
 
 
 # =====================================================
@@ -2335,53 +2630,256 @@ def update_mainblock_pendingbills(request):
 
 
 
-@api_view(["POST"])
-# @permission_classes([HasRoleAndDataPermission])
+@api_view(["POST", "GET"])
 def get_shift_summary_report(request):
+    """
+    Ultra-fast shift summary report using direct PyMongo with field projection,
+    pre-fetched cash counter mappings, bulk cashier profile names, and selective
+    live collection aggregation for active shifts.
+    """
     try:
-        from django.db.models import Q
-        data = request.data
+        import datetime
+        from pymongo import MongoClient
+
+        data = request.data if request.method == "POST" else request.query_params
+        if not data:
+            data = {}
+
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
+            or request.META.get("HTTP_HOSPITAL_CODE")
+            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or request.META.get("HTTP_AUTH_BRANCH_CODE")
+            or request.META.get("HTTP_BRANCH_CODE")
+            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+        )
+        status_filter = data.get("status") or data.get("shift_status")
+        outlet_code_filter = data.get("outlet_code") or data.get("outlet")
+        shiftno_filter = data.get("shiftno") or data.get("shift_no")
+        cashier_filter = data.get("cashier_id") or data.get("CashierID")
         from_date = data.get("from_date")
         to_date = data.get("to_date")
-        outlet_code = data.get("outlet_code") or data.get("outlet")
-        shiftno = data.get("shiftno") or data.get("shift_no")
-        hospital_code = data.get("auth-hospital-code") 
-        branch_code = data.get("auth-branch-code")
-        queryset = Cashcountershiftdetails.objects.all()
+        user_limit = data.get("limit")
+
+        # ── MongoDB Query Filter ──────────────────────────────────────
+        query = {}
         if hospital_code:
-            queryset = queryset.filter(hospital_code=hospital_code)
+            query["hospital_code"] = hospital_code
         if branch_code:
-            queryset = queryset.filter(branch_code=branch_code)
-        if outlet_code and str(outlet_code).lower() != "all":
-            queryset = queryset.filter(Q(outlet_code=outlet_code) | Q(SelectedOutlet=outlet_code))
-        if shiftno:
-            queryset = queryset.filter(shiftno=shiftno)
+            query["branch_code"] = branch_code
+        if status_filter and str(status_filter).lower() != "all":
+            s_low = str(status_filter).strip().lower()
+            if s_low == "active":
+                # Active shifts must have ShiftStatus active AND closingTime None AND is_active != False
+                query["ShiftStatus"] = {"$regex": "^active$", "$options": "i"}
+                query["closingTime"] = None
+                query["is_active"] = {"$ne": False}
+            elif s_low in ("inactive", "closed"):
+                query["$or"] = [
+                    {"ShiftStatus": {"$regex": "^inactive$", "$options": "i"}},
+                    {"closingTime": {"$ne": None}},
+                    {"is_active": False}
+                ]
+            else:
+                query["ShiftStatus"] = {"$regex": f"^{s_low}$", "$options": "i"}
+        if outlet_code_filter and str(outlet_code_filter).lower() != "all":
+            query["$or"] = [{"outlet_code": str(outlet_code_filter)}, {"SelectedOutlet": str(outlet_code_filter)}]
+        if shiftno_filter:
+            query["shiftno"] = {"$regex": str(shiftno_filter).strip(), "$options": "i"}
+        if cashier_filter and str(cashier_filter).lower() != "all":
+            query["CashierID"] = str(cashier_filter)
+
+        # Parse date bounds safely
+        date_filter = {}
         if from_date:
-            queryset = queryset.filter(date__gte=from_date)
+            try:
+                parts = [int(p) for p in str(from_date).split("T")[0].split("-")]
+                date_filter["$gte"] = datetime.datetime(parts[0], parts[1], parts[2], 0, 0, 0)
+            except Exception:
+                pass
         if to_date:
-            queryset = queryset.filter(date__lte=to_date)
-        shifts = queryset.order_by("-date", "-StartingTime")
-        cashier_ids = list(set([s.CashierID for s in shifts]))
-        cashier_name_map = {}
+            try:
+                parts = [int(p) for p in str(to_date).split("T")[0].split("-")]
+                date_filter["$lte"] = datetime.datetime(parts[0], parts[1], parts[2], 23, 59, 59, 999999)
+            except Exception:
+                pass
+        if date_filter:
+            query["date"] = date_filter
+
+        # Dynamic limit to safeguard against unbound full-scan queries
         try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client['Global']
-            profiles = list(db['backend_diagnostics_profile'].find(
-                {"employeeId": {"$in": cashier_ids}},
-                {"employeeId": 1, "employeeName": 1, "_id": 0}
-            ))
-            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            client.close()
-        except:
+            limit_val = int(user_limit) if user_limit else 0
+        except Exception:
+            limit_val = 0
+
+        is_active_only = bool(status_filter and str(status_filter).lower() == "active")
+        if limit_val <= 0 and not is_active_only and not shiftno_filter and not (from_date and to_date):
+            limit_val = 500
+
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client["HMS"]
+        col_shifts = hms_db["hospital_cashcountershiftdetails"]
+
+        projection = {
+            "shiftno": 1, "CashierID": 1, "CashCounter": 1,
+            "OpeningBalance": 1, "ClosingBalance": 1, "collected_Amount": 1,
+            "PettyCashBalance": 1, "RemittedToBank": 1, "SubmittedToAccount": 1,
+            "HandOverAmount": 1, "SalesReturnAmount": 1, "ShiftStatus": 1,
+            "StartingTime": 1, "closingTime": 1, "date": 1,
+            "outlet_code": 1, "SelectedOutlet": 1, "hospital_code": 1, "branch_code": 1
+        }
+
+        cursor = col_shifts.find(query, projection).sort([("date", -1), ("StartingTime", -1)])
+        if limit_val > 0:
+            cursor = cursor.limit(limit_val)
+        shifts = list(cursor)
+
+        # Bulk pre-fetch cash counters (only 10 rows in database)
+        cc_map = {}
+        try:
+            cc_map = {c["counter_id"]: c.get("counter_name", c["counter_id"]) for c in hms_db["hospital_cashcounter"].find({}, {"counter_id": 1, "counter_name": 1})}
+        except Exception:
             pass
+
+        # Bulk fetch cashier profile employee names
+        cashier_ids = list({s.get("CashierID") for s in shifts if s.get("CashierID")})
+        cashier_name_map = {}
+        if cashier_ids:
+            try:
+                prof_db = client["Global"]
+                profiles = list(prof_db["backend_diagnostics_profile"].find(
+                    {"employeeId": {"$in": cashier_ids}},
+                    {"employeeId": 1, "employeeName": 1, "_id": 0}
+                ))
+                cashier_name_map = {p["employeeId"]: p.get("employeeName", p["employeeId"]) for p in profiles}
+            except Exception:
+                pass
+
+        # Query live collections ONLY for active shifts in the batch
+        active_nos = [s["shiftno"] for s in shifts if (s.get("ShiftStatus") or "").lower() == "active" and s.get("shiftno")]
+        shift_totals = {}
+        if active_nos:
+            try:
+                col_c = hms_db["hospital_cashcountercollection"]
+                ccc_docs = list(col_c.find(
+                    {"shift_no": {"$in": active_nos}},
+                    {"shift_no": 1, "billing_category": 1, "transaction_type": 1, "collected_amount": 1, "Returned_amount": 1}
+                ))
+                for doc in ccc_docs:
+                    s_no = doc.get("shift_no")
+                    if not s_no:
+                        continue
+                    st = shift_totals.setdefault(s_no, {"collected": 0.0, "returns": 0.0, "remitted": 0.0, "submitted": 0.0})
+                    cat = (doc.get("billing_category") or "").lower()
+                    tx_type = (doc.get("transaction_type") or "").lower()
+                    try:
+                        col_amt = float(str(doc.get("collected_amount") or 0))
+                    except Exception:
+                        col_amt = 0.0
+                    try:
+                        ret_amt = float(str(doc.get("Returned_amount") or 0))
+                    except Exception:
+                        ret_amt = 0.0
+
+                    if "return" in cat or tx_type in ("payment", "returned"):
+                        st["returns"] += col_amt or ret_amt
+                    elif cat == "remitted" or tx_type == "remitted":
+                        st["remitted"] += col_amt
+                    elif cat == "submit" or tx_type == "submit":
+                        st["submitted"] += col_amt
+                    else:
+                        st["collected"] += col_amt
+            except Exception as e:
+                print("Error aggregating active shift collections:", e)
+
+        def _to_num(val):
+            if val is None:
+                return 0.0
+            try:
+                return float(str(val))
+            except Exception:
+                return 0.0
+
         report_data = []
         for s in shifts:
-            res = format_shift_response(s)
-            res["User"] = cashier_name_map.get(s.CashierID, s.CashierID)
-            # Format times for report display
-            res["StartTime"] = s.StartingTime.strftime("%I.%M%p").lower() if s.StartingTime else ""
-            res["EndTime"] = s.closingTime.strftime("%I.%M%p").lower() if s.closingTime else ""
-            report_data.append(res)
+            sno = s.get("shiftno", "")
+            cid = s.get("CashierID", "")
+            cc_id = s.get("CashCounter", "")
+            st = shift_totals.get(sno, {})
+
+            col_amt = st.get("collected") if sno in shift_totals else _to_num(s.get("collected_Amount"))
+            ret_amt = st.get("returns") if sno in shift_totals else _to_num(s.get("SalesReturnAmount"))
+            rem_amt = st.get("remitted") if sno in shift_totals else _to_num(s.get("RemittedToBank"))
+            sub_amt = st.get("submitted") if sno in shift_totals else _to_num(s.get("SubmittedToAccount"))
+
+            # Standard Indian Time (IST = UTC+05:30)
+            IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+            def _to_ist(val):
+                if not val:
+                    return None
+                if isinstance(val, str):
+                    try:
+                        val = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    except Exception:
+                        return None
+                if isinstance(val, datetime.datetime):
+                    if val.tzinfo is None:
+                        val = val.replace(tzinfo=datetime.timezone.utc)
+                    return val.astimezone(IST)
+                return None
+
+            st_time = s.get("StartingTime")
+            cl_time = s.get("closingTime")
+            st_ist = _to_ist(st_time)
+            cl_ist = _to_ist(cl_time)
+
+            st_iso = st_ist.isoformat() if st_ist else (str(st_time or ""))
+            cl_iso = cl_ist.isoformat() if cl_ist else None
+
+            # Standard Indian Time: 12-hour format with AM/PM (e.g. 08:39 PM)
+            st_disp = st_ist.strftime("%I:%M %p") if st_ist else ""
+            cl_disp = cl_ist.strftime("%I:%M %p") if cl_ist else ""
+
+            # Standard Indian Date (DD/MM/YYYY)
+            if st_ist:
+                dt_str = st_ist.strftime("%d/%m/%Y")
+            else:
+                dt = s.get("date")
+                dt_str = dt.strftime("%d/%m/%Y") if isinstance(dt, (datetime.datetime, datetime.date)) else str(dt or "")
+
+            report_data.append({
+                "_id": str(s.get("_id", "")),
+                "id": str(s.get("_id", "")),
+                "shiftno": sno,
+                "CashierID": cid,
+                "User": cashier_name_map.get(cid, cid),
+                "CashCounter": cc_id,
+                "CashCounterName": cc_map.get(cc_id, cc_id),
+                "OpeningBalance": _to_num(s.get("OpeningBalance")),
+                "ClosingBalance": _to_num(s.get("ClosingBalance")),
+                "collected_Amount": round(col_amt - ret_amt, 2),
+                "PettyCashBalance": _to_num(s.get("PettyCashBalance")),
+                "RemittedToBank": round(rem_amt, 2),
+                "SubmittedToAccount": round(sub_amt, 2),
+                "HandOverAmount": _to_num(s.get("HandOverAmount")),
+                "SalesReturnAmount": round(ret_amt, 2),
+                "ShiftStatus": s.get("ShiftStatus", ""),
+                "StartingTime": st_iso,
+                "StartTime": st_disp,
+                "closingTime": cl_iso,
+                "EndTime": cl_disp,
+                "date": dt_str,
+                "hospital_code": s.get("hospital_code", ""),
+                "branch_code": s.get("branch_code", ""),
+                "outlet_code": s.get("outlet_code", ""),
+                "SelectedOutlet": s.get("SelectedOutlet") or s.get("outlet_code", "")
+            })
+
         return Response({
             "success": True,
             "data": report_data
@@ -2389,7 +2887,7 @@ def get_shift_summary_report(request):
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print("❌ get_active_shift ERROR:\n", error_details)
+        print("❌ get_shift_summary_report ERROR:", error_details)
         return Response({"success": False, "message": str(e), "traceback": error_details}, status=500)
 
 @api_view(['GET'])

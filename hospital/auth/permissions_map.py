@@ -16,6 +16,10 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-credit-report/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-master/?.*$': 'HMS-P-ADM',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-configuration-master/?.*$': 'HMS-P-ADM',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-configuration-copy/?.*$': 'HMS-P-ADM',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/my-report-permissions/?.*$': 'HMS-P-ADM',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
     
@@ -630,6 +634,7 @@ PAGE_MAPPING = {
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/get_employee_counter_assignments/': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/assign_employee_cash_counter/': 'HMS-P-CCC',
+        '/_b_a_c_k_e_n_d/HMS/admin_close_shift/': 'HMS-P-CCC',
 
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
         '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',

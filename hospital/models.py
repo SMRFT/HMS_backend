@@ -2928,5 +2928,30 @@ class TumourTemplate(AuditModel):
         return f"{self.template_id} - {self.template_name}"
 
 
+class ReportMaster(AuditModel):
+    report_id = models.CharField(max_length=50, primary_key=True)
+    report_title = models.CharField(max_length=255)
+    reports = models.JSONField(default=dict, blank=True)
+    order = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_reportmaster"
+        ordering = ["order", "report_id"]
+
+    def __str__(self):
+        return f"{self.report_id} - {self.report_title}"
 
 
+class ReportConfigurationMaster(AuditModel):
+    employee_id = models.CharField(max_length=100, unique=True)
+    report_permissions = models.JSONField(default=dict, blank=True)
+    reports = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_reportconfigurationmaster"
+        ordering = ["-created_date"]
+
+    def __str__(self):
+        return f"{self.employee_id} - Report Config"
