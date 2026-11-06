@@ -3977,9 +3977,9 @@ def ipadvance_bills(request):
             for bt in allowed_bill_type_details
             if isinstance(bt, dict) and bt.get("bill_type") is not None
         }
-        # If empty, ensure advance bill type 1 is allowed
-        if not allowed_bill_types:
-            allowed_bill_types = {"1", "2"}
+        # Advance bill types 1 and 2 must always be allowed in ipadvance_bills
+        allowed_bill_types.add("1")
+        allowed_bill_types.add("2")
 
         def _payment_bill_type(p):
             bt = p.get("bill_type") if p.get("bill_type") is not None else p.get(" bill_type")
@@ -3995,6 +3995,37 @@ def ipadvance_bills(request):
         # ✅ GET METHOD (Ultra-fast PyMongo + Bulk Prefetch)
         # =========================================
         if request.method == "GET":
+
+            req_status = request.GET.get("status") or (data.get("status") if data else None) or "pending"
+            req_status_str = str(req_status).strip().lower()
+            is_received_req = req_status_str in ["paid", "received"]
+            is_unpaid_req = req_status_str in ["unpaid", "unpaid_bills"]
+
+            from datetime import date, timedelta
+            today = timezone.localdate() if hasattr(timezone, "localdate") else timezone.now().date()
+            d_start = datetime.combine(today, datetime.min.time())
+            d_end = d_start + timedelta(days=1)
+
+            def _parse_bill_dt(payment):
+                bd = payment.get("bill_date") or payment.get("date") or payment.get("created_date")
+                if not bd:
+                    return None
+                if isinstance(bd, datetime):
+                    return bd.replace(tzinfo=None) if bd.tzinfo else bd
+                if isinstance(bd, date):
+                    return datetime.combine(bd, datetime.min.time())
+                if isinstance(bd, str):
+                    s = bd.strip().replace("Z", "+00:00")
+                    try:
+                        dt = datetime.fromisoformat(s)
+                        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+                    except Exception:
+                        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+                            try:
+                                return datetime.strptime(s.split(" ")[0].split("T")[0], fmt)
+                            except Exception:
+                                continue
+                return None
 
             adm_filter = {
                 "hospital_code": hospital_code,
@@ -4089,10 +4120,75 @@ def ipadvance_bills(request):
                         # ✅ Only bills whose bill_type is allowed for this cash counter
                         if _payment_bill_type(p_copy) not in allowed_bill_types:
                             continue
+
+                        # Check is_advanceActive
+                        if not p_copy.get("is_advanceActive", True):
+                            continue
+
+                        p_status = str(p_copy.get("status") or "").strip().lower()
+                        p_dt = _parse_bill_dt(p_copy)
+                        p_paid_dt = _parse_bill_dt({
+                            "bill_date": p_copy.get("paid_datetime") or p_copy.get("paid_date") or p_copy.get("bill_date") or p_copy.get("date")
+                        }) or p_dt
+
+                        if is_received_req:
+                            if p_status not in ["paid", "received"]:
+                                continue
+                            # ✅ Received bills also display current date paid bills
+                            if p_paid_dt and not (d_start <= p_paid_dt < d_end):
+                                continue
+                        elif is_unpaid_req:
+                            # Prior date / other date unpaid bills
+                            if p_status != "pending":
+                                continue
+                            if p_dt and (d_start <= p_dt < d_end):
+                                # Skip today's bills in unpaid tab
+                                continue
+                        else:
+                            # Current date pending bills
+                            if p_status != "pending":
+                                continue
+                            if p_dt and not (d_start <= p_dt < d_end):
+                                # Skip older bills in pending tab
+                                continue
+
+                        p_copy["_dt"] = p_paid_dt if is_received_req else p_dt
+
+                        # Check is_advanceActive
+                        if not p_copy.get("is_advanceActive", True):
+                            continue
+
+                        p_status = str(p_copy.get("status") or "").strip().lower()
+                        p_dt = _parse_bill_dt(p_copy)
+
+                        if is_received_req:
+                            if p_status not in ["paid", "received"]:
+                                continue
+                        elif is_unpaid_req:
+                            # Prior date / other date unpaid bills
+                            if p_status != "pending":
+                                continue
+                            if p_dt and (d_start <= p_dt < d_end):
+                                # Skip today's bills in unpaid tab
+                                continue
+                        else:
+                            # Current date pending bills
+                            if p_status != "pending":
+                                continue
+                            if p_dt and not (d_start <= p_dt < d_end):
+                                # Skip older bills in pending tab
+                                continue
+
+                        p_copy["_dt"] = p_paid_dt if is_received_req else p_dt
                         clean_payments.append(p_copy)
 
                 if not clean_payments:
-                    continue   # admission has no bills for this counter
+                    continue   # admission has no bills for this counter/status
+
+                # Sort payments newest first
+                clean_payments.sort(key=lambda x: x.get("_dt") or datetime.min, reverse=True)
+                for cp in clean_payments:
+                    cp.pop("_dt", None)
 
                 adm_dt = admission.get("admissionDateTime")
                 if adm_dt and hasattr(adm_dt, "isoformat"):
@@ -4126,6 +4222,15 @@ def ipadvance_bills(request):
                 }
 
                 result.append(admission_data)
+
+            # Sort admissions by newest payment date
+            result.sort(
+                key=lambda a: max(
+                    (_parse_bill_dt(p) or datetime.min for p in a.get("advance_payments", [])),
+                    default=datetime.min
+                ),
+                reverse=True
+            )
 
             return Response({
                 "cashcounter": cashcounter_data,
