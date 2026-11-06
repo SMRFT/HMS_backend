@@ -317,8 +317,8 @@ def pharmacy_stock_view(request, pk=None):
                 filter_q["item_id"] = _int(item_id)
 
             if outlet_code_param is not None:
-                if outlet_code_param in ("", "None", "null", "system"):
-                    filter_q["$or"] = [{"outlet_code": ""}, {"outlet_code": None}]
+                if outlet_code_param in ("", "None", "null", "system", "OLET006"):
+                    filter_q["$or"] = [{"outlet_code": ""}, {"outlet_code": None}, {"outlet_code": "OLET006"}]
                 else:
                     filter_q["outlet_code"] = outlet_code_param
 
@@ -438,7 +438,7 @@ def stock_transfer_view(request, pk=None):
         or "system"
     )
 
-    is_drug_purchase = (outlet_code == "")
+    is_drug_purchase = (outlet_code in ("", "OLET006"))
 
     # ─────────────────────────────────────────────────────────────────────────
     # GET
@@ -473,7 +473,10 @@ def stock_transfer_view(request, pk=None):
             filter_q["transfer_ref_number"] = ref_number
 
         if is_drug_purchase:
-            filter_q["$or"] = [{"to_outlet": ""}, {"to_outlet": None}]
+            filter_q["$or"] = [
+                {"to_outlet": {"$in": ["", None, "OLET006"]}},
+                {"outlet_code": {"$in": ["", None, "OLET006"]}}
+            ]
         else:
             if outlet_code:
                 filter_q["$or"] = [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
@@ -569,10 +572,14 @@ def stock_transfer_view(request, pk=None):
                     break
 
                 row_outlet = str(getattr(s, "outlet_code", "") or "")
+                outlet_matches = (
+                    row_outlet == outlet_code_item or
+                    (row_outlet in ("", "OLET006") and outlet_code_item in ("", "OLET006"))
+                )
                 if (
                     str(getattr(s, "item_id",      "")) == item_id
                     and str(getattr(s, "batch_number", "")).strip() == batch_number
-                    and row_outlet == outlet_code_item
+                    and outlet_matches
                 ):
                     source = s
                     break
@@ -685,7 +692,7 @@ def stock_transfer_action_view(request):
         or ""
     )
     outlet_code = "" if raw_outlet in ("", "null", "None", "system") else raw_outlet
-    is_drug_purchase = (outlet_code == "")
+    is_drug_purchase = (outlet_code in ("", "OLET006"))
 
     user_id = (
         request_data.get("auth-user-id")
@@ -734,7 +741,8 @@ def stock_transfer_action_view(request):
 
         # Permission: Drug Purchase can approve any; real outlet can only approve if they are the recipient
         # For department transfers, originating / issuing outlet can also approve
-        if not is_drug_purchase and outlet_code != transfer_to_outlet:
+        is_recipient = (outlet_code == transfer_to_outlet) or (is_drug_purchase and transfer_to_outlet in ("", "OLET006"))
+        if not is_drug_purchase and not is_recipient:
             if not (is_dept_transfer and (outlet_code == from_outlet or not outlet_code)):
                 return Response(
                     {"success": False, "error": "Only the receiving outlet or issuing pharmacy can approve this transfer"},
@@ -819,7 +827,7 @@ def stock_transfer_action_view(request):
                 PharmacyStock.objects.create(
                     hospital_code            = hospital_code,
                     branch_code              = branch_code,
-                    outlet_code              = transfer_to_outlet,  # "" = Drug Purchase
+                    outlet_code              = transfer_to_outlet if transfer_to_outlet not in ("", "null", "None") else "OLET006",
                     item_id                  = _int(getattr(source, "item_id", 0)),
                     batch_number             = str(getattr(source, "batch_number", "") or ""),
                     expiry_date              = getattr(source, "expiry_date", None),

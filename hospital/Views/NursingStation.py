@@ -308,6 +308,80 @@ def get_admission_list(request):
 
                 item["nursing_station"] = item.get("nursing_station")
 
+        # Phase 7: Batch compute pending request flags for admitted patients
+        active_ips = [it.get("ipNumber") for it in data if it.get("ipNumber") and not it.get("is_discharged")]
+        if active_ips:
+            try:
+                pending_inv = list(mongo_db["hospital_investbilling"].find(
+                    {
+                        "ipNumber": {"$in": active_ips},
+                        "is_ward_request": True,
+                        "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]},
+                        "is_active": True
+                    },
+                    {"ipNumber": 1, "ward_request_type": 1, "_id": 0}
+                ))
+                pending_pharm = list(mongo_db["hospital_pharmacybilling"].find(
+                    {
+                        "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
+                        "is_ward_request": True,
+                        "is_deleted": {"$ne": True},
+                        "billing_status": {"$in": ["Pending", "Draft"]}
+                    },
+                    {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
+                ))
+                pending_diet = list(mongo_db["hospital_patientdietorder"].find(
+                    {
+                        "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
+                        "status": {"$in": ["Ordered", "Received"]}
+                    },
+                    {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
+                ))
+                pending_laundry = list(mongo_db["hospital_laundrywardrequest"].find(
+                    {
+                        "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
+                        "status": "Pending"
+                    },
+                    {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
+                ))
+                pending_implants = list(mongo_db["hospital_implant_request"].find(
+                    {
+                        "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
+                        "is_active": True
+                    },
+                    {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
+                ))
+                pending_map = {}
+                for p_doc in pending_inv:
+                    p_ip = p_doc.get("ipNumber")
+                    w_type = p_doc.get("ward_request_type", "LAB")
+                    k = "radiology" if w_type == "RADIOLOGY" else "lab"
+                    pending_map.setdefault(p_ip, {}).setdefault(k, 0)
+                    pending_map[p_ip][k] += 1
+                for p_doc in pending_pharm:
+                    p_ip = p_doc.get("inpatient_number") or p_doc.get("ipNumber")
+                    pending_map.setdefault(p_ip, {}).setdefault("pharmacy", 0)
+                    pending_map[p_ip]["pharmacy"] += 1
+                for p_doc in pending_diet:
+                    p_ip = p_doc.get("inpatient_number") or p_doc.get("ipNumber")
+                    pending_map.setdefault(p_ip, {}).setdefault("diet", 0)
+                    pending_map[p_ip]["diet"] += 1
+                for p_doc in pending_laundry:
+                    p_ip = p_doc.get("inpatient_number") or p_doc.get("ipNumber")
+                    pending_map.setdefault(p_ip, {}).setdefault("laundry", 0)
+                    pending_map[p_ip]["laundry"] += 1
+                for p_doc in pending_implants:
+                    p_ip = p_doc.get("inpatient_number") or p_doc.get("ipNumber")
+                    pending_map.setdefault(p_ip, {}).setdefault("implant", 0)
+                    pending_map[p_ip]["implant"] += 1
+                for item in data:
+                    p_ip = item.get("ipNumber")
+                    c_dict = pending_map.get(p_ip, {})
+                    item["pending_counts"] = c_dict
+                    item["pending_total"] = sum(c_dict.values())
+            except Exception as e_pend:
+                print(f"Error computing pending counts: {e_pend}")
+
         return Response({
 
             "success": True,
@@ -704,6 +778,35 @@ def serialize_doc(doc):
 
     return doc
 
+
+def compute_investbill_rollup_status(items):
+    """
+    Computes parent investbill status based on individual item statuses:
+    - If all items are 'Cancelled': 'Cancelled'
+    - Active items = [it for it in items if it.get("status") != "Cancelled"]
+    - If active items exist:
+        - If all active items in ['Completed', 'Result Entered']: 'Result Entered'
+        - If any active item is 'Completed' or 'Result Entered' and some are 'Result Pending': 'Partially Completed'
+        - If all active items are 'Result Pending': 'Result Pending'
+    - If no items at all: 'Result Pending'
+    """
+    if not items:
+        return "Result Pending"
+    statuses = [it.get("status") or "Result Pending" for it in items if isinstance(it, dict)]
+    if not statuses:
+        return "Result Pending"
+    if all(s == "Cancelled" for s in statuses):
+        return "Cancelled"
+    active_statuses = [s for s in statuses if s != "Cancelled"]
+    if not active_statuses:
+        return "Cancelled"
+    if all(s in ["Completed", "Result Entered"] for s in active_statuses):
+        return "Result Entered"
+    if any(s in ["Completed", "Result Entered"] for s in active_statuses):
+        return "Partially Completed"
+    return "Result Pending"
+
+
 @api_view(["GET"])
 
 @permission_classes([HasRoleAndDataPermission])
@@ -742,6 +845,18 @@ def get_lab_ward_requests(request):
 
         # Enrich and format for the frontend component
 
+        # Build doctor mapping (employeeId -> employeeName)
+        doc_map = {}
+        try:
+            from pymongo import MongoClient
+            import os
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+            for d in g_client["Global"]["backend_diagnostics_profile"].find({}, {"employeeId": 1, "employeeName": 1}):
+                if d.get("employeeId") and d.get("employeeName"):
+                    doc_map[str(d["employeeId"]).strip()] = str(d["employeeName"]).strip()
+        except Exception:
+            pass
+
         formatted_data = []
 
         for doc in requests_data:
@@ -773,18 +888,25 @@ def get_lab_ward_requests(request):
             tests = []
 
             for itm in items:
+                it_st = itm.get("status") or doc.get("status") or "Result Pending"
+                if it_st == "Cancelled":
+                    continue
+
                 tests.append({
                     "test_id": itm.get("test_id", ""),
                     "name": itm.get("itemName", ""),
                     "billTypeNo": itm.get("billTypeNo", ""),
                     "nabh_code": itm.get("nabh_code", ""),
                     "price": itm.get("price", 0),
-                    "collectionTime": itm.get("collectionTime", "") 
+                    "quantity": itm.get("quantity", 1),
+                    "collectionTime": itm.get("collectionTime", ""),
+                    "status": it_st
                 })
             
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "status": doc.get("status", "Result Pending"),
+                "cancelReason": doc.get("cancel_reason", ""),
                 "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
                 "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
                 "userName": doc.get("created_by", ""),
@@ -795,7 +917,8 @@ def get_lab_ward_requests(request):
 
                 "wardName": doc.get("wardName", ""),
 
-                "doctorName": doc.get("doctor", ""),
+                "doctorName": doc_map.get(str(doc.get("doctor") or "").strip(), doc.get("doctorName") or doc.get("doctor", "")),
+                "doctor": str(doc.get("doctor") or "").strip(),
 
                 "tests": tests
 
@@ -828,274 +951,210 @@ def get_lab_ward_requests(request):
 @permission_classes([HasRoleAndDataPermission])
 
 def save_lab_ward_request(request):
-
     try:
-
         import json
-
+        from pymongo import ReturnDocument
         data = request.data
 
-        current_user = data.get('auth-user-id', "system")
-
-        branch_code = data.get('auth-branch-code', 'system')
-
+        current_user = data.get("auth-user-id", "system")
+        branch_code = data.get("auth-branch-code", "system")
         outlet_code = (
-
             request.data.get("auth-outlet-code") or
-
             request.headers.get("Outlet-Code") or "system"
-
         )
+        hospital_code = data.get("auth-hospital-code", "system")
 
-        hospital_code = data.get('auth-hospital-code', 'system')
+        uhid = str(data.get("uhid") or "").strip()
+        ip_number = str(data.get("ipNumber") or data.get("ip_number") or "").strip()
 
-        
+        # Lookup Admission & Patient
+        adm_doc = None
+        if ip_number:
+            adm_doc = mongo_db["hospital_admission"].find_one({"ipNumber": ip_number, "is_admitted": True, "is_cancelled": {"$ne": True}})
+            if not adm_doc:
+                adm_doc = mongo_db["hospital_admission"].find_one({"ipNumber": ip_number})
+        if not adm_doc and uhid:
+            adm_doc = mongo_db["hospital_admission"].find_one({"uhid": uhid, "is_admitted": True, "is_cancelled": {"$ne": True}})
+            if not adm_doc:
+                adm_doc = mongo_db["hospital_admission"].find_one({"uhid": uhid})
 
-        # Prepare the document for saving
+        pt_doc = None
+        if uhid:
+            pt_doc = mongo_db["hospital_patient"].find_one({"uhid": uhid})
 
-        request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
-
-        
-
-        # --- Doctor & Patient Resolution ---
-
-        doctor_name = data.get("doctor", "")
-
-        if doctor_name:
-
-            doc_profile = mongo_db["backend_diagnostics_profile"].find_one({"employeeName": doctor_name})
-
-            if doc_profile and "employeeId" in doc_profile:
-
-                request_doc["doctor_id"] = doc_profile["employeeId"]
-
-            else:
-
-                request_doc["doctor_id"] = doctor_name
-
-                
-
-        patient_name = data.get("patient_name", "").strip()
-
-        if not patient_name:
-
-            # Fallback to Admission via PyMongo
-
-            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
-
-            if admission and "patient_details" in admission:
-
-                fname = admission["patient_details"].get("firstName", "")
-
-                lname = admission["patient_details"].get("lastName", "")
-
-                request_doc["patient_name"] = f"{fname} {lname}".strip()
-
-        
-
-        # --- Resolve billTypeNo and bill_type at root ---
-
-        bill_type_code = str(data.get("billTypeNo") or data.get("bill_type") or "LAB01").strip()
-
-        bill_type = data.get("bill_type")
-
-        request_doc.pop("billTypeNo", None)
-
-        request_doc.pop("billTypeName", None)
-
-        request_doc["bill_type"] = bill_type
-
-        # --- Robust Item Fetching (Handle multiple field names) ---
-
-        # LabWardRequest.js uses 'item', but some components use 'selectedTests' or 'items'
-
-        selected_tests = request_doc.pop("selectedTests", request_doc.pop("items", request_doc.pop("item", [])))
-        request_doc.pop("selectedTests", None)
-        request_doc.pop("items", None)
-
-        if isinstance(selected_tests, str):
-
+        # Resolve Doctor ID (employeeId)
+        raw_doctor = data.get("doctor") or ""
+        doctor_id = str(raw_doctor).strip()
+        if doctor_id:
             try:
+                from pymongo import MongoClient
+                import os
+                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
+                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
+                })
+                if doc_profile and doc_profile.get("employeeId"):
+                    doctor_id = str(doc_profile.get("employeeId")).strip()
+            except Exception as e:
+                print("Doctor lookup error in save_lab_ward_request:", e)
 
-                selected_tests = json.loads(selected_tests)
+        # Resolve Room No
+        raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
+        if raw_r in ["", "-", "None", "null"]:
+            raw_r = str(data.get("wardName") or data.get("ward_name") or "").strip()
+        if raw_r in ["-", "None", "null"]:
+            raw_r = ""
+        room_no = raw_r
 
+        if not room_no and adm_doc:
+            for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                shifting = adm_doc.get(field, [])
+                if shifting and isinstance(shifting, list):
+                    active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                    if not active_shift and shifting:
+                        active_shift = shifting[-1]
+                    if active_shift and isinstance(active_shift, dict):
+                        found_room = active_shift.get("newRoomNo") or active_shift.get("roomNo") or active_shift.get("roomNumber") or active_shift.get("room_number")
+                        if found_room:
+                            room_no = str(found_room).strip()
+                            break
+            if not room_no:
+                room_no = str(adm_doc.get("roomNo") or adm_doc.get("room_no") or adm_doc.get("ward_name") or adm_doc.get("wardName") or "").strip()
+        if room_no in ["-", "None", "null"]:
+            room_no = ""
+
+        # Resolve Age & Age Type
+        age = str(data.get("age") or "").strip()
+        age_type = str(data.get("age_type") or "Y").strip()
+        if not age:
+            if pt_doc and pt_doc.get("age"):
+                age = str(pt_doc.get("age"))
+                age_type = str(pt_doc.get("age_type") or "Y")
+            elif adm_doc and adm_doc.get("age"):
+                age = str(adm_doc.get("age"))
+                age_type = str(adm_doc.get("age_type") or "Y")
+
+        # Resolve bill_type (int) and billTypeNo (str)
+        raw_bt = data.get("bill_type")
+        bill_type_no = str(data.get("billTypeNo") or "LAB01").strip()
+        try:
+            bill_type_val = int(raw_bt) if raw_bt is not None else 16
+        except (ValueError, TypeError):
+            bill_type_val = raw_bt or 16
+
+        # Robust Item Fetching
+        raw_tests = data.get("item") or data.get("selectedTests") or data.get("items") or []
+        if isinstance(raw_tests, str):
+            try:
+                raw_tests = json.loads(raw_tests)
             except Exception:
+                raw_tests = []
+        if not isinstance(raw_tests, list):
+            raw_tests = []
 
-                selected_tests = []
-
-        if not isinstance(selected_tests, list):
-
-            selected_tests = []
-
-        # --- Auto-Enrich Items (billTypeNo, bill_type, nabh_code) ---
-
+        # Auto-enrich NABH code
         nabh_records = list(mongo_db["hospital_lab_nabh_rate"].find({}, {"_id": 0, "test_id": 1, "nabh_code": 1}))
-
         nabh_map = {str(r.get("test_id", "")).strip(): str(r.get("nabh_code", "")).strip() for r in nabh_records if r.get("test_id") is not None}
 
         enriched_tests = []
-
-        for t in selected_tests:
-
+        total_price = 0
+        for t in raw_tests:
             if not isinstance(t, dict):
-
                 continue
+            item_btn = str(t.get("billTypeNo") or bill_type_no or "LAB01").strip()
+            t_id_raw = str(t.get("test_id") or "").strip()
+            item_nabh = str(t.get("nabh_code") or "").strip()
+            if not item_nabh and t_id_raw in nabh_map:
+                item_nabh = nabh_map[t_id_raw]
 
-            item_btn = str(t.get("billTypeNo") or bill_type_code or "LAB01").strip()
+            p_val = float(t.get("price", 0) or 0)
+            total_price += p_val
 
-            item_bt = t.get("bill_type") or bill_type
-
-            t_id = str(t.get("test_id", "")).strip()
-
-            item_nabh = str(t.get("nabh_code", "")).strip()
-
-            if not item_nabh and t_id in nabh_map:
-
-                item_nabh = nabh_map[t_id]
-
+            t_id_final = int(t_id_raw) if t_id_raw.isdigit() else (t.get("test_id") or "")
             enriched_tests.append({
-
-                "test_id": t.get("test_id", ""),
-
-                "itemName": t.get("itemName", "") or t.get("name", ""),
-
+                "itemName": str(t.get("itemName") or t.get("name") or "").strip(),
                 "price": str(t.get("price", "0")),
-
+                "quantity": int(t.get("quantity") or 1),
                 "billTypeNo": item_btn,
-
-                "bill_type": item_bt,
-
                 "nabh_code": item_nabh,
-
-                "is_emergency": bool(t.get("is_emergency", False))
-
+                "test_id": t_id_final,
+                "status": "Result Pending"
             })
 
-        # Ensure it is a native list inside mongo to avoid parsing issues
+        total_float = float(total_price)
+        total_int = int(total_float) if total_float.is_integer() else round(total_float, 2)
 
-        request_doc["item"] = enriched_tests
-
-        
-
-        # ── Bill Number Generation ──────────────────────────────
-
-        bill_prefix_code = "LAB"
-
+        # Financial Year & Bill Number Generation
         today = datetime.now()
-
         if today.month < 4:
-
             financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
-
         else:
-
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-        prefix_key = f"{financial_year}/{bill_prefix_code}"
-
+        prefix_key = f"{financial_year}/{bill_type_val}"
         prefix = f"{prefix_key}/"
-
         counters_collection = mongo_db["counters"]
-
         counter = counters_collection.find_one_and_update(
-
             {"_id": prefix_key},
-
             {"$inc": {"seq": 1}},
-
             upsert=True,
-
             return_document=ReturnDocument.AFTER
-
         )
-
         next_number = counter["seq"]
-
         invest_bill_no = f"{prefix}{next_number:06d}"
 
-        
-
-        # Use Indian Standard Time (IST) for saves
-
         ist = pytz.timezone("Asia/Kolkata")
-
         now_ist = datetime.now(ist)
 
-        
-
-        # Add metadata and generated fields
-
-        tot = round(float(request_doc.get("total_amount", 0)), 2)
-
-        request_doc.update({
-
-            "investBillNo": invest_bill_no,
-
-            "total_amount": tot,
-
-            "finalPrice": tot,
-
-            "finalPrice": round(float(request_doc.get("total_amount", 0)), 2),
-
-            "created_by": current_user,
-
-            "branch_code": branch_code,
-
-            "outlet_code": outlet_code,
-
-            "hospital_code": hospital_code,
-
-            "created_date": now_ist,
-
+        request_doc = {
+            "uhid": uhid,
+            "ipNumber": ip_number,
+            "doctor": doctor_id,
+            "bill_type": bill_type_val,
+            "billTypeNo": bill_type_no,
+            "referredBy": doctor_id,
+            "discountPercent": 0,
+            "discount": 0,
+            "discountRemarks": "",
+            "total": total_int,
+            "finalPrice": total_int,
+            "paymentMethod": "Credit",
+            "paymentStatus": "Pending",
+            "item": enriched_tests,
+            "is_emergency": bool(data.get("is_emergency", False)),
+            "roomNo": room_no,
+            "age": age,
+            "age_type": age_type,
             "investBillDate": now_ist,
-
+            "investBillNo": invest_bill_no,
+            "created_by": str(current_user),
+            "branch_code": str(branch_code),
+            "outlet_code": str(outlet_code),
+            "hospital_code": str(hospital_code),
+            "created_date": now_ist,
+            "lastmodified_by": None,
+            "lastmodified_date": now_ist,
             "is_active": True,
-
             "is_ward_request": True,
-
-            "status": "Result Pending",
-
-            "payment_method":"Credit",
-
-            "ward_request_type": "LAB"
-
-        })
-
-        
-
-        # Save to the centralized investbilling collection
+            "ward_request_type": "LAB",
+            "status": "Result Pending"
+        }
 
         collection = mongo_db["hospital_investbilling"]
-
         result = collection.insert_one(request_doc)
 
-        
-
         return Response({
-
             "success": True,
-
             "message": "Lab Ward Request saved successfully",
-
-            "id": str(result.inserted_id),
-
-            "investBillNo": invest_bill_no
-
+            "data": {
+                "id": str(result.inserted_id),
+                "investBillNo": invest_bill_no
+            }
         })
-
-        
-
     except Exception as e:
-
+        print("Error saving lab ward request:", e)
         print(traceback.format_exc())
-
-        return Response({
-
-            "success": False,
-
-            "error": str(e)
-
-        }, status=500)
+        return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
 
@@ -1109,29 +1168,35 @@ def cancel_lab_ward_request(request):
 
         request_id = data.get("id")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
 
         from bson import ObjectId
 
         collection = mongo_db["hospital_investbilling"]
 
-        
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         result = collection.update_one(
 
             {"_id": ObjectId(request_id), "is_ward_request": True},
 
-            {"$set": {"is_active": False, "status": "Cancelled"}}
+            {"$set": {
+                "is_active": False,
+                "status": "Cancelled",
+                "cancel_reason": cancel_reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_date": datetime.now()
+            }}
 
         )
-
-        
 
         if result.modified_count > 0:
 
@@ -1150,141 +1215,272 @@ def cancel_lab_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
-
-# @permission_classes([HasRoleAndDataPermission])
-
-def remove_individual_test_from_lab_ward_request(request):
-
+@permission_classes([HasRoleAndDataPermission])
+def cancel_individual_ward_request_item(request):
     try:
-
-        import json
-
-        data = request.data
-
-        request_id = data.get("id")
-
-        test_id = data.get("test_id")
-
-        test_name = data.get("test_name") # Fallback if test_id is empty
-
-        
-
-        if not request_id:
-
-            return Response({"success": False, "error": "Request ID is required"}, status=400)
-
-            
-
         from bson import ObjectId
+        import json
+        data = request.data
+        bill_id = data.get("id") or data.get("bill_id")
+        test_id = data.get("test_id")
+        test_name = (data.get("test_name") or data.get("name") or data.get("itemName") or "").strip()
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not bill_id:
+            return Response({"success": False, "error": "Bill ID (id) is required"}, status=400)
+        if not cancel_reason:
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
+        if test_id is None and not test_name:
+            return Response({"success": False, "error": "test_id or test_name is required"}, status=400)
 
         collection = mongo_db["hospital_investbilling"]
-
-        
-
-        # Step 1: Get the document
-
-        doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
-
+        doc = collection.find_one({"_id": ObjectId(bill_id)})
         if not doc:
+            return Response({"success": False, "error": "Invest billing request not found"}, status=404)
 
+        raw_items = doc.get("item", [])
+        if isinstance(raw_items, str):
+            try:
+                items = json.loads(raw_items)
+            except Exception:
+                items = []
+        elif isinstance(raw_items, list):
+            items = list(raw_items)
+        else:
+            items = []
+
+        matched_idx = -1
+        t_id_str = str(test_id).strip() if test_id is not None else ""
+        for idx, itm in enumerate(items):
+            if not isinstance(itm, dict):
+                continue
+            curr_id = str(itm.get("test_id") or itm.get("item_id") or "").strip()
+            curr_name = str(itm.get("itemName") or itm.get("name") or "").strip()
+            if t_id_str and curr_id == t_id_str:
+                matched_idx = idx
+                break
+            if test_name and curr_name.lower() == test_name.lower():
+                matched_idx = idx
+                break
+
+        if matched_idx == -1:
+            return Response({"success": False, "error": "Test item not found in this request"}, status=404)
+
+        target_item = items[matched_idx]
+        if target_item.get("status") == "Cancelled" or target_item.get("cancelled"):
+            return Response({"success": False, "error": "This test is already cancelled"}, status=400)
+
+        current_user = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or data.get("auth-user-id") or "system")
+        now_dt = datetime.now()
+
+        # Update item
+        target_item["status"] = "Cancelled"
+        target_item["cancelled"] = True
+        target_item["cancel_reason"] = cancel_reason
+        target_item["cancelled_by"] = current_user
+        target_item["cancelled_date"] = now_dt
+        target_item["status_updated_at"] = now_dt
+        target_item["status_updated_by"] = current_user
+        items[matched_idx] = target_item
+
+        # Recalculate bill total (excluding cancelled items)
+        new_total = sum(float(it.get("price", 0) or 0) * int(it.get("quantity", 1) or 1) for it in items if it.get("status") != "Cancelled")
+        new_total_val = int(new_total) if float(new_total).is_integer() else round(float(new_total), 2)
+
+        # Rollup parent bill status
+        new_bill_status = compute_investbill_rollup_status(items)
+        is_active_val = False if new_bill_status == "Cancelled" else doc.get("is_active", True)
+
+        collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {
+                "item": items,
+                "total": new_total_val,
+                "finalPrice": new_total_val,
+                "total_amount": new_total_val,
+                "status": new_bill_status,
+                "is_active": is_active_val,
+                "lastmodified_by": current_user,
+                "lastmodified_date": now_dt
+            }}
+        )
+
+        return Response({
+            "success": True,
+            "message": f"Test '{target_item.get('itemName') or test_name}' cancelled successfully",
+            "bill_status": new_bill_status,
+            "total": new_total_val,
+            "item": target_item
+        })
+    except Exception as e:
+        print(f"Error in cancel_individual_ward_request_item: {e}\n{traceback.format_exc()}")
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def update_ward_request_item_status(request):
+    try:
+        from bson import ObjectId
+        import json
+        data = request.data
+        bill_id = data.get("id") or data.get("bill_id")
+        test_id = data.get("test_id")
+        test_name = (data.get("test_name") or data.get("name") or data.get("itemName") or "").strip()
+        new_status = str(data.get("status") or "").strip()
+
+        if not bill_id:
+            return Response({"success": False, "error": "Bill ID (id) is required"}, status=400)
+        if not new_status:
+            return Response({"success": False, "error": "Status is required"}, status=400)
+
+        collection = mongo_db["hospital_investbilling"]
+        doc = collection.find_one({"_id": ObjectId(bill_id)})
+        if not doc:
+            return Response({"success": False, "error": "Invest billing request not found"}, status=404)
+
+        raw_items = doc.get("item", [])
+        if isinstance(raw_items, str):
+            try:
+                items = json.loads(raw_items)
+            except Exception:
+                items = []
+        elif isinstance(raw_items, list):
+            items = list(raw_items)
+        else:
+            items = []
+
+        matched_idx = -1
+        t_id_str = str(test_id).strip() if test_id is not None else ""
+        for idx, itm in enumerate(items):
+            if not isinstance(itm, dict):
+                continue
+            curr_id = str(itm.get("test_id") or itm.get("item_id") or "").strip()
+            curr_name = str(itm.get("itemName") or itm.get("name") or "").strip()
+            if t_id_str and curr_id == t_id_str:
+                matched_idx = idx
+                break
+            if test_name and curr_name.lower() == test_name.lower():
+                matched_idx = idx
+                break
+
+        if matched_idx == -1:
+            return Response({"success": False, "error": "Test item not found in this request"}, status=404)
+
+        current_user = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or data.get("auth-user-id") or "system")
+        now_dt = datetime.now()
+
+        target_item = items[matched_idx]
+        target_item["status"] = new_status
+        for k in ["cancelled", "cancel_reason", "cancelled_by", "cancelled_date", "status_updated_at", "status_updated_by"]:
+            target_item.pop(k, None)
+
+        items[matched_idx] = target_item
+
+        new_total = sum(float(it.get("price", 0) or 0) * int(it.get("quantity", 1) or 1) for it in items if it.get("status") != "Cancelled")
+        new_total_val = int(new_total) if float(new_total).is_integer() else round(float(new_total), 2)
+        new_bill_status = compute_investbill_rollup_status(items)
+        is_active_val = False if new_bill_status == "Cancelled" else doc.get("is_active", True)
+
+        collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {
+                "item": items,
+                "total": new_total_val,
+                "finalPrice": new_total_val,
+                "total_amount": new_total_val,
+                "status": new_bill_status,
+                "is_active": is_active_val,
+                "lastmodified_by": current_user,
+                "lastmodified_date": now_dt
+            }}
+        )
+
+        return Response({
+            "success": True,
+            "message": f"Test status updated to '{new_status}'",
+            "bill_status": new_bill_status,
+            "item": target_item
+        })
+    except Exception as e:
+        print(f"Error in update_ward_request_item_status: {e}\n{traceback.format_exc()}")
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+def remove_individual_test_from_lab_ward_request(request):
+    """
+    Physically removes an individual test from a Lab Ward Request bill BEFORE status is changed.
+    Only allowed when status is 'Result Pending' or 'Pending'.
+    """
+    try:
+        import json
+        from decimal import Decimal
+        from bson import ObjectId, Decimal128
+
+        data = request.data
+        request_id = data.get("id") or data.get("bill_id")
+        test_id = data.get("test_id")
+        test_name = (data.get("test_name") or data.get("name") or data.get("itemName") or "").strip()
+
+        if not request_id:
+            return Response({"success": False, "error": "Request ID is required"}, status=400)
+        if test_id is None and not test_name:
+            return Response({"success": False, "error": "test_id or test_name is required"}, status=400)
+
+        collection = mongo_db["hospital_investbilling"]
+        doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
+        if not doc:
             return Response({"success": False, "error": "Request not found"}, status=404)
 
-            
-
         # Parse items
-
         item_data = doc.get("item", "[]")
+        items = json.loads(item_data) if isinstance(item_data, str) else list(item_data or [])
 
-        if isinstance(item_data, str):
-
-            items = json.loads(item_data)
-
-        else:
-
-            items = item_data
-
-            
-
-        # Step 2: Remove the test
-
+        # Step: Guard status & remove item
         new_items = []
-
         found = False
-
         for itm in items:
-
+            is_match = False
             if test_id and str(itm.get("test_id")) == str(test_id):
+                is_match = True
+            elif not test_id and test_name and (itm.get("itemName") == test_name or itm.get("test_name") == test_name):
+                is_match = True
 
+            if is_match and not found:
+                item_status = itm.get("status") or doc.get("status") or "Result Pending"
+                if item_status not in ["Result Pending", "Pending", ""]:
+                    return Response({
+                        "success": False,
+                        "error": f"Cannot remove test. Status has already been updated to '{item_status}'."
+                    }, status=400)
                 found = True
-
-                continue
-
-            if not test_id and itm.get("itemName") == test_name:
-
-                found = True
-
-                continue
+                continue  # Physically remove this test
 
             new_items.append(itm)
 
-            
+        if not found:
+            return Response({"success": False, "error": "Test item not found in this request"}, status=404)
 
-        if found:
+        # Recalculate bill total
+        new_total = sum(float(t.get("price", 0)) for t in new_items)
+        dec_total = Decimal128(Decimal(str(new_total)))
+        update_fields = {
+            "item": new_items,
+            "total": dec_total,
+            "finalPrice": dec_total,
+            "total_amount": new_total,
+            "last_modified_date": timezone.now()
+        }
 
-            # Step 3: Recalculate total amount
+        if len(new_items) == 0:
+            update_fields["is_active"] = False
+            update_fields["status"] = "Cancelled"
 
-            new_total = sum(float(t.get("price", 0)) for t in new_items)
-
-            
-
-            update_fields = {
-
-                "item": new_items,
-
-                "total_amount": new_total
-
-            }
-
-            
-
-            if not new_items:
-
-                update_fields["status"] = "Cancelled"
-
-                update_fields["is_active"] = False
-
-                
-
-            collection.update_one(
-
-                {"_id": ObjectId(request_id)},
-
-                {"$set": update_fields}
-
-            )
-
-            
-
-            return Response({
-
-                "success": True, 
-
-                "message": "Test removed successfully",
-
-                "remaining_tests": len(new_items)
-
-            })
-
-        else:
-
-            return Response({"success": False, "error": "Test not found in request"}, status=404)
-
-            
-
+        collection.update_one({"_id": ObjectId(request_id)}, {"$set": update_fields})
+        return Response({"success": True, "message": "Test removed successfully", "remaining_count": len(new_items)})
     except Exception as e:
-
-        print(traceback.format_exc())
-
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["GET"])
@@ -1384,6 +1580,18 @@ def get_medicine_ward_requests(request):
                 bill_name_map[bt.get("bill_type")] = bt.get("bill_name", "")
 
                 bill_name_map[str(bt.get("bill_type"))] = bt.get("bill_name", "")
+
+        # Build doctor mapping (employeeId -> employeeName)
+        doc_map = {}
+        try:
+            from pymongo import MongoClient
+            import os
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+            for d in g_client["Global"]["backend_diagnostics_profile"].find({}, {"employeeId": 1, "employeeName": 1}):
+                if d.get("employeeId") and d.get("employeeName"):
+                    doc_map[str(d["employeeId"]).strip()] = str(d["employeeName"]).strip()
+        except Exception:
+            pass
 
         formatted_data = []
 
@@ -1833,7 +2041,25 @@ def save_medicine_ward_request(request):
 
         # --- Doctor & Patient Settings ---
 
-        doctor_id = data.get("doctor_id", data.get("doctor", ""))
+        doctor_id = str(data.get("doctor_id") or data.get("doctorId") or data.get("doctor") or "").strip()
+        if doctor_id and not doctor_id.isdigit():
+            try:
+                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
+                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
+                })
+                if doc_profile and doc_profile.get("employeeId"):
+                    doctor_id = str(doc_profile.get("employeeId")).strip()
+            except Exception as e:
+                print("Doctor lookup error in save_medicine_ward_request:", e)
+
+        # Resolve Room No
+        raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
+        if raw_r in ["", "-", "None", "null"]:
+            raw_r = str(data.get("wardName") or data.get("ward_name") or "").strip()
+        if raw_r in ["-", "None", "null"]:
+            raw_r = ""
+        room_no = raw_r
 
         patient_name = data.get("patient_name", "").strip()
 
@@ -1891,7 +2117,7 @@ def save_medicine_ward_request(request):
 
             # bill_type_no=data.get("billTypeNo"),
 
-            doctor_id=data.get("doctor_id"),
+            doctor_id=doctor_id,
 
             medicine_particulars=cleaned_particulars,
 
@@ -1915,7 +2141,7 @@ def save_medicine_ward_request(request):
 
             is_ward_request=True,
 
-            room_no=data.get("room_no", data.get("roomNo", data.get("wardName", "-"))),
+            room_no=room_no,
 
             ward_request_date=timezone.now() if 'timezone' in globals() else datetime.now()
 
@@ -2007,13 +2233,17 @@ def cancel_medicine_ward_request(request):
 
         request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
+
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         queries = []
 
@@ -2033,6 +2263,15 @@ def cancel_medicine_ward_request(request):
 
         query = {"$or": queries} if len(queries) > 1 else queries[0]
 
+        update_payload = {
+            "billing_status": "Cancelled",
+            "is_deleted": True,
+            "cancel_reason": cancel_reason,
+            "cancelled_by": cancelled_by,
+            "cancelled_date": datetime.now(),
+            "lastmodified_date": datetime.now()
+        }
+
         # Primary collection: hospital_pharmacybilling
 
         collection = mongo_db["hospital_pharmacybilling"]
@@ -2041,11 +2280,9 @@ def cancel_medicine_ward_request(request):
 
             query,
 
-            {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+            {"$set": update_payload}
 
         )
-
-        
 
         # Fallback collection if not found in primary
 
@@ -2057,7 +2294,7 @@ def cancel_medicine_ward_request(request):
 
                 query,
 
-                {"$set": {"billing_status": "Cancelled", "is_deleted": True, "lastmodified_date": datetime.now()}}
+                {"$set": update_payload}
 
             )
 
@@ -2249,33 +2486,40 @@ def get_radiology_ward_requests(request):
 
     try:
 
-        uhid = request.query_params.get("uhid")
+        params = getattr(request, "query_params", None) if hasattr(request, "query_params") else getattr(request, "GET", {})
+        uhid = params.get("uhid")
+        ip_number = params.get("ipNumber") or params.get("ip_number")
 
-        ip_number = request.query_params.get("ipNumber")
-
-        if not uhid:
-
-            return Response({"success": False, "error": "UHID is required"}, status=400)
+        if not uhid and not ip_number:
+            return Response({"success": False, "error": "UHID or ipNumber is required"}, status=400)
 
         collection = mongo_db["hospital_investbilling"]
 
         query = {
-
-            "uhid": uhid,
-
             "is_active": True,
-
             "is_ward_request": True,
-
             "ward_request_type": "RADIOLOGY"
-
         }
 
-        if ip_number:
+        if uhid:
+            query["uhid"] = uhid
 
+        if ip_number:
             query["ipNumber"] = ip_number
 
         requests_data = list(collection.find(query).sort("created_date", -1))
+
+        # Build doctor mapping (employeeId -> employeeName)
+        doc_map = {}
+        try:
+            from pymongo import MongoClient
+            import os
+            g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+            for d in g_client["Global"]["backend_diagnostics_profile"].find({}, {"employeeId": 1, "employeeName": 1}):
+                if d.get("employeeId") and d.get("employeeName"):
+                    doc_map[str(d["employeeId"]).strip()] = str(d["employeeName"]).strip()
+        except Exception:
+            pass
 
         formatted_data = []
 
@@ -2304,17 +2548,24 @@ def get_radiology_ward_requests(request):
             tests = []
 
             for itm in items:
+                it_st = itm.get("status") or doc.get("status") or "Result Pending"
+                if it_st == "Cancelled":
+                    continue
+
                 tests.append({
                     "test_id": itm.get("test_id", ""),
                     "name": itm.get("itemName", ""),
                     "billTypeNo": itm.get("billTypeNo", ""),
                     "nabh_code": itm.get("nabh_code", ""),
-                    "price": itm.get("price", 0)
+                    "price": itm.get("price", 0),
+                    "quantity": itm.get("quantity", 1),
+                    "status": it_st
                 })
             
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "status": doc.get("status", "Result Pending"),
+                "cancelReason": doc.get("cancel_reason", ""),
                 "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
                 "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
                 "userName": doc.get("created_by", ""),
@@ -2327,7 +2578,8 @@ def get_radiology_ward_requests(request):
 
                 "wardName": doc.get("wardName", ""),
 
-                "doctorName": doc.get("doctor", ""),
+                "doctorName": doc_map.get(str(doc.get("doctor") or "").strip(), doc.get("doctorName") or doc.get("doctor", "")),
+                "doctor": str(doc.get("doctor") or "").strip(),
 
                 "tests": tests,
 
@@ -2356,307 +2608,204 @@ def get_radiology_ward_requests(request):
 @permission_classes([HasRoleAndDataPermission])
 
 def save_radiology_ward_request(request):
-
     try:
-
         import json
-
+        from pymongo import ReturnDocument
         data = request.data
 
-        current_user = data.get('auth-user-id', "system")
-
-        branch_code = data.get('auth-branch-code', 'system')
-
-        outlet_code = data.get('auth-outlet-code', 'system')
-
-        hospital_code = data.get('auth-hospital-code', 'system')
-
-        
-
-        request_doc = {k: v for k, v in data.items() if not k.startswith('auth-')}
-
-        
-
-        # --- Doctor & Patient Resolution ---
-
-        doctor_name = data.get("doctor", "")
-
-        if doctor_name:
-
-            doc_profile = mongo_db["backend_diagnostics_profile"].find_one({"employeeName": doctor_name})
-
-            if doc_profile and "employeeId" in doc_profile:
-
-                request_doc["doctor_id"] = doc_profile["employeeId"]
-
-            else:
-
-                request_doc["doctor_id"] = doctor_name
-
-                
-
-        patient_name = data.get("patient_name", "").strip()
-
-        if not patient_name:
-
-            # Fallback to Admission via PyMongo
-
-            admission = mongo_db["hospital_admission"].find_one({"uhid": data.get("uhid"), "is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}})
-
-            if admission and "patient_details" in admission:
-
-                fname = admission["patient_details"].get("firstName", "")
-
-                lname = admission["patient_details"].get("lastName", "")
-
-                request_doc["patient_name"] = f"{fname} {lname}".strip()
-
-        
-
-        # --- Resolve billTypeNo and bill_type at root ---
-
-        bill_type_code = str(data.get("billTypeNo") or "RAD").strip()
-
-        bill_type = data.get("bill_type") or data.get("billtype")
-
-        request_doc.pop("billtype", None)
-
-        request_doc.pop("billTypeNo", None)
-
-        request_doc.pop("billTypeName", None)
-
-        request_doc["bill_type"] = bill_type
-
-        # --- Robust Item Fetching (Handle multiple field names) ---
-
-        # RadiologyWardRequest.js might use 'selectedTests' or 'item'
-
-        selected_tests = request_doc.pop("selectedTests", request_doc.pop("items", request_doc.pop("item", [])))
-        request_doc.pop("selectedTests", None)
-        request_doc.pop("items", None)
-
-        if isinstance(selected_tests, str):
-
-            try:
-
-                selected_tests = json.loads(selected_tests)
-
-            except Exception:
-
-                selected_tests = []
-
-        if not isinstance(selected_tests, list):
-
-            selected_tests = []
-
-        # --- Auto-Enrich Items (billTypeNo, billtype, nabh_code) ---
-
-        inv_doc = mongo_db["hospital_investigationprice"].find_one(
-
-            {"billTypeNo": bill_type_code},
-
-            {"_id": 0, "Items": 1}
-
+        current_user = data.get("auth-user-id", "system")
+        branch_code = data.get("auth-branch-code", "system")
+        outlet_code = (
+            request.data.get("auth-outlet-code") or
+            request.headers.get("Outlet-Code") or "system"
         )
+        hospital_code = data.get("auth-hospital-code", "system")
 
-        inv_items = inv_doc.get("Items", []) if inv_doc else []
+        uhid = str(data.get("uhid") or "").strip()
+        ip_number = str(data.get("ipNumber") or data.get("ip_number") or "").strip()
 
-        nabh_map_by_id = {}
+        # Lookup Admission & Patient
+        adm_doc = None
+        if ip_number:
+            adm_doc = mongo_db["hospital_admission"].find_one({"ipNumber": ip_number, "is_admitted": True, "is_cancelled": {"$ne": True}})
+            if not adm_doc:
+                adm_doc = mongo_db["hospital_admission"].find_one({"ipNumber": ip_number})
+        if not adm_doc and uhid:
+            adm_doc = mongo_db["hospital_admission"].find_one({"uhid": uhid, "is_admitted": True, "is_cancelled": {"$ne": True}})
+            if not adm_doc:
+                adm_doc = mongo_db["hospital_admission"].find_one({"uhid": uhid})
 
-        nabh_map_by_name = {}
+        pt_doc = None
+        if uhid:
+            pt_doc = mongo_db["hospital_patient"].find_one({"uhid": uhid})
 
-        for it in inv_items:
+        # Resolve Doctor ID (employeeId)
+        raw_doctor = data.get("doctor") or ""
+        doctor_id = str(raw_doctor).strip()
+        if doctor_id:
+            try:
+                from pymongo import MongoClient
+                import os
+                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
+                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
+                })
+                if doc_profile and doc_profile.get("employeeId"):
+                    doctor_id = str(doc_profile.get("employeeId")).strip()
+            except Exception as e:
+                print("Doctor lookup error in save_radiology_ward_request:", e)
 
-            i_id = str(it.get("item_id", "")).strip()
+        # Resolve Room No
+        raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
+        if raw_r in ["", "-", "None", "null"]:
+            raw_r = str(data.get("wardName") or data.get("ward_name") or "").strip()
+        if raw_r in ["-", "None", "null"]:
+            raw_r = ""
+        room_no = raw_r
 
-            i_name = str(it.get("itemName", "")).strip().lower()
+        if not room_no and adm_doc:
+            for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                shifting = adm_doc.get(field, [])
+                if shifting and isinstance(shifting, list):
+                    active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                    if not active_shift and shifting:
+                        active_shift = shifting[-1]
+                    if active_shift and isinstance(active_shift, dict):
+                        found_room = active_shift.get("newRoomNo") or active_shift.get("roomNo") or active_shift.get("roomNumber") or active_shift.get("room_number")
+                        if found_room:
+                            room_no = str(found_room).strip()
+                            break
+            if not room_no:
+                room_no = str(adm_doc.get("roomNo") or adm_doc.get("room_no") or adm_doc.get("ward_name") or adm_doc.get("wardName") or "").strip()
+        if room_no in ["-", "None", "null"]:
+            room_no = ""
 
-            val = it.get(str(bill_type)) if bill_type else None
+        # Resolve Age & Age Type
+        age = str(data.get("age") or "").strip()
+        age_type = str(data.get("age_type") or "Y").strip()
+        if not age:
+            if pt_doc and pt_doc.get("age"):
+                age = str(pt_doc.get("age"))
+                age_type = str(pt_doc.get("age_type") or "Y")
+            elif adm_doc and adm_doc.get("age"):
+                age = str(adm_doc.get("age"))
+                age_type = str(adm_doc.get("age_type") or "Y")
 
-            n_code = ""
+        # Resolve bill_type (int) and billTypeNo (str)
+        raw_bt = data.get("bill_type")
+        bill_type_no = str(data.get("billTypeNo") or "CT01").strip()
+        try:
+            bill_type_val = int(raw_bt) if raw_bt is not None else 85
+        except (ValueError, TypeError):
+            bill_type_val = raw_bt or 85
 
-            if isinstance(val, dict):
-
-                n_code = str(val.get("nabh_code", "")).strip()
-
-            elif isinstance(val, str) and not val.isdigit():
-
-                n_code = val.strip()
-
-            
-
-            # If not in specific bill_type, search any key for nabh_code
-
-            if not n_code:
-
-                for k, v in it.items():
-
-                    if isinstance(v, dict) and v.get("nabh_code"):
-
-                        n_code = str(v.get("nabh_code")).strip()
-
-                        break
-
-            if i_id:
-
-                nabh_map_by_id[i_id] = n_code
-
-            if i_name:
-
-                nabh_map_by_name[i_name] = n_code
+        # Robust Item Fetching
+        raw_tests = data.get("item") or data.get("selectedTests") or data.get("items") or []
+        if isinstance(raw_tests, str):
+            try:
+                raw_tests = json.loads(raw_tests)
+            except Exception:
+                raw_tests = []
+        if not isinstance(raw_tests, list):
+            raw_tests = []
 
         enriched_tests = []
-
-        for t in selected_tests:
-
+        total_price = 0
+        for t in raw_tests:
             if not isinstance(t, dict):
-
                 continue
+            item_btn = str(t.get("billTypeNo") or bill_type_no or "CT01").strip()
+            t_id_raw = str(t.get("test_id") or t.get("item_id") or "").strip()
+            item_nabh = str(t.get("nabh_code") or "").strip()
 
-            item_btn = str(t.get("billTypeNo") or bill_type_code or "RAD").strip()
+            p_val = float(t.get("price", 0) or 0)
+            total_price += p_val
 
-            item_bt = t.get("billtype") or t.get("bill_type") or bill_type
-
-            item_id = str(t.get("item_id", "") or t.get("test_id", "")).strip()
-
-            item_name = str(t.get("itemName", "") or t.get("name", "")).strip()
-
-            item_nabh = str(t.get("nabh_code", "")).strip()
-
-            if not item_nabh:
-
-                if item_id and item_id in nabh_map_by_id:
-
-                    item_nabh = nabh_map_by_id[item_id]
-
-                elif item_name.lower() in nabh_map_by_name:
-
-                    item_nabh = nabh_map_by_name[item_name.lower()]
-
+            t_id_final = int(t_id_raw) if t_id_raw.isdigit() else (t.get("test_id") or t.get("item_id") or "")
             enriched_tests.append({
-
-                "item_id": t.get("item_id", "") or t.get("test_id", ""),
-
-                "itemName": item_name,
-
+                "itemName": str(t.get("itemName") or t.get("name") or "").strip(),
                 "price": str(t.get("price", "0")),
-
+                "quantity": int(t.get("quantity") or 1),
                 "billTypeNo": item_btn,
-
-                "bill_type": item_bt,
-
                 "nabh_code": item_nabh,
-
-                "packageName": t.get("packageName", None),
-
-                "type": t.get("type", "individual")
-
+                "test_id": t_id_final,
+                "status": "Result Pending"
             })
 
-        request_doc["item"] = enriched_tests
+        total_float = float(total_price)
+        total_int = int(total_float) if total_float.is_integer() else round(total_float, 2)
 
-        
-
-        # ── Bill Number Generation (Prefix RAD) ──
-
-        bill_type_code = data.get("billTypeNo", "RAD")
-
-        from datetime import datetime
-
+        # Financial Year & Bill Number Generation
         today = datetime.now()
-
         if today.month < 4:
-
             financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
-
         else:
-
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-        prefix_key = f"{financial_year}/{bill_type_code}"
-
+        prefix_key = f"{financial_year}/{bill_type_val}"
         prefix = f"{prefix_key}/"
-
-        counters_collection = mongo_db["hospital_counters"]
-
+        counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
-
             {"_id": prefix_key},
-
             {"$inc": {"seq": 1}},
-
             upsert=True,
-
             return_document=ReturnDocument.AFTER
-
         )
-
         next_number = counter["seq"]
-
         invest_bill_no = f"{prefix}{next_number:06d}"
 
-        
-
         ist = pytz.timezone("Asia/Kolkata")
-
         now_ist = datetime.now(ist)
 
-        request_doc.update({
-
-            "investBillNo": invest_bill_no,
-
-            "total_amount": round(float(request_doc.get("total_amount", 0)), 2),
-
-            "created_by": current_user,
-
-            "branch_code": branch_code,
-
-            "outlet_code": outlet_code,
-
-            "hospital_code": hospital_code,
-
-            "created_date": now_ist,
-
+        request_doc = {
+            "uhid": uhid,
+            "ipNumber": ip_number,
+            "doctor": doctor_id,
+            "bill_type": bill_type_val,
+            "billTypeNo": bill_type_no,
+            "referredBy": doctor_id,
+            "discountPercent": 0,
+            "discount": 0,
+            "discountRemarks": "",
+            "total": total_int,
+            "finalPrice": total_int,
+            "paymentMethod": "Credit",
+            "paymentStatus": "Pending",
+            "item": enriched_tests,
+            "is_emergency": bool(data.get("is_emergency", False)),
+            "roomNo": room_no,
+            "age": age,
+            "age_type": age_type,
             "investBillDate": now_ist,
-
-            "bill_date": now_ist,
-
+            "investBillNo": invest_bill_no,
+            "created_by": str(current_user),
+            "branch_code": str(branch_code),
+            "outlet_code": str(outlet_code),
+            "hospital_code": str(hospital_code),
+            "created_date": now_ist,
+            "lastmodified_by": None,
+            "lastmodified_date": now_ist,
             "is_active": True,
-
+            # Extra ward request fields
             "is_ward_request": True,
-
-            "payment_method":"Credit",
-
-            "status": "Result Pending",
-
-            "ward_request_type": "RADIOLOGY"
-
-        })
-
-        
+            "ward_request_type": "RADIOLOGY",
+            "status": "Result Pending"
+        }
 
         collection = mongo_db["hospital_investbilling"]
-
         result = collection.insert_one(request_doc)
 
-        
-
         return Response({
-
             "success": True,
-
             "message": "Radiology Ward Request saved successfully",
-
-            "id": str(result.inserted_id),
-
-            "investBillNo": invest_bill_no
-
+            "data": {
+                "id": str(result.inserted_id),
+                "investBillNo": invest_bill_no
+            }
         })
-
     except Exception as e:
-
+        print("Error saving radiology ward request:", e)
         print(traceback.format_exc())
-
         return Response({"success": False, "error": str(e)}, status=500)
 
 @api_view(["POST"])
@@ -2671,29 +2820,35 @@ def cancel_radiology_ward_request(request):
 
         request_id = data.get("id")
 
-        
-
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
 
-            
+        cancel_reason = str(data.get("cancel_reason") or data.get("reason") or "").strip()
+
+        if not cancel_reason:
+
+            return Response({"success": False, "error": "Cancellation reason is required"}, status=400)
 
         from bson import ObjectId
 
         collection = mongo_db["hospital_investbilling"]
 
-        
+        cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         result = collection.update_one(
 
             {"_id": ObjectId(request_id), "is_ward_request": True, "ward_request_type": "RADIOLOGY"},
 
-            {"$set": {"is_active": False, "status": "Cancelled"}}
+            {"$set": {
+                "is_active": False,
+                "status": "Cancelled",
+                "cancel_reason": cancel_reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_date": datetime.now()
+            }}
 
         )
-
-        
 
         if result.modified_count > 0:
 
@@ -2720,24 +2875,26 @@ def remove_individual_test_from_radiology_ward_request(request):
     try:
 
         import json
+        from decimal import Decimal
+        from bson import ObjectId, Decimal128
 
         data = request.data
 
-        request_id = data.get("id")
+        request_id = data.get("id") or data.get("bill_id")
 
         test_id = data.get("test_id")
 
-        test_name = data.get("test_name")
+        test_name = (data.get("test_name") or data.get("name") or data.get("itemName") or "").strip()
 
         
 
         if not request_id:
 
             return Response({"success": False, "error": "Request ID is required"}, status=400)
+        if test_id is None and not test_name:
+            return Response({"success": False, "error": "test_id or test_name is required"}, status=400)
 
             
-
-        from bson import ObjectId
 
         collection = mongo_db["hospital_investbilling"]
 
@@ -2757,41 +2914,32 @@ def remove_individual_test_from_radiology_ward_request(request):
 
         item_data = doc.get("item", "[]")
 
-        if isinstance(item_data, str):
-
-            try:
-
-                items = json.loads(item_data)
-
-            except json.JSONDecodeError:
-
-                items = []
-
-        else:
-
-            items = item_data
+        items = json.loads(item_data) if isinstance(item_data, str) else list(item_data or [])
 
             
 
-        # Step 2: Remove test
+        # Step 2: Guard status & Remove test
 
         new_items = []
 
         found = False
 
         for itm in items:
-
+            is_match = False
             if test_id and str(itm.get("test_id")) == str(test_id):
+                is_match = True
+            elif not test_id and test_name and (itm.get("itemName") == test_name or itm.get("test_name") == test_name):
+                is_match = True
 
+            if is_match and not found:
+                item_status = itm.get("status") or doc.get("status") or "Result Pending"
+                if item_status not in ["Result Pending", "Pending", ""]:
+                    return Response({
+                        "success": False,
+                        "error": f"Cannot remove test. Status has already been updated to '{item_status}'."
+                    }, status=400)
                 found = True
-
-                continue
-
-            if not test_id and itm.get("itemName") == test_name:
-
-                found = True
-
-                continue
+                continue  # Physically remove this test
 
             new_items.append(itm)
 
@@ -2799,9 +2947,10 @@ def remove_individual_test_from_radiology_ward_request(request):
 
         if found:
 
-            # Step 3: Recalculate total amount
+            # Step 3: Recalculate total amount with Decimal128
 
             new_total = sum(float(t.get("price", 0)) for t in new_items)
+            dec_total = Decimal128(Decimal(str(new_total)))
 
             
 
@@ -2809,7 +2958,13 @@ def remove_individual_test_from_radiology_ward_request(request):
 
                 "item": new_items,
 
-                "total_amount": new_total
+                "total": dec_total,
+
+                "finalPrice": dec_total,
+
+                "total_amount": new_total,
+
+                "last_modified_date": timezone.now()
 
             }
 
@@ -2839,6 +2994,440 @@ def remove_individual_test_from_radiology_ward_request(request):
 
         return Response({"success": False, "error": str(e)}, status=500)
 
+
+def get_patient_billing_clearance_data(ip_number, uhid=None):
+    """
+    Evaluates inpatient clearance across 6 streams:
+    1. Lab: hospital_investbilling (is_ward_request=True, ward_request_type='LAB', is_active=True, status in ['Result Pending', 'Pending'])
+    2. Radiology: hospital_investbilling (is_ward_request=True, ward_request_type='RADIOLOGY', is_active=True, status in ['Result Pending', 'Pending'])
+    3. Pharmacy: hospital_pharmacybilling (is_ward_request=True, is_deleted!=True, billing_status in ['Pending', 'Draft'] or unapproved pending_returns)
+    4. Implants: hospital_implant_request (is_active=True and no paid bill in hospital_velavansalesbill)
+    5. Diet: hospital_patientdietorder (status in ['Ordered', 'Received'])
+    6. Laundry: hospital_laundrywardrequest (status in ['Pending'])
+    """
+    import json
+    ip_clean = str(ip_number or "").strip()
+    uhid_clean = str(uhid or "").strip()
+
+    ip_filter_clauses = []
+    if ip_clean:
+        ip_filter_clauses.extend([
+            {"ipNumber": ip_clean},
+            {"inpatient_number": ip_clean},
+            {"ip_number": ip_clean},
+        ])
+    if not ip_filter_clauses and uhid_clean:
+        ip_filter_clauses.append({"uhid": uhid_clean})
+
+    if not ip_filter_clauses:
+        return {
+            "is_clear_for_billing": False,
+            "pending_total": 0,
+            "error": "No IP number or UHID provided",
+            "streams": {}
+        }
+
+    match_ip = {"$or": ip_filter_clauses} if len(ip_filter_clauses) > 1 else ip_filter_clauses[0]
+
+    # --- 1. Lab ---
+    lab_query = {
+        "$and": [
+            match_ip,
+            {
+                "is_ward_request": True,
+                "ward_request_type": "LAB",
+                "is_active": True,
+                "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]}
+            }
+        ]
+    }
+    lab_docs = list(mongo_db["hospital_investbilling"].find(
+        lab_query,
+        {"investBillNo": 1, "item": 1, "status": 1, "total": 1, "finalPrice": 1, "created_date": 1, "investBillDate": 1}
+    ))
+    lab_bills = []
+    lab_pending_items = []
+    for d in lab_docs:
+        bill_no = d.get("investBillNo") or "Lab Request"
+        dt_raw = d.get("investBillDate") or d.get("created_date")
+        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
+        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        status_str = d.get("status") or "Result Pending"
+
+        raw_items = d.get("item", [])
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+            except Exception:
+                raw_items = []
+        item_details = []
+        for it in (raw_items if isinstance(raw_items, list) else []):
+            if isinstance(it, dict) and it.get("itemName"):
+                it_st = it.get("status") or status_str
+                if it_st in ["Cancelled", "Completed", "Result Entered"] or it.get("cancelled"):
+                    continue
+                p = it.get("price")
+                p_str = f" (Rs. {p})" if p else ""
+                item_details.append(f"{it.get('itemName')}{p_str} [{it_st}]")
+
+        if item_details:
+            lab_bills.append({
+                "bill_no": bill_no,
+                "date": dt_str,
+                "status": status_str,
+                "total": tot_str,
+                "items": item_details
+            })
+            items_summary = f"{bill_no}: {', '.join(item_details)}"
+            lab_pending_items.append(items_summary)
+
+    # --- 2. Radiology ---
+    rad_query = {
+        "$and": [
+            match_ip,
+            {
+                "is_ward_request": True,
+                "ward_request_type": "RADIOLOGY",
+                "is_active": True,
+                "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]}
+            }
+        ]
+    }
+    rad_docs = list(mongo_db["hospital_investbilling"].find(
+        rad_query,
+        {"investBillNo": 1, "item": 1, "status": 1, "total": 1, "finalPrice": 1, "created_date": 1, "investBillDate": 1}
+    ))
+    rad_bills = []
+    rad_pending_items = []
+    for d in rad_docs:
+        bill_no = d.get("investBillNo") or "Radiology Request"
+        dt_raw = d.get("investBillDate") or d.get("created_date")
+        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
+        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        status_str = d.get("status") or "Result Pending"
+
+        raw_items = d.get("item", [])
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+            except Exception:
+                raw_items = []
+        item_details = []
+        for it in (raw_items if isinstance(raw_items, list) else []):
+            if isinstance(it, dict) and it.get("itemName"):
+                it_st = it.get("status") or status_str
+                if it_st in ["Cancelled", "Completed", "Result Entered"] or it.get("cancelled"):
+                    continue
+                p = it.get("price")
+                p_str = f" (Rs. {p})" if p else ""
+                item_details.append(f"{it.get('itemName')}{p_str} [{it_st}]")
+
+        if item_details:
+            rad_bills.append({
+                "bill_no": bill_no,
+                "date": dt_str,
+                "status": status_str,
+                "total": tot_str,
+                "items": item_details
+            })
+            items_summary = f"{bill_no}: {', '.join(item_details)}"
+            rad_pending_items.append(items_summary)
+
+    # --- 3. Pharmacy ---
+    pharm_pending_query = {
+        "$and": [
+            match_ip,
+            {
+                "is_ward_request": True,
+                "is_deleted": {"$ne": True},
+                "billing_status": {"$in": ["Pending", "Draft"]}
+            }
+        ]
+    }
+    pharm_pending_docs = list(mongo_db["hospital_pharmacybilling"].find(
+        pharm_pending_query,
+        {"Bill_id": 1, "bill_no": 1, "billing_status": 1, "net_amount": 1, "total_amount": 1, "bill_date": 1, "created_date": 1, "ward_request_date": 1, "medicine_particulars": 1}
+    ))
+    pharm_item_ids = set()
+    for d in pharm_pending_docs:
+        for m in d.get("medicine_particulars", []):
+            if isinstance(m, dict) and m.get("item_id"):
+                pharm_item_ids.add(m.get("item_id"))
+    pharm_map = {}
+    if pharm_item_ids:
+        try:
+            for r in mongo_db["hospital_pharmacyitem"].find({"item_id": {"$in": list(pharm_item_ids)}}, {"item_id": 1, "item_name": 1}):
+                pharm_map[r.get("item_id")] = r.get("item_name")
+        except Exception:
+            pass
+
+    pharm_bills = []
+    pharm_pending_items = []
+    for d in pharm_pending_docs:
+        b_num = d.get("bill_no") or d.get("Bill_id") or "Req"
+        b_label = f"Bill #{b_num}" if not str(b_num).startswith("Bill") else str(b_num)
+        dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
+        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        tot = d.get("net_amount") if d.get("net_amount") is not None else d.get("total_amount")
+        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        st_str = d.get("billing_status") or "Pending"
+
+        item_details = []
+        for m in d.get("medicine_particulars", []):
+            if isinstance(m, dict):
+                m_name = m.get("item_name") or pharm_map.get(m.get("item_id")) or f"Medicine #{m.get('item_id')}"
+                qty = m.get("qty") or m.get("quantity") or 1
+                item_details.append(f"{m_name} (Qty: {qty})")
+
+        pharm_bills.append({
+            "bill_no": b_label,
+            "date": dt_str,
+            "status": st_str,
+            "total": tot_str,
+            "items": item_details
+        })
+        pharm_pending_items.append(f"{b_label} ({st_str}): {', '.join(item_details[:3])}" if item_details else f"{b_label} (Status: {st_str})")
+
+    # Check unapproved returns in pharmacy
+    pharm_return_query = {
+        "$and": [
+            match_ip,
+            {
+                "is_ward_request": True,
+                "is_deleted": {"$ne": True},
+                "pending_returns": {"$exists": True, "$not": {"$size": 0}}
+            }
+        ]
+    }
+    pharm_return_docs = list(mongo_db["hospital_pharmacybilling"].find(
+        pharm_return_query,
+        {"Bill_id": 1, "bill_no": 1, "pending_returns": 1}
+    ))
+    pharm_returns_pending_count = 0
+    for d in pharm_return_docs:
+        rets = d.get("pending_returns", [])
+        unapproved = [r for r in rets if isinstance(r, dict) and not r.get("is_approved") and not r.get("is_rejected")]
+        if unapproved:
+            pharm_returns_pending_count += len(unapproved)
+            b_num = d.get("bill_no") or d.get("Bill_id") or "Req"
+            b_label = f"Bill #{b_num}" if not str(b_num).startswith("Bill") else str(b_num)
+            return_details = []
+            for r in unapproved:
+                r_name = r.get("item_name") or pharm_map.get(r.get("item_id")) or f"Item #{r.get('item_id')}"
+                r_qty = r.get("return_qty") or r.get("qty") or 1
+                return_details.append(f"{r_name} (Return Qty: {r_qty})")
+
+            pharm_bills.append({
+                "bill_no": f"{b_label} - Return Request",
+                "status": "Return Pending Approval",
+                "items": return_details
+            })
+            pharm_pending_items.append(f"{b_label}: {len(unapproved)} Medicine return(s) pending approval")
+
+    # --- 4. Implants ---
+    implant_query = {
+        "$and": [
+            match_ip,
+            {"is_active": True}
+        ]
+    }
+    implant_docs = list(mongo_db["hospital_implant_request"].find(
+        implant_query,
+        {"ImplantRequest_id": 1, "items": 1, "status": 1}
+    ))
+    implant_item_ids = set()
+    for d in implant_docs:
+        for it in d.get("items", []):
+            if isinstance(it, dict) and it.get("item_id"):
+                implant_item_ids.add(it.get("item_id"))
+    implant_map = {}
+    if implant_item_ids:
+        try:
+            for it_rec in mongo_db["hospital_velavan_items"].find({"item_id": {"$in": list(implant_item_ids)}}, {"item_id": 1, "itemName": 1}):
+                implant_map[it_rec.get("item_id")] = it_rec.get("itemName")
+        except Exception:
+            pass
+
+    implant_bills = []
+    implant_pending_items = []
+    has_implant_requests = len(implant_docs) > 0
+    if has_implant_requests:
+        sales_bill = mongo_db["hospital_velavansalesbill"].find_one({
+            "ip_number": ip_clean,
+            "payment_status": "PAID"
+        })
+        if not sales_bill:
+            for imp in implant_docs:
+                req_id = imp.get("ImplantRequest_id") or "Req"
+                b_label = f"Implant Request #{req_id}"
+                st_str = "Unbilled / Payment Pending"
+                item_details = []
+                for it in imp.get("items", []):
+                    if isinstance(it, dict):
+                        it_name = it.get("itemName") or implant_map.get(it.get("item_id")) or it.get("hsn") or f"Implant #{it.get('item_id')}"
+                        qty = it.get("quantity") or it.get("qty") or 1
+                        item_details.append(f"{it_name} (Qty: {qty})")
+
+                implant_bills.append({
+                    "bill_no": b_label,
+                    "status": st_str,
+                    "items": item_details
+                })
+                implant_pending_items.append(f"{b_label} - {st_str}")
+
+    # --- 5. Diet ---
+    diet_query = {
+        "$and": [
+            match_ip,
+            {"status": {"$in": ["Ordered", "Received"]}}
+        ]
+    }
+    diet_docs = list(mongo_db["hospital_patientdietorder"].find(
+        diet_query,
+        {"diet_type": 1, "meal_time": 1, "status": 1, "order_date": 1}
+    ))
+    diet_bills = []
+    diet_pending_items = []
+    for d in diet_docs:
+        m_time = d.get("meal_time") or "Meal"
+        d_type = d.get("diet_type") or "Regular Diet"
+        st = d.get("status") or "Ordered"
+        dt_raw = d.get("order_date")
+        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+
+        diet_bills.append({
+            "bill_no": f"Diet: {m_time}",
+            "date": dt_str,
+            "status": st,
+            "items": [f"{m_time} ({d_type}) - Status: {st}"]
+        })
+        diet_pending_items.append(f"{m_time} ({d_type}) - Status: {st}")
+
+    # --- 6. Laundry ---
+    laundry_query = {
+        "$and": [
+            match_ip,
+            {"status": "Pending"}
+        ]
+    }
+    laundry_docs = list(mongo_db["hospital_laundrywardrequest"].find(
+        laundry_query,
+        {"id": 1, "request_type": 1, "status": 1, "created_date": 1, "items": 1}
+    ))
+    laundry_bills = []
+    laundry_pending_items = []
+    for d in laundry_docs:
+        lid = d.get("id") or "Req"
+        rtype = d.get("request_type") or "Normal"
+        st = d.get("status") or "Pending"
+        dt_raw = d.get("created_date")
+        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+
+        raw_items = d.get("items", [])
+        item_details = []
+        if isinstance(raw_items, list):
+            for it in raw_items:
+                if isinstance(it, dict):
+                    i_name = it.get("item") or it.get("name") or "Linen"
+                    qty = it.get("qty") or 1
+                    item_details.append(f"{i_name} (Qty: {qty})")
+
+        laundry_bills.append({
+            "bill_no": f"Laundry Request #{lid} ({rtype})",
+            "date": dt_str,
+            "status": st,
+            "items": item_details if item_details else [f"Laundry #{lid} ({rtype}) - Status: {st}"]
+        })
+        laundry_pending_items.append(f"Laundry #{lid} ({rtype}) - Status: {st}")
+
+    lab_count = len(lab_bills)
+    rad_count = len(rad_bills)
+    pharm_count = len(pharm_bills)
+    implant_count = len(implant_bills)
+    diet_count = len(diet_bills)
+    laundry_count = len(laundry_bills)
+
+    pending_total = lab_count + rad_count + pharm_count + implant_count + diet_count + laundry_count
+    is_clear = (pending_total == 0)
+
+    return {
+        "is_clear_for_billing": is_clear,
+        "pending_total": pending_total,
+        "streams": {
+            "lab": {
+                "name": "Lab Investigations",
+                "icon": "bi-droplet",
+                "is_cleared": lab_count == 0,
+                "pending_count": lab_count,
+                "bills": lab_bills,
+                "items": lab_pending_items,
+            },
+            "radiology": {
+                "name": "Radiology",
+                "icon": "bi-camera",
+                "is_cleared": rad_count == 0,
+                "pending_count": rad_count,
+                "bills": rad_bills,
+                "items": rad_pending_items,
+            },
+            "pharmacy": {
+                "name": "Pharmacy / Medicines",
+                "icon": "bi-capsule",
+                "is_cleared": pharm_count == 0,
+                "pending_count": pharm_count,
+                "pending_bills_count": len(pharm_pending_docs),
+                "pending_returns_count": pharm_returns_pending_count,
+                "bills": pharm_bills,
+                "items": pharm_pending_items,
+            },
+            "implants": {
+                "name": "Implants",
+                "icon": "bi-shield-check",
+                "is_cleared": implant_count == 0,
+                "has_requests": has_implant_requests,
+                "pending_count": implant_count,
+                "bills": implant_bills,
+                "items": implant_pending_items,
+            },
+            "diet": {
+                "name": "Diet Orders",
+                "icon": "bi-egg-fried",
+                "is_cleared": diet_count == 0,
+                "pending_count": diet_count,
+                "bills": diet_bills,
+                "items": diet_pending_items,
+            },
+            "laundry": {
+                "name": "Laundry Requests",
+                "icon": "bi-basket",
+                "is_cleared": laundry_count == 0,
+                "pending_count": laundry_count,
+                "bills": laundry_bills,
+                "items": laundry_pending_items,
+            },
+        }
+    }
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def check_patient_billing_clearance(request):
+    try:
+        params = getattr(request, "query_params", None) if hasattr(request, "query_params") else getattr(request, "GET", {})
+        ip_number = params.get("ipNumber") or params.get("ip_number", "")
+        uhid = params.get("uhid", "")
+        if not ip_number and not uhid:
+            return Response({"success": False, "error": "ipNumber or uhid is required"}, status=400)
+
+        clearance = get_patient_billing_clearance_data(ip_number, uhid)
+        return Response({"success": True, **clearance})
+    except Exception as e:
+        print(f"Error checking patient billing clearance: {e}\n{traceback.format_exc()}")
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
 @api_view(["POST"])
 
 def update_admission_status(request):
@@ -2852,6 +3441,21 @@ def update_admission_status(request):
         if not ip_number or not ward_status:
 
             return Response({"error": "ip_number and status are required"}, status=400)
+
+        # Server-side guard: verify clearance if attempting to mark "Sent for billing"
+        if ward_status == "Sent for billing":
+            clearance = get_patient_billing_clearance_data(ip_number)
+            if not clearance.get("is_clear_for_billing", False):
+                pending_streams = []
+                for s_key, s_val in clearance.get("streams", {}).items():
+                    if not s_val.get("is_cleared", True):
+                        pending_streams.append(f"{s_val.get('name', s_key.title())} ({s_val.get('pending_count', 1)} pending)")
+                pending_msg = ", ".join(pending_streams) if pending_streams else "Pending items exist"
+                return Response({
+                    "success": False,
+                    "error": f"Cannot send for billing. Patient has uncleared requests: {pending_msg}.",
+                    "clearance": clearance
+                }, status=400)
 
         # Update in Relational Model
 

@@ -148,6 +148,8 @@ urlpatterns = [
     path("get_employee_name/", pharmacy.get_employee_name_api, name='get_employee_name'),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('PharmacyBillanalysis/', pharmacy.PharmacyBillanalysis, name='PharmacyBillanalysis'),
+    path('PharmacyItemPatientAnalysis/', pharmacy.PharmacyItemPatientAnalysis, name='PharmacyItemPatientAnalysis'),
+    path('search_pharmacy_items/', pharmacy.search_pharmacy_items, name='search_pharmacy_items'),
 
 
     
@@ -263,6 +265,7 @@ urlpatterns = [
 
     # Discharge URLs
     path("search-discharge-patient/", discharge.search_discharge_patient, name="search-discharge-patient"),
+    path("discharge-billing/signatories/", discharge.get_discharge_signatories, name="discharge-signatories"),
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
     path("discharge-billing/<str:pk>/convert-to-bill/", discharge.convert_estimate_to_bill, name="discharge-billing-convert"),
@@ -400,6 +403,7 @@ urlpatterns = [
     # Nursing Station / Ward Requests
     path("wardrequest/", NursingStation.get_admission_list, name="wardrequest"),
     path("update_admission_status/", NursingStation.update_admission_status, name="update_admission_status"),
+    path("check-patient-billing-clearance/", NursingStation.check_patient_billing_clearance, name="check-patient-billing-clearance"),
     path("location-mapping/", NursingStation.get_location_mapping, name="location-mapping"),
     path("get_wards_list/", NursingStation.get_wards_list, name="get_wards_list"),
     path("hospital_nursingstation/", NursingStation.get_wards_list, name="hospital_nursingstation_list"),
@@ -410,6 +414,8 @@ urlpatterns = [
     path("save_lab_ward_request/", NursingStation.save_lab_ward_request, name="save_lab_ward_request"),
     path("cancel_lab_ward_request/", NursingStation.cancel_lab_ward_request, name="cancel_lab_ward_request"),
     path("remove_individual_test/", NursingStation.remove_individual_test_from_lab_ward_request, name="remove_individual_test"),
+    path("cancel_individual_ward_request_item/", NursingStation.cancel_individual_ward_request_item, name="cancel_individual_ward_request_item"),
+    path("update_ward_request_item_status/", NursingStation.update_ward_request_item_status, name="update_ward_request_item_status"),
     path("get_medicine_ward_requests/", NursingStation.get_medicine_ward_requests, name="get_medicine_ward_requests"),
     path("save_medicine_ward_request/", NursingStation.save_medicine_ward_request, name="save_medicine_ward_request"),
     path("return_medicine_ward_request/", NursingStation.return_medicine_ward_request, name="return_medicine_ward_request"),
@@ -687,6 +693,7 @@ urlpatterns = [
     path("get_salesreturn_billdetails/", salesreturn.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
     path("OP_salesreturn_billdetails/", salesreturn.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
     path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
+    path("get_salesreturn_print_details/", salesreturn.get_salesreturn_print_details, name="get_salesreturn_print_details"),
     path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),

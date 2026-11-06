@@ -36,6 +36,8 @@ from .dbcollection import (
 from ..counter_service import get_next_pharmacy_bill_no
 
 # MongoDB Configuration
+from dotenv import load_dotenv
+load_dotenv(override=True)
 MONGO_URI = os.getenv("GLOBAL_DB_HOST")
 DB_NAME = "HMS"
 COLLECTION_NAME = "hospital_pharmacystock"
@@ -77,29 +79,17 @@ def to_utc_iso(dt_val):
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_stock(request):
     try:
-        # ✅ Get values safely from request data, GET params, headers or fallback
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-        hospital_code = (
-            request.GET.get("hospital_code")
-            or data.get("auth-hospital-code")
-            or request.headers.get("auth-hospital-code")
-            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-            or "SH001"
-        )
-        branch_code = (
-            request.GET.get("branch_code")
-            or data.get("auth-branch-code")
-            or request.headers.get("auth-branch-code")
-            or request.META.get("HTTP_AUTH_BRANCH_CODE")
-            or "SHB001"
-        )
-        outlet_code = (
-            request.GET.get("outlet_code")
-            or data.get("auth-outlet-code")
-            or request.headers.get("auth-outlet-code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or "OLET001"
-        )
+        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+        outlet_code   = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        if isinstance(outlet_code, (list, tuple)):
+            if len(outlet_code) == 1:
+                outlet_code = outlet_code[0]
+            elif outlet_code:
+                outlet_code = {"$in": list(outlet_code)}
+            else:
+                outlet_code = None
 
         search_query = (
             request.GET.get("search")
@@ -118,12 +108,14 @@ def get_pharmacy_stock(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         mongo_db = client["HMS"]
 
-        # ✅ MATCH STOCK STRICTLY
-        match_stage = {
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            "outlet_code": outlet_code   
-        }
+        # ✅ MATCH STOCK DYNAMICALLY
+        match_stage = {}
+        if hospital_code:
+            match_stage["hospital_code"] = hospital_code
+        if branch_code:
+            match_stage["branch_code"] = branch_code
+        if outlet_code:
+            match_stage["outlet_code"] = outlet_code
 
         # Filter to active batches with total_stock > 0 to avoid scanning tens of thousands of historical 0-stock batches
         include_zero_stock = request.GET.get("include_zero_stock") or data.get("include_zero_stock")
@@ -527,28 +519,53 @@ def sanitize_medicines(medicines):
 # ----------------------------------------------------------
 def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_code):
 
-    old_map = {(m.get("item_id"), m.get("batch_number")): m for m in (old_meds or [])}
-    new_map = {(m.get("item_id"), m.get("batch_number")): m for m in (new_meds or [])}
+    if not hospital_code or not branch_code or not outlet_code:
+        return
+
+    def _clean_bn(b):
+        s = str(b or "").strip()
+        return "" if s.lower() in ["none", "null", "n/a", "undefined", "—", "-"] else s
+
+    def _clean_iid(iid):
+        try:
+            return int(iid)
+        except (ValueError, TypeError):
+            return iid
+
+    def _get_qty(m):
+        if not isinstance(m, dict):
+            return 0.0
+        try:
+            return float(m.get("qty") if m.get("qty") is not None else m.get("quantity", 0) or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    old_map = {}
+    for m in (old_meds or []):
+        if isinstance(m, dict):
+            iid = _clean_iid(m.get("item_id"))
+            bn = _clean_bn(m.get("batch_number") or m.get("batch_no") or m.get("batch"))
+            if iid is not None and bn:
+                old_map[(iid, bn)] = _get_qty(m)
+
+    new_map = {}
+    for m in (new_meds or []):
+        if isinstance(m, dict):
+            iid = _clean_iid(m.get("item_id"))
+            bn = _clean_bn(m.get("batch_number") or m.get("batch_no") or m.get("batch"))
+            if iid is not None and bn:
+                new_map[(iid, bn)] = _get_qty(m)
 
     keys = set(old_map.keys()).union(new_map.keys())
 
-    for key in keys:
-        old_qty = float(old_map.get(key, {}).get("qty", 0))
-        new_qty = float(new_map.get(key, {}).get("qty", 0))
+    for item_id_val, batch_number in keys:
+        old_qty = old_map.get((item_id_val, batch_number), 0.0)
+        new_qty = new_map.get((item_id_val, batch_number), 0.0)
 
         diff = new_qty - old_qty
 
         if diff == 0:
             continue
-
-        item_id, batch_number = key
-        if item_id is None:
-            continue
-
-        try:
-            item_id_val = int(item_id)
-        except (ValueError, TypeError):
-            item_id_val = item_id
 
         stock_collection.update_one(
             {
@@ -565,68 +582,138 @@ def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_
 
 
 # ----------------------------------------------------------
-# EDIT HISTORY
+# EDIT HISTORY (Safely handles ward requests / missing batch numbers)
 # ----------------------------------------------------------
 def build_edit_history(old_meds, new_meds, employee_id):
 
     updated = []
 
-    old_map = {(m["item_id"], m["batch_number"]): m for m in old_meds}
-    new_map = {(m["item_id"], m["batch_number"]): m for m in new_meds}
+    # Ensure list types
+    if isinstance(old_meds, str):
+        try:
+            old_meds = json.loads(old_meds)
+        except Exception:
+            old_meds = []
+    if not isinstance(old_meds, list):
+        old_meds = []
 
-    keys = set(old_map.keys()).union(new_map.keys())
+    if isinstance(new_meds, str):
+        try:
+            new_meds = json.loads(new_meds)
+        except Exception:
+            new_meds = []
+    if not isinstance(new_meds, list):
+        new_meds = []
 
-    for key in keys:
-        old = old_map.get(key)
-        new = new_map.get(key)
+    def _clean_key(m):
+        if not isinstance(m, dict):
+            return (None, "")
+        iid = m.get("item_id")
+        try:
+            iid = int(iid)
+        except (ValueError, TypeError):
+            pass
+        b = str(m.get("batch_number") or m.get("batch_no") or m.get("batch") or "").strip()
+        if b.lower() in ["none", "null", "n/a", "undefined", "—", "-"]:
+            b = ""
+        return (iid, b)
 
-        now = datetime.utcnow().isoformat()
+    def _get_qty(m):
+        if not isinstance(m, dict):
+            return 0
+        try:
+            return float(m.get("qty") if m.get("qty") is not None else m.get("quantity", 0) or 0)
+        except (ValueError, TypeError):
+            return 0
 
-        if not old and new:
-            new_item = {k: v for k, v in new.items() if k != "item_name"}
-            new_item.setdefault("edit_history", [])
-            new_item["edit_history"].append({
-                "action": "medicine_added",
-                "qty": new["qty"],
-                "blocked_change": new["qty"],
+    unmatched_old = [m for m in old_meds if isinstance(m, dict) and not m.get("is_deleted")]
+    unmatched_new = [m for m in new_meds if isinstance(m, dict)]
+
+    pairs = []  # (old_item, new_item)
+
+    # Pass 1: Exact (item_id, batch_number) match
+    remaining_new = []
+    for new_it in unmatched_new:
+        new_k = _clean_key(new_it)
+        matched_idx = None
+        for idx, old_it in enumerate(unmatched_old):
+            old_k = _clean_key(old_it)
+            if new_k[0] is not None and old_k[0] is not None and new_k[0] == old_k[0] and new_k[1] == old_k[1] and new_k[1] != "":
+                matched_idx = idx
+                break
+        if matched_idx is not None:
+            pairs.append((unmatched_old.pop(matched_idx), new_it))
+        else:
+            remaining_new.append(new_it)
+    unmatched_new = remaining_new
+
+    # Pass 2: Match by item_id when old item had no batch assigned yet (e.g. from Medicine Chart / Ward Requests)
+    remaining_new = []
+    for new_it in unmatched_new:
+        new_k = _clean_key(new_it)
+        matched_idx = None
+        for idx, old_it in enumerate(unmatched_old):
+            old_k = _clean_key(old_it)
+            if new_k[0] is not None and old_k[0] is not None and new_k[0] == old_k[0] and old_k[1] == "":
+                matched_idx = idx
+                break
+        if matched_idx is not None:
+            pairs.append((unmatched_old.pop(matched_idx), new_it))
+        else:
+            remaining_new.append(new_it)
+    unmatched_new = remaining_new
+
+    now = datetime.utcnow().isoformat()
+
+    # Process paired items
+    for old, new in pairs:
+        old_qty = _get_qty(old)
+        new_qty = _get_qty(new)
+        history = list(old.get("edit_history") or [])
+
+        if old_qty != new_qty:
+            diff = new_qty - old_qty
+            history.append({
+                "action": "qty_added" if diff > 0 else "qty_deleted",
+                "old_qty": old_qty,
+                "new_qty": new_qty,
+                "blocked_change": diff,
                 "timestamp": now,
                 "edited_by": employee_id
             })
-            updated.append(new_item)
 
-        elif old and not new:
-            old_item = {k: v for k, v in old.items() if k != "item_name"}
-            old_item.setdefault("edit_history", [])
-            old_item["edit_history"].append({
-                "action": "medicine_deleted",
-                "qty_deleted": old["qty"],
-                "blocked_change": -old["qty"],
-                "timestamp": now,
-                "edited_by": employee_id
-            })
-            updated.append(old_item)
+        new_item = {k: v for k, v in new.items() if k != "item_name"}
+        new_item["edit_history"] = history
+        updated.append(new_item)
 
-        elif old and new:
-            old_qty = old.get("qty", 0)
-            new_qty = new.get("qty", 0)
+    # Process additions (in new but not in old)
+    for new in unmatched_new:
+        new_qty = _get_qty(new)
+        new_item = {k: v for k, v in new.items() if k != "item_name"}
+        new_item.setdefault("edit_history", [])
+        new_item["edit_history"].append({
+            "action": "medicine_added",
+            "qty": new_qty,
+            "blocked_change": new_qty,
+            "timestamp": now,
+            "edited_by": employee_id
+        })
+        updated.append(new_item)
 
-            history = old.get("edit_history", [])
-
-            if old_qty != new_qty:
-                diff = new_qty - old_qty
-
-                history.append({
-                    "action": "qty_added" if diff > 0 else "qty_deleted",
-                    "old_qty": old_qty,
-                    "new_qty": new_qty,
-                    "blocked_change": diff,
-                    "timestamp": now,
-                    "edited_by": employee_id
-                })
-
-            new_item = {k: v for k, v in new.items() if k != "item_name"}
-            new_item["edit_history"] = history
-            updated.append(new_item)
+    # Process deletions (in old but not in new)
+    for old in unmatched_old:
+        old_qty = _get_qty(old)
+        old_item = {k: v for k, v in old.items() if k != "item_name"}
+        old_item.setdefault("edit_history", [])
+        old_item["is_deleted"] = True
+        old_item["edit_history"].append({
+            "action": "medicine_deleted",
+            "qty_deleted": old_qty,
+            "blocked_change": -old_qty,
+            "timestamp": now,
+            "edited_by": employee_id
+        })
+        updated.append(old_item)
 
     return updated
 
@@ -645,6 +732,9 @@ def save_pharmacy_bill(request):
     hospital_code = data.get("auth-hospital-code")
     branch_code   = data.get("auth-branch-code")
     outlet_code   = data.get("auth-outlet-code")
+
+    if isinstance(outlet_code, (list, tuple)) and outlet_code:
+        outlet_code = outlet_code[0]
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -765,11 +855,20 @@ def save_pharmacy_bill(request):
             update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
             update_data["payment_mode"]   = norm_pm or "Cash"
             update_data["bill_date"]      = datetime.utcnow()
+            update_data["billed_id"]      = employee_id
 
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
             {"$set": update_data}
         )
+
+        try:
+            PharmacyBilling.objects.filter(Bill_id=int(Bill_id)).update(
+                billing_status=update_data.get("billing_status", "Billed"),
+                billed_id=update_data.get("billed_id", employee_id)
+            )
+        except Exception:
+            pass
 
         doc_id = resolve_doctor_id(data.get("doctor_id") or record.get("doctor_id"))
         doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
@@ -842,6 +941,7 @@ def save_pharmacy_bill(request):
                 "estimate_no":  None,
                 "billing_mode": data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "DIRECT"),
                 "payment_mode": norm_pm or "Cash",
+                "billed_id":    employee_id,
             })
 
             bill_collection.insert_one(record_doc)
@@ -937,7 +1037,15 @@ def get_pharmacy_BillType(request):
     hospital_code = request.data.get("auth-hospital-code") 
     branch_code   = request.data.get("auth-branch-code") 
     outlet_code   = request.data.get("auth-outlet-code") 
-    print(request.data.get)
+
+    if isinstance(outlet_code, (list, tuple)):
+        if len(outlet_code) == 1:
+            outlet_code = outlet_code[0]
+        elif outlet_code:
+            outlet_code = {"$in": list(outlet_code)}
+        else:
+            outlet_code = None
+
     print("hospital_code:", hospital_code)
     print("branch_code:", branch_code)
     print("outlet_code:", outlet_code)
@@ -2227,8 +2335,6 @@ def pharmacy_medicinechart(request):
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
 
-        print(f"pharmacy_medicinechart -> hospital_code: '{hospital_code}', branch_code: '{branch_code}', outlet_code: '{outlet_code}'")
-
         # =========================================
         # 1. GET BILL DATA (Using PyMongo for speed & reliability)
         # =========================================
@@ -2239,7 +2345,11 @@ def pharmacy_medicinechart(request):
             "is_ward_request": True
         }
         if outlet_code:
-            base_mongo_filter["outlet_code"] = outlet_code
+            if isinstance(outlet_code, (list, tuple)):
+                base_mongo_filter["outlet_code"] = {"$in": list(outlet_code)}
+            else:
+                base_mongo_filter["outlet_code"] = outlet_code
+
 
         raw_bills = list(pharmacy_billing_collection.find(
             base_mongo_filter
@@ -2458,10 +2568,16 @@ def pharmacy_medicinechart(request):
                 print("profile_collection created_by bulk error:", e)
 
         # 5. Bulk fetch Pharmacy items & stock via common optimized function in dbcollection.py
+        stock_outlet = outlet_code
+        if isinstance(stock_outlet, dict) and "$in" in stock_outlet:
+            stock_outlet = stock_outlet["$in"][0] if stock_outlet["$in"] else None
+        elif isinstance(stock_outlet, (list, tuple)):
+            stock_outlet = stock_outlet[0] if stock_outlet else None
+
         items_stock_data = get_pharmacy_items_with_stock(
             hospital_code=hospital_code,
             branch_code=branch_code,
-            outlet_code=outlet_code,
+            outlet_code=stock_outlet,
             item_ids=all_item_ids
         )
 
@@ -2685,6 +2801,8 @@ def patient_details(request):
             elif clean_uhid.isdigit():
                 padded_num = clean_uhid.zfill(6)
                 uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+                if len(clean_uhid) == 10:
+                    uhid_cond |= (Q(mobilePhone__icontains=clean_uhid) | Q(mobilePhone__iendswith=clean_uhid))
 
             query &= uhid_cond
             has_filter = True
@@ -2700,10 +2818,15 @@ def patient_details(request):
 
     if name_str and mobile_str and name_str == mobile_str:
         # Unified Name/Phone field search
+        clean_digits = re.sub(r'\D', '', name_str)
+        phone_q = Q(mobilePhone__icontains=name_str)
+        if len(clean_digits) >= 10:
+            phone_q |= Q(mobilePhone__icontains=clean_digits[-10:])
+
         query &= (
             Q(firstName__icontains=name_str) |
             Q(lastName__icontains=name_str) |
-            Q(mobilePhone__icontains=name_str)
+            phone_q
         )
         has_filter = True
     else:
@@ -2711,7 +2834,11 @@ def patient_details(request):
             query &= (Q(firstName__icontains=name_str) | Q(lastName__icontains=name_str))
             has_filter = True
         if mobile_str:
-            query &= Q(mobilePhone__icontains=mobile_str)
+            clean_digits = re.sub(r'\D', '', mobile_str)
+            if len(clean_digits) >= 10:
+                query &= (Q(mobilePhone__icontains=mobile_str) | Q(mobilePhone__icontains=clean_digits[-10:]))
+            else:
+                query &= Q(mobilePhone__icontains=mobile_str)
             has_filter = True
 
     if not has_filter:
@@ -2788,12 +2915,31 @@ def substitute_medicine(request):
             substitute_item = json.loads(substitute_item)
 
         # ── Fetch bill ────────────────────────────────────────────────
-        bill = bill_collection.find_one({
-            "Bill_id":      Bill_id,
+        try:
+            b_id_int = int(Bill_id)
+        except (ValueError, TypeError):
+            b_id_int = None
+        id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
+
+        bill_query = {
+            "Bill_id":       id_clause,
             "hospital_code": hospital_code,
             "branch_code":   branch_code,
-            "outlet_code":   outlet_code,
-        })
+        }
+        if outlet_code:
+            if isinstance(outlet_code, (list, tuple)):
+                bill_query["outlet_code"] = {"$in": list(outlet_code)}
+            else:
+                bill_query["outlet_code"] = outlet_code
+
+        bill = bill_collection.find_one(bill_query)
+        if not bill:
+            bill = bill_collection.find_one({
+                "Bill_id":       id_clause,
+                "hospital_code": hospital_code,
+                "branch_code":   branch_code,
+            })
+
         if not bill:
             return Response({"error": "Bill not found"}, status=404)
 
@@ -2802,7 +2948,19 @@ def substitute_medicine(request):
         substituted      = False
 
         for med in medicines:
-            if med["item_id"] == item_id and med["batch_number"] == batch_number:
+            if not isinstance(med, dict):
+                continue
+            m_iid = med.get("item_id")
+            m_bn  = str(med.get("batch_number") or med.get("batch_no") or med.get("batch") or "").strip()
+            target_bn = str(batch_number or "").strip()
+            is_match = False
+            if m_iid is not None and item_id is not None and str(m_iid) == str(item_id):
+                if not target_bn or not m_bn or target_bn.lower() in ["none", "null", "n/a", ""]:
+                    is_match = True
+                elif m_bn.lower() == target_bn.lower():
+                    is_match = True
+
+            if is_match and not substituted:
                 substituted = True
 
                 # Carry forward existing history (guard against null)
@@ -2823,6 +2981,10 @@ def substitute_medicine(request):
                 # Replace in-place: substitute carries the history, old entry dropped
                 substitute_item_clean = {k: v for k, v in substitute_item.items() if k != "item_name"}
                 substitute_item_clean["edit_history"] = med_edit_history
+                # Carry forward prescription details (dosage, noOfDays, dose, doseunit, instruction, etc.)
+                for field in ["dosage", "noOfDays", "no_of_days", "dose", "doseunit", "doseUnit", "instruction", "route", "remark"]:
+                    if med.get(field) and not substitute_item_clean.get(field):
+                        substitute_item_clean[field] = med.get(field)
                 updated_medicines.append(substitute_item_clean)   # ← substitute replaces original
             else:
                 med_clean = {k: v for k, v in med.items() if k != "item_name"}
@@ -2832,13 +2994,9 @@ def substitute_medicine(request):
             return Response({"error": "Matching medicine not found in bill"}, status=404)
 
         # ── Persist ───────────────────────────────────────────────────
+        sub_outlet = bill.get("outlet_code") or (outlet_code[0] if isinstance(outlet_code, (list, tuple)) and outlet_code else (outlet_code or "OLET001"))
         bill_collection.update_one(
-            {
-                "Bill_id":      Bill_id,
-                "hospital_code": hospital_code,
-                "branch_code":   branch_code,
-                "outlet_code":   outlet_code,
-            },
+            {"_id": bill["_id"]},
             {
                 "$set": {
                     "medicine_particulars": updated_medicines,
@@ -2846,7 +3004,7 @@ def substitute_medicine(request):
                     "lastmodified_context": {
                         "hospital_code": hospital_code,
                         "branch_code":   branch_code,
-                        "outlet_code":   outlet_code,
+                        "outlet_code":   sub_outlet,
                     },
                 }
             }
@@ -2865,9 +3023,14 @@ def substitute_medicine(request):
 def convert_to_bill(request):
     try:
         Bill_id = request.data.get("Bill_id")
+        try:
+            b_id_int = int(Bill_id)
+        except (ValueError, TypeError):
+            b_id_int = None
+        id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
 
         result = bill_collection.update_one(
-            {"Bill_id": Bill_id},
+            {"Bill_id": id_clause},
             {
                 "$set": {
                     "billing_status": "Processing",
@@ -2941,18 +3104,40 @@ def finalize_bill(request):
         # =====================================================
         # ✅ FETCH BILL
         # =====================================================
-        bill = bill_collection.find_one({
-            "Bill_id":       Bill_id,
+        try:
+            b_id_int = int(Bill_id)
+        except (ValueError, TypeError):
+            b_id_int = None
+        id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
+
+        bill_query = {
+            "Bill_id":       id_clause,
             "hospital_code": hospital_code,
             "branch_code":   branch_code,
-            "outlet_code":   outlet_code,
-        })
+        }
+        if outlet_code:
+            if isinstance(outlet_code, (list, tuple)):
+                bill_query["outlet_code"] = {"$in": list(outlet_code)}
+            else:
+                bill_query["outlet_code"] = outlet_code
+
+        bill = bill_collection.find_one(bill_query)
+        if not bill:
+            bill = bill_collection.find_one({
+                "Bill_id":       id_clause,
+                "hospital_code": hospital_code,
+                "branch_code":   branch_code,
+            })
 
         if not bill:
             return Response(
                 {"error": "Bill not found"},
                 status=404
             )
+
+        bill_outlet = bill.get("outlet_code") or (
+            outlet_code[0] if isinstance(outlet_code, (list, tuple)) and outlet_code else (outlet_code or "OLET001")
+        )
 
         # =====================================================
         # ✅ RESOLVE MEDICINES & TOTAL
@@ -3028,39 +3213,23 @@ def finalize_bill(request):
                 print("Warning: could not fetch admission advance —", adm_err)
                 ip_advance = None
 
-            is_insurance_patient = str(customer_type).strip().lower() == "insurance"
+            patient_details_map = bill.get("patient_details") or {}
+            is_insurance_patient = (
+                str(customer_type).strip().lower() == "insurance"
+                or bool(bill.get("is_insurance"))
+                or str(bill.get("customer_type", "")).strip().lower() == "insurance"
+                or str(data.get("customer_type", "")).strip().lower() == "insurance"
+                or bool(data.get("is_insurance"))
+                or bool(patient_details_map.get("is_insurance"))
+                or str(patient_details_map.get("customer_type", "")).strip().lower() == "insurance"
+                or bool(bill.get("insurance_company"))
+                or bool(patient_details_map.get("insurance_company"))
+            )
 
-            # ── Determine amount to check against IP Advance ─────────────────
-            # Rule: For Insurance patients, ONLY consumable items are payable by patient from IP Advance.
+            # ── IP Advance Check: Only for General/Cash patients ──────────────
+            # For Insurance patients, treatments and medicines are covered by insurance.
+            # Do NOT ask or deduct IP advance during billing.
             if is_insurance_patient:
-                consumable_amount = 0.0
-                for med in medicines_to_use:
-                    if not isinstance(med, dict) or med.get("is_deleted"):
-                        continue
-                    m_is_consumable = med.get("is_consumable_items")
-                    if m_is_consumable is None:
-                        try:
-                            m_id = int(med.get("item_id", 0))
-                        except (ValueError, TypeError):
-                            m_id = 0
-                        p_item = mongo_db["hospital_pharmacyitem"].find_one(
-                            {"item_id": m_id, "hospital_code": hospital_code},
-                            {"is_consumable_items": 1}
-                        )
-                        m_is_consumable = bool(p_item.get("is_consumable_items", False)) if p_item else False
-
-                    if m_is_consumable:
-                        q = float(med.get("qty") or med.get("quantity") or 0)
-                        p = float(med.get("price") or med.get("mrp") or med.get("rate") or 0)
-                        consumable_amount += float(med.get("calculated_price") or (q * p))
-
-                consumable_amount = round(consumable_amount, 2)
-                amount_to_check = consumable_amount
-            else:
-                amount_to_check = total_amount_to_use
-
-            # If Insurance patient has 0 consumable items, no IP advance deduction is needed
-            if is_insurance_patient and amount_to_check == 0:
                 pass
             else:
                 if advance_check_blocked:
@@ -3078,36 +3247,28 @@ def finalize_bill(request):
                         "is_deleted":       {"$ne": True},
                         "Bill_id":          {"$ne": Bill_id},
                     })
-                    existing_total = 0.0
-                    for b in existing_billed_cursor:
-                        if is_insurance_patient:
-                            past_meds = b.get("medicine_particulars", [])
-                            for pm in past_meds:
-                                if isinstance(pm, dict) and pm.get("is_consumable_items"):
-                                    q = float(pm.get("qty") or pm.get("quantity") or 0)
-                                    p = float(pm.get("price") or pm.get("mrp") or 0)
-                                    existing_total += float(pm.get("calculated_price") or (q * p))
-                        else:
-                            existing_total += float(b.get("total_amount", 0) or 0)
+                    existing_total = sum(
+                        float(b.get("total_amount", 0) or 0)
+                        for b in existing_billed_cursor
+                    )
 
-                    cumulative_total = round(existing_total + amount_to_check, 2)
+                    cumulative_total = round(existing_total + total_amount_to_use, 2)
 
                     print(
-                        f"IP Advance check | customer_type={customer_type} | is_insurance={is_insurance_patient} "
+                        f"IP Advance check | customer_type={customer_type} | is_insurance=False "
                         f"| ip_advance={ip_advance} | existing_billed={existing_total} "
-                        f"| current_payable={amount_to_check} | cumulative={cumulative_total}"
+                        f"| current_payable={total_amount_to_use} | cumulative={cumulative_total}"
                     )
 
                     if cumulative_total > ip_advance:
-                        err_msg = "Payable Consumables Exceed IP Advance" if is_insurance_patient else "Billing Exceeds From IP Advance"
                         return Response(
                             {
-                                "error":             err_msg,
+                                "error":             "Billing Exceeds From IP Advance",
                                 "customer_type":      customer_type,
-                                "is_insurance":       is_insurance_patient,
+                                "is_insurance":       False,
                                 "ip_advance":         ip_advance,
                                 "existing_billed":    existing_total,
-                                "current_payable":    amount_to_check,
+                                "current_payable":    total_amount_to_use,
                                 "cumulative_total":   cumulative_total,
                             },
                             status=400
@@ -3127,21 +3288,15 @@ def finalize_bill(request):
         if not bill.get("bill_no"):
 
             fy          = get_financial_year()
-            outlet      = outlet_code or bill.get("outlet_code")
             new_bill_no = get_next_pharmacy_bill_no(
-                outlet_code=outlet,
+                outlet_code=bill_outlet,
                 fy=fy,
                 db_instance=mongo_db
             )
             bill_date   = datetime.utcnow()
 
             bill_collection.update_one(
-                {
-                    "Bill_id":       Bill_id,
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
-                },
+                {"_id": bill["_id"]},
                 {
                     "$set": {
                         "bill_no":   new_bill_no,
@@ -3242,6 +3397,13 @@ def finalize_bill(request):
             else:
                 med_is_consumable = bool(med_is_consumable)
 
+            dosage_val = med.get("dosage") or (db_med.get("dosage") if db_med else "") or ""
+            no_days_val = med.get("noOfDays") or med.get("no_of_days") or (db_med.get("noOfDays") if db_med else "") or ""
+            dose_val = med.get("dose") or (db_med.get("dose") if db_med else "") or ""
+            doseunit_val = med.get("doseunit") or med.get("doseUnit") or (db_med.get("doseunit") if db_med else "") or ""
+            instruction_val = med.get("instruction") or (db_med.get("instruction") if db_med else "") or ""
+            route_val = med.get("route") or (db_med.get("route") if db_med else "") or ""
+
             med_entry = {
                 "item_id":          item_id,
                 "batch_number":     bn_val,
@@ -3252,6 +3414,12 @@ def finalize_bill(request):
                 "tax":              med.get("tax", 0),
                 "mrp":              med.get("mrp"),
                 "expiry_date":      med.get("expiry_date"),
+                "dosage":           dosage_val,
+                "noOfDays":         no_days_val,
+                "dose":             dose_val,
+                "doseunit":         doseunit_val,
+                "instruction":      instruction_val,
+                "route":            route_val,
                 "action":           "finalized",
                 "edited_by":        employee_id,
                 "edited_at":        now_ts,
@@ -3294,7 +3462,7 @@ def finalize_bill(request):
                     "batch_number":  batch,
                     "hospital_code": hospital_code,
                     "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
+                    "outlet_code":   bill_outlet,
                 },
                 {
                     "$inc": {
@@ -3309,7 +3477,7 @@ def finalize_bill(request):
                 "batch_number":  batch,
                 "hospital_code": hospital_code,
                 "branch_code":   branch_code,
-                "outlet_code":   outlet_code,
+                "outlet_code":   bill_outlet,
             })
 
             print(
@@ -3324,10 +3492,13 @@ def finalize_bill(request):
 
             "billing_status":       "Billed",
 
+            "billed_id":            employee_id,
+
             # ✅ NEW: mark as dispatched when billing is finalised
             "is_dispatched":        True,
 
             "lastmodified_date":    now_ts,
+            "lastmodified_by":      employee_id,
 
             # ✅ Store updated medicine list (with edit_history per item)
             "medicine_particulars": medicine_history,
@@ -3345,20 +3516,31 @@ def finalize_bill(request):
         if frontend_overall_discount_amount is not None:
             set_payload["overall_discount_amount"] = float(frontend_overall_discount_amount)
         raw_final_pm = data.get("payment_mode") or data.get("paymentMode")
-        if raw_final_pm:
+        if is_insurance_patient:
+            set_payload["payment_mode"] = "Credit"
+            set_payload["billing_mode"] = "IP CREDIT"
+            set_payload["is_insurance"] = True
+            set_payload["customer_type"] = "Insurance"
+        elif raw_final_pm:
             set_payload["payment_mode"] = "Credit" if str(raw_final_pm).strip().lower() == "credit" else "Cash"
 
         bill_collection.update_one(
-            {
-                "Bill_id":       Bill_id,
-                "hospital_code": hospital_code,
-                "branch_code":   branch_code,
-                "outlet_code":   outlet_code,
-            },
+            {"_id": bill["_id"]},
             {
                 "$set": set_payload,
             }
         )
+
+        try:
+            PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
+                billing_status="Billed",
+                billed_id=employee_id,
+                payment_mode=set_payload.get("payment_mode", "Cash"),
+                total_amount=set_payload.get("total_amount", float(bill.get("total_amount", 0))),
+                net_amount=set_payload.get("net_amount", float(bill.get("net_amount", 0)))
+            )
+        except Exception:
+            pass
 
         # Resolve doctor name and employee name
         doc_id = bill.get("doctor_id") or data.get("doctor_id")
@@ -3886,13 +4068,21 @@ def pharmacy_view_bills(request):
     # =========================================================
     # ✅ Outlet Validation
     # =========================================================
-    if request_outlet not in emp_outlets:
-        return Response({
-            "success": False,
-            "message": f"Outlet {request_outlet} not mapped to employee"
-        }, status=403)
-
-    matched_outlet = request_outlet
+    if isinstance(request_outlet, (list, tuple)):
+        valid_outlets = [o for o in request_outlet if o in emp_outlets]
+        if not valid_outlets:
+            return Response({
+                "success": False,
+                "message": f"Outlet {request_outlet} not mapped to employee"
+            }, status=403)
+        matched_outlet = valid_outlets[0]
+    else:
+        if request_outlet not in emp_outlets:
+            return Response({
+                "success": False,
+                "message": f"Outlet {request_outlet} not mapped to employee"
+            }, status=403)
+        matched_outlet = request_outlet
 
     # =========================================================
     # ✅ Get All Bill Types
@@ -3961,8 +4151,11 @@ def pharmacy_view_bills(request):
         "billing_status__in": ["Billed", "Paid", "Processing", "deleted"],
         "hospital_code": hospital_code,
         "branch_code": branch_code,
-        "outlet_code": matched_outlet,
     }
+    if isinstance(matched_outlet, (list, tuple)):
+        bill_filters["outlet_code__in"] = list(matched_outlet)
+    else:
+        bill_filters["outlet_code"] = matched_outlet
 
     if bill_type_param and bill_type_param != "ALL":
         try:
@@ -4037,18 +4230,45 @@ def pharmacy_view_bills(request):
         }
 
     # =========================================================
-    # ✅ Employee / Creator Mapping
+    # ✅ Employee / Creator / Billed Mapping
     # =========================================================
-    creator_ids = list(set([
-        str(bill.created_by).strip() for bill in bills if bill.created_by
-    ] + [
-        str(bill.cashier_id).strip() for bill in bills if bill.cashier_id
-    ]))
+    all_bill_ids = [b.Bill_id for b in bills]
+    mongo_bill_map = {}
+    if all_bill_ids:
+        mongo_bills_cursor = oppharmacy_collection.find(
+            {
+                "Bill_id": {"$in": all_bill_ids},
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+            },
+            {
+                "Bill_id": 1,
+                "billed_id": 1,
+                "created_by": 1,
+                "cashier_id": 1,
+                "medicine_particulars": 1,
+            }
+        )
+        for mb in mongo_bills_cursor:
+            mongo_bill_map[mb["Bill_id"]] = mb
+
+    all_emp_ids = set()
+    for bill in bills:
+        mb = mongo_bill_map.get(bill.Bill_id, {})
+        b_id = str(getattr(bill, "billed_id", None) or mb.get("billed_id") or "").strip()
+        c_id = str(getattr(bill, "created_by", None) or mb.get("created_by") or "").strip()
+        cs_id = str(getattr(bill, "cashier_id", None) or mb.get("cashier_id") or "").strip()
+        if b_id:
+            all_emp_ids.add(b_id)
+        if c_id:
+            all_emp_ids.add(c_id)
+        if cs_id:
+            all_emp_ids.add(cs_id)
 
     employee_map = {}
-    if creator_ids:
+    if all_emp_ids:
         search_ids = []
-        for cid in creator_ids:
+        for cid in all_emp_ids:
             search_ids.append(cid)
             if cid.isdigit():
                 search_ids.append(int(cid))
@@ -4062,25 +4282,16 @@ def pharmacy_view_bills(request):
             if emp_n:
                 employee_map[str(doc["employeeId"])] = emp_n
 
+        for cid in all_emp_ids:
+            if str(cid) not in employee_map:
+                resolved = get_employee_name_by_id(cid)
+                if resolved and resolved != "Unknown":
+                    employee_map[str(cid)] = resolved
+
     # =========================================================
     # ✅ Fallback for bills missing medicine_particulars in Django
     # =========================================================
-    missing_med_bill_ids = [b.Bill_id for b in bills if not b.medicine_particulars]
-    mongo_map = {}
-    if missing_med_bill_ids:
-        mongo_bills = oppharmacy_collection.find(
-            {
-                "Bill_id": {"$in": missing_med_bill_ids},
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": matched_outlet
-            },
-            {
-                "Bill_id": 1,
-                "medicine_particulars": 1,
-            }
-        )
-        mongo_map = {m["Bill_id"]: m.get("medicine_particulars", []) for m in mongo_bills}
+    mongo_map = {b_id: mb.get("medicine_particulars", []) for b_id, mb in mongo_bill_map.items()}
 
     # =========================================================
     # ✅ Fast Float Conversion Helper
@@ -4108,7 +4319,7 @@ def pharmacy_view_bills(request):
     items_stock_data = get_pharmacy_items_with_stock(
         hospital_code=hospital_code,
         branch_code=branch_code,
-        outlet_code=matched_outlet,
+        outlet_code=matched_outlet[0] if isinstance(matched_outlet, (list, tuple)) and matched_outlet else matched_outlet,
         item_ids=list(all_item_ids)
     ) if all_item_ids else {"items": {}, "stock_by_item": {}, "stock_by_batch": {}}
 
@@ -4134,10 +4345,19 @@ def pharmacy_view_bills(request):
         serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
         serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type) if bill.bill_type is not None else 0, "")
 
-        created_val  = str(bill.created_by or bill.cashier_id or "").strip()
-        matched_user = employee_map.get(created_val) or created_val
+        mb = mongo_bill_map.get(bill.Bill_id, {})
+        billed_id_val = str(getattr(bill, "billed_id", None) or mb.get("billed_id") or "").strip()
+        created_val   = str(getattr(bill, "created_by", None) or mb.get("created_by") or "").strip()
+        cashier_val   = str(getattr(bill, "cashier_id", None) or mb.get("cashier_id") or "").strip()
+
+        # Target user to display in Username column of View Bills tab:
+        # Billed ID (who billed it) -> created_by -> cashier_id
+        target_user_id = billed_id_val or created_val or cashier_val
+        matched_user   = employee_map.get(target_user_id) or target_user_id
+
+        serialized["billed_id"]       = billed_id_val or None
         serialized["employee_name"]   = matched_user
-        serialized["created_by_name"] = matched_user
+        serialized["created_by_name"] = employee_map.get(created_val) or created_val
 
         medicine_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
         updated_items = []
@@ -4695,6 +4915,31 @@ def PharmacyBillanalysis(request):
         hospital_code = data.get("auth-hospital-code") 
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
+        raw_outlet    = outlet_code
+
+        if isinstance(raw_outlet, (list, tuple)):
+            if len(raw_outlet) == 1:
+                outlet_code = raw_outlet[0]
+            elif raw_outlet:
+                outlet_code = {"$in": list(raw_outlet)}
+            else:
+                outlet_code = None
+        elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("[") and raw_outlet.strip().endswith("]"):
+            try:
+                parsed_list = ast.literal_eval(raw_outlet.strip())
+                if isinstance(parsed_list, (list, tuple)):
+                    if len(parsed_list) == 1:
+                        outlet_code = parsed_list[0]
+                    elif parsed_list:
+                        outlet_code = {"$in": list(parsed_list)}
+                    else:
+                        outlet_code = None
+                else:
+                    outlet_code = raw_outlet
+            except Exception:
+                outlet_code = raw_outlet
+        else:
+            outlet_code = raw_outlet
 
         from_date_str = str(data.get("from_date") or "").strip()
         to_date_str   = str(data.get("to_date") or "").strip()
@@ -5176,4 +5421,500 @@ def PharmacyBillanalysis(request):
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@api_view(["POST", "GET"])
+@permission_classes([HasRoleAndDataPermission])
+def search_pharmacy_items(request):
+    """
+    Search pharmacy item catalog (hospital_pharmacyitem and hospital_pharmacystock)
+    by item name or ID for auto-suggestions.
+    """
+    try:
+        data = request.data if isinstance(getattr(request, "data", None), dict) else {}
+        query = str(
+            request.GET.get("q")
+            or request.GET.get("search")
+            or data.get("search")
+            or data.get("query")
+            or ""
+        ).strip()
 
+        if not query:
+            return Response({"success": True, "data": []}, status=status.HTTP_200_OK)
+
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client["HMS"]
+        pharmacy_item_col = hms_db["hospital_pharmacyitem"]
+        pharmacy_stock_col = hms_db["hospital_pharmacystock"]
+
+        tokens = [t for t in re.split(r'\s+', query) if t]
+        token_regex = ".*".join([re.escape(t) for t in tokens])
+
+        mongo_query = {
+            "$or": [
+                {"item_name": {"$regex": re.escape(query), "$options": "i"}},
+                {"item_name": {"$regex": token_regex, "$options": "i"}},
+            ]
+        }
+        if query.isdigit():
+            mongo_query["$or"].append({"item_id": int(query)})
+
+        items = list(pharmacy_item_col.find(
+            mongo_query,
+            {"item_id": 1, "item_name": 1, "category": 1, "_id": 0}
+        ).limit(30))
+
+        # If few found, fallback to pharmacystock
+        if len(items) < 10:
+            existing_ids = {it.get("item_id") for it in items}
+            stock_items = list(pharmacy_stock_col.find(
+                {"item_name": {"$regex": re.escape(query), "$options": "i"}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ).limit(20))
+            for s in stock_items:
+                iid = s.get("item_id")
+                if iid and iid not in existing_ids:
+                    items.append({
+                        "item_id": iid,
+                        "item_name": s.get("item_name") or f"Item #{iid}",
+                    })
+                    existing_ids.add(iid)
+
+        return Response({"success": True, "data": items}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["POST", "GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def PharmacyItemPatientAnalysis(request):
+    """
+    Pharmacy Bill Analysis -> Item-wise Patient Purchase Analysis:
+    Identifies how many unique patients (UHIDs and IP Numbers) purchased a particular medicine
+    or item within a selected date range, along with complete patient purchase details.
+    """
+    try:
+        data = request.data if isinstance(getattr(request, "data", None), dict) else {}
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code") or data.get("outlet_code")
+        raw_outlet    = outlet_code
+
+        if isinstance(raw_outlet, (list, tuple)):
+            if len(raw_outlet) == 1:
+                outlet_code = raw_outlet[0]
+            elif raw_outlet:
+                outlet_code = {"$in": list(raw_outlet)}
+            else:
+                outlet_code = None
+        elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("[") and raw_outlet.strip().endswith("]"):
+            try:
+                parsed_list = ast.literal_eval(raw_outlet.strip())
+                if isinstance(parsed_list, (list, tuple)):
+                    if len(parsed_list) == 1:
+                        outlet_code = parsed_list[0]
+                    elif parsed_list:
+                        outlet_code = {"$in": list(parsed_list)}
+                    else:
+                        outlet_code = None
+                else:
+                    outlet_code = raw_outlet
+            except Exception:
+                outlet_code = raw_outlet
+        else:
+            outlet_code = raw_outlet
+
+        from_date_str = str(data.get("from_date") or request.GET.get("from_date") or "").strip()
+        to_date_str   = str(data.get("to_date") or request.GET.get("to_date") or "").strip()
+        search_item   = str(data.get("search_item") or data.get("search") or request.GET.get("search_item") or request.GET.get("search") or "").strip()
+        selected_item_id = data.get("item_id") or request.GET.get("item_id")
+
+        # Connect to MongoDB
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        hms_db = client["HMS"]
+
+        pb_col  = hms_db["hospital_pharmacybilling"]
+        pat_col = hms_db["hospital_patient"]
+        pi_col  = hms_db["hospital_pharmacyitem"]
+        ps_col  = hms_db["hospital_pharmacystock"]
+
+        # Date handling (Default to today in Asia/Kolkata if not provided)
+        kolkata_tz = pytz.timezone("Asia/Kolkata")
+        today_str = datetime.now(kolkata_tz).strftime("%Y-%m-%d")
+
+        if not from_date_str:
+            from_date_str = today_str
+        if not to_date_str:
+            to_date_str = today_str
+
+        from_dt = None
+        to_dt = None
+
+        if from_date_str.lower() != "all":
+            try:
+                from_dt = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+            except Exception:
+                pass
+
+        if to_date_str.lower() != "all":
+            try:
+                to_dt = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+            except Exception:
+                pass
+
+        # Build Base Query for Pharmacy Bills (exclude deleted/cancelled)
+        query = {
+            "is_deleted": {"$ne": True},
+            "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted"]},
+        }
+        if hospital_code:
+            query["hospital_code"] = hospital_code
+        if branch_code:
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
+
+        if from_dt and to_dt:
+            query["$or"] = [
+                {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+            ]
+        elif from_dt:
+            query["$or"] = [
+                {"bill_date": {"$gte": from_dt}},
+                {"created_date": {"$gte": from_dt}},
+            ]
+
+        # 1. Resolve Target Item(s) if search_item or selected_item_id is specified
+        target_item_ids = set()
+        searched_items_meta = {}  # item_id -> item_name
+        is_specific_search = bool(search_item or (selected_item_id is not None and str(selected_item_id).strip() != ""))
+
+        if selected_item_id is not None and str(selected_item_id).strip() != "":
+            try:
+                target_item_ids.add(int(selected_item_id))
+            except Exception:
+                pass
+            target_item_ids.add(str(selected_item_id).strip())
+
+            # Fetch its meta
+            for it in pi_col.find({"item_id": {"$in": list(target_item_ids)}}):
+                iid = it.get("item_id")
+                searched_items_meta[iid] = it.get("item_name", "")
+                searched_items_meta[str(iid)] = it.get("item_name", "")
+
+        elif search_item:
+            tokens = [t for t in re.split(r'\s+', search_item) if t]
+            token_regex = ".*".join([re.escape(t) for t in tokens])
+            cat_query = {
+                "$or": [
+                    {"item_name": {"$regex": re.escape(search_item), "$options": "i"}},
+                    {"item_name": {"$regex": token_regex, "$options": "i"}},
+                ]
+            }
+            if search_item.isdigit():
+                cat_query["$or"].append({"item_id": int(search_item)})
+
+            for it in pi_col.find(cat_query, {"item_id": 1, "item_name": 1}).limit(100):
+                iid = it.get("item_id")
+                target_item_ids.add(iid)
+                target_item_ids.add(str(iid))
+                searched_items_meta[iid] = it.get("item_name", "")
+                searched_items_meta[str(iid)] = it.get("item_name", "")
+
+            # Also check pharmacystock if few found
+            if len(target_item_ids) < 5:
+                for stk in ps_col.find({"item_name": {"$regex": re.escape(search_item), "$options": "i"}}, {"item_id": 1, "item_name": 1}).limit(50):
+                    iid = stk.get("item_id")
+                    if iid:
+                        target_item_ids.add(iid)
+                        target_item_ids.add(str(iid))
+                        if iid not in searched_items_meta:
+                            searched_items_meta[iid] = stk.get("item_name", "")
+                            searched_items_meta[str(iid)] = stk.get("item_name", "")
+
+        # If specific items were found from catalog search, add condition to billing query
+        if target_item_ids:
+            query["medicine_particulars.item_id"] = {"$in": list(target_item_ids)}
+        elif is_specific_search and search_item:
+            query["medicine_particulars.item_name"] = {"$regex": re.escape(search_item), "$options": "i"}
+
+        # Fetch Bills (sorted by created_date desc)
+        raw_bills = list(pb_col.find(query).sort("created_date", -1).limit(3500))
+
+        # Fallback: if 0 bills found with date filter and outlet_code, but specific search was given,
+        # check if bills exist without outlet_code filter
+        if len(raw_bills) == 0 and is_specific_search and outlet_code:
+            fallback_query = {
+                "is_deleted": {"$ne": True},
+                "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted"]},
+            }
+            if hospital_code:
+                fallback_query["hospital_code"] = hospital_code
+            if branch_code:
+                fallback_query["branch_code"] = branch_code
+            if from_dt and to_dt:
+                fallback_query["$or"] = [
+                    {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
+                    {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+                ]
+            if target_item_ids:
+                fallback_query["medicine_particulars.item_id"] = {"$in": list(target_item_ids)}
+            elif search_item:
+                fallback_query["medicine_particulars.item_name"] = {"$regex": re.escape(search_item), "$options": "i"}
+
+            raw_bills = list(pb_col.find(fallback_query).sort("created_date", -1).limit(3500))
+
+        # Helper for float conversion
+        def to_num(val):
+            if val is None:
+                return 0.0
+            from bson.decimal128 import Decimal128
+            if isinstance(val, Decimal128):
+                return float(val.to_decimal())
+            try:
+                return float(val)
+            except Exception:
+                return 0.0
+
+        # Group purchases by item_id
+        items_acc = {}
+        all_uhids = set()
+        all_item_ids = set()
+
+        for b in raw_bills:
+            b_no = str(b.get("bill_no") or b.get("bill_number") or b.get("Bill_id") or "—").strip()
+            u = str(b.get("uhid") or "").strip()
+            ip_num = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
+
+            # Format Date & Time: "DD/MM/YYYY HH:MM:SS"
+            b_date = b.get("bill_date") or b.get("created_date")
+            date_time_str = "—"
+            if b_date:
+                try:
+                    if hasattr(b_date, "strftime"):
+                        date_time_str = b_date.strftime("%d/%m/%Y %H:%M:%S")
+                    else:
+                        d_obj = parse_datetime(str(b_date))
+                        if d_obj:
+                            date_time_str = d_obj.strftime("%d/%m/%Y %H:%M:%S")
+                        else:
+                            date_time_str = str(b_date)[:19]
+                except Exception:
+                    date_time_str = str(b_date)[:19]
+
+            med_list = b.get("medicine_particulars") or []
+            for m in med_list:
+                if not isinstance(m, dict):
+                    continue
+                raw_iid = m.get("item_id")
+                m_name = m.get("item_name") or m.get("medicine_name") or ""
+
+                # Check if matches target items if specific search was conducted
+                if is_specific_search:
+                    matched = False
+                    if target_item_ids and (raw_iid in target_item_ids or str(raw_iid) in target_item_ids):
+                        matched = True
+                    elif search_item and m_name and re.search(re.escape(search_item), m_name, re.IGNORECASE):
+                        matched = True
+                    if not matched:
+                        continue
+
+                item_key = raw_iid if raw_iid is not None else m_name
+                if not item_key:
+                    continue
+
+                all_item_ids.add(item_key)
+                if u and u != "—":
+                    all_uhids.add(u)
+
+                qty = to_num(m.get("qty") or m.get("quantity") or 0)
+
+                if item_key not in items_acc:
+                    items_acc[item_key] = {
+                        "item_id": raw_iid,
+                        "item_name": searched_items_meta.get(raw_iid) or searched_items_meta.get(str(raw_iid)) or m_name or "",
+                        "total_quantity": 0.0,
+                        "uhids": set(),
+                        "ip_numbers": set(),
+                        "bills": set(),
+                        "purchases": [],
+                    }
+
+                items_acc[item_key]["total_quantity"] += qty
+                if u and u != "—":
+                    items_acc[item_key]["uhids"].add(u)
+                if ip_num and ip_num != "—":
+                    items_acc[item_key]["ip_numbers"].add(ip_num)
+                if b_no and b_no != "—":
+                    items_acc[item_key]["bills"].add(b_no)
+
+                items_acc[item_key]["purchases"].append({
+                    "uhid": u or "—",
+                    "inpatient_number": ip_num or "—",
+                    "bill_number": b_no,
+                    "bill_date": date_time_str,
+                    "purchased_quantity": qty,
+                    "batch_number": m.get("batch_number", "—"),
+                    "price": to_num(m.get("price", 0)),
+                    "calculated_price": to_num(m.get("calculated_price", 0)),
+                    "patient_name": b.get("patientname") or b.get("patient_name") or "—",
+                    "mobile_number": b.get("phone") or b.get("mobilePhone") or "—",
+                })
+
+        # Batch fetch Patient Details for collected UHIDs
+        patients_map = {}
+        if all_uhids:
+            for p in pat_col.find({"uhid": {"$in": list(all_uhids)}}):
+                u = p.get("uhid")
+                if u:
+                    f_name = p.get("firstName") or ""
+                    l_name = p.get("lastName") or ""
+                    full_name = clean_patient_name(f"{f_name} {l_name}".strip()) or f_name
+                    phone = p.get("mobilePhone") or p.get("phone") or ""
+                    patients_map[u] = {
+                        "name": full_name,
+                        "phone": phone,
+                        "gender": p.get("gender", ""),
+                        "age": p.get("age", ""),
+                    }
+
+        # Batch fetch Item Names for all billed item IDs
+        item_names_map = dict(searched_items_meta)
+        missing_item_ids = [k for k in all_item_ids if k not in item_names_map and str(k) not in item_names_map]
+        if missing_item_ids:
+            query_ids = []
+            for k in missing_item_ids:
+                query_ids.append(k)
+                if str(k).isdigit():
+                    query_ids.append(int(k))
+                query_ids.append(str(k))
+            for it in pi_col.find({"item_id": {"$in": query_ids}}, {"item_id": 1, "item_name": 1}):
+                iid = it.get("item_id")
+                name = it.get("item_name", "")
+                item_names_map[iid] = name
+                item_names_map[str(iid)] = name
+
+            still_missing = [k for k in missing_item_ids if k not in item_names_map and str(k) not in item_names_map]
+            if still_missing:
+                for stk in ps_col.find({"item_id": {"$in": still_missing}}, {"item_id": 1, "item_name": 1}):
+                    iid = stk.get("item_id")
+                    name = stk.get("item_name", "")
+                    item_names_map[iid] = name
+                    item_names_map[str(iid)] = name
+
+        # Enrich purchases with patient details and resolve item names
+        final_items = []
+        overall_unique_uhids = set()
+        overall_unique_ips = set()
+        overall_unique_bills = set()
+        overall_total_qty = 0.0
+
+        for item_key, info in items_acc.items():
+            resolved_name = (
+                info["item_name"]
+                or item_names_map.get(info["item_id"])
+                or item_names_map.get(str(info["item_id"]))
+                or item_names_map.get(item_key)
+                or str(item_key)
+            )
+
+            # Enrich purchases
+            enriched_purchases = []
+            for p in info["purchases"]:
+                u = p["uhid"]
+                pat = patients_map.get(u, {})
+                pat_name = pat.get("name") or p.get("patient_name") or "—"
+                mobile = pat.get("phone") or p.get("mobile_number") or "—"
+                enriched_purchases.append({
+                    **p,
+                    "patient_name": pat_name,
+                    "mobile_number": mobile,
+                })
+
+            unique_uhid_count = len(info["uhids"])
+            unique_ip_count = len(info["ip_numbers"])
+            total_bills_count = len(info["bills"])
+            total_qty = round(info["total_quantity"], 2)
+
+            overall_unique_uhids.update(info["uhids"])
+            overall_unique_ips.update(info["ip_numbers"])
+            overall_unique_bills.update(info["bills"])
+            overall_total_qty += total_qty
+
+            final_items.append({
+                "item_id": info["item_id"],
+                "item_name": resolved_name,
+                "total_quantity": total_qty,
+                "unique_uhid_count": unique_uhid_count,
+                "unique_ip_count": unique_ip_count,
+                "total_bills_count": total_bills_count,
+                "unique_uhids": list(info["uhids"]),
+                "unique_ip_numbers": list(info["ip_numbers"]),
+                "patients": enriched_purchases,
+            })
+
+        # If a specific search was made (e.g. "SEAGATE SATA HDD 1 TB") and 0 bills were found:
+        # Provide zero-count record for each searched item or the searched query
+        if is_specific_search and len(final_items) == 0:
+            if searched_items_meta:
+                seen_names = set()
+                for iid, iname in searched_items_meta.items():
+                    if iname and iname not in seen_names:
+                        seen_names.add(iname)
+                        final_items.append({
+                            "item_id": iid,
+                            "item_name": iname,
+                            "total_quantity": 0,
+                            "unique_uhid_count": 0,
+                            "unique_ip_count": 0,
+                            "total_bills_count": 0,
+                            "unique_uhids": [],
+                            "unique_ip_numbers": [],
+                            "patients": [],
+                        })
+            else:
+                final_items.append({
+                    "item_id": selected_item_id or None,
+                    "item_name": search_item,
+                    "total_quantity": 0,
+                    "unique_uhid_count": 0,
+                    "unique_ip_count": 0,
+                    "total_bills_count": 0,
+                    "unique_uhids": [],
+                    "unique_ip_numbers": [],
+                    "patients": [],
+                })
+
+        # Sort items: by total_quantity descending
+        final_items.sort(key=lambda x: x["total_quantity"], reverse=True)
+
+        summary = {
+            "total_items": len(final_items),
+            "total_quantity": round(overall_total_qty, 2),
+            "total_unique_uhids": len(overall_unique_uhids),
+            "total_unique_ips": len(overall_unique_ips),
+            "total_bills": len(overall_unique_bills),
+        }
+
+        return Response({
+            "success": True,
+            "data": final_items,
+            "summary": summary,
+            "filters": {
+                "from_date": from_date_str,
+                "to_date": to_date_str,
+                "search_item": search_item,
+                "item_id": selected_item_id,
+                "outlet_code": outlet_code,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+            }
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -24,7 +24,7 @@ from pymongo import MongoClient
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from pyauth.auth import HasRoleAndDataPermission, HasRolePermission
-from ..models import Patient, SalesReturn
+from ..models import Patient, SalesReturn, PharmacyItem
 from .dbcollection import get_employee_name_by_id
 
 
@@ -115,12 +115,83 @@ def get_salesreturn_details(request):
                 user_map[str(emp_id)] = emp_str
                 user_map[emp_str] = emp_str
 
+        # ✅ Collect all item_ids across records for batch item_name lookup
+        all_item_ids = set()
+        for r in records:
+            mp = r.medicine_particulars
+            if isinstance(mp, str):
+                try:
+                    mp = json.loads(mp)
+                except Exception:
+                    mp = []
+            if isinstance(mp, list):
+                for it in mp:
+                    if isinstance(it, dict) and it.get("item_id"):
+                        try:
+                            all_item_ids.add(int(it["item_id"]))
+                        except (ValueError, TypeError):
+                            pass
+
+        item_name_map = {}
+        if all_item_ids:
+            try:
+                for pi in PharmacyItem.objects.filter(item_id__in=all_item_ids):
+                    item_name_map[pi.item_id] = pi.item_name
+            except Exception:
+                pass
+
         # ✅ Final Response Build
         data = []
         for r in records:
             raw_user = r.created_by or r.pharmacist_id or ""
             raw_user_str = str(raw_user).strip() if raw_user else ""
             user_display = user_map.get(raw_user_str, raw_user_str) if raw_user_str else ""
+
+            # Parse and enrich medicine particulars
+            mp = r.medicine_particulars
+            if isinstance(mp, str):
+                try:
+                    mp = json.loads(mp)
+                except Exception:
+                    mp = []
+            parsed_items = []
+            if isinstance(mp, list):
+                for it in mp:
+                    if isinstance(it, dict):
+                        iid = it.get("item_id")
+                        try:
+                            iid_int = int(iid)
+                        except (ValueError, TypeError):
+                            iid_int = iid
+                        it_name = it.get("item_name") or item_name_map.get(iid_int) or f"Item #{iid}"
+                        ret_qty = float(it.get("return_qty", 0) or 0)
+                        ret_amt = float(it.get("return_amount", 0) or 0)
+                        ret_cost = it.get("return_cost")
+                        if ret_cost is None:
+                            ret_cost = round((ret_amt / ret_qty), 2) if ret_qty > 0 else 0.0
+                        else:
+                            try:
+                                ret_cost = round(float(ret_cost), 2)
+                            except Exception:
+                                ret_cost = 0.0
+                        billed_qty = it.get("billed_qty")
+                        if billed_qty is None:
+                            billed_qty = ret_qty
+
+                        parsed_items.append({
+                            "item_id": iid,
+                            "item_name": it_name,
+                            "batch_number": it.get("batch_number", "—"),
+                            "billed_qty": billed_qty,
+                            "return_qty": ret_qty,
+                            "re_qty": ret_qty,
+                            "return_cost": ret_cost,
+                            "re_cost": ret_cost,
+                            "gst": it.get("gst", "5%"),
+                            "expiry_date": it.get("expiry_date", "—"),
+                            "return_amount": round(ret_amt, 2),
+                            "amount": round(ret_amt, 2),
+                        })
 
             data.append({
                 "return_bill_no":   r.return_bill_no,
@@ -135,6 +206,8 @@ def get_salesreturn_details(request):
                 "pharmacist_name":  user_display,
                 "created_by":       user_display,
                 "user":             user_display,
+                "items":            parsed_items,
+                "medicine_particulars": parsed_items,
             })
 
 
@@ -1099,10 +1172,77 @@ def OP_salesreturn_billdetails(request):
         )
  
         serializer = SalesReturnSerializer(sales_return)
+
+        # Build print_data for immediate sales return slip print view
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        formatted_dt = now_ist.strftime("%d/%m/%Y & %H:%M:%S")
+
+        patient_name = ""
+        try:
+            p = Patient.objects.filter(uhid=uhid).first()
+            if p:
+                p_dict = _get_patient_dict(p)
+                patient_name = p_dict.get("name", "")
+        except Exception:
+            pass
+
+        user_name = get_employee_name_by_id(str(employee_id).strip()) if employee_id else ""
+        if not user_name or user_name == "Unknown":
+            user_name = str(employee_id).strip()
+
+        print_items = []
+        for it in cleaned_particulars:
+            ret_qty = float(it.get("return_qty", 0) or 0)
+            ret_amt = float(it.get("return_amount", 0) or 0)
+            ret_cost = it.get("return_cost")
+            if ret_cost is None:
+                ret_cost = round((ret_amt / ret_qty), 2) if ret_qty > 0 else 0.0
+            else:
+                try:
+                    ret_cost = round(float(ret_cost), 2)
+                except Exception:
+                    ret_cost = 0.0
+            print_items.append({
+                "item_id": it.get("item_id"),
+                "item_name": it.get("item_name") or f"Item #{it.get('item_id')}",
+                "batch_number": it.get("batch_number", "—"),
+                "billed_qty": it.get("billed_qty", ret_qty),
+                "return_qty": ret_qty,
+                "re_qty": ret_qty,
+                "return_cost": ret_cost,
+                "re_cost": ret_cost,
+                "gst": str(it.get("gst", "5%")),
+                "expiry_date": it.get("expiry_date", "—"),
+                "return_amount": round(ret_amt, 2),
+                "amount": round(ret_amt, 2),
+            })
+
+        print_data = {
+            "hospital_name": "SHANMUGA HOSPITAL LIMITED",
+            "hospital_address": "51/24.Saradha College Road, Salem - 636007,",
+            "hospital_phone": "04272706666",
+            "return_bill_no": return_bill_no,
+            "bill_no": bill_no,
+            "uhid": uhid,
+            "op_number": uhid,
+            "patient_name": patient_name,
+            "return_bill_date": now.isoformat(),
+            "formatted_datetime": formatted_dt,
+            "pharmacist_name": user_name,
+            "created_by": user_name,
+            "payment_type": payment_type,
+            "mode": "Cash Return" if payment_type == "Cash" else "IP Credit",
+            "total_amount": float(return_amount or 0),
+            "refund_amount": f"{float(return_amount or 0):.2f}",
+            "items": print_items,
+        }
+
         return Response({
             "status":  "success",
             "message": f"Sales return {return_bill_no} processed successfully.",
-            "data":    serializer.data
+            "data":    serializer.data,
+            "print_data": print_data,
         }, status=status.HTTP_201_CREATED)
  
     except Exception as e:
@@ -1158,6 +1298,10 @@ def convert_decimal(value):
 # GET RETURN BILLS
 # ---------------------------------------------------
 
+# ---------------------------------------------------
+# GET RETURN BILLS
+# ---------------------------------------------------
+
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_return_bills(request):
@@ -1176,6 +1320,13 @@ def get_return_bills(request):
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
         employee_id   = data.get("auth-user-id")
+
+        print("---- get_return_bills request.data ----")
+        print("hospital_code:", repr(hospital_code))
+        print("branch_code  :", repr(branch_code))
+        print("outlet_code  :", repr(outlet_code))
+        print("employee_id  :", repr(employee_id))
+        print("all keys     :", list(data.keys()))
 
         # ---------------------------------------------------
         # CURRENT DATE
@@ -1239,7 +1390,16 @@ def get_return_bills(request):
         # CHECK HMS OUTLETS
         # ---------------------------------------------------
 
-        hms_outlets = profile_data.get("hms_outlets", [])
+        hms_outlets = [
+            str(o).strip()
+            for o in (profile_data.get("hms_outlets") or [])
+        ]
+
+        # outlet may arrive as a list or with stray whitespace
+        if isinstance(outlet_code, (list, tuple)):
+            outlet_code = outlet_code[0] if outlet_code else None
+
+        outlet_code = str(outlet_code).strip() if outlet_code else None
 
         if outlet_code not in hms_outlets:
 
@@ -1247,6 +1407,7 @@ def get_return_bills(request):
                 {
                     "status": "error",
                     "message": "Outlet not mapped for employee",
+                    "received_outlet": repr(outlet_code),
                     "employee_outlets": hms_outlets
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -1641,5 +1802,190 @@ def get_return_bills(request):
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
- 
 
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_salesreturn_print_details(request):
+    """
+    Returns complete sales return slip print data matching the hospital's
+    SALES RETURN SLIP format for a specific return_bill_no.
+    """
+    try:
+        return_bill_no = request.GET.get("return_bill_no", "").strip()
+        if not return_bill_no:
+            return Response({
+                "status": "error",
+                "message": "return_bill_no parameter is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        sr = SalesReturn.objects.filter(return_bill_no=return_bill_no).first()
+        if not sr:
+            return Response({
+                "status": "error",
+                "message": f"Sales return record with Return No: {return_bill_no} not found."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # 1. Patient details lookup
+        patient_name = ""
+        ip_number = ""
+        try:
+            p = Patient.objects.filter(uhid=sr.uhid).first()
+            if p:
+                p_dict = _get_patient_dict(p)
+                patient_name = p_dict.get("name", "")
+                ip_number = p_dict.get("ip_number", "")
+        except Exception:
+            pass
+
+        # 2. Pharmacist / User lookup
+        raw_user = sr.created_by or sr.pharmacist_id or ""
+        user_name = get_employee_name_by_id(str(raw_user).strip()) if raw_user else ""
+        if not user_name or user_name == "Unknown":
+            user_name = str(raw_user).strip()
+
+        # 3. Format Date & Time in IST: "01/09/2026 & 10:47:15"
+        formatted_datetime = "—"
+        dt = sr.return_bill_date
+        if dt:
+            try:
+                ist = pytz.timezone("Asia/Kolkata")
+                if timezone.is_aware(dt):
+                    dt_ist = dt.astimezone(ist)
+                else:
+                    dt_ist = ist.localize(dt)
+                formatted_datetime = dt_ist.strftime("%d/%m/%Y & %H:%M:%S")
+            except Exception:
+                formatted_datetime = dt.strftime("%d/%m/%Y & %H:%M:%S")
+
+        # 4. Medicine particulars parsing & enrichment
+        mp = sr.medicine_particulars
+        if isinstance(mp, str):
+            try:
+                mp = json.loads(mp)
+            except Exception:
+                mp = []
+        if not isinstance(mp, list):
+            mp = []
+
+        item_ids = [it.get("item_id") for it in mp if isinstance(it, dict) and it.get("item_id")]
+        item_name_map = {}
+        if item_ids:
+            try:
+                for pi in PharmacyItem.objects.filter(item_id__in=item_ids):
+                    item_name_map[pi.item_id] = pi.item_name
+            except Exception:
+                pass
+
+        # Stock lookup for missing expiry/gst
+        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        db = client["HMS"]
+        stock_col = db["hospital_pharmacystock"]
+
+        items = []
+        for it in mp:
+            if not isinstance(it, dict):
+                continue
+            iid = it.get("item_id")
+            try:
+                iid_int = int(iid)
+            except (ValueError, TypeError):
+                iid_int = iid
+
+            name = it.get("item_name") or item_name_map.get(iid_int) or f"Item #{iid}"
+            batch = it.get("batch_number", "—")
+            ret_qty = float(it.get("return_qty", 0) or 0)
+            ret_amt = float(it.get("return_amount", 0) or 0)
+
+            # GST and Expiry lookup from stock if not present
+            gst_val = it.get("gst")
+            exp_val = it.get("expiry_date")
+            if not gst_val or not exp_val or exp_val == "—":
+                stock = stock_col.find_one({"item_id": iid_int, "batch_number": batch})
+                if stock:
+                    if not exp_val or exp_val == "—":
+                        exp_val = stock.get("expiry_date") or "—"
+                    if not gst_val:
+                        cgst = float(stock.get("CGST_Percentage") or 0)
+                        sgst = float(stock.get("SGST_Percentage") or 0)
+                        tot_gst = cgst + sgst
+                        gst_val = f"{tot_gst:g}%" if tot_gst > 0 else "5%"
+
+            if not gst_val:
+                gst_val = "5%"
+
+            # Clean expiry to YYYY/MM if format like YYYY-MM-DD
+            if exp_val and exp_val != "—":
+                try:
+                    exp_clean = str(exp_val).strip().split("T")[0]
+                    if "-" in exp_clean:
+                        parts = exp_clean.split("-")
+                        if len(parts) >= 2:
+                            exp_val = f"{parts[0]}/{parts[1]}"
+                except Exception:
+                    pass
+
+            ret_cost = it.get("return_cost")
+            if ret_cost is None:
+                ret_cost = round((ret_amt / ret_qty), 2) if ret_qty > 0 else 0.0
+            else:
+                try:
+                    ret_cost = round(float(ret_cost), 2)
+                except Exception:
+                    ret_cost = 0.0
+
+            billed_qty = it.get("billed_qty")
+            if billed_qty is None:
+                billed_qty = ret_qty
+
+            items.append({
+                "item_id": iid,
+                "item_name": name,
+                "batch_number": batch,
+                "billed_qty": billed_qty,
+                "return_qty": ret_qty,
+                "re_qty": ret_qty,
+                "return_cost": ret_cost,
+                "re_cost": ret_cost,
+                "gst": str(gst_val) if "%" in str(gst_val) else f"{gst_val}%",
+                "expiry_date": exp_val or "—",
+                "return_amount": round(ret_amt, 2),
+                "amount": round(ret_amt, 2),
+            })
+
+        client.close()
+
+        total_amount = float(sr.return_amount or 0)
+
+        data = {
+            "hospital_name": "SHANMUGA HOSPITAL LIMITED",
+            "hospital_address": "51/24.Saradha College Road, Salem - 636007,",
+            "hospital_phone": "04272706666",
+            "return_bill_no": sr.return_bill_no,
+            "bill_no": sr.bill_no,
+            "uhid": sr.uhid,
+            "op_number": sr.uhid,
+            "ip_number": ip_number,
+            "patient_name": patient_name,
+            "return_bill_date": sr.return_bill_date.isoformat() if sr.return_bill_date else "",
+            "formatted_datetime": formatted_datetime,
+            "pharmacist_name": user_name,
+            "created_by": user_name,
+            "payment_type": sr.PaymentType,
+            "mode": "Cash Return" if sr.PaymentType == "Cash" else "IP Credit",
+            "total_amount": total_amount,
+            "refund_amount": f"{total_amount:.2f}",
+            "items": items,
+        }
+
+        return Response({
+            "status": "success",
+            "data": data
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
