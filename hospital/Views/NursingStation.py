@@ -326,7 +326,7 @@ def get_admission_list(request):
                         "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
                         "is_ward_request": True,
                         "is_deleted": {"$ne": True},
-                        "billing_status": {"$in": ["Pending", "Draft"]}
+                        "billing_status": {"$in": ["Pending", "Draft", "Processing"]}
                     },
                     {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
                 ))
@@ -1502,15 +1502,16 @@ def get_medicine_ward_requests(request):
             return Response({"success": False, "error": "UHID is required"}, status=400)
 
         # Build query
-
         query_params = {"uhid": uhid, "is_ward_request": True}
 
-        if ip_number:
-
-            query_params["inpatient_number"] = ip_number
+        if ip_number and str(ip_number).strip() not in ["-", "null", "undefined", ""]:
+            clean_ip = str(ip_number).strip()
+            query_params["$or"] = [
+                {"inpatient_number": clean_ip},
+                {"ipNumber": clean_ip},
+            ]
 
         if outlet_code:
-
             query_params["outlet_code"] = outlet_code
 
         # Fetch billing records using PyMongo for maximum speed & compound index support
@@ -1599,6 +1600,12 @@ def get_medicine_ward_requests(request):
 
             import json
 
+            raw_st = str(doc.get("billing_status") or doc.get("status") or "Pending").strip()
+            if doc.get("is_dispatched") and raw_st in ["Pending", "Processing", "Draft", ""]:
+                raw_st = "Billed"
+            elif raw_st in ["Completed", "Paid"]:
+                raw_st = "Billed"
+
             items = doc.get("medicine_particulars", [])
 
             if isinstance(items, str):
@@ -1666,6 +1673,8 @@ def get_medicine_ward_requests(request):
                     "is_deleted": itm.get("is_deleted", False),
 
                     "edit_history": itm.get("edit_history", []),
+
+                    "status": itm.get("status") or raw_st,
 
                 })
 
@@ -1745,7 +1754,7 @@ def get_medicine_ward_requests(request):
 
                 "reqTime": _req_time,
 
-                "status": doc.get("billing_status", "Pending"),
+                "status": raw_st,
 
                 "doctor": resolved_doctor_name,
 
@@ -3142,7 +3151,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
             {
                 "is_ward_request": True,
                 "is_deleted": {"$ne": True},
-                "billing_status": {"$in": ["Pending", "Draft"]}
+                "billing_status": {"$in": ["Pending", "Draft", "Processing"]}
             }
         ]
     }
