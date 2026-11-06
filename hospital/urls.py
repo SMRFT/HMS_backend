@@ -147,6 +147,8 @@ urlpatterns = [
     path("get_employee_name/", pharmacy.get_employee_name_api, name='get_employee_name'),
     path("cashcounter_outlet/",   pharmacy.cashcounter_outlet),
     path('PharmacyBillanalysis/', pharmacy.PharmacyBillanalysis, name='PharmacyBillanalysis'),
+    path('PharmacyItemPatientAnalysis/', pharmacy.PharmacyItemPatientAnalysis, name='PharmacyItemPatientAnalysis'),
+    path('search_pharmacy_items/', pharmacy.search_pharmacy_items, name='search_pharmacy_items'),
 
 
     
@@ -683,6 +685,7 @@ urlpatterns = [
     path("get_salesreturn_billdetails/", salesreturn.get_salesreturn_billdetails, name="get_salesreturn_billdetails"),
     path("OP_salesreturn_billdetails/", salesreturn.OP_salesreturn_billdetails, name="OP_salesreturn_billdetails"),
     path("get_salesreturn_details/", salesreturn.get_salesreturn_details, name="get_salesreturn_details"),
+    path("get_salesreturn_print_details/", salesreturn.get_salesreturn_print_details, name="get_salesreturn_print_details"),
     path("gsalesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("salesreturn_get_uhid_bills/", salesreturn.salesreturn_get_uhid_bills, name="salesreturn_get_uhid_bills"),
     path("get_return_bills/", salesreturn.get_return_bills, name="get_return_bills"),
