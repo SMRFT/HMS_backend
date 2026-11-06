@@ -1067,6 +1067,7 @@ class DischargeBilling(AuditModel):
     advance_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     sales_return      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     medicines_amount  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    implant_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     taxable_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     non_tax_amount    = models.DecimalField(max_digits=12, decimal_places=2, default=0)

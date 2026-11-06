@@ -1798,6 +1798,19 @@ def save_implant_request(request):
             except (ValueError, TypeError):
                 ci["quantity"] = 1
 
+        # Resolve Doctor Employee ID
+        surgeon_id = str(data.get("surgeon_id") or data.get("surgeonId") or "").strip()
+        if surgeon_id and not surgeon_id.isdigit():
+            try:
+                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
+                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
+                    "$or": [{"employeeName": surgeon_id}, {"employeeId": surgeon_id}]
+                })
+                if doc_profile and doc_profile.get("employeeId"):
+                    surgeon_id = str(doc_profile.get("employeeId")).strip()
+            except Exception as e:
+                print("Doctor lookup error in save_implant_request:", e)
+
         implant_req = ImplantRequest.objects.create(
             branch_code      = branch_code,
             hospital_code    = hospital_code,
@@ -1806,7 +1819,7 @@ def save_implant_request(request):
             created_date     = timezone.now(),
             uhid             = data.get("uhid", ""),
             inpatient_number = data.get("ipNumber", ""),
-            surgeon_id       = data.get("surgeon_id", ""),
+            surgeon_id       = surgeon_id,
             surgery_ref      = data.get("surgeryRef", ""),
             items            = [],  # set below via raw pymongo write
             status           = "Pending",
