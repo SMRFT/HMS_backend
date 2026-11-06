@@ -155,6 +155,7 @@ def op_patient_detail_by_uhid(request, uhid):
 
             uhid_list = [str(p.get("uhid") or "").strip() for p in patient_data if p.get("uhid")]
             active_admissions = {}
+            active_admissions_doc = {}
             if uhid_list:
                 try:
                     adm_qs = Admission.objects.filter(uhid__in=uhid_list)
@@ -166,6 +167,9 @@ def op_patient_detail_by_uhid(request, uhid):
                             u_key = str(adm.uhid or "").strip()
                             active_admissions[u_key] = adm.ipNumber
                             active_admissions[u_key.upper()] = adm.ipNumber
+                            adm_doc = getattr(adm, 'admittingDoctor', '') or ''
+                            active_admissions_doc[u_key] = adm_doc
+                            active_admissions_doc[u_key.upper()] = adm_doc
                 except Exception as ex:
                     print("Admission check error:", ex)
 
@@ -182,8 +186,10 @@ def op_patient_detail_by_uhid(request, uhid):
                 p_uhid = str(p.get("uhid") or "").strip()
                 if p_uhid in active_admissions or p_uhid.upper() in active_admissions:
                     ip_no = active_admissions.get(p_uhid) or active_admissions.get(p_uhid.upper())
+                    adm_doc = active_admissions_doc.get(p_uhid) or active_admissions_doc.get(p_uhid.upper()) or ""
                     p["ip_number"] = ip_no
                     p["ipNumber"] = ip_no
+                    p["admittingDoctor"] = adm_doc
                     p["admitted"] = True
                     p["is_admitted"] = True
                     p["is_discharged"] = False
@@ -317,6 +323,10 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                     'company_code': pt.company_code,
                     'room_no': room_no,
                     'bed_no': bed_no,
+                    'admittingDoctor': getattr(adm, 'admittingDoctor', '') or '',
+                    'consultingDoctor': getattr(adm, 'consultingDoctor', '') or '',
+                    'doctorName': getattr(adm, 'admittingDoctor', '') or getattr(adm, 'consultingDoctor', '') or getattr(pt, 'doctorName', '') or '',
+                    'doctor': getattr(adm, 'admittingDoctor', '') or getattr(adm, 'consultingDoctor', '') or getattr(pt, 'doctorName', '') or '',
                     'is_admitted': getattr(adm, 'is_admitted', False),
                     'is_discharged': adm.is_discharged,
                     'admitted': getattr(adm, 'is_admitted', False) and not adm.is_discharged,
@@ -1614,7 +1624,7 @@ def billing_report_view(request):
             if doc_val and doc_val.upper() == "SELF":
                 doc["doctorName"] = "SELF"
             else:
-                doc["doctorName"] = diagnostics_profile_cache.get(str(doc_val), "")
+                doc["doctorName"] = diagnostics_profile_cache.get(str(doc_val), str(doc_val) if doc_val else "")
 
             # ── ReferredBy name ────────────────────────────────
             ref_val = doc.get("referredBy", "")
