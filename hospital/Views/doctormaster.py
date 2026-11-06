@@ -129,6 +129,26 @@ def doctor_schedule_list(request):
             seen_emp_ids.add(eid)
             unique_doctors.append(doc)
         doctors = unique_doctors
+
+        # Filter only active doctors based on backend_diagnostics_user (is_active: True)
+        user_collection = global_db['backend_diagnostics_user']
+        candidate_emp_ids = [str(doc.get('employeeId') or '').strip() for doc in doctors if doc.get('employeeId')]
+        query_eids = set()
+        for eid in candidate_emp_ids:
+            query_eids.add(eid)
+            if eid.isdigit():
+                query_eids.add(int(eid))
+
+        active_users = user_collection.find(
+            {"employeeId": {"$in": list(query_eids)}, "is_active": True},
+            {"employeeId": 1, "_id": 0}
+        )
+        active_emp_ids = set(str(u.get("employeeId") or "").strip() for u in active_users)
+
+        doctors = [
+            doc for doc in doctors
+            if str(doc.get("employeeId") or "").strip() in active_emp_ids
+        ]
         
         # Get schedules for these doctors
         hms_db = client['HMS']
@@ -204,6 +224,23 @@ def doctor_schedule_detail(request, employee_id):
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         global_db = client['Global']
+        user_collection = global_db['backend_diagnostics_user']
+
+        # Verify doctor is active in backend_diagnostics_user
+        emp_id_str = str(employee_id).strip()
+        user_filter = [emp_id_str]
+        if emp_id_str.isdigit():
+            user_filter.append(int(emp_id_str))
+
+        active_user = user_collection.find_one(
+            {"employeeId": {"$in": user_filter}, "is_active": True}
+        )
+        if not active_user:
+            return Response(
+                {"error": "Doctor account is inactive or not found in user master"}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
         diagnostics_collection = global_db['backend_diagnostics_profile']
         diagnostic_profile = diagnostics_collection.find_one(
             {"employeeId": employee_id}
@@ -275,6 +312,23 @@ def doctor_schedule_upsert(request, employee_id):
         hospital_code = request.data.get("auth-hospital-code", "system")
         
         global_db = client['Global']
+        user_collection = global_db['backend_diagnostics_user']
+
+        # Verify doctor is active in backend_diagnostics_user
+        emp_id_str = str(employee_id).strip()
+        user_filter = [emp_id_str]
+        if emp_id_str.isdigit():
+            user_filter.append(int(emp_id_str))
+
+        active_user = user_collection.find_one(
+            {"employeeId": {"$in": user_filter}, "is_active": True}
+        )
+        if not active_user:
+            return Response(
+                {"error": "Cannot update schedule: doctor account is inactive or not found in user master"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         diagnostics_collection = global_db['backend_diagnostics_profile']
         diagnostic_profile = diagnostics_collection.find_one(
             {"employeeId": employee_id}
