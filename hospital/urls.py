@@ -65,6 +65,7 @@ from .Views import (
     employee_master,
     tumourboard,
 )
+from .auth import permissions_map
 from .Views.AccountsReport import (
     shift_basis_report,
     cash_counter_manager,
