@@ -413,6 +413,7 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "id_card_number", None) is not None: update_dict["id_card_number"] = str(obj.id_card_number)
             if getattr(obj, "insurance_bill_number", None) is not None: update_dict["insurance_bill_number"] = str(obj.insurance_bill_number)
             if getattr(obj, "company_name", None) is not None: update_dict["company_name"] = str(obj.company_name)
+            if getattr(obj, "implant_amount", None) is not None: update_dict["implant_amount"] = _to_float(obj.implant_amount)
 
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
@@ -441,7 +442,7 @@ def _safe_isoformat(dt):
 
 # DecimalField names — used by _normalise_decimals before every .save()
 _DECIMAL_FIELDS = [
-    "total_amount", "advance_amount", "sales_return", "medicines_amount",
+    "total_amount", "advance_amount", "sales_return", "medicines_amount", "implant_amount",
     "taxable_amount", "non_tax_amount",
     "gst_amount", "room_tax",
     "discount_percent", "discount_amount", "net_amount",
@@ -806,6 +807,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "advance_amount":    _to_float(doc.get("advance_amount")),
         "sales_return":      _to_float(doc.get("sales_return")),
         "medicines_amount":  _to_float(doc.get("medicines_amount")),
+        "implant_amount":    _to_float(doc.get("implant_amount")),
         "taxable_amount":    _to_float(doc.get("taxable_amount")),
         "non_tax_amount":    _to_float(doc.get("non_tax_amount")),
         "gst_amount":        _to_float(doc.get("gst_amount")),
@@ -946,6 +948,7 @@ def _obj_to_dict(obj):
         "advance_amount":    _to_float(obj.advance_amount),
         "sales_return":      _to_float(obj.sales_return),
         "medicines_amount":  _to_float(obj.medicines_amount),
+        "implant_amount":    _to_float(getattr(obj, "implant_amount", 0)),
         "taxable_amount":    _to_float(obj.taxable_amount),
         "non_tax_amount":    _to_float(obj.non_tax_amount),
         "gst_amount":        _to_float(obj.gst_amount),
@@ -1018,6 +1021,7 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.advance_amount   = flt("advance_amount")
     obj.sales_return     = flt("sales_return")
     obj.medicines_amount = flt("medicines_amount")
+    obj.implant_amount   = flt("implant_amount") if data.get("implant_amount") is not None else flt("implants")
     obj.taxable_amount   = flt("taxable_amount")
     obj.non_tax_amount   = flt("non_tax_amount")
     obj.gst_amount       = flt("gst_amount")
@@ -1306,7 +1310,8 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
 
         # ── 2. Update Pharmacy Billing ───────────────────────────────────────
         # Criteria: outlet_code: "OLET001", ip_no / inpatient_number, payment_mode: "Credit", billing_status: "Billed", is_ward_request: True
-        # Update: billing_status -> "Completed"
+        # ── 2. Update Pharmacy Billing ────────────────────────────────────────
+        # Update billing_status: Pending / Billed --> Completed
         pharm_ip_filter = []
         if ip_number:
             pharm_ip_filter.extend([
@@ -1321,19 +1326,21 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
         pharm_match = {
             "$and": [
                 {"$or": pharm_ip_filter},
+                {"is_deleted": {"$ne": True}},
                 {
                     "$or": [
-                        {"outlet_code": "OLET001"},
-                        {"outlet_code": {"$regex": "OLET", "$options": "i"}},
+                        {"billing_status": "Pending"},
+                        {"billing_status": "Billed"},
+                        {"billing_status": {"$regex": "^pending$", "$options": "i"}},
+                        {"billing_status": {"$regex": "^billed$", "$options": "i"}},
                     ]
                 },
-                {"billing_status": "Billed"},
-                {"is_ward_request": True},
                 {
                     "$or": [
                         {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
                         {"paymentMethod": {"$regex": "^credit$", "$options": "i"}},
                         {"payment_details.payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                        {"is_ward_request": True},
                     ]
                 }
             ]
@@ -1365,8 +1372,8 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
             pass
 
         # ── 3. Update Invest Billing ─────────────────────────────────────────
-        # Criteria: ipNumber, paymentMethod: "Credit", paymentStatus: "Pending"
-        # Update: paymentStatus -> "Billed"
+        # Criteria: ipNumber/uhid, paymentMethod: "Credit", paymentStatus: "Pending" or "Billed"
+        # Update: paymentStatus -> "Completed"
         invest_ip_filter = []
         if ip_number:
             invest_ip_filter.extend([
@@ -1380,16 +1387,13 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
         invest_match = {
             "$and": [
                 {"$or": invest_ip_filter},
+                {"is_active": {"$ne": False}},
                 {
                     "$or": [
-                        {"paymentMethod": {"$regex": "^credit$", "$options": "i"}},
-                        {"payment_method": {"$regex": "^credit$", "$options": "i"}},
-                    ]
-                },
-                {
-                    "$or": [
-                        {"paymentStatus": "Pending"},
-                        {"payment_status": "Pending"},
+                        {"paymentStatus": {"$in": ["Pending", "Billed", "pending", "billed"]}},
+                        {"payment_status": {"$in": ["Pending", "Billed", "pending", "billed"]}},
+                        {"paymentStatus": {"$regex": "^(pending|billed)$", "$options": "i"}},
+                        {"payment_status": {"$regex": "^(pending|billed)$", "$options": "i"}},
                     ]
                 }
             ]
@@ -1397,8 +1401,42 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
         db["hospital_investbilling"].update_many(
             invest_match,
             {"$set": {
-                "paymentStatus": "Billed",
-                "payment_status": "Billed",
+                "paymentStatus": "Completed",
+                "payment_status": "Completed",
+                "lastmodified_by": user_str,
+                "lastmodified_date": now_dt,
+            }}
+        )
+
+        # ── 4. Update Implant Request ─────────────────────────────────────────
+        # Criteria: inpatient_number/uhid, status: "Pending", is_active: True
+        # Update: status -> "Completed"
+        implant_ip_filter = []
+        if ip_number:
+            implant_ip_filter.extend([
+                {"inpatient_number": str(ip_number)},
+                {"ipNumber": str(ip_number)},
+                {"ip_number": str(ip_number)},
+            ])
+        if uhid:
+            implant_ip_filter.append({"uhid": str(uhid)})
+
+        implant_match = {
+            "$and": [
+                {"$or": implant_ip_filter},
+                {"is_active": {"$ne": False}},
+                {
+                    "$or": [
+                        {"status": "Pending"},
+                        {"status": {"$regex": "^pending$", "$options": "i"}},
+                    ]
+                }
+            ]
+        }
+        db["hospital_implant_request"].update_many(
+            implant_match,
+            {"$set": {
+                "status": "Completed",
                 "lastmodified_by": user_str,
                 "lastmodified_date": now_dt,
             }}
@@ -1840,6 +1878,7 @@ def search_discharge_patient(request):
                     except Exception:
                         raw_items = []
                 for it in (raw_items if isinstance(raw_items, list) else []):
+                    matched_n = None
                     item_btn  = str(it.get("billTypeNo", "") or bill.get("billTypeNo", "") or "LAB01").strip().upper()
                     item_name = it.get("itemName", "")
                     test_id   = it.get("test_id") or it.get("item_id")
@@ -2084,6 +2123,46 @@ def search_discharge_patient(request):
                     "package_name":             doc.get("surgery_type", ""),
                     "source":                   "hospital_surgeryschedule",
                 })
+
+        # ── 7. hospital_implant_request ───────────────────────────────────────
+        implant_q = get_query(
+            ["inpatient_number", "ipNumber", "ip_number"],
+            {"status": "Pending", "is_active": {"$ne": False}}
+        )
+        total_implant_amt = 0.0
+        if implant_q:
+            for imp_doc in db["hospital_implant_request"].find(implant_q):
+                raw_imp_items = imp_doc.get("items", [])
+                if isinstance(raw_imp_items, str):
+                    try:
+                        raw_imp_items = _json.loads(raw_imp_items)
+                    except Exception:
+                        raw_imp_items = []
+                for imp_item in (raw_imp_items if isinstance(raw_imp_items, list) else []):
+                    if not isinstance(imp_item, dict):
+                        continue
+                    item_id_val = imp_item.get("item_id")
+                    qty = int(imp_item.get("quantity") or imp_item.get("qty") or 1)
+
+                    v_stock = None
+                    try:
+                        if item_id_val is not None:
+                            v_stock = db["hospital_velavan_stock"].find_one(
+                                {"item_id": int(item_id_val)},
+                                sort=[("created_date", -1)]
+                            )
+                    except Exception:
+                        pass
+                    if not v_stock and item_id_val is not None:
+                        v_stock = db["hospital_velavan_stock"].find_one({"item_id": str(item_id_val)})
+
+                    rate = 0.0
+                    if v_stock:
+                        rate = _to_float(v_stock.get("unitSellingCost") or v_stock.get("mrp") or v_stock.get("sellingCost") or 0)
+
+                    total_implant_amt += (rate * qty)
+
+        patient_info["implant_amount"] = round(total_implant_amt, 2)
 
     except Exception as e:
         import traceback
