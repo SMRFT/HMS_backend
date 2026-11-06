@@ -243,15 +243,15 @@ def patientCreateView(request):
             doctor_id = request.data.get('employeeId', None)
 
             # Determine payment status, timing and method
-            payment_status = request.data.get('payment_status')
             payment_timing = request.data.get('payment_timing', 'pay_now')
+            raw_payment_status = request.data.get('payment_status')
             cust_type = str(request.data.get('customer_type') or request.data.get('customerType') or getattr(patient, 'customer_type', '')).strip().lower()
 
-            if not payment_status:
-                if payment_timing == 'pay_later':
-                    payment_status = 'Pending'
-                else:
-                    payment_status = 'Paid' if (total_fees and total_fees > 0) else 'Pending'
+            if payment_timing == 'pay_later':
+                payment_status = 'Pending'
+            else:
+                # Pay Now / Cash at counter registration -> Cash Pending
+                payment_status = 'Pending' if (not raw_payment_status or raw_payment_status in ['Paid', 'Billing', 'Pending']) else raw_payment_status
 
             if not payment_method:
                 if payment_status == 'Pending':
@@ -639,11 +639,11 @@ def update_bill_status(request, bill_number):
         payment_status = request.data.get('payment_status')
 
         if payment_status:
-            if payment_status not in ['Paid', 'Pending', 'Unpaid']:
+            if payment_status not in ['Paid', 'Pending', 'Unpaid', 'Billing', 'Pending']:
                 return Response({"error": "Invalid payment status"}, status=status.HTTP_400_BAD_REQUEST)
             bill.payment_status = payment_status
             
-            if payment_status == 'Paid':
+            if payment_status in ['Paid', 'Billing']:
                 bill.paid_date = timezone.now()
                 bill.shiftno = request.data.get('shiftno')
             else:

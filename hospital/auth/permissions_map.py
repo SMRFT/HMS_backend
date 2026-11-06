@@ -1,4 +1,47 @@
-PAGE_MAPPING = {
+import inspect
+
+class DynamicPageMapping(dict):
+    """
+    Enhanced dictionary for PAGE_MAPPING that supports:
+    1. Single page code string: 'HMS-P-WR'
+    2. Multiple allowed page codes: ['HMS-P-WR', 'HMS-P-IB', 'HMS-P-OTM']
+       When an endpoint is shared across multiple modules, it dynamically
+       checks the caller's verified JWT permissions on the call stack and
+       returns the matching permission, allowing all authorized roles access!
+    """
+    def get(self, key, default=""):
+        val = super().get(key, default)
+        if isinstance(val, (list, tuple)):
+            frame = inspect.currentframe().f_back
+            while frame:
+                vJson = frame.f_locals.get('vJson')
+                if vJson and isinstance(vJson, dict) and 'allowed-actions' in vJson:
+                    user_perms = vJson.get('allowed-actions', [])
+                    for candidate in val:
+                        if any(k.startswith(candidate) for k in user_perms):
+                            return candidate
+                    return val[0]
+                frame = frame.f_back
+            return val[0]
+        return val
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        if isinstance(val, (list, tuple)):
+            frame = inspect.currentframe().f_back
+            while frame:
+                vJson = frame.f_locals.get('vJson')
+                if vJson and isinstance(vJson, dict) and 'allowed-actions' in vJson:
+                    user_perms = vJson.get('allowed-actions', [])
+                    for candidate in val:
+                        if any(k.startswith(candidate) for k in user_perms):
+                            return candidate
+                    return val[0]
+                frame = frame.f_back
+            return val[0]
+        return val
+
+PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/patient-inquiry/?(\?.*)?$': 'HMS-P-PIN',
     r'^/_b_a_c_k_e_n_d/HMS/create/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/patients/register/': 'HMS-P-AIN',
@@ -49,13 +92,13 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/update_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/cancel_radiology_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/remove_individual_radiology/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/remove_individual_test/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/get_LabBillType_list/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/remove_individual_test/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_LabBillType_list/?(\?.*)?$': ['HMS-P-WR', 'HMS-P-IB'],
     
 
 
@@ -265,8 +308,8 @@ PAGE_MAPPING = {
 
     '/_b_a_c_k_e_n_d/HMS/invest-bill-types/': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/packages/': 'HMS-P-IB',                 
-    r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': 'HMS-P-IB',                             
-    r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': 'HMS-P-IB',       
+    r'^/_b_a_c_k_e_n_d/HMS/package-items/?(\?.*)?$': ['HMS-P-IB', 'HMS-P-WR', 'HMS-P-OTM', 'HMS-P-OTSS'],                             
+    r'^/_b_a_c_k_e_n_d/HMS/investigation-items/?(\?.*)?$': ['HMS-P-IB', 'HMS-P-WR', 'HMS-P-OTM', 'HMS-P-OTSS'],       
     '/_b_a_c_k_e_n_d/HMS/investBilling/': 'HMS-P-IB',                 
     r'^/_b_a_c_k_e_n_d/HMS/investBillingGet/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/estimateBilling/': 'HMS-P-IB',                 
@@ -498,14 +541,7 @@ PAGE_MAPPING = {
     r'^/_b_a_c_k_e_n_d/HMS/delete_implant_request/?(\?.*)?$': 'HMS-P-OTIRD',      
 
     
-    '/_b_a_c_k_e_n_d/HMS/save_lab_ward_request/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/cancel_lab_ward_request/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/': 'HMS-P-IB',
-    '/_b_a_c_k_e_n_d/HMS/cancel_individual_ward_request_item/': 'HMS-P-WR',
-    '/_b_a_c_k_e_n_d/HMS/update_ward_request_item_status/': 'HMS-P-WR',
-    '/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/': 'HMS-P-IB',
-    r'^/_b_a_c_k_e_n_d/HMS/get_lab_ward_requests/?(\?.*)?$': 'HMS-P-IB',    
+    
                
 
     r'^/_b_a_c_k_e_n_d/HMS/crash-cart/items/?(\?.*)?$': 'HMS-P-CL',
@@ -764,7 +800,7 @@ PAGE_MAPPING = {
         # Tanuh (Publicly accessible like QRScan / InPatientFeedback)
         r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
         r'/_b_a_c_k_e_n_d/HMS/tanuh_student_surveyor_registration/?(\?.*)?$'     : 'HMS-P-TSSR',
-}
+})
 
  
 

@@ -277,7 +277,7 @@ class Billing(AuditModel):
     doctor_id = models.CharField(max_length=50, blank=True, null=True)
     bill_number = models.CharField(max_length=50, unique=True, blank=True ,primary_key=True)
     billed_date = models.DateTimeField(auto_now_add=True)
-    payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
+    payment_status = models.CharField(max_length=20, default='Pending', choices=[('Paid', 'Paid'), ('Billing', 'Billing'), ('Cash Pending', 'Cash Pending'), ('Pending', 'Pending'), ('Unpaid', 'Unpaid')])
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     paid_date = models.DateTimeField(null=True, blank=True)
     shiftno = models.CharField(max_length=100, blank=True, null=True)

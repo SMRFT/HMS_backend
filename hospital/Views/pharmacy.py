@@ -80,27 +80,92 @@ def to_utc_iso(dt_val):
 def get_pharmacy_stock(request):
     try:
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
-        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-        raw_outlet    = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
 
-        header_outlet = (
-            request.headers.get("Outlet-Code")
-            or request.headers.get("outlet-code")
-            or request.META.get("HTTP_OUTLET_CODE")
-            or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        # 1. Hospital and Branch Code Resolution (Explicit > Auth > Header > Default)
+        hospital_code = (
+            (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+            or (request.query_params.get("hospital_code") if hasattr(request, "query_params") else None)
+            or data.get("auth-hospital-code")
+            or data.get("hospital_code")
+            or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_HOSPITAL_CODE")
+            or "SH001"
         )
-        if header_outlet:
-            outlet_code = header_outlet
-        elif isinstance(raw_outlet, (list, tuple)):
-            if len(raw_outlet) == 1:
-                outlet_code = raw_outlet[0]
-            elif raw_outlet:
-                outlet_code = {"$in": list(raw_outlet)}
+        branch_code = (
+            (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+            or (request.query_params.get("branch_code") if hasattr(request, "query_params") else None)
+            or data.get("auth-branch-code")
+            or data.get("branch_code")
+            or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_BRANCH_CODE")
+            or "SHB001"
+        )
+
+        # 2. Outlet Resolution: Explicit requested outlet takes top priority!
+        explicit_outlet = (
+            (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+            or (request.query_params.get("outlet_code") if hasattr(request, "query_params") else None)
+            or (data.get("outlet_code") if isinstance(data, dict) else None)
+            or (data.get("outlet") if isinstance(data, dict) else None)
+        )
+
+        if explicit_outlet:
+            if isinstance(explicit_outlet, (list, tuple)):
+                if len(explicit_outlet) == 1:
+                    outlet_code = explicit_outlet[0]
+                elif explicit_outlet:
+                    outlet_code = {"$in": list(explicit_outlet)}
+                else:
+                    outlet_code = None
+            elif isinstance(explicit_outlet, str) and explicit_outlet.strip().startswith("[") and explicit_outlet.strip().endswith("]"):
+                import ast
+                try:
+                    parsed_list = ast.literal_eval(explicit_outlet.strip())
+                    if isinstance(parsed_list, (list, tuple)):
+                        if len(parsed_list) == 1:
+                            outlet_code = parsed_list[0]
+                        elif parsed_list:
+                            outlet_code = {"$in": list(parsed_list)}
+                        else:
+                            outlet_code = None
+                    else:
+                        outlet_code = str(parsed_list).strip()
+                except Exception:
+                    outlet_code = explicit_outlet.strip()
             else:
-                outlet_code = None
+                outlet_code = str(explicit_outlet).strip()
         else:
-            outlet_code = raw_outlet
+            # Fallback to session / header outlet if not explicitly sent
+            raw_outlet = data.get("auth-outlet-code")
+            header_outlet = (
+                (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+                or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+                or request.META.get("HTTP_OUTLET_CODE")
+                or raw_outlet
+            )
+
+            if isinstance(header_outlet, (list, tuple)):
+                if len(header_outlet) == 1:
+                    header_val = header_outlet[0]
+                elif header_outlet:
+                    header_val = list(header_outlet)
+                else:
+                    header_val = None
+            else:
+                header_val = str(header_outlet).strip() if header_outlet else None
+
+            # If user session outlet is a valid pharmacy outlet (OLET001 or OLET002), use it.
+            # Otherwise (e.g. OLET003 Main Block, OLET004 Cancer Block, which have no pharmacy stock),
+            # default to "OLET001" (IP Pharmacy) so staff in wards can browse and order medicine stock.
+            if header_val in ["OLET001", "OLET002"]:
+                outlet_code = header_val
+            elif isinstance(header_val, list) and any(o in ["OLET001", "OLET002"] for o in header_val):
+                pharmacy_outlets = [o for o in header_val if o in ["OLET001", "OLET002"]]
+                outlet_code = pharmacy_outlets[0] if len(pharmacy_outlets) == 1 else {"$in": pharmacy_outlets}
+            else:
+                outlet_code = "OLET001" 
 
         search_query = (
             request.GET.get("search")
@@ -645,29 +710,46 @@ def save_pharmacy_bill(request):
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code")
-    branch_code   = data.get("auth-branch-code")
-    raw_outlet    = data.get("auth-outlet-code")
-
-    header_outlet = (
-        request.headers.get("Outlet-Code")
-        or request.headers.get("outlet-code")
-        or request.META.get("HTTP_OUTLET_CODE")
-        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
-        or data.get("outlet_code")
+    hospital_code = (
+        data.get("auth-hospital-code")
+        or data.get("hospital_code")
+        or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
+        or "SH001"
     )
-    if header_outlet:
-        outlet_code = str(header_outlet).strip()
-    elif isinstance(raw_outlet, (list, tuple)) and raw_outlet:
-        outlet_code = str(raw_outlet[0]).strip()
-    elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("["):
-        try:
-            parsed_list = ast.literal_eval(raw_outlet.strip())
-            outlet_code = str(parsed_list[0]).strip() if parsed_list else "OLET001"
-        except Exception:
-            outlet_code = raw_outlet
+    branch_code = (
+        data.get("auth-branch-code")
+        or data.get("branch_code")
+        or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
+        or "SHB001"
+    )
+
+    explicit_outlet = (
+        data.get("outlet_code")
+        or data.get("outlet")
+        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+    )
+    if explicit_outlet:
+        outlet_code = str(explicit_outlet).strip()
     else:
-        outlet_code = raw_outlet or "OLET001"
+        raw_outlet = data.get("auth-outlet-code")
+        header_outlet = (
+            (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_OUTLET_CODE")
+            or raw_outlet
+        )
+        if header_outlet:
+            outlet_code = str(header_outlet).strip()
+        elif isinstance(raw_outlet, (list, tuple)) and raw_outlet:
+            outlet_code = str(raw_outlet[0]).strip()
+        elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("["):
+            try:
+                parsed_list = ast.literal_eval(raw_outlet.strip())
+                outlet_code = str(parsed_list[0]).strip() if parsed_list else "OLET001"
+            except Exception:
+                outlet_code = raw_outlet
+        else:
+            outlet_code = raw_outlet or "OLET001"
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -957,27 +1039,65 @@ def get_pharmacy_BillType(request):
     stock_collection = db["hospital_billtype"]
 
  
-    hospital_code = request.data.get("auth-hospital-code") 
-    branch_code   = request.data.get("auth-branch-code") 
-    raw_outlet    = request.data.get("auth-outlet-code") 
+    data = request.data if isinstance(getattr(request, "data", None), dict) else {}
 
-    header_outlet = (
-        request.headers.get("Outlet-Code")
-        or request.headers.get("outlet-code")
-        or request.META.get("HTTP_OUTLET_CODE")
-        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+    hospital_code = (
+        (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+        or (request.query_params.get("hospital_code") if hasattr(request, "query_params") else None)
+        or data.get("auth-hospital-code")
+        or data.get("hospital_code")
+        or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
+        or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+        or request.META.get("HTTP_HOSPITAL_CODE")
+        or "SH001"
     )
-    if header_outlet:
-        outlet_code = header_outlet
-    elif isinstance(raw_outlet, (list, tuple)):
-        if len(raw_outlet) == 1:
-            outlet_code = raw_outlet[0]
-        elif raw_outlet:
-            outlet_code = {"$in": list(raw_outlet)}
+    branch_code = (
+        (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+        or (request.query_params.get("branch_code") if hasattr(request, "query_params") else None)
+        or data.get("auth-branch-code")
+        or data.get("branch_code")
+        or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
+        or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+        or request.META.get("HTTP_BRANCH_CODE")
+        or "SHB001"
+    )
+
+    explicit_outlet = (
+        (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        or (request.query_params.get("outlet_code") if hasattr(request, "query_params") else None)
+        or (data.get("outlet_code") if isinstance(data, dict) else None)
+        or (data.get("outlet") if isinstance(data, dict) else None)
+    )
+
+    if explicit_outlet:
+        if isinstance(explicit_outlet, (list, tuple)):
+            if len(explicit_outlet) == 1:
+                outlet_code = explicit_outlet[0]
+            elif explicit_outlet:
+                outlet_code = {"$in": list(explicit_outlet)}
+            else:
+                outlet_code = None
+        else:
+            outlet_code = str(explicit_outlet).strip()
+    else:
+        raw_outlet = data.get("auth-outlet-code")
+        header_outlet = (
+            (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_OUTLET_CODE")
+            or raw_outlet
+        )
+        if isinstance(header_outlet, (list, tuple)):
+            if len(header_outlet) == 1:
+                outlet_code = header_outlet[0]
+            elif header_outlet:
+                outlet_code = {"$in": list(header_outlet)}
+            else:
+                outlet_code = None
+        elif header_outlet:
+            outlet_code = str(header_outlet).strip()
         else:
             outlet_code = None
-    else:
-        outlet_code = raw_outlet
 
     print("hospital_code:", hospital_code)
     print("branch_code:", branch_code)
@@ -2944,6 +3064,7 @@ def convert_to_bill(request):
             {
                 "$set": {
                     "billing_status": "Processing",
+                    "status": "Processing",
                     "lastmodified_date": datetime.utcnow()
                 }
             }
@@ -3331,6 +3452,7 @@ def finalize_bill(request):
                 "instruction":      instruction_val,
                 "route":            route_val,
                 "action":           "finalized",
+                "status":           "Billed",
                 "edited_by":        employee_id,
                 "edited_at":        now_ts,
             }
@@ -3401,6 +3523,7 @@ def finalize_bill(request):
         set_payload = {
 
             "billing_status":       "Billed",
+            "status":               "Billed",
 
             # ✅ NEW: mark as dispatched when billing is finalised
             "is_dispatched":        True,
@@ -4799,39 +4922,46 @@ def PharmacyBillanalysis(request):
         branch_code   = data.get("auth-branch-code")
         raw_outlet    = data.get("auth-outlet-code")
 
-        header_outlet = (
-            request.headers.get("Outlet-Code")
-            or request.headers.get("outlet-code")
-            or request.META.get("HTTP_OUTLET_CODE")
-            or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        explicit_outlet = (
+            (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+            or (request.query_params.get("outlet_code") if hasattr(request, "query_params") else None)
             or data.get("outlet_code")
+            or data.get("outlet")
         )
-
-        if header_outlet:
-            outlet_code = str(header_outlet).strip()
-        elif isinstance(raw_outlet, (list, tuple)):
-            if len(raw_outlet) == 1:
-                outlet_code = raw_outlet[0]
-            elif raw_outlet:
-                outlet_code = {"$in": list(raw_outlet)}
-            else:
-                outlet_code = None
-        elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("[") and raw_outlet.strip().endswith("]"):
-            try:
-                parsed_list = ast.literal_eval(raw_outlet.strip())
-                if isinstance(parsed_list, (list, tuple)):
-                    if len(parsed_list) == 1:
-                        outlet_code = parsed_list[0]
-                    elif parsed_list:
-                        outlet_code = {"$in": list(parsed_list)}
-                    else:
-                        outlet_code = None
-                else:
-                    outlet_code = raw_outlet
-            except Exception:
-                outlet_code = raw_outlet
+        if explicit_outlet:
+            outlet_code = str(explicit_outlet).strip()
         else:
-            outlet_code = raw_outlet
+            header_outlet = (
+                (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+                or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+                or request.META.get("HTTP_OUTLET_CODE")
+                or raw_outlet
+            )
+            if header_outlet:
+                outlet_code = str(header_outlet).strip()
+            elif isinstance(raw_outlet, (list, tuple)):
+                if len(raw_outlet) == 1:
+                    outlet_code = raw_outlet[0]
+                elif raw_outlet:
+                    outlet_code = {"$in": list(raw_outlet)}
+                else:
+                    outlet_code = None
+            elif isinstance(raw_outlet, str) and raw_outlet.strip().startswith("[") and raw_outlet.strip().endswith("]"):
+                try:
+                    parsed_list = ast.literal_eval(raw_outlet.strip())
+                    if isinstance(parsed_list, (list, tuple)):
+                        if len(parsed_list) == 1:
+                            outlet_code = parsed_list[0]
+                        elif parsed_list:
+                            outlet_code = {"$in": list(parsed_list)}
+                        else:
+                            outlet_code = None
+                    else:
+                        outlet_code = raw_outlet
+                except Exception:
+                    outlet_code = raw_outlet
+            else:
+                outlet_code = raw_outlet
 
         from_date_str = str(data.get("from_date") or "").strip()
         to_date_str   = str(data.get("to_date") or "").strip()

@@ -601,12 +601,12 @@ def calculate_shift_collection(shift_no):
 
         # 1. Billing (Registration/Consultation)
         # Paid
-        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Paid"}, {"total_fees": 1}))
+        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}}, {"total_fees": 1}))
         for b in paid_bills:
             results["total_collection"] += to_float(b.get("total_fees", 0))
         
         # Pending
-        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Pending"}, {"total_fees": 1}))
+        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}}, {"total_fees": 1}))
         for b in pending_bills:
             results["pending_amount"] += to_float(b.get("total_fees", 0))
 
@@ -1757,7 +1757,7 @@ def get_mainblock_pendingbills(request):
         # ✅ 1. OP BILLING (payment_method: 'Cash' alone)
         # =========================================================
         billing_query = {
-            "payment_status": status_op,
+            "payment_status": {"$in": ["Paid", "Billing"]} if is_received_req else {"$in": ["Pending", "Cash Pending"]},
             "payment_method": {"$in": ["Cash", "cash", "CASH"]}
         }
         if hospital_code:
@@ -2299,7 +2299,7 @@ def update_mainblock_pendingbills(request):
         if doc:
             return update_investigation(doc)
 
-        doc = billing_col.find_one({"hospital_code": hospital_code, "branch_code": branch_code, "bill_number": bill_no, "payment_status": "Pending"})
+        doc = billing_col.find_one({"hospital_code": hospital_code, "branch_code": branch_code, "bill_number": bill_no, "payment_status": {"$in": ["Pending", "Cash Pending"]}})
         if doc:
             return update_billing(doc)
 
@@ -2411,7 +2411,7 @@ def get_registration_bills(request):
         # ================================
         from ..models import Billing
         filter_query = {
-            "payment_status": "Pending"
+            "payment_status": {"$in": ["Pending", "Cash Pending"]}
         }
         if hospital_code is not None:
             filter_query["hospital_code"] = hospital_code
