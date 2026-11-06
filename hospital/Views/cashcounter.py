@@ -641,12 +641,12 @@ def calculate_shift_collection(shift_no):
 
         # 1. Billing (Registration/Consultation)
         # Paid
-        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Paid"}, {"total_fees": 1}))
+        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}}, {"total_fees": 1}))
         for b in paid_bills:
             results["total_collection"] += to_float(b.get("total_fees", 0))
         
         # Pending
-        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": "Pending"}, {"total_fees": 1}))
+        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}}, {"total_fees": 1}))
         for b in pending_bills:
             results["pending_amount"] += to_float(b.get("total_fees", 0))
 
@@ -3309,7 +3309,7 @@ def get_registration_bills(request):
         # ================================
         from ..models import Billing
         filter_query = {
-            "payment_status": "Pending"
+            "payment_status": {"$in": ["Pending", "Cash Pending"]}
         }
         if hospital_code is not None:
             filter_query["hospital_code"] = hospital_code
