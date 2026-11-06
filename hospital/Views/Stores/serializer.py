@@ -407,7 +407,10 @@ def get_lookup_maps():
                 cid = doc.get('category_id')
                 cname = doc.get('category_name') or doc.get('categoryName') or doc.get('name')
                 if cid and cname:
-                    _CAT_MAP[cid] = cname
+                    _CAT_MAP[str(cid).strip()] = str(cname).strip()
+            for c in Category.objects.filter(is_active__in=[True]):
+                if c.category_id and c.category_name:
+                    _CAT_MAP[str(c.category_id).strip()] = str(c.category_name).strip()
         except Exception:
             _CAT_MAP = {}
             
@@ -418,12 +421,12 @@ def get_lookup_maps():
                 code = doc.get('department_code') or doc.get('department_id') or str(doc.get('_id'))
                 name = doc.get('department_name')
                 if code and name:
-                    _DEPT_MAP[str(code)] = name
-                    _DEPT_MAP[str(name)] = name
+                    _DEPT_MAP[str(code).strip()] = str(name).strip()
+                    _DEPT_MAP[str(name).strip()] = str(name).strip()
             for d in Department.objects.filter(is_active__in=[True]):
                 if d.department_id and d.department_name:
-                    _DEPT_MAP[str(d.department_id)] = d.department_name
-                    _DEPT_MAP[str(d.department_name)] = d.department_name
+                    _DEPT_MAP[str(d.department_id).strip()] = str(d.department_name).strip()
+                    _DEPT_MAP[str(d.department_name).strip()] = str(d.department_name).strip()
         except Exception:
             _DEPT_MAP = {}
 
@@ -434,7 +437,10 @@ def get_lookup_maps():
                 gid = doc.get('group_id')
                 gname = doc.get('group_name') or doc.get('groupName') or doc.get('name')
                 if gid and gname:
-                    _GROUP_MAP[gid] = gname
+                    _GROUP_MAP[str(gid).strip()] = str(gname).strip()
+            for g in Group.objects.filter(is_active__in=[True]):
+                if g.group_id and g.group_name:
+                    _GROUP_MAP[str(g.group_id).strip()] = str(g.group_name).strip()
         except Exception:
             _GROUP_MAP = {}
 

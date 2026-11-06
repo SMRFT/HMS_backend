@@ -537,122 +537,14 @@ def fetch_detailed_billing_data(db, ccc_records):
 # Cashier Wise Reports
 # ─────────────────────────────────────────────────────────────────────────────
 
-@api_view(["POST"])
+@api_view(["POST", "GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_shift_summary_report(request):
     """
-    Returns shift summary for cashier wise reports.
-    Uses hospital_cashcountercollection for shift calculations.
+    Delegates to the ultra-fast PyMongo cashcounter.get_shift_summary_report implementation.
     """
-    try:
-        data = request.data
-        from_date = data.get("from_date")
-        to_date = data.get("to_date")
-        hospital_code = (
-            data.get("auth-hospital-code") or 
-            request.META.get("HTTP_AUTH_HOSPITAL_CODE") or 
-            request.META.get("HTTP_HOSPITAL_CODE") or 
-            (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-        )
-        branch_code = (
-            data.get("auth-branch-code") or 
-            request.META.get("HTTP_AUTH_BRANCH_CODE") or 
-            request.META.get("HTTP_BRANCH_CODE") or 
-            (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-        )
-        
-        queryset = Cashcountershiftdetails.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        )
-        if from_date:
-            queryset = queryset.filter(date__gte=from_date)
-        if to_date:
-            queryset = queryset.filter(date__lte=to_date)
-            
-        shifts = queryset.order_by("-date", "-StartingTime")
-        cashier_ids = list(set([s.CashierID for s in shifts]))
-        shift_nos = [s.shiftno for s in shifts]
-        
-        cashier_name_map = {}
-        try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client['Global']
-            profiles = list(db['backend_diagnostics_profile'].find(
-                {"employeeId": {"$in": cashier_ids}},
-                {"employeeId": 1, "employeeName": 1, "_id": 0}
-            ))
-            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles}
-            client.close()
-        except:
-            pass
-            
-        # Bulk query hospital_cashcountercollection for all shifts
-        shift_totals = {}
-        try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            db = client["HMS"]
-            ccc_docs = list(db["hospital_cashcountercollection"].find({"shift_no": {"$in": shift_nos}}))
-            for doc in ccc_docs:
-                s_no = doc.get("shift_no")
-                if not s_no: continue
-                shift_totals.setdefault(s_no, {"collected": 0.0, "returns": 0.0, "remitted": 0.0, "submitted": 0.0})
-                
-                cat = doc.get("billing_category", "").lower()
-                tx_type = doc.get("transaction_type", "").lower()
-                col_amt = _to_float(doc.get("collected_amount"))
-                ret_amt = _to_float(doc.get("Returned_amount"))
-                
-                if "return" in cat or tx_type == "payment" or tx_type == "returned":
-                    shift_totals[s_no]["returns"] += col_amt or ret_amt
-                elif cat == "remitted" or tx_type == "remitted":
-                    shift_totals[s_no]["remitted"] += col_amt
-                elif cat == "submit" or tx_type == "submit":
-                    shift_totals[s_no]["submitted"] += col_amt
-                else:
-                    shift_totals[s_no]["collected"] += col_amt
-            client.close()
-        except Exception as e:
-            print("Error querying cash counter collection for shift totals:", e)
-
-        report_data = []
-        for s in shifts:
-            st = shift_totals.get(s.shiftno, {})
-            collected = st.get("collected", _to_float(s.collected_Amount))
-            returns = st.get("returns", _to_float(s.SalesReturnAmount))
-            remitted = st.get("remitted", _to_float(s.RemittedToBank))
-            submitted = st.get("submitted", _to_float(s.SubmittedToAccount))
-            
-            report_data.append({
-                "shiftno": s.shiftno,
-                "CashierID": s.CashierID,
-                "User": cashier_name_map.get(s.CashierID, s.CashierID),
-                "CashCounter": s.CashCounter,
-                "OpeningBalance": _to_float(s.OpeningBalance),
-                "ClosingBalance": _to_float(s.ClosingBalance),
-                "collected_Amount": round(collected - returns, 2),
-                "PettyCashBalance": _to_float(s.PettyCashBalance),
-                "RemittedToBank": round(remitted, 2),
-                "HandOverAmount": _to_float(s.HandOverAmount),
-                "SalesReturnAmount": round(returns, 2),
-                "ShiftStatus": s.ShiftStatus,
-                "StartingTime": _format_dt(s.StartingTime),
-                "StartTime": _format_time(s.StartingTime),
-                "closingTime": _format_dt(s.closingTime),
-                "EndTime": _format_time(s.closingTime),
-                "date": str(s.date),
-                "outlet_code": s.outlet_code,
-            })
-            
-        return Response({
-            "success": True,
-            "data": report_data
-        })
-    except Exception as e:
-        import traceback
-        print("Shift Summary Error:", str(e))
-        print(traceback.format_exc())
-        return Response({"success": False, "message": str(e)}, status=500)
+    from ..cashcounter import get_shift_summary_report as _fast_shift_report
+    return _fast_shift_report(request)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Discharge Bills Report

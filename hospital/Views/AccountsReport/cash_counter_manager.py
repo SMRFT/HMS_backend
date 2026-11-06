@@ -21,11 +21,27 @@ def cash_counter_manager(request):
     user_id = request.data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID")
 
     if request.method == 'GET':
+        outlet_map = {}
+        try:
+            from ..dbcollection import hms_db
+            for o in hms_db['hospital_outlets'].find({"is_active": True}, {"outlet_code": 1, "outlet_name": 1}):
+                code = o.get("outlet_code")
+                name = o.get("outlet_name")
+                if code and name:
+                    outlet_map[str(code)] = name
+        except Exception:
+            pass
+
         counters = CashCounter.objects.filter(hospital_code=hospital_code)
         serializer = CashCounterSerializer(counters, many=True)
+        data = serializer.data
+        for c in data:
+            code = str(c.get("outlet") or "")
+            c["outlet_name"] = outlet_map.get(code, code)
+
         return Response({
             "success": True, 
-            "data": serializer.data
+            "data": data
         })
 
     elif request.method == 'POST':
