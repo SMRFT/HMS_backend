@@ -2965,3 +2965,6 @@ class ReportConfigurationMaster(AuditModel):
 
     def __str__(self):
         return f"{self.employee_id} - Report Config"
+
+
+
