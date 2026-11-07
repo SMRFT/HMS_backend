@@ -42,6 +42,11 @@ def update_registration_visit(request):
             except Exception:
                 pass
 
+        reason = data.get('reason') or data.get('edit_reason')
+        if not reason or not str(reason).strip():
+            return Response({"success": False, "message": "Reason for editing visit is required"}, status=400)
+        reason = str(reason).strip()
+
         if not bill_number:
             return Response({"success": False, "message": "Bill number is required"}, status=400)
 
@@ -54,6 +59,7 @@ def update_registration_visit(request):
         history_entry = {
             "date": timezone.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": user_name,
+            "reason": reason,
             "changes": {}
         }
         
@@ -121,7 +127,10 @@ def process_registration_refund(request):
         bill_no = data.get('bill_no')
         uhid = data.get('uhid')
         refund_amount = data.get('refund_amount')
-        remarks = data.get('remarks', 'Patient Request')
+        reason = data.get('reason') or data.get('remarks')
+        if not reason or not str(reason).strip():
+            return Response({"success": False, "message": "Reason for processing refund is required"}, status=400)
+        remarks = str(reason).strip()
         
         employee_id = data.get('auth-user-id', 'system')
         hospital_code = data.get('auth-hospital-code', 'system')
@@ -180,11 +189,13 @@ def process_registration_refund(request):
         history_entry = {
             "date": timezone.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": employee_id,
+            "reason": remarks,
             "changes": {
                 "refund": {
                     "refund_bill_no": refund.refund_bill_no,
                     "amount": str(refund_amt_dec),
-                    "status": refund.status
+                    "status": refund.status,
+                    "reason": remarks
                 }
             }
         }

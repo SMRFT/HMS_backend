@@ -80,16 +80,63 @@ def to_utc_iso(dt_val):
 def get_pharmacy_stock(request):
     try:
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
-        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-        outlet_code   = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
-        if isinstance(outlet_code, (list, tuple)):
-            if len(outlet_code) == 1:
-                outlet_code = outlet_code[0]
-            elif outlet_code:
-                outlet_code = {"$in": list(outlet_code)}
+
+        # 1. Hospital Code and Branch Code Resolution (Auth > Query > Header > Default)
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+            or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_HOSPITAL_CODE")
+            or "SH001"
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+            or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_BRANCH_CODE")
+            or "SHB001"
+        )
+
+        # 2. Outlet Resolution: Explicit requested outlet takes top priority!
+        explicit_outlet = (
+            (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+            or (request.query_params.get("outlet_code") if hasattr(request, "query_params") else None)
+            or (data.get("outlet_code") if isinstance(data, dict) else None)
+            or (data.get("outlet") if isinstance(data, dict) else None)
+        )
+
+        if explicit_outlet:
+            if isinstance(explicit_outlet, (list, tuple)):
+                if len(explicit_outlet) == 1:
+                    outlet_code = explicit_outlet[0]
+                elif explicit_outlet:
+                    outlet_code = {"$in": list(explicit_outlet)}
+                else:
+                    outlet_code = None
             else:
-                outlet_code = None
+                outlet_code = str(explicit_outlet).strip()
+        else:
+            raw_outlet = data.get("auth-outlet-code")
+            header_outlet = (
+                (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+                or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+                or request.META.get("HTTP_OUTLET_CODE")
+                or raw_outlet
+            )
+            if isinstance(header_outlet, (list, tuple)):
+                header_val = header_outlet[0] if len(header_outlet) == 1 else list(header_outlet)
+            else:
+                header_val = str(header_outlet).strip() if header_outlet else None
+
+            if header_val in ["OLET001", "OLET002"]:
+                outlet_code = header_val
+            elif isinstance(header_val, list) and any(o in ["OLET001", "OLET002"] for o in header_val):
+                pharmacy_outlets = [o for o in header_val if o in ["OLET001", "OLET002"]]
+                outlet_code = pharmacy_outlets[0] if len(pharmacy_outlets) == 1 else {"$in": pharmacy_outlets}
+            else:
+                outlet_code = "OLET001"
 
         search_query = (
             request.GET.get("search")

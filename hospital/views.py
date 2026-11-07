@@ -879,6 +879,7 @@ def patient_visit_list(request):
                     "refund_bill_no": r.refund_bill_no,
                     "amount": str(r.refund_amount),
                     "status": r.status,
+                    "reason": r.remarks or '',
                     "date": r.refund_date.strftime("%d-%m-%Y %I:%M %p") if r.refund_date else ''
                 })
 
@@ -903,6 +904,7 @@ def patient_visit_list(request):
                 formatted_history.append({
                     'date': h.get('date'),
                     'user': resolved_user,
+                    'reason': h.get('reason', '') or (h.get('changes', {}).get('refund', {}).get('reason', '') if isinstance(h.get('changes'), dict) else ''),
                     'changes': formatted_changes
                 })
 
@@ -1201,8 +1203,10 @@ def get_sidebar_mapping(request):
                 else:
                     perm_values = set()
 
-                # Allowed if super admin OR (hms_pages is configured and p_id in hms_pages) OR (no hms_pages and perm_values match expanded_permissions)
+                # Allowed if super admin OR common page (/Dashboard or empty permissions) OR (hms_pages is configured and p_id in hms_pages) OR (no hms_pages and perm_values match expanded_permissions)
                 if is_super_admin:
+                    allowed_pages.append(page)
+                elif page.get('route') == '/Dashboard' or not perm_values:
                     allowed_pages.append(page)
                 elif len(hms_pages) > 0:
                     if p_id is not None and p_id in hms_pages:
