@@ -82,7 +82,7 @@ def get_pharmacy_stock(request):
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
         hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
         branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-        outlet_code   = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        outlet_code   = (request.GET.get("outlet_code") if hasattr(request, "GET") else None) or data.get("auth-outlet-code")
         if isinstance(outlet_code, (list, tuple)):
             if len(outlet_code) == 1:
                 outlet_code = outlet_code[0]
