@@ -432,6 +432,9 @@ urlpatterns = [
     path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
     path("dosage_master/", NursingStation.dosage_master_view, name="dosage_master"),
     path("ward-bill-types/", NursingStation.get_ward_bill_types, name="get_ward_bill_types"),
+    path("get_nursing_station_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="get_nursing_station_pharmacy_stock"),
+    path("nursing_station_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="nursing_station_pharmacy_stock"),
+    path("get_nursing_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="get_nursing_pharmacy_stock"),
     
     # Package Master
     path('investigation-prices/', package_crud.get_bill_types, name='get_bill_types'),

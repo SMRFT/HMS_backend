@@ -87,6 +87,24 @@ PAGE_MAPPING = DynamicPageMapping({
         'HMS-P-WR', 'HMS-P-SIDEBAR', 'HMS-P-SB', 'HMS-P-AIN', 'HMS-P-PGS', 'HMS-R-SA', 'HMS-R-A'
     ],
     r'^/_b_a_c_k_e_n_d/HMS/ward-bill-types/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get_nursing_station_pharmacy_stock/?(\?.*)?$': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    '/_b_a_c_k_e_n_d/HMS/get_nursing_station_pharmacy_stock/': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    r'^/_b_a_c_k_e_n_d/HMS/nursing_station_pharmacy_stock/?(\?.*)?$': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    '/_b_a_c_k_e_n_d/HMS/nursing_station_pharmacy_stock/': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    r'^/_b_a_c_k_e_n_d/HMS/get_nursing_pharmacy_stock/?(\?.*)?$': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    '/_b_a_c_k_e_n_d/HMS/get_nursing_pharmacy_stock/': [
+        'HMS-P-WR', 'HMS-P-NS', 'HMS-P-PGS', 'HMS-P-IPEMR', 'HMS-P-OPEMRGM', 'HMS-R-SA', 'HMS-R-A'
+    ],
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/cancel_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
