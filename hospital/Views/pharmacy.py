@@ -80,63 +80,16 @@ def to_utc_iso(dt_val):
 def get_pharmacy_stock(request):
     try:
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-
-        # 1. Hospital Code and Branch Code Resolution (Auth > Query > Header > Default)
-        hospital_code = (
-            data.get("auth-hospital-code")
-            or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
-            or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
-            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-            or request.META.get("HTTP_HOSPITAL_CODE")
-            or "SH001"
-        )
-        branch_code = (
-            data.get("auth-branch-code")
-            or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-            or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
-            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-            or request.META.get("HTTP_BRANCH_CODE")
-            or "SHB001"
-        )
-
-        # 2. Outlet Resolution: Explicit requested outlet takes top priority!
-        explicit_outlet = (
-            (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
-            or (request.query_params.get("outlet_code") if hasattr(request, "query_params") else None)
-            or (data.get("outlet_code") if isinstance(data, dict) else None)
-            or (data.get("outlet") if isinstance(data, dict) else None)
-        )
-
-        if explicit_outlet:
-            if isinstance(explicit_outlet, (list, tuple)):
-                if len(explicit_outlet) == 1:
-                    outlet_code = explicit_outlet[0]
-                elif explicit_outlet:
-                    outlet_code = {"$in": list(explicit_outlet)}
-                else:
-                    outlet_code = None
+        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+        outlet_code   = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        if isinstance(outlet_code, (list, tuple)):
+            if len(outlet_code) == 1:
+                outlet_code = outlet_code[0]
+            elif outlet_code:
+                outlet_code = {"$in": list(outlet_code)}
             else:
-                outlet_code = str(explicit_outlet).strip()
-        else:
-            raw_outlet = data.get("auth-outlet-code")
-            header_outlet = (
-                (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
-                or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
-                or request.META.get("HTTP_OUTLET_CODE")
-                or raw_outlet
-            )
-            if isinstance(header_outlet, (list, tuple)):
-                header_val = header_outlet[0] if len(header_outlet) == 1 else list(header_outlet)
-            else:
-                header_val = str(header_outlet).strip() if header_outlet else None
-
-            if header_val in ["OLET001", "OLET002"]:
-                outlet_code = header_val
-            elif isinstance(header_val, list) and any(o in ["OLET001", "OLET002"] for o in header_val):
-                pharmacy_outlets = [o for o in header_val if o in ["OLET001", "OLET002"]]
-                outlet_code = pharmacy_outlets[0] if len(pharmacy_outlets) == 1 else {"$in": pharmacy_outlets}
-            else:
-                outlet_code = "OLET001"
+                outlet_code = None
 
         search_query = (
             request.GET.get("search")
@@ -1815,7 +1768,17 @@ def collect_oppharmacy_payment(request):
         payment_details = data.get("payment_details")
 
         shiftno = data.get("shiftno")
-        cashier_id = data.get("auth-user-id")
+        cashier_id = (
+            data.get("auth-user-id")
+            or request.META.get("HTTP_AUTH_USER_ID")
+            or request.headers.get("User-Id")
+        )
+        if not cashier_id and shiftno:
+            client_cc = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            s_doc = client_cc["HMS"]["hospital_cashcountershiftdetails"].find_one({"shiftno": str(shiftno).strip()})
+            if s_doc and s_doc.get("CashierID"):
+                cashier_id = s_doc.get("CashierID")
+
         counter_id = data.get("counter_id")
         if not counter_id and cashier_id:
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1849,13 +1812,32 @@ def collect_oppharmacy_payment(request):
             or "SHB001"
         )
 
-        outlet_code = (
-            data.get("auth-outlet-code")
+        raw_outlet = (
+            data.get("outlet_code")
+            or data.get("auth-outlet-code")
             or request.META.get("HTTP_AUTH_OUTLET_CODE")
             or request.META.get("HTTP_OUTLET_CODE")
             or request.headers.get("Outlet-Code")
-            or "OLET001"
+            or "OLET002"
         )
+
+        parsed_outlets = []
+        if isinstance(raw_outlet, (list, tuple)):
+            parsed_outlets = [str(x).strip() for x in raw_outlet if str(x).strip()]
+        elif isinstance(raw_outlet, str):
+            s = raw_outlet.strip()
+            if s.startswith("[") and s.endswith("]"):
+                import ast
+                try:
+                    p = ast.literal_eval(s)
+                    if isinstance(p, (list, tuple)):
+                        parsed_outlets = [str(x).strip() for x in p if str(x).strip()]
+                except Exception:
+                    pass
+            if not parsed_outlets and s and s.lower() != "all":
+                parsed_outlets = [s]
+
+        outlet_code = parsed_outlets[0] if parsed_outlets else "OLET002"
 
         # =====================================================
         # VALIDATIONS
@@ -1879,10 +1861,10 @@ def collect_oppharmacy_payment(request):
                 "error": "payment_details is required"
             })
 
-        if not hospital_code or not branch_code or not outlet_code:
+        if not hospital_code or not branch_code:
             return Response({
                 "success": False,
-                "error": "hospital/branch/outlet missing"
+                "error": "hospital/branch missing"
             })
 
         if not cashier_id:
@@ -1921,8 +1903,6 @@ def collect_oppharmacy_payment(request):
 
         hospital_code = str(hospital_code).strip()
         branch_code = str(branch_code).strip()
-        outlet_code = str(outlet_code).strip()
-
         cashier_id = str(cashier_id).strip()
 
         # =====================================================
@@ -1946,14 +1926,31 @@ def collect_oppharmacy_payment(request):
             "uhid": uhid,
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            "outlet_code": outlet_code,
             "$or": [
                 {"is_deleted": False},
                 {"is_deleted": {"$exists": False}}
             ]
         }
+        if len(parsed_outlets) == 1:
+            query["outlet_code"] = parsed_outlets[0]
+        elif len(parsed_outlets) > 1:
+            query["outlet_code"] = {"$in": parsed_outlets}
 
         bill = bill_collection.find_one(query)
+
+        if not bill:
+            # Fallback search without outlet_code constraint in case bill is in another authorized outlet
+            fallback_query = {
+                "Bill_id": Bill_id,
+                "uhid": uhid,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "$or": [
+                    {"is_deleted": False},
+                    {"is_deleted": {"$exists": False}}
+                ]
+            }
+            bill = bill_collection.find_one(fallback_query)
 
         if not bill:
             return Response({
@@ -1961,6 +1958,11 @@ def collect_oppharmacy_payment(request):
                 "error": "Bill not found",
                 "query": query
             })
+
+        resolved_outlet = (
+            bill.get("outlet_code")
+            or (parsed_outlets[0] if parsed_outlets else "OLET002")
+        )
 
         # =====================================================
         # CHECK ALREADY PAID
@@ -2016,7 +2018,7 @@ def collect_oppharmacy_payment(request):
                 {
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
-                    "outlet_code": outlet_code,
+                    "outlet_code": resolved_outlet,
                     "item_id": item_id,
                     "batch_number": str(med.get("batch_number", "")).strip()
                 },
@@ -2028,7 +2030,7 @@ def collect_oppharmacy_payment(request):
         # =====================================================
 
         update_result = bill_collection.update_one(
-            query,
+            {"_id": bill["_id"]},
             {
                 "$set": {
                     "billing_status": "Paid",
@@ -2082,7 +2084,7 @@ def collect_oppharmacy_payment(request):
 
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            "outlet_code": outlet_code,
+            "outlet_code": resolved_outlet,
 
             "created_by": cashier_id,
             "lastmodified_by": cashier_id,
