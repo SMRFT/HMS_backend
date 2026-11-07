@@ -1,14 +1,7 @@
 import inspect
 
 class DynamicPageMapping(dict):
-    """
-    Enhanced dictionary for PAGE_MAPPING that supports:
-    1. Single page code string: 'HMS-P-WR'
-    2. Multiple allowed page codes: ['HMS-P-WR', 'HMS-P-IB', 'HMS-P-OTM']
-       When an endpoint is shared across multiple modules, it dynamically
-       checks the caller's verified JWT permissions on the call stack and
-       returns the matching permission, allowing all authorized roles access!
-    """
+
     def get(self, key, default=""):
         val = super().get(key, default)
         if isinstance(val, (list, tuple)):
@@ -58,7 +51,21 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-credit-report/?(\?.*)?$': 'HMS-P-FOR',
-    r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+    r'^/_b_a_c_k_e_n_d/HMS/dashboard/stats/?(\?.*)?$': [
+        'HMS-API-DASH', 'HMS-P-WR', 'HMS-P-AIN', 'HMS-P-PGS', 'HMS-P-SIDEBAR', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    '/_b_a_c_k_e_n_d/HMS/dashboard/stats/': [
+        'HMS-API-DASH', 'HMS-P-WR', 'HMS-P-AIN', 'HMS-P-PGS', 'HMS-P-SIDEBAR', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': [
+        'HMS-P-SB', 'HMS-P-SIDEBAR', 'HMS-P-WR', 'HMS-P-AIN', 'HMS-P-PGS', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    r'^/_b_a_c_k_e_n_d/HMS/update-sidebar-mapping/?(\?.*)?$': [
+        'HMS-P-SIDEBAR', 'HMS-P-SB', 'HMS-R-SA', 'HMS-R-A'
+    ],
+    '/_b_a_c_k_e_n_d/HMS/update-sidebar-mapping/': [
+        'HMS-P-SIDEBAR', 'HMS-P-SB', 'HMS-R-SA', 'HMS-R-A'
+    ],
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
     
@@ -76,7 +83,9 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/update_admission_status/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/check-patient-billing-clearance/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/dosage_master/?(\?.*)?$': 'HMS-P-WR',
-    r'^/_b_a_c_k_e_n_d/HMS/get-all-outlets/?(\?.*)?$': 'HMS-P-WR',
+    r'^/_b_a_c_k_e_n_d/HMS/get-all-outlets/?(\?.*)?$': [
+        'HMS-P-WR', 'HMS-P-SIDEBAR', 'HMS-P-SB', 'HMS-P-AIN', 'HMS-P-PGS', 'HMS-R-SA', 'HMS-R-A'
+    ],
     r'^/_b_a_c_k_e_n_d/HMS/ward-bill-types/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/save_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
     r'^/_b_a_c_k_e_n_d/HMS/update_medicine_ward_request/?(\?.*)?$': 'HMS-P-WR',
@@ -104,24 +113,24 @@ PAGE_MAPPING = DynamicPageMapping({
 
     
     # ==================== DIET ====================
-    r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/get_diet_master/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/save_diet_master/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/save_diet_order/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/update_diet_status/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/save_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/get_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
-    r'^/_b_a_c_k_e_n_d/HMS/update_diet_extra_master/?(\?.*)?$': 'HMS-P-DO',
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_orders/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_all_diet_orders/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_master/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_master/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_order/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/update_diet_status/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/save_diet_extra_master/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_diet_extra_master/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/update_diet_extra_master/?(\?.*)?$': ['HMS-P-DO', 'HMS-P-WR'],
 
     # ==================== LAUNDRY ====================
-    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_request/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_requests/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/update_laundry_status/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/get_all_laundry_requests/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_items_master/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_item_master/?(\?.*)?$': 'HMS-P-LND',
-    r'^/_b_a_c_k_e_n_d/HMS/delete_laundry_item_master/?(\?.*)?$': 'HMS-P-LND',
+    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_request/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_requests/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/update_laundry_status/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_all_laundry_requests/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/get_laundry_items_master/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/save_laundry_item_master/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/delete_laundry_item_master/?(\?.*)?$': ['HMS-P-LND', 'HMS-P-WR'],
     
     # ==================== ROOMS ====================
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
@@ -146,9 +155,9 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/update-room-cleaned/?(\?.*)?$': 'HMS-P-RCLN',
     r'^/_b_a_c_k_e_n_d/HMS/book-room/?(\?.*)?$': 'HMS-P-BROOM',
 
-    r'^/_b_a_c_k_e_n_d/HMS/get_active_admission/?(\?.*)?$': 'HMS-P-GADM',
-    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/?(\?.*)?$': 'HMS-P-RSHFT',
-    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/.+/update/?(\?.*)?$': 'HMS-P-RSHFTD',
+    r'^/_b_a_c_k_e_n_d/HMS/get_active_admission/?(\?.*)?$': ['HMS-P-GADM', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/?(\?.*)?$': ['HMS-P-RSHFT', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/room-shifting/.+/update/?(\?.*)?$': ['HMS-P-RSHFTD', 'HMS-P-WR'],
 
     # ==================== ADMISSION ====================
     r'^/_b_a_c_k_e_n_d/HMS/autoipNumber/?(\?.*)?$': 'HMS-P-AIN',
@@ -524,7 +533,7 @@ PAGE_MAPPING = DynamicPageMapping({
     '/_b_a_c_k_e_n_d/HMS/list_diagnosis/': 'HMS-P-OTSS',
     r'^/_b_a_c_k_e_n_d/HMS/ot_staffs/?(\?.*)?$': 'HMS-P-OTSS',
 
-    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': 'HMS-P-IPKG',  
+    r'^/_b_a_c_k_e_n_d/HMS/get_medicine_packages/?(\?.*)?$': ['HMS-P-IPKG', 'HMS-P-WR'],  
     r'^/_b_a_c_k_e_n_d/HMS/mark_ot_medicine_received/?(\?.*)?$': 'HMS-P-OTMB',  
     r'^/_b_a_c_k_e_n_d/HMS/get_ot_medicine_ward_requests/?(\?.*)?$': 'HMS-P-OTMB',                
     r'^/_b_a_c_k_e_n_d/HMS/update_ot_medicine_ward_request/?(\?.*)?$': 'HMS-P-OTMBE',                
@@ -533,12 +542,13 @@ PAGE_MAPPING = DynamicPageMapping({
     '/_b_a_c_k_e_n_d/HMS/save_ot_medicine_ward_request/': 'HMS-P-OTMB', 
 
     #Implant Request:
-    r'^/_b_a_c_k_e_n_d/HMS/get_implant_items/?(\?.*)?$': 'HMS-P-OTIR',  
-    '/_b_a_c_k_e_n_d/HMS/save_implant_request/': 'HMS-P-OTIR',  
-    r'^/_b_a_c_k_e_n_d/HMS/get_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',             
-    r'^/_b_a_c_k_e_n_d/HMS/get_ward_implant_requests/?(\?.*)?$': 'HMS-P-OTIR',
-    r'^/_b_a_c_k_e_n_d/HMS/update_implant_request/?(\?.*)?$': 'HMS-P-OTIRE',                
-    r'^/_b_a_c_k_e_n_d/HMS/delete_implant_request/?(\?.*)?$': 'HMS-P-OTIRD',      
+    r'^/_b_a_c_k_e_n_d/HMS/get_implant_items/?(\?.*)?$': ['HMS-P-OTIR', 'HMS-P-WR'],  
+    '/_b_a_c_k_e_n_d/HMS/save_implant_request/': ['HMS-P-OTIR', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/save_implant_request/?(\?.*)?$': ['HMS-P-OTIR', 'HMS-P-WR'],  
+    r'^/_b_a_c_k_e_n_d/HMS/get_implant_requests/?(\?.*)?$': ['HMS-P-OTIR', 'HMS-P-WR'],             
+    r'^/_b_a_c_k_e_n_d/HMS/get_ward_implant_requests/?(\?.*)?$': ['HMS-P-OTIR', 'HMS-P-WR'],
+    r'^/_b_a_c_k_e_n_d/HMS/update_implant_request/?(\?.*)?$': ['HMS-P-OTIRE', 'HMS-P-WR'],                
+    r'^/_b_a_c_k_e_n_d/HMS/delete_implant_request/?(\?.*)?$': ['HMS-P-OTIRD', 'HMS-P-WR'],      
 
     
     
@@ -624,12 +634,19 @@ PAGE_MAPPING = DynamicPageMapping({
 
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',
-         r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PGS',               
-
-        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
+        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/?(\?.*)?$': [
+            'HMS-P-PGS', 'HMS-P-WR', 'HMS-P-PMC', 'HMS-P-OPEMRGM', 'HMS-P-IPEMR', 'HMS-P-IPPS', 'HMS-P-OPPS'
+        ],
+        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': [
+            'HMS-P-PGS', 'HMS-P-WR', 'HMS-P-PMC', 'HMS-P-OPEMRGM', 'HMS-P-IPEMR', 'HMS-P-IPPS', 'HMS-P-OPPS'
+        ],
+        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': [
+            'HMS-P-PGS', 'HMS-P-WR', 'HMS-P-PMC', 'HMS-P-OPEMRGM', 'HMS-P-IPEMR', 'HMS-P-IPPS', 'HMS-P-OPPS'
+        ],
 
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
-        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
+        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/?(\?.*)?$': ['HMS-P-PGPBT', 'HMS-P-WR', 'HMS-P-IPPS', 'HMS-P-OPPS'],
+        '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': ['HMS-P-PGPBT', 'HMS-P-WR', 'HMS-P-IPPS', 'HMS-P-OPPS'],
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
         '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
         
