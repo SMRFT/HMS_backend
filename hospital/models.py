@@ -1097,6 +1097,7 @@ class DischargeBilling(AuditModel):
     id_card_number        = models.CharField(max_length=100, blank=True, null=True)
     insurance_bill_number = models.CharField(max_length=100, blank=True, null=True)
     company_name          = models.CharField(max_length=255, blank=True, null=True)
+    payment_method        = models.CharField(max_length=50, blank=True, null=True, default="Cash")
 
     def save(self, *args, **kwargs):
         if self.discharge_id is None:

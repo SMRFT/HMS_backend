@@ -414,6 +414,7 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "insurance_bill_number", None) is not None: update_dict["insurance_bill_number"] = str(obj.insurance_bill_number)
             if getattr(obj, "company_name", None) is not None: update_dict["company_name"] = str(obj.company_name)
             if getattr(obj, "implant_amount", None) is not None: update_dict["implant_amount"] = _to_float(obj.implant_amount)
+            if getattr(obj, "payment_method", None) is not None: update_dict["payment_method"] = str(obj.payment_method)
 
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
@@ -458,6 +459,61 @@ def _normalise_decimals(obj):
 _employee_name_cache = {}
 _employee_designation_cache = {}
 _manager_cache = {}
+_dept_cache = {}
+
+def _resolve_department_name(dept_code):
+    if not dept_code:
+        return ""
+    code_str = str(dept_code).strip()
+    if not code_str:
+        return ""
+    if code_str in _dept_cache:
+        return _dept_cache[code_str]
+    try:
+        client, db = get_hms_db()
+        g_db = client["Global"]
+        dept = g_db["backend_diagnostics_Departments"].find_one({
+            "$or": [
+                {"department_code": code_str},
+                {"department_code": {"$regex": f"^{re.escape(code_str)}$", "$options": "i"}}
+            ]
+        })
+        if dept:
+            d_name = (dept.get("department_name") or dept.get("description") or "").strip()
+            if d_name:
+                _dept_cache[code_str] = d_name
+                return d_name
+        dept_h = db["hospital_department"].find_one({
+            "$or": [
+                {"department_id": code_str},
+                {"department_name": {"$regex": f"^{re.escape(code_str)}$", "$options": "i"}}
+            ]
+        })
+        if dept_h:
+            d_name = (dept_h.get("department_name") or "").strip()
+            if d_name:
+                _dept_cache[code_str] = d_name
+                return d_name
+    except Exception:
+        pass
+    return code_str
+
+def _resolve_doctor_and_department(doc_id):
+    if not doc_id:
+        return "", ""
+    doc_str = str(doc_id).strip()
+    try:
+        client, _ = get_hms_db()
+        g_db = client["Global"]
+        profile = g_db["backend_diagnostics_profile"].find_one({"employeeId": doc_str})
+        if profile:
+            doc_name = (profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or "").strip()
+            dept_code = profile.get("department") or ""
+            dept_name = _resolve_department_name(dept_code) if dept_code else ""
+            return doc_name, dept_name
+    except Exception:
+        pass
+    return _resolve_employee_name(doc_id), ""
 
 def _resolve_employee_name(emp_id):
     if not emp_id:
@@ -752,7 +808,23 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
                         current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
-            doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+            doc_name, dept_name = _resolve_doctor_and_department(doc_id)
+            if not doc_name:
+                doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+            if not dept_name and adm:
+                dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
+
+            disch_dt = adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None
+            disch_str = ""
+            if isinstance(disch_dt, _datetime):
+                disch_str = disch_dt.strftime("%d-%m-%Y")
+            elif isinstance(disch_dt, _date):
+                disch_str = disch_dt.strftime("%d-%m-%Y")
+            elif isinstance(disch_dt, str) and disch_dt:
+                disch_str = disch_dt[:10]
+
+            guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
+            guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
 
             raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
             company_name_p = ""
@@ -774,10 +846,16 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
                 "mobilePhone":    p.get("mobilePhone", ""),
                 "phone":          p.get("mobilePhone", ""),
                 "address":        full_address,
-                "guardian":       p.get("spouse_name", "") or p.get("emergency_contact", "") or "",
-                "doctor":         doc_name or doc_id,
+                "guardian":       f"{guardian_type_val} {guardian_val}".strip() if guardian_val and not str(guardian_val).startswith(("W/o", "S/o", "D/o", "C/o")) else guardian_val,
+                "guardian_type":  guardian_type_val,
+                "guardian_name":  guardian_val,
+                "spouse_name":    p.get("spouse_name", ""),
+                "father_name":    p.get("father_name", ""),
+                "doctor":         doc_name or p.get("doctorName") or doc_id,
                 "doctor_id":      doc_id,
+                "department":     dept_name,
                 "admission_date": adm_str,
+                "discharge_date": disch_str,
                 "room_no":        current_room,
                 "company":        doc.get("company_name") or company_name_p or str(raw_comp),
                 "company_code":   str(raw_comp),
@@ -823,6 +901,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "id_card_number":        doc.get("id_card_number") or "",
         "insurance_bill_number": doc.get("insurance_bill_number") or "",
         "company_name":          doc.get("company_name") or "",
+        "payment_method":        doc.get("payment_method") or "Cash",
         "created_by":             created_by_val,
         "created_by_name":        created_by_name,
         "created_by_designation": created_by_designation,
@@ -894,7 +973,23 @@ def _obj_to_dict(obj):
                         current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
-            doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+            doc_name, dept_name = _resolve_doctor_and_department(doc_id)
+            if not doc_name:
+                doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+            if not dept_name and adm:
+                dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
+
+            disch_dt = adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None
+            disch_str = ""
+            if isinstance(disch_dt, _datetime):
+                disch_str = disch_dt.strftime("%d-%m-%Y")
+            elif isinstance(disch_dt, _date):
+                disch_str = disch_dt.strftime("%d-%m-%Y")
+            elif isinstance(disch_dt, str) and disch_dt:
+                disch_str = disch_dt[:10]
+
+            guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
+            guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
 
             raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
             company_name_p = ""
@@ -916,10 +1011,16 @@ def _obj_to_dict(obj):
                 "mobilePhone":    p.get("mobilePhone", ""),
                 "phone":          p.get("mobilePhone", ""),
                 "address":        full_address,
-                "guardian":       p.get("spouse_name", "") or p.get("emergency_contact", "") or "",
-                "doctor":         doc_name or doc_id,
+                "guardian":       f"{guardian_type_val} {guardian_val}".strip() if guardian_val and not str(guardian_val).startswith(("W/o", "S/o", "D/o", "C/o")) else guardian_val,
+                "guardian_type":  guardian_type_val,
+                "guardian_name":  guardian_val,
+                "spouse_name":    p.get("spouse_name", ""),
+                "father_name":    p.get("father_name", ""),
+                "doctor":         doc_name or p.get("doctorName") or doc_id,
                 "doctor_id":      doc_id,
+                "department":     dept_name,
                 "admission_date": adm_str,
+                "discharge_date": disch_str,
                 "room_no":        current_room,
                 "company":        getattr(obj, "company_name", None) or company_name_p or str(raw_comp),
                 "company_code":   str(raw_comp),
@@ -964,6 +1065,7 @@ def _obj_to_dict(obj):
         "id_card_number":        getattr(obj, "id_card_number", "") or "",
         "insurance_bill_number": getattr(obj, "insurance_bill_number", "") or "",
         "company_name":          getattr(obj, "company_name", "") or "",
+        "payment_method":        getattr(obj, "payment_method", "Cash") or "Cash",
         "created_by":             created_by_val,
         "created_by_name":        created_by_name,
         "created_by_designation": created_by_designation,
@@ -1032,6 +1134,7 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.net_amount       = flt("net_amount")
     obj.remarks          = s("remarks")
     obj.shiftno          = s("shiftno")
+    obj.payment_method   = s("payment_method", "Cash")
 
     # ── Insurance Fields ─────────────────────────────────────────────────────
     if "is_insurance_bill" in data:
@@ -1529,29 +1632,31 @@ def search_discharge_patient(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Verify patient discharge state: if already discharged, disallow billing again
-    ward_status = str(admission_doc.get("ward_status") or "").strip()
-    adm_status = str(admission_doc.get("status") or "").strip()
-    is_discharged = bool(admission_doc.get("is_discharged", False))
+    for_print = request.GET.get("for_print") in ["true", "1", "True"]
+    if not for_print:
+        # Verify patient discharge state: if already discharged, disallow billing again
+        ward_status = str(admission_doc.get("ward_status") or "").strip()
+        adm_status = str(admission_doc.get("status") or "").strip()
+        is_discharged = bool(admission_doc.get("is_discharged", False))
 
-    if ward_status.lower() in ["discharged", "already discharged"] or adm_status.lower() == "discharged" or is_discharged is True:
-        return Response(
-            {"error": "Already Discharged", "message": "Patient is already discharged"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        if ward_status.lower() in ["discharged", "already discharged"] or adm_status.lower() == "discharged" or is_discharged is True:
+            return Response(
+                {"error": "Already Discharged", "message": "Patient is already discharged"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-    # Check if an active Billed DischargeBilling record exists for this IP number (indexed fast query)
-    ip_num_str = str(admission_doc.get("ipNumber") or "").strip()
-    existing_billed = db["hospital_dischargebilling"].find_one({
-        "ip_number": ip_num_str,
-        "status": "Billed",
-        "is_cancelled": {"$ne": True}
-    })
-    if existing_billed:
-        return Response(
-            {"error": "Already Discharged", "message": "Discharge bill already generated for this admission"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        # Check if an active Billed DischargeBilling record exists for this IP number (indexed fast query)
+        ip_num_str = str(admission_doc.get("ipNumber") or "").strip()
+        existing_billed = db["hospital_dischargebilling"].find_one({
+            "ip_number": ip_num_str,
+            "status": "Billed",
+            "is_cancelled": {"$ne": True}
+        })
+        if existing_billed:
+            return Response(
+                {"error": "Already Discharged", "message": "Discharge bill already generated for this admission"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     adm_dt = admission_doc.get("admissionDateTime")
     if isinstance(adm_dt, _datetime):
@@ -1615,7 +1720,23 @@ def search_discharge_patient(request):
     full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
 
     doc_id = str(admission_doc.get("admittingDoctor") or "")
-    doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+    doc_name, dept_name = _resolve_doctor_and_department(doc_id)
+    if not doc_name:
+        doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+    if not dept_name:
+        dept_name = _resolve_department_name(admission_doc.get("department") or admission_doc.get("admittingDepartment") or "")
+
+    disch_dt = admission_doc.get("dischargeDateTime") or admission_doc.get("discharge_date")
+    disch_str = ""
+    if isinstance(disch_dt, _datetime):
+        disch_str = disch_dt.strftime("%d-%m-%Y")
+    elif isinstance(disch_dt, _date):
+        disch_str = disch_dt.strftime("%d-%m-%Y")
+    elif isinstance(disch_dt, str) and disch_dt:
+        disch_str = disch_dt[:10]
+
+    guardian_val = patient_doc.get("guardian_name") or patient_doc.get("spouse_name") or patient_doc.get("father_name") or patient_doc.get("emergency_contact") or ""
+    guardian_type_val = patient_doc.get("guardian_type") or ("W/o" if str(patient_doc.get("gender", "")).lower() == "female" and patient_doc.get("spouse_name") else "S/o")
 
     # Resolve full insurance company name
     raw_company = admission_doc.get("company_code") or patient_doc.get("company_code") or admission_doc.get("insurance_company") or patient_doc.get("company_name") or ""
@@ -1644,6 +1765,7 @@ def search_discharge_patient(request):
         "ip_number":            admission_doc.get("ipNumber"),
         "ipNumber":             admission_doc.get("ipNumber"),
         "admission_date":       adm_str,
+        "discharge_date":       disch_str,
         "patient_type":         admission_doc.get("customer_type") or patient_doc.get("customer_type") or admission_doc.get("patient_type", ""),
         "customer_type":        admission_doc.get("customer_type") or patient_doc.get("customer_type") or "",
         "insurance_company":    admission_doc.get("insurance_company") or "",
@@ -1654,10 +1776,15 @@ def search_discharge_patient(request):
         "room_category":        current_room_cat,
         "total_days":           total_days,
         "advance_amount":       total_advance,
-        "doctor":               doc_name or doc_id,
+        "doctor":               doc_name or patient_doc.get("doctorName") or doc_id,
         "doctor_id":            doc_id,
+        "department":           dept_name,
         "address":              full_address,
-        "guardian":             patient_doc.get("spouse_name") or patient_doc.get("emergency_contact") or "",
+        "guardian":             f"{guardian_type_val} {guardian_val}".strip() if guardian_val and not str(guardian_val).startswith(("W/o", "S/o", "D/o", "C/o")) else guardian_val,
+        "guardian_type":        guardian_type_val,
+        "guardian_name":        guardian_val,
+        "spouse_name":          patient_doc.get("spouse_name") or "",
+        "father_name":          patient_doc.get("father_name") or "",
         "ward_status":          ward_status,
         "is_ready_for_billing": ward_status == "Sent for billing",
     }
@@ -2680,6 +2807,8 @@ def convert_estimate_to_bill(request, pk):
     estimate.bill_no   = generate_bill_number()
     estimate.bill_date = timezone.now().date()   # USE_TZ-safe
     estimate.shiftno   = request.data.get("shiftno")
+    if request.data.get("payment_method"):
+        estimate.payment_method = str(request.data.get("payment_method")).strip()
     if getattr(estimate, "is_insurance_bill", False) and not getattr(estimate, "insurance_bill_number", None):
         ins_name = getattr(estimate, "company_name", None) or "INS"
         estimate.insurance_bill_number = generate_insurance_bill_number(ins_name)
