@@ -10,7 +10,14 @@ class DynamicPageMapping(dict):
        returns the matching permission, allowing all authorized roles access!
     """
     def get(self, key, default=""):
-        val = super().get(key, default)
+        val = super().get(key, None)
+        if val is None and isinstance(key, str) and "?" in key:
+            clean_key = key.split("?")[0]
+            val = super().get(clean_key, None)
+            if val is None and clean_key.rstrip("/"):
+                val = super().get(clean_key.rstrip("/") + "/", None)
+        if val is None:
+            val = default
         if isinstance(val, (list, tuple)):
             frame = inspect.currentframe().f_back
             while frame:
@@ -26,7 +33,17 @@ class DynamicPageMapping(dict):
         return val
 
     def __getitem__(self, key):
-        val = super().__getitem__(key)
+        try:
+            val = super().__getitem__(key)
+        except KeyError:
+            if isinstance(key, str) and "?" in key:
+                clean_key = key.split("?")[0]
+                try:
+                    val = super().__getitem__(clean_key)
+                except KeyError:
+                    val = super().__getitem__(clean_key.rstrip("/") + "/")
+            else:
+                raise
         if isinstance(val, (list, tuple)):
             frame = inspect.currentframe().f_back
             while frame:
@@ -630,6 +647,7 @@ PAGE_MAPPING = DynamicPageMapping({
 
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
+        r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/?(\?.*)?$': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
         '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
         
@@ -644,6 +662,7 @@ PAGE_MAPPING = DynamicPageMapping({
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
          r'^/_b_a_c_k_e_n_d/HMS/searchby_ip/?(\?.*)?$': 'HMS-P-PSIP',
          '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': 'HMS-P-CCIPAB',
+         r'^/_b_a_c_k_e_n_d/HMS/ipadvance_bills/?(\?.*)?$': 'HMS-P-CCIPAB',
           r'/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/?(\?.*)?$': 'HMS-P-PHVSB',
           r'/_b_a_c_k_e_n_d/HMS/PharmacyBillanalysis/?(\?.*)?$': 'HMS-P-PHVSB',
 
@@ -664,25 +683,42 @@ PAGE_MAPPING = DynamicPageMapping({
 
 
         '/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/': 'HMS-P-CCOPPB',
+        r'^/_b_a_c_k_e_n_d/HMS/OPPharmacy_pending_bills/?(\?.*)?$': 'HMS-P-CCOPPB',
         '/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/': 'HMS-P-PCOPP',
+        r'^/_b_a_c_k_e_n_d/HMS/collect_oppharmacy_payment/?(\?.*)?$': 'HMS-P-PCOPP',
         '/_b_a_c_k_e_n_d/HMS/get_active_shift/'         : 'HMS-P-CCGAS',
+        r'^/_b_a_c_k_e_n_d/HMS/get_active_shift/?(\?.*)?$' : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
+        r'^/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/?(\?.*)?$': 'HMS-P-CCSTSD',
 
         # Central Cash Counter
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/cash_counter/?(\?.*)?$': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_manager/': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/cash_counter_manager/?(\?.*)?$': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/get_employee_counter_assignments/': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/get_employee_counter_assignments/?(\?.*)?$': 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/assign_employee_cash_counter/': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/assign_employee_cash_counter/?(\?.*)?$': 'HMS-P-CCC',
 
         '/_b_a_c_k_e_n_d/HMS/get_active_account_heads/': 'HMS-P-CCGAH',
+        r'^/_b_a_c_k_e_n_d/HMS/get_active_account_heads/?(\?.*)?$': 'HMS-P-CCGAH',
         '/_b_a_c_k_e_n_d/HMS/post_receipt_payments/': 'HMS-P-CCPRP',
+        r'^/_b_a_c_k_e_n_d/HMS/post_receipt_payments/?(\?.*)?$': 'HMS-P-CCPRP',
         '/_b_a_c_k_e_n_d/HMS/get_receipt_payments/': 'HMS-P-CCGRP',
+        r'^/_b_a_c_k_e_n_d/HMS/get_receipt_payments/?(\?.*)?$': 'HMS-P-CCGRP',
         '/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/': 'HMS-P-CCGMPB',
-        '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',        
+        r'^/_b_a_c_k_e_n_d/HMS/get_mainblock_pendingbills/?(\?.*)?$': 'HMS-P-CCGMPB',
+        '/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/': 'HMS-P-CCUPB',
+        r'^/_b_a_c_k_e_n_d/HMS/update_mainblock_pendingbills/?(\?.*)?$': 'HMS-P-CCUPB',
         '/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/' : 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/shift_basis_accounts_report/?(\?.*)?$' : 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/bill_wise_report/' : 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/bill_wise_report/?(\?.*)?$' : 'HMS-P-CCC',
         '/_b_a_c_k_e_n_d/HMS/get_return_bills/' : 'HMS-P-CCGRB',
+        r'^/_b_a_c_k_e_n_d/HMS/get_return_bills/?(\?.*)?$' : 'HMS-P-CCGRB',
         '/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/' :'HMS-P-CCCRB',
+        r'^/_b_a_c_k_e_n_d/HMS/collectpayment_return_bills/?(\?.*)?$' :'HMS-P-CCCRB',
 
         # Accounts Reports Dashboard
         r'^/_b_a_c_k_e_n_d/HMS/discharge-bills-report/?(\?.*)?$': 'HMS-P-CCC',

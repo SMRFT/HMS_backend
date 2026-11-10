@@ -1033,7 +1033,6 @@ def get_pharmacy_BillType(request):
     db = client["HMS"]
     stock_collection = db["hospital_billtype"]
 
- 
     hospital_code = request.data.get("auth-hospital-code") 
     branch_code   = request.data.get("auth-branch-code") 
     outlet_code   = request.data.get("auth-outlet-code") 
@@ -1770,8 +1769,8 @@ def collect_oppharmacy_payment(request):
         shiftno = data.get("shiftno")
         cashier_id = (
             data.get("auth-user-id")
-            or request.META.get("HTTP_AUTH_USER_ID")
             or request.headers.get("User-Id")
+            or request.META.get("HTTP_AUTH_USER_ID")
         )
         if not cashier_id and shiftno:
             client_cc = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1798,27 +1797,23 @@ def collect_oppharmacy_payment(request):
 
         hospital_code = (
             data.get("auth-hospital-code")
-            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-            or request.META.get("HTTP_HOSPITAL_CODE")
             or request.headers.get("Hospital-Code")
+            or request.META.get("HTTP_HOSPITAL_CODE")
             or "SH001"
         )
 
         branch_code = (
             data.get("auth-branch-code")
-            or request.META.get("HTTP_AUTH_BRANCH_CODE")
-            or request.META.get("HTTP_BRANCH_CODE")
             or request.headers.get("Branch-Code")
+            or request.META.get("HTTP_BRANCH_CODE")
             or "SHB001"
         )
 
         raw_outlet = (
             data.get("outlet_code")
             or data.get("auth-outlet-code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or request.META.get("HTTP_OUTLET_CODE")
             or request.headers.get("Outlet-Code")
-            or "OLET002"
+            or request.META.get("HTTP_OUTLET_CODE")
         )
 
         parsed_outlets = []
@@ -1992,10 +1987,11 @@ def collect_oppharmacy_payment(request):
                 })
 
         method_str = str(payment_details.get("method", "")).strip().lower()
-        if method_str == "cash":
-            bill_payment_mode = "Cash"
-        else:
+        # Any payment collected at cash counter (Cash, Card, Multiple, Cheque, UPI) is a settled counter collection
+        if method_str == "credit":
             bill_payment_mode = "Credit"
+        else:
+            bill_payment_mode = "Cash"
 
         # =====================================================
         # UPDATE STOCK
@@ -2378,11 +2374,45 @@ def parse_medicine_particulars(data):
 @permission_classes([HasRoleAndDataPermission])
 def pharmacy_medicinechart(request):
     try:
-        data = request.data
+        data = request.data if isinstance(getattr(request, "data", None), dict) else {}
 
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
         outlet_code   = data.get("auth-outlet-code")
+
+        # Determine client's explicitly requested / active outlet (from payload, query param, or header)
+        requested_outlet = (
+            data.get("outlet_code")
+            or request.GET.get("outlet_code")
+            or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+            or request.META.get("HTTP_OUTLET_CODE")
+            or request.META.get("HTTP_AUTH_OUTLET_CODE")
+        )
+
+        target_outlet = None
+        if requested_outlet and str(requested_outlet).strip().upper() not in ["ALL", "", "NONE", "UNDEFINED"]:
+            target_outlet = str(requested_outlet).strip()
+        elif outlet_code:
+            if isinstance(outlet_code, (list, tuple)):
+                target_outlet = {"$in": list(outlet_code)}
+            else:
+                target_outlet = outlet_code
+
+        # If user specified a specific target outlet, ensure they have access if outlet_code list is restricted
+        if target_outlet and isinstance(target_outlet, str):
+            if isinstance(outlet_code, (list, tuple)) and outlet_code and target_outlet not in outlet_code:
+                return Response(
+                    {
+                        "status": "success",
+                        "hospital_code": hospital_code,
+                        "branch_code": branch_code,
+                        "outlet_code": target_outlet,
+                        "count": 0,
+                        "data": []
+                    },
+                    status=status.HTTP_200_OK
+                )
 
         # =========================================
         # 1. GET BILL DATA (Using PyMongo for speed & reliability)
@@ -2393,11 +2423,8 @@ def pharmacy_medicinechart(request):
             "billing_status": {"$in": ["Pending", "Processing"]},
             "is_ward_request": True
         }
-        if outlet_code:
-            if isinstance(outlet_code, (list, tuple)):
-                base_mongo_filter["outlet_code"] = {"$in": list(outlet_code)}
-            else:
-                base_mongo_filter["outlet_code"] = outlet_code
+        if target_outlet:
+            base_mongo_filter["outlet_code"] = target_outlet
 
 
         raw_bills = list(pharmacy_billing_collection.find(
@@ -2421,7 +2448,7 @@ def pharmacy_medicinechart(request):
                     "status": "success",
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
-                    "outlet_code": outlet_code,
+                    "outlet_code": target_outlet or outlet_code,
                     "count": 0,
                     "data": []
                 },
@@ -2617,7 +2644,7 @@ def pharmacy_medicinechart(request):
                 print("profile_collection created_by bulk error:", e)
 
         # 5. Bulk fetch Pharmacy items & stock via common optimized function in dbcollection.py
-        stock_outlet = outlet_code
+        stock_outlet = target_outlet or outlet_code
         if isinstance(stock_outlet, dict) and "$in" in stock_outlet:
             stock_outlet = stock_outlet["$in"][0] if stock_outlet["$in"] else None
         elif isinstance(stock_outlet, (list, tuple)):
@@ -2749,7 +2776,7 @@ def pharmacy_medicinechart(request):
                 "status": "success",
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
-                "outlet_code": outlet_code,
+                "outlet_code": target_outlet or outlet_code,
                 "count": len(final_data),
                 "data": final_data
             },
