@@ -66,6 +66,7 @@ from .Views import (
     report_config_views,
     tumourboard,
 )
+from .auth import permissions_map
 from .Views.AccountsReport import (
     shift_basis_report,
     cash_counter_manager,
@@ -233,7 +234,8 @@ urlpatterns = [
     path("update_mainblock_pendingbills/", cashcounter.update_mainblock_pendingbills),
     path("get_registration_bills/", cashcounter.get_registration_bills),
     path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
-     path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
+    path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
+
 
     # Medicine Package Master
     path('medicine-packages/', medicine_package.get_medicine_packages, name='get_medicine_packages'),
@@ -431,6 +433,9 @@ urlpatterns = [
     path("remove_individual_radiology/", NursingStation.remove_individual_test_from_radiology_ward_request, name="remove_individual_radiology"),
     path("dosage_master/", NursingStation.dosage_master_view, name="dosage_master"),
     path("ward-bill-types/", NursingStation.get_ward_bill_types, name="get_ward_bill_types"),
+    path("get_nursing_station_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="get_nursing_station_pharmacy_stock"),
+    path("nursing_station_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="nursing_station_pharmacy_stock"),
+    path("get_nursing_pharmacy_stock/", NursingStation.get_nursing_station_pharmacy_stock, name="get_nursing_pharmacy_stock"),
     
     # Package Master
     path('investigation-prices/', package_crud.get_bill_types, name='get_bill_types'),

@@ -326,7 +326,7 @@ def get_admission_list(request):
                         "$or": [{"inpatient_number": {"$in": active_ips}}, {"ipNumber": {"$in": active_ips}}],
                         "is_ward_request": True,
                         "is_deleted": {"$ne": True},
-                        "billing_status": {"$in": ["Pending", "Draft"]}
+                        "billing_status": {"$in": ["Pending", "Draft", "Processing"]}
                     },
                     {"inpatient_number": 1, "ipNumber": 1, "_id": 0}
                 ))
@@ -1502,15 +1502,16 @@ def get_medicine_ward_requests(request):
             return Response({"success": False, "error": "UHID is required"}, status=400)
 
         # Build query
-
         query_params = {"uhid": uhid, "is_ward_request": True}
 
-        if ip_number:
-
-            query_params["inpatient_number"] = ip_number
+        if ip_number and str(ip_number).strip() not in ["-", "null", "undefined", ""]:
+            clean_ip = str(ip_number).strip()
+            query_params["$or"] = [
+                {"inpatient_number": clean_ip},
+                {"ipNumber": clean_ip},
+            ]
 
         if outlet_code:
-
             query_params["outlet_code"] = outlet_code
 
         # Fetch billing records using PyMongo for maximum speed & compound index support
@@ -1599,6 +1600,12 @@ def get_medicine_ward_requests(request):
 
             import json
 
+            raw_st = str(doc.get("billing_status") or doc.get("status") or "Pending").strip()
+            if doc.get("is_dispatched") and raw_st in ["Pending", "Processing", "Draft", ""]:
+                raw_st = "Billed"
+            elif raw_st in ["Completed", "Paid"]:
+                raw_st = "Billed"
+
             items = doc.get("medicine_particulars", [])
 
             if isinstance(items, str):
@@ -1666,6 +1673,8 @@ def get_medicine_ward_requests(request):
                     "is_deleted": itm.get("is_deleted", False),
 
                     "edit_history": itm.get("edit_history", []),
+
+                    "status": itm.get("status") or raw_st,
 
                 })
 
@@ -1745,7 +1754,7 @@ def get_medicine_ward_requests(request):
 
                 "reqTime": _req_time,
 
-                "status": doc.get("billing_status", "Pending"),
+                "status": raw_st,
 
                 "doctor": resolved_doctor_name,
 
@@ -3142,7 +3151,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
             {
                 "is_ward_request": True,
                 "is_deleted": {"$ne": True},
-                "billing_status": {"$in": ["Pending", "Draft"]}
+                "billing_status": {"$in": ["Pending", "Draft", "Processing"]}
             }
         ]
     }
@@ -5049,3 +5058,281 @@ def get_ward_bill_types(request):
 
             client.close()
 
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def get_nursing_station_pharmacy_stock(request):
+    """
+    Dedicated endpoint for Nursing Station / Ward Management to fetch and search pharmacy medicine stock.
+    Decoupled from cashier/nurse outlet data restrictions so wards (e.g. MAIN BLOCK OLET003)
+    can freely view, search, and request medicine stock from pharmacy stock outlets (e.g. IP PHARMACY OLET001).
+
+    Query parameters / body payload:
+    - search / q: Search string (item_name, generic, brand, or item_id)
+    - outlet_code: Target pharmacy stock outlet (default: 'OLET001'). If a non-stock ward outlet
+                   (such as OLET003 or OLET004) is passed, automatically resolves to 'OLET001'.
+                   Can also pass 'ALL' to search across all active pharmacy stock outlets.
+    - include_zero_stock: If true, include items with 0 available stock (default: false).
+    - limit: Max records to return (default: 80 for search, 100 for empty search).
+    """
+    client = None
+    try:
+        data = request.data if isinstance(getattr(request, "data", None), dict) else {}
+
+        # Scoping
+        hospital_code = (
+            request.GET.get("hospital_code")
+            or request.headers.get("Hospital-Code")
+            or data.get("auth-hospital-code")
+            or "SH001"
+        )
+        branch_code = (
+            request.GET.get("branch_code")
+            or request.headers.get("Branch-Code")
+            or data.get("auth-branch-code")
+            or "SHB001"
+        )
+
+        # Target pharmacy outlet resolution
+        raw_outlet = (
+            request.GET.get("outlet_code")
+            or request.GET.get("outlet")
+            or data.get("outlet_code")
+            or ""
+        ).strip()
+
+        # Non-stock ward/station outlets
+        non_stock_outlets = {"OLET003", "OLET004", "OLET005"}
+        if not raw_outlet or raw_outlet.upper() in non_stock_outlets:
+            target_outlet = "OLET001"
+        elif raw_outlet.upper() == "ALL":
+            target_outlet = None  # Match all active stock outlets
+        else:
+            target_outlet = raw_outlet
+
+        search_query = (
+            request.GET.get("search")
+            or request.GET.get("q")
+            or data.get("search")
+            or ""
+        ).strip()
+
+        include_zero = str(
+            request.GET.get("include_zero_stock")
+            or data.get("include_zero_stock")
+            or "false"
+        ).lower() in ("true", "1", "yes")
+
+        limit_val = int(request.GET.get("limit") or data.get("limit") or (80 if search_query else 100))
+
+        mongo_uri = os.getenv("GLOBAL_DB_HOST")
+        client = MongoClient(mongo_uri)
+        db = client["HMS"]
+
+        def to_num(val, default=0.0):
+            if val is None:
+                return default
+            if hasattr(val, "to_decimal"):
+                return float(val.to_decimal())
+            try:
+                return float(val)
+            except Exception:
+                return default
+
+        def format_date(dt):
+            if not dt:
+                return "-"
+            if isinstance(dt, (datetime, date)):
+                return dt.strftime("%Y-%m-%d")
+            s = str(dt).strip()
+            if "T" in s:
+                return s.split("T")[0]
+            return s[:10]
+
+        matching_item_ids = None
+
+        if search_query:
+            escaped = re.escape(search_query)
+            item_match = {
+                "is_active": True,
+                "is_blocked": False
+            }
+            if hospital_code and hospital_code != "system":
+                item_match["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                item_match["branch_code"] = branch_code
+
+            regex_conditions = [
+                {"item_name": {"$regex": f"^{escaped}", "$options": "i"}},
+                {"item_name": {"$regex": f"(?:^|\\s){escaped}", "$options": "i"}},
+                {"item_name": {"$regex": escaped, "$options": "i"}},
+                {"brand_name": {"$regex": escaped, "$options": "i"}},
+                {"chemical_composition": {"$regex": escaped, "$options": "i"}}
+            ]
+            if search_query.isdigit():
+                regex_conditions.append({"item_id": int(search_query)})
+
+            item_match["$or"] = regex_conditions
+
+            found_items = list(db["hospital_pharmacyitem"].find(
+                item_match,
+                {"item_id": 1, "_id": 0}
+            ).limit(150))
+
+            if not found_items:
+                return Response({
+                    "success": True,
+                    "count": 0,
+                    "target_outlet": target_outlet or "ALL",
+                    "data": []
+                }, status=200)
+
+            matching_item_ids = [it["item_id"] for it in found_items if "item_id" in it]
+
+        # Build Stock match stage
+        stock_match = {}
+        if hospital_code and hospital_code != "system":
+            stock_match["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            stock_match["branch_code"] = branch_code
+
+        if target_outlet:
+            stock_match["outlet_code"] = target_outlet
+        else:
+            stock_match["outlet_code"] = {"$in": ["OLET001", "OLET002"]}
+
+        if matching_item_ids is not None:
+            stock_match["item_id"] = {"$in": matching_item_ids}
+
+        if not include_zero:
+            stock_match["total_stock"] = {"$gt": 0}
+
+        pipeline = [
+            {"$match": stock_match},
+            {
+                "$lookup": {
+                    "from": "hospital_pharmacyitem",
+                    "let": {
+                        "item_id": "$item_id",
+                        "branch_code": "$branch_code",
+                        "hospital_code": "$hospital_code"
+                    },
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$item_id", "$$item_id"]},
+                                        {"$eq": ["$branch_code", "$$branch_code"]},
+                                        {"$eq": ["$hospital_code", "$$hospital_code"]}
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "as": "item_details"
+                }
+            },
+            {
+                "$unwind": {
+                    "path": "$item_details",
+                    "preserveNullAndEmptyArrays": False
+                }
+            },
+            {
+                "$match": {
+                    "item_details.is_active": True,
+                    "item_details.is_blocked": False
+                }
+            },
+            {
+                "$addFields": {
+                    "available_stock": {
+                        "$add": [
+                            {
+                                "$subtract": [
+                                    {
+                                        "$subtract": [
+                                            {
+                                                "$subtract": [
+                                                    {
+                                                        "$subtract": [
+                                                            {"$ifNull": ["$total_stock", 0]},
+                                                            {"$ifNull": ["$sold_quantity", 0]}
+                                                        ]
+                                                    },
+                                                    {"$ifNull": ["$transferred_out_quantity", 0]}
+                                                ]
+                                            },
+                                            {"$ifNull": ["$grn_return_quantity", 0]}
+                                        ]
+                                    },
+                                    {"$ifNull": ["$blocked_quantity", 0]}
+                                ]
+                            },
+                            {"$ifNull": ["$sales_return_quantity", 0]}
+                        ]
+                    },
+                    "reorder_level": {"$ifNull": ["$item_details.reorder_level", 0]}
+                }
+            }
+        ]
+
+        if not include_zero:
+            pipeline.append({"$match": {"available_stock": {"$gt": 0}}})
+
+        pipeline.append({"$sort": {"item_details.item_name": 1, "expiry_date": 1}})
+        pipeline.append({"$limit": limit_val})
+
+        raw_records = list(db["hospital_pharmacystock"].aggregate(pipeline))
+
+        results = []
+        for r in raw_records:
+            item_info = r.get("item_details", {})
+            outlet = r.get("outlet_code", "OLET001")
+
+            shelf = item_info.get("IP_shelf_no", "") if outlet == "OLET001" else item_info.get("OP_shelf_no", item_info.get("G_shelf_no", ""))
+            rack = item_info.get("IP_rack_no", "") if outlet == "OLET001" else item_info.get("OP_rack_no", item_info.get("G_rack_no", ""))
+
+            mrp_val = to_num(r.get("mrp") or r.get("Selling_Price"))
+            selling_price_val = to_num(r.get("Selling_Price") or r.get("mrp"))
+            avail_stock = to_num(r.get("available_stock"))
+            total_stock_val = to_num(r.get("total_stock"))
+            reorder_val = to_num(r.get("reorder_level"))
+
+            results.append({
+                "id": f"{r.get('item_id')}_{r.get('batch_number')}",
+                "stock_id": r.get("stock_id") or r.get("id"),
+                "item_id": r.get("item_id"),
+                "item_name": item_info.get("item_name") or f"Item {r.get('item_id')}",
+                "name": item_info.get("item_name") or f"Item {r.get('item_id')}",
+                "batch_number": r.get("batch_number") or "",
+                "expiry_date": format_date(r.get("expiry_date")),
+                "mrp": mrp_val,
+                "Selling_Price": selling_price_val,
+                "price": selling_price_val or mrp_val,
+                "total_stock": total_stock_val,
+                "available_stock": avail_stock,
+                "outlet_code": outlet,
+                "shelf_no": shelf,
+                "rack_no": rack,
+                "category": item_info.get("category"),
+                "reorder_level": reorder_val,
+                "is_low_stock": avail_stock <= reorder_val,
+                "high_risk": bool(item_info.get("high_risk", False))
+            })
+
+        return Response({
+            "success": True,
+            "count": len(results),
+            "target_outlet": target_outlet or "ALL",
+            "data": results
+        }, status=200)
+
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        return Response({"success": False, "error": str(e)}, status=500)
+    finally:
+        if client:
+            client.close()
+

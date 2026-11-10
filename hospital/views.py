@@ -243,15 +243,15 @@ def patientCreateView(request):
             doctor_id = request.data.get('employeeId', None)
 
             # Determine payment status, timing and method
-            payment_status = request.data.get('payment_status')
             payment_timing = request.data.get('payment_timing', 'pay_now')
+            raw_payment_status = request.data.get('payment_status')
             cust_type = str(request.data.get('customer_type') or request.data.get('customerType') or getattr(patient, 'customer_type', '')).strip().lower()
 
-            if not payment_status:
-                if payment_timing == 'pay_later':
-                    payment_status = 'Pending'
-                else:
-                    payment_status = 'Paid' if (total_fees and total_fees > 0) else 'Pending'
+            if payment_timing == 'pay_later':
+                payment_status = 'Pending'
+            else:
+                # Pay Now / Cash at counter registration -> Cash Pending
+                payment_status = 'Pending' if (not raw_payment_status or raw_payment_status in ['Paid', 'Billing', 'Pending']) else raw_payment_status
 
             if not payment_method:
                 if payment_status == 'Pending':
@@ -639,11 +639,11 @@ def update_bill_status(request, bill_number):
         payment_status = request.data.get('payment_status')
 
         if payment_status:
-            if payment_status not in ['Paid', 'Pending', 'Unpaid']:
+            if payment_status not in ['Paid', 'Pending', 'Unpaid', 'Billing', 'Pending']:
                 return Response({"error": "Invalid payment status"}, status=status.HTTP_400_BAD_REQUEST)
             bill.payment_status = payment_status
             
-            if payment_status == 'Paid':
+            if payment_status in ['Paid', 'Billing']:
                 bill.paid_date = timezone.now()
                 bill.shiftno = request.data.get('shiftno')
             else:
@@ -879,6 +879,7 @@ def patient_visit_list(request):
                     "refund_bill_no": r.refund_bill_no,
                     "amount": str(r.refund_amount),
                     "status": r.status,
+                    "reason": r.remarks or '',
                     "date": r.refund_date.strftime("%d-%m-%Y %I:%M %p") if r.refund_date else ''
                 })
 
@@ -903,6 +904,7 @@ def patient_visit_list(request):
                 formatted_history.append({
                     'date': h.get('date'),
                     'user': resolved_user,
+                    'reason': h.get('reason', '') or (h.get('changes', {}).get('refund', {}).get('reason', '') if isinstance(h.get('changes'), dict) else ''),
                     'changes': formatted_changes
                 })
 
@@ -1201,8 +1203,10 @@ def get_sidebar_mapping(request):
                 else:
                     perm_values = set()
 
-                # Allowed if super admin OR (hms_pages is configured and p_id in hms_pages) OR (no hms_pages and perm_values match expanded_permissions)
+                # Allowed if super admin OR common page (/Dashboard or empty permissions) OR (hms_pages is configured and p_id in hms_pages) OR (no hms_pages and perm_values match expanded_permissions)
                 if is_super_admin:
+                    allowed_pages.append(page)
+                elif page.get('route') == '/Dashboard' or not perm_values:
                     allowed_pages.append(page)
                 elif len(hms_pages) > 0:
                     if p_id is not None and p_id in hms_pages:

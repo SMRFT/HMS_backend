@@ -666,6 +666,7 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
         "item_id": 1,
         "item_name": 1,
         "batch_number": 1,
+        "expiry_date": 1,
         "mrp": 1,
         "Selling_Price": 1,
         "total_stock": 1,
@@ -803,12 +804,19 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
         sgst_per = _safe_float(latest_stock.get("SGST_Percentage"))
         cgst_amt = _safe_float(latest_stock.get("CGST_Amt"))
         sgst_amt = _safe_float(latest_stock.get("SGST_Amt"))
+        exp_date = latest_stock.get("expiry_date")
+        if hasattr(exp_date, "isoformat"):
+            exp_date = exp_date.isoformat()
+        elif exp_date is not None:
+            exp_date = str(exp_date)
     else:
         mrp = selling_price = cgst_per = sgst_per = cgst_amt = sgst_amt = 0.0
+        exp_date = None
 
     return {
         "item_name": item_name,
         "batch_number": req_batch,
+        "expiry_date": exp_date,
         "mrp": mrp,
         "Selling_Price": selling_price,
         "available_stock": available_stock,
