@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
     GeneralStoreVendor, VendingMachineSale, StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn,
-    Stores_LabApprovedItem, Stores_LabUsedQtyDetail, ItemOpeningStockLog
+    Stores_LabApprovedItem, Stores_LabUsedQtyDetail, ItemOpeningStockLog, StoresIntentDepartmentApproval
 )
 
 _PROFILE_CACHE = {}
@@ -983,6 +983,13 @@ class ItemOpeningStockLogSerializer(serializers.ModelSerializer):
 
         rep['created_by_name'] = self.get_created_by_name(instance)
         return rep
+
+
+class StoresIntentDepartmentApprovalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StoresIntentDepartmentApproval
+        fields = '__all__'
+
 
 
 

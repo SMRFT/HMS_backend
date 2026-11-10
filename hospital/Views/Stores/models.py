@@ -178,10 +178,28 @@ class storesIntent(AuditModel):
     department = models.CharField(max_length=50,null=True,blank=True)
     nursing_station = models.CharField(max_length=150,null=True,blank=True)
     nursing_station_id = models.CharField(max_length=50,null=True,blank=True)
-    is_approved = models.BooleanField(default=False)    
-    
+    is_approved = models.BooleanField(default=False)
+    is_hod_approved = models.BooleanField(default=False)
+    hod_status = models.CharField(max_length=50, default='Pending', null=True, blank=True)
+    hod_approved_by = models.CharField(max_length=100, null=True, blank=True)
+    hod_approved_date = models.DateTimeField(null=True, blank=True)
+    hod_remarks = models.TextField(null=True, blank=True)
+
     def __str__(self):
         return f"{self.intent_id} - {self.date}"    
+
+
+class StoresIntentDepartmentApproval(AuditModel):
+    employee_id = models.CharField(max_length=100, unique=True)
+    departments = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "hospital_storesintentdepartmentapproval"
+        ordering = ["-created_date"]
+
+    def __str__(self):
+        return f"{self.employee_id} - {len(self.departments or [])} departments"
 
 
 

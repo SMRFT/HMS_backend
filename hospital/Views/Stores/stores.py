@@ -6,7 +6,8 @@ from rest_framework import status
 from .models import (
     ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
     Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale,
-    StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn, ItemOpeningStockLog
+    StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn, ItemOpeningStockLog,
+    StoresIntentDepartmentApproval
 )
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
@@ -15,13 +16,14 @@ from .serializer import (
     get_department_candidates,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
-    StoresIndentReturnSerializer, ItemOpeningStockLogSerializer, get_lookup_maps
+    StoresIndentReturnSerializer, ItemOpeningStockLogSerializer, get_lookup_maps,
+    StoresIntentDepartmentApprovalSerializer
 )
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from datetime import datetime, timedelta, date
 from pyauth.auth import HasRoleAndDataPermission
-from ..dbcollection import department_collection
+from ..dbcollection import department_collection, stores_intent_dept_approval_collection, hms_db
 from django.utils import timezone
 
 def get_financial_year_string():
@@ -1471,13 +1473,43 @@ def get_stores_intents(request):
     from_date = request.data.get('from_date')
     to_date = request.data.get('to_date')
     department_filter = request.data.get('department')
+    departments_list = request.data.get('departments')
+    hod_status = request.data.get('hod_status')
+
+    scoped_employee_id = request.data.get('scoped_employee_id') or request.data.get('employee_id_for_hod')
 
     query = {
         "is_active": True
     }
 
-    if department_filter:
+    if departments_list and isinstance(departments_list, list) and len(departments_list) > 0:
+        query["department"] = {"$in": departments_list}
+    elif scoped_employee_id:
+        dept_doc = stores_intent_dept_approval_collection.find_one({"employee_id": str(scoped_employee_id).strip(), "is_active": True})
+        if not dept_doc:
+            dept_doc = stores_intent_dept_approval_collection.find_one({"employee_id": str(scoped_employee_id).strip()})
+        assigned_depts = (dept_doc.get("departments") if dept_doc else []) or []
+        query["department"] = {"$in": assigned_depts}
+    elif department_filter:
         query["department"] = department_filter
+
+    if hod_status:
+        if hod_status == 'Pending':
+            query["$or"] = [
+                {"hod_status": "Pending"},
+                {"hod_status": {"$exists": False}},
+                {"hod_status": None},
+                {"is_hod_approved": False},
+                {"is_hod_approved": {"$exists": False}},
+                {"is_hod_approved": None}
+            ]
+        elif hod_status == 'Approved':
+            query["$or"] = [
+                {"hod_status": "Approved"},
+                {"is_hod_approved": True}
+            ]
+        elif hod_status == 'Rejected':
+            query["hod_status"] = "Rejected"
 
     # Date filter
     if from_date or to_date:
@@ -1547,6 +1579,15 @@ def get_stores_intents(request):
         cb = str(d.get("created_by") or d.get("user") or "").strip()
         d["created_by_name"] = emp_map.get(cb) or cb or "Department User"
 
+        # HOD / Department Admin approval fields
+        d["is_hod_approved"] = bool(d.get("is_hod_approved", False))
+        d["hod_status"] = d.get("hod_status") or ("Approved" if d.get("is_hod_approved") else "Pending")
+        d["hod_approved_by"] = d.get("hod_approved_by") or ""
+        d["hod_approved_by_name"] = emp_map.get(str(d.get("hod_approved_by") or "")) or d.get("hod_approved_by") or ""
+        d["hod_remarks"] = d.get("hod_remarks") or ""
+        h_date = d.get("hod_approved_date")
+        d["hod_approved_date"] = h_date.isoformat() if isinstance(h_date, (datetime, date)) else (str(h_date) if h_date else None)
+
         # ✅ Add stock inside items
         for item in d.get("items", []):
             item_id = item.get("item_id")
@@ -1608,6 +1649,19 @@ def update_stores_intent(request, pk):
     if not obj.is_active:
         return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Check if this is a store-level approval attempt without prior HOD approval
+    is_store_approval_attempt = request.data.get('is_approved') is True or any(
+        (isinstance(it, dict) and it.get('approval', {}).get('approved') is True)
+        for it in (request.data.get('items') or [])
+    )
+    is_hod_approving_now = request.data.get('is_hod_approved') is True or request.data.get('hod_status') == 'Approved'
+    already_hod_approved = bool(getattr(obj, 'is_hod_approved', False) or getattr(obj, 'hod_status', '') == 'Approved')
+
+    if is_store_approval_attempt and not is_hod_approving_now and not already_hod_approved:
+        return Response({
+            "error": "Store approval not allowed: This intent requisition is pending Department HOD / Admin approval."
+        }, status=status.HTTP_400_BAD_REQUEST)
+
     # Store old items to compare quantities if needed
     old_items = {it.get('item_id'): it.get('approved_quantity', 0) for it in (obj.items or []) if it.get('item_id')}
 
@@ -1616,11 +1670,29 @@ def update_stores_intent(request, pk):
     data['branch_code'] = branch_code
     data['hospital_code'] = hospital_code
 
+    if 'hod_status' in data or 'is_hod_approved' in data:
+        if not data.get('hod_approved_by'):
+            data['hod_approved_by'] = employee_id
+        if not data.get('hod_approved_date'):
+            data['hod_approved_date'] = timezone.now()
+
     serializer = StoresIntentSerializer(obj, data=data, partial=True)
 
     if serializer.is_valid():
         instance = serializer.save()
         items = instance.items or []
+
+        # Ensure Mongo document directly stores HOD fields
+        hod_set = {}
+        for h_f in ['is_hod_approved', 'hod_status', 'hod_approved_by', 'hod_approved_date', 'hod_remarks']:
+            if h_f in data:
+                hod_set[h_f] = data[h_f]
+        if hod_set:
+            try:
+                db = connection.cursor().db_conn
+                db["hospital_storesintent"].update_one({"intent_id": pk}, {"$set": hod_set})
+            except Exception:
+                pass
 
         for item in items:
             item_id = item.get("item_id")
@@ -4396,6 +4468,89 @@ def stores_opening_stock_report(request):
         },
         "results": serialized_data
     })
+
+
+@api_view(['GET', 'POST', 'PATCH', 'DELETE'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_intent_department_approval_view(request, employee_id=None):
+    col = stores_intent_dept_approval_collection
+
+    if request.method == 'GET':
+        emp_query = employee_id or request.GET.get('employee_id')
+        if emp_query:
+            emp_clean = str(emp_query).strip()
+            doc = col.find_one({"employee_id": emp_clean, "is_active": True})
+            if not doc:
+                doc = col.find_one({"employee_id": emp_clean})
+            depts = (doc.get("departments") if doc else []) or []
+            return Response({
+                "success": True,
+                "data": {
+                    "employee_id": emp_clean,
+                    "departments": depts,
+                    "created_by": doc.get("created_by") if doc else None,
+                    "created_date": doc.get("created_date") if doc else None,
+                    "lastmodified_by": doc.get("lastmodified_by") if doc else None,
+                    "lastmodified_date": doc.get("lastmodified_date") if doc else None
+                }
+            })
+        else:
+            docs = list(col.find({"is_active": True}))
+            emp_map = get_employee_name_map()
+            results = []
+            for d in docs:
+                eid = str(d.get("employee_id") or "").strip()
+                if eid:
+                    results.append({
+                        "employee_id": eid,
+                        "employee_name": emp_map.get(eid, eid),
+                        "departments": d.get("departments") or [],
+                        "departments_count": len(d.get("departments") or []),
+                        "created_by": d.get("created_by"),
+                        "created_date": d.get("created_date")
+                    })
+            return Response({"success": True, "data": results})
+
+    elif request.method in ['POST', 'PATCH']:
+        data = request.data or {}
+        emp_id = str(data.get("employee_id") or employee_id or "").strip()
+        if not emp_id:
+            return Response({"success": False, "error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_depts = data.get("departments")
+        departments_list = list(raw_depts) if isinstance(raw_depts, list) else []
+        auth_user = request.data.get('auth-user-id') or request.META.get('HTTP_AUTH_USER_ID') or str(getattr(request, 'user', 'system')) or 'system'
+        now_dt = timezone.now()
+
+        existing = col.find_one({"employee_id": emp_id})
+        update_set = {
+            "departments": departments_list,
+            "is_active": True,
+            "lastmodified_by": auth_user,
+            "lastmodified_date": now_dt
+        }
+        if not existing:
+            update_set["employee_id"] = emp_id
+            update_set["created_by"] = auth_user
+            update_set["created_date"] = now_dt
+
+        col.update_one({"employee_id": emp_id}, {"$set": update_set}, upsert=True)
+        return Response({
+            "success": True,
+            "message": "Store Intent department assignments saved successfully",
+            "data": {
+                "employee_id": emp_id,
+                "departments": departments_list
+            }
+        })
+
+    elif request.method == 'DELETE':
+        emp_id = str(employee_id or request.GET.get('employee_id') or request.data.get('employee_id') or "").strip()
+        if not emp_id:
+            return Response({"success": False, "error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        col.update_one({"employee_id": emp_id}, {"$set": {"departments": [], "is_active": False, "lastmodified_date": timezone.now()}})
+        return Response({"success": True, "message": "Assignments deleted successfully"})
+
 
 
 
