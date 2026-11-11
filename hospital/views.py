@@ -253,11 +253,14 @@ def patientCreateView(request):
                 # Pay Now / Cash at counter registration -> Cash Pending
                 payment_status = 'Pending' if (not raw_payment_status or raw_payment_status in ['Paid', 'Billing', 'Pending']) else raw_payment_status
 
-            if not payment_method:
-                if payment_status == 'Pending':
-                    payment_method = 'Insurance Credit' if cust_type == 'insurance' else 'Pay Later'
+            # Enforce payment_method for billing: only 'Cash' or 'Credit' (no 'Insurance Credit')
+            if not payment_method or payment_method in ['Insurance Credit', 'Pay Later', 'Credit']:
+                if cust_type == 'insurance' or payment_timing == 'pay_later' or payment_method in ['Insurance Credit', 'Pay Later', 'Credit']:
+                    payment_method = 'Credit'
                 else:
                     payment_method = 'Cash'
+            elif str(payment_method).strip().lower() in ['insurance credit', 'pay later']:
+                payment_method = 'Credit'
 
             paid_date = timezone.now() if payment_status == 'Paid' else None
 
@@ -654,6 +657,8 @@ def update_bill_status(request, bill_number):
 
         # Allow updating payment details regardless of status, but enforce logic if needed
         if payment_method:
+            if str(payment_method).strip().lower() in ['insurance credit', 'pay later']:
+                payment_method = 'Credit'
             bill.payment_method = payment_method
         
         if transaction_id:
