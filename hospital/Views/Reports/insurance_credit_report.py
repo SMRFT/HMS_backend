@@ -428,7 +428,7 @@ def insurance_credit_report_view(request):
             op_total = 0.0
             op_doctor_id = ""
             payment_status = "Pending"
-            payment_method = "Insurance Credit"
+            payment_method = "Credit"
 
             if p_bills:
                 latest_b = p_bills[-1]
@@ -438,7 +438,7 @@ def insurance_credit_report_view(request):
                 op_total = clean_decimal(latest_b.get('total_fees', 0))
                 op_doctor_id = latest_b.get('doctor_id', '')
                 payment_status = latest_b.get('payment_status', 'Pending')
-                payment_method = latest_b.get('payment_method', 'Insurance Credit')
+                payment_method = latest_b.get('payment_method', 'Credit')
             
             consulting_doctor = doctor_map.get(op_doctor_id, op_doctor_id or admitting_doctor)
 
