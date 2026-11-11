@@ -691,6 +691,8 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/get_active_shift/?(\?.*)?$' : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
         r'^/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/?(\?.*)?$': 'HMS-P-CCSTSD',
+        r'^/_b_a_c_k_e_n_d/HMS/admin_close_shift/?(\?.*)?$': 'HMS-P-CCC',
+        
 
         # Central Cash Counter
         '/_b_a_c_k_e_n_d/HMS/cash_counter/': 'HMS-P-CCC',
