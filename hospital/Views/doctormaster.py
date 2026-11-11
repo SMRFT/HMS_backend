@@ -4,9 +4,19 @@ from rest_framework.response import Response
 from rest_framework import status
 from pymongo import MongoClient
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure .env is loaded from backend directory regardless of working directory
+_backend_env = Path(__file__).resolve().parent.parent.parent / ".env"
+if _backend_env.exists():
+    load_dotenv(dotenv_path=_backend_env, override=False)
+load_dotenv(override=True)
+
 from datetime import datetime
 from rest_framework.decorators import api_view, permission_classes
 from pyauth.auth import HasRoleAndDataPermission
+
 
 # Helper function to convert Decimal128 fields to float
 def convert_decimal128_to_float(data):
@@ -16,6 +26,7 @@ def convert_decimal128_to_float(data):
         elif isinstance(value, dict):
             convert_decimal128_to_float(value)
     return data
+
 
 # Helper function to build department code -> name mapping from backend_diagnostics_Departments
 def get_department_mapping(global_db):
@@ -31,6 +42,7 @@ def get_department_mapping(global_db):
     except Exception as e:
         print("Error fetching department mapping:", e)
         return {}
+
 
 # Helper function to build designation code -> name mapping from backend_diagnostics_Designation
 def get_designation_mapping(global_db):
@@ -48,48 +60,93 @@ def get_designation_mapping(global_db):
         return {}
 
 
+def get_active_doctor_profiles(global_db, projection):
+    """
+    Return de-duplicated doctor profiles that satisfy BOTH:
+      1. backend_diagnostics_profile.isDoctor == True
+      2. backend_diagnostics_user.is_active == True (matched by employeeId)
+    No other filters (designation / role / name pattern) are applied.
+    """
+    profile_collection = global_db['backend_diagnostics_profile']
+    user_collection = global_db['backend_diagnostics_user']
+
+    # Make sure employeeId is always projected (needed for dedupe + active check)
+    projection = dict(projection)
+    projection["employeeId"] = 1
+    projection["_id"] = 0
+
+    profiles = list(profile_collection.find({"isDoctor": True}, projection))
+
+    # Deduplicate by employeeId
+    unique_profiles = []
+    seen_emp_ids = set()
+    for doc in profiles:
+        eid = str(doc.get("employeeId") or "").strip()
+        if not eid or eid in seen_emp_ids:
+            continue
+        seen_emp_ids.add(eid)
+        unique_profiles.append(doc)
+
+    if not unique_profiles:
+        return []
+
+    # employeeId may be stored as string or int in the user collection
+    query_eids = set()
+    for doc in unique_profiles:
+        eid = str(doc.get("employeeId") or "").strip()
+        query_eids.add(eid)
+        if eid.isdigit():
+            query_eids.add(int(eid))
+
+    active_users = user_collection.find(
+        {"employeeId": {"$in": list(query_eids)}, "is_active": True},
+        {"employeeId": 1, "_id": 0}
+    )
+    active_emp_ids = set(str(u.get("employeeId") or "").strip() for u in active_users)
+
+    return [
+        doc for doc in unique_profiles
+        if str(doc.get("employeeId") or "").strip() in active_emp_ids
+    ]
+
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_list_from_diagnostics(request):
-    """Get list of doctors from backend_diagnostics_profile with resolved Department and Designation names"""
+    """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with resolved Department and Designation names"""
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         global_db = client['Global']
-        diagnostics_collection = global_db['backend_diagnostics_profile']
-        
+
         # Get Mappings
         dept_map = get_department_mapping(global_db)
         desig_map = get_designation_mapping(global_db)
 
-        query = {
-            "$or": [
-                {"designation": "DESIG094"},
-                {"primaryRole": "SD-R-DOC"},
-                {"additionalRoles": "SD-R-DOC"},
-                {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
-            ]
-        }
-        doctors = list(diagnostics_collection.find(
-            query,
-            {"employeeId": 1, "employeeName": 1, "department": 1, "specialty": 1, "designation": 1, "_id": 0}
-        ))
-        
-        # Map codes to human readable names & deduplicate
-        unique_doctors = []
-        seen_emp_ids = set()
+        doctors = get_active_doctor_profiles(
+            global_db,
+            {
+                "employeeName": 1,
+                "department": 1,
+                "specialty": 1,
+                "designation": 1,
+                "registrationNumber": 1,
+            }
+        )
+
+        # Map codes to human readable names
+        result = []
         for doc in doctors:
-            eid = str(doc.get("employeeId") or "").strip()
-            if not eid or eid in seen_emp_ids:
-                continue
-            seen_emp_ids.add(eid)
             raw_dept = doc.get("department")
             doc["department"] = dept_map.get(raw_dept, raw_dept) if raw_dept else "N/A"
 
             raw_desig = doc.get("designation")
             doc["designation"] = desig_map.get(raw_desig, raw_desig) if raw_desig else "Doctor"
-            unique_doctors.append(doc)
-        
-        return Response(unique_doctors, status=status.HTTP_200_OK)
+
+            raw_reg = doc.get("registrationNumber")
+            doc["registrationNumber"] = str(raw_reg).strip() if raw_reg else ""
+            result.append(doc)
+
+        return Response(result, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -97,79 +154,47 @@ def doctor_list_from_diagnostics(request):
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_list(request):
-    """Get list of all doctors with schedule details and resolved Department & Designation names"""
+    """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with schedule details and resolved Department & Designation names"""
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         global_db = client['Global']
-        diagnostics_collection = global_db['backend_diagnostics_profile']
-        
+
         # Get Mappings
         dept_map = get_department_mapping(global_db)
         desig_map = get_designation_mapping(global_db)
 
-        query = {
-            "$or": [
-                {"designation": "DESIG094"},
-                {"employeeName": {"$regex": r"^\s*Dr", "$options": "i"}}
-            ]
-        }
-        doctors_cursor = diagnostics_collection.find(
-            query,
-            {"employeeId": 1, "employeeName": 1, "department": 1, "specialty": 1, "designation": 1, "email": 1, "mobileNumber": 1, "_id": 0} 
+        doctors = get_active_doctor_profiles(
+            global_db,
+            {
+                "employeeName": 1,
+                "department": 1,
+                "specialty": 1,
+                "designation": 1,
+                "email": 1,
+                "mobileNumber": 1,
+            }
         )
-        doctors = list(doctors_cursor)
-        
-        # Deduplicate by employeeId
-        unique_doctors = []
-        seen_emp_ids = set()
-        for doc in doctors:
-            eid = str(doc.get("employeeId") or "").strip()
-            if not eid or eid in seen_emp_ids:
-                continue
-            seen_emp_ids.add(eid)
-            unique_doctors.append(doc)
-        doctors = unique_doctors
 
-        # Filter only active doctors based on backend_diagnostics_user (is_active: True)
-        user_collection = global_db['backend_diagnostics_user']
-        candidate_emp_ids = [str(doc.get('employeeId') or '').strip() for doc in doctors if doc.get('employeeId')]
-        query_eids = set()
-        for eid in candidate_emp_ids:
-            query_eids.add(eid)
-            if eid.isdigit():
-                query_eids.add(int(eid))
-
-        active_users = user_collection.find(
-            {"employeeId": {"$in": list(query_eids)}, "is_active": True},
-            {"employeeId": 1, "_id": 0}
-        )
-        active_emp_ids = set(str(u.get("employeeId") or "").strip() for u in active_users)
-
-        doctors = [
-            doc for doc in doctors
-            if str(doc.get("employeeId") or "").strip() in active_emp_ids
-        ]
-        
         # Get schedules for these doctors
         hms_db = client['HMS']
         doctor_collection = hms_db['hospital_doctor']
-        
+
         # Batch fetch all schedules in a single query to eliminate N+1 network latency
         emp_ids = [doc.get('employeeId') for doc in doctors if doc.get('employeeId')]
         schedules_map = {
             s.get("employeeId"): s
             for s in doctor_collection.find({"employeeId": {"$in": emp_ids}})
         }
-        
+
         detailed_doctors = []
         for doc in doctors:
             employee_id = doc.get('employeeId')
-            
+
             emp_name = doc.get('employeeName', '')
             name_parts = emp_name.split(' ')
             first_name = name_parts[0] if name_parts else ''
             last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
-            
+
             raw_dept = doc.get('department')
             resolved_dept = dept_map.get(raw_dept, raw_dept) if raw_dept else "N/A"
 
@@ -195,7 +220,7 @@ def doctor_schedule_list(request):
                 "time_schedule": [],
                 "schedule_exists": False
             }
-            
+
             schedule = schedules_map.get(employee_id)
             if schedule:
                 doc_data.update({
@@ -207,12 +232,12 @@ def doctor_schedule_list(request):
                     "time_schedule": schedule.get("time_schedule", []),
                     "schedule_exists": True
                 })
-                
+
             convert_decimal128_to_float(doc_data)
             detailed_doctors.append(doc_data)
-            
+
         return Response(detailed_doctors, status=status.HTTP_200_OK)
-        
+
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -237,7 +262,7 @@ def doctor_schedule_detail(request, employee_id):
         )
         if not active_user:
             return Response(
-                {"error": "Doctor account is inactive or not found in user master"}, 
+                {"error": "Doctor account is inactive or not found in user master"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -245,13 +270,13 @@ def doctor_schedule_detail(request, employee_id):
         diagnostic_profile = diagnostics_collection.find_one(
             {"employeeId": employee_id}
         )
-        
+
         if not diagnostic_profile:
             return Response(
-                {"error": "Doctor not found in diagnostics profile"}, 
+                {"error": "Doctor not found in diagnostics profile"},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
         # Get Mappings
         dept_map = get_department_mapping(global_db)
         desig_map = get_designation_mapping(global_db)
@@ -260,7 +285,7 @@ def doctor_schedule_detail(request, employee_id):
         hms_db = client['HMS']
         doctor_collection = hms_db['hospital_doctor']
         doctor_schedule = doctor_collection.find_one({"employeeId": employee_id})
-        
+
         raw_dept = diagnostic_profile.get("department")
         resolved_dept = dept_map.get(raw_dept, raw_dept) if raw_dept else ""
 
@@ -281,7 +306,7 @@ def doctor_schedule_detail(request, employee_id):
             "day_schedule": [],
             "time_schedule": []
         }
-        
+
         if doctor_schedule:
             response_data.update({
                 "consulting_fee": doctor_schedule.get("consulting_fee", ""),
@@ -294,10 +319,10 @@ def doctor_schedule_detail(request, employee_id):
             response_data["schedule_exists"] = True
         else:
             response_data["schedule_exists"] = False
-        
+
         response_data = convert_decimal128_to_float(response_data)
         return Response(response_data, status=status.HTTP_200_OK)
-        
+
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -308,9 +333,9 @@ def doctor_schedule_upsert(request, employee_id):
     """Create or update doctor schedule by employeeId"""
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
-        branch_code   = request.data.get("auth-branch-code",   "system")
+        branch_code = request.data.get("auth-branch-code", "system")
         hospital_code = request.data.get("auth-hospital-code", "system")
-        
+
         global_db = client['Global']
         user_collection = global_db['backend_diagnostics_user']
 
@@ -325,7 +350,7 @@ def doctor_schedule_upsert(request, employee_id):
         )
         if not active_user:
             return Response(
-                {"error": "Cannot update schedule: doctor account is inactive or not found in user master"}, 
+                {"error": "Cannot update schedule: doctor account is inactive or not found in user master"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -333,14 +358,14 @@ def doctor_schedule_upsert(request, employee_id):
         diagnostic_profile = diagnostics_collection.find_one(
             {"employeeId": employee_id}
         )
-        
+
         if not diagnostic_profile:
             return Response(
-                {"error": "Doctor not found in diagnostics profile"}, 
+                {"error": "Doctor not found in diagnostics profile"},
                 status=status.HTTP_404_NOT_FOUND
             )
         created_by = request.data.get('auth-user-id', "system")
-        
+
         schedule_data = {
             "employeeId": employee_id,
             "consulting_fee": request.data.get("consulting_fee", ""),
@@ -354,11 +379,11 @@ def doctor_schedule_upsert(request, employee_id):
             "hospital_code": hospital_code,
             "branch_code": branch_code
         }
-        
+
         hms_db = client['HMS']
         doctor_collection = hms_db['hospital_doctor']
         existing_schedule = doctor_collection.find_one({"employeeId": employee_id})
-        
+
         if existing_schedule:
             result = doctor_collection.update_one(
                 {"employeeId": employee_id},
@@ -371,13 +396,13 @@ def doctor_schedule_upsert(request, employee_id):
         else:
             doctor_collection.insert_one(schedule_data)
             message = "Doctor schedule created successfully"
-        
+
         updated_schedule = doctor_collection.find_one({"employeeId": employee_id})
         response_data = {key: updated_schedule[key] for key in updated_schedule if key != '_id'}
         response_data = convert_decimal128_to_float(response_data)
         response_data["message"] = message
-        
+
         return Response(response_data, status=status.HTTP_200_OK)
-        
+
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

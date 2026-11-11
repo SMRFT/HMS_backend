@@ -15,6 +15,7 @@ from .dbcollection import (
     admission_collection,
     get_employee_name_by_id,
     resolve_created_by_name,
+    extract_aud_employee_id,
 )
 
 # ── Serialization Helper ───────────────────────────────────────────────────────
@@ -39,11 +40,11 @@ def serialize_doc(doc):
 
 DEFAULT_TUMOUR_BOARD_TEMPLATE = {
     "template_id": 1,
-    "template_name": "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)",
+    "template_name": "TUMOUR BOARD CERTIFICATE",
     "is_template": True,
     "version": "1.0",
     "description": "Multidisciplinary Tumour Board Clinical Assessment & Certification for AB-PMJAY / CMCHIS / CGHS / State Health Schemes",
-    "created_at": "2026-11-02T10:00:00",
+    "created_date": "2026-11-02T10:00:00",
     "header_fields": [
         {
             "key": "meeting_date",
@@ -366,51 +367,15 @@ INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE = {
     "is_template": True,
     "version": "1.0",
     "description": "Comprehensive Institutional Multidisciplinary Clinical Oncology Assessment & Treatment Plan",
-    "created_at": "2026-11-02T10:00:00",
+    "created_date": "2026-11-02T10:00:00",
     "header_fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["header_fields"],
     "fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["fields"],
 }
 
 
 def ensure_templates_seeded():
-    """Ensure templates exist in hospital_tumourTemplate collection."""
-    try:
-        col = hospital_tumour_template_collection
-        # Template 1
-        existing1 = col.find_one({"template_id": 1})
-        if not existing1:
-            col.insert_one(DEFAULT_TUMOUR_BOARD_TEMPLATE.copy())
-        else:
-            col.update_one(
-                {"template_id": 1},
-                {
-                    "$set": {
-                        "template_name": DEFAULT_TUMOUR_BOARD_TEMPLATE["template_name"],
-                        "description": DEFAULT_TUMOUR_BOARD_TEMPLATE["description"],
-                        "header_fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["header_fields"],
-                        "fields": DEFAULT_TUMOUR_BOARD_TEMPLATE["fields"],
-                    }
-                },
-            )
-
-        # Template 2 (for multi-template selection modal)
-        existing2 = col.find_one({"template_id": 2})
-        if not existing2:
-            col.insert_one(INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE.copy())
-        else:
-            col.update_one(
-                {"template_id": 2},
-                {
-                    "$set": {
-                        "template_name": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["template_name"],
-                        "description": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["description"],
-                        "header_fields": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["header_fields"],
-                        "fields": INSTITUTIONAL_TUMOUR_BOARD_TEMPLATE["fields"],
-                    }
-                },
-            )
-    except Exception as e:
-        print("Warning: could not seed tumour board template:", e)
+    """Do not automatically seed templates; templates are managed by admin directly in DB."""
+    pass
 
 
 # ── Templates API ─────────────────────────────────────────────────────────────
@@ -420,14 +385,11 @@ def ensure_templates_seeded():
 def get_tumour_board_templates(request):
     """
     Return all available Tumour Board templates from hospital_tumourTemplate collection.
-    Seeds template_id: 1 if collection has no templates.
+    Does not auto-seed templates if empty.
     """
     try:
-        ensure_templates_seeded()
         col = hospital_tumour_template_collection
         templates = list(col.find({}))
-        if not templates:
-            templates = [DEFAULT_TUMOUR_BOARD_TEMPLATE]
         return Response({"success": True, "data": serialize_doc(templates)}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -631,31 +593,30 @@ def _format_display_iso(val):
 
 def _get_auth_user_info(request, fallback_id="system", fallback_name=None):
     """
-    Extract authenticated user credentials from request data or headers.
-    Prioritizes auth-user-id from pyauth token decoding or request headers.
+    Extract authenticated user credentials from request data, headers, or decoded JWT token.
+    Prioritizes auth-user-id / aud from active session.
     """
     data = request.data if isinstance(request.data, dict) else {}
-    headers = request.headers if hasattr(request, "headers") else {}
 
-    user_id = (
-        data.get("auth-user-id")
-        or headers.get("auth-user-id")
-        or headers.get("Auth-User-Id")
-        or headers.get("X-Employee-Id")
-        or headers.get("X-User-Id")
-        or (data.get("created_by") if isinstance(data, dict) else None)
-        or fallback_id
-    )
+    # 1. Extract employee ID from request token / session / headers
+    user_id = extract_aud_employee_id(request)
+
+    # 2. Check explicit auth-user-id or employeeId in data/headers
+    if not user_id:
+        user_id = (
+            data.get("auth-user-id")
+        )
     user_id = str(user_id).strip() if user_id else "system"
 
-    user_name = (
-        data.get("auth-user-name")
-        or headers.get("auth-user-name")
-        or headers.get("Auth-User-Name")
-        or fallback_name
-        or resolve_created_by_name(user_id)
-        or str(user_id)
-    )
+    # Resolve actual employee display name from backend_diagnostics_profile
+    user_name = None
+    if user_id and user_id.lower() != "system":
+        user_name = resolve_created_by_name(user_id)
+
+    if not user_name or user_name == user_id:
+        user_name = (
+            data.get("auth-user-name")
+        )
     user_name = str(user_name).strip() if user_name else user_id
 
     return user_id, user_name
@@ -672,10 +633,10 @@ def list_tumour_board_certificates(request):
     """
     try:
         col = hospital_tumour_board_collection
-        from_date = request.GET.get("from_date", "").strip()
-        to_date = request.GET.get("to_date", "").strip()
+        from_date = (request.GET.get("from_date") or request.GET.get("fromDate") or "").strip()
+        to_date = (request.GET.get("to_date") or request.GET.get("toDate") or "").strip()
         search_uhid = request.GET.get("uhid", "").strip()
-        search_patient = request.GET.get("patient_name", "").strip()
+        search_patient = (request.GET.get("patient_name") or request.GET.get("patientName") or "").strip()
         search_status = request.GET.get("status", "").strip()
 
         query = {
@@ -696,22 +657,34 @@ def list_tumour_board_certificates(request):
             elif search_status.lower() in ["draft", "pending"]:
                 query["is_approved"] = {"$ne": True}
 
+        # If no dates and no specific search criteria passed, default to current date
+        if not from_date and not to_date and not search_uhid and not search_patient and not search_status:
+            today_str = date.today().strftime("%Y-%m-%d")
+            from_date = today_str
+            to_date = today_str
+
         if from_date and to_date:
             from_dt = _parse_to_datetime(from_date)
             to_dt = _parse_to_datetime(to_date)
             if to_dt:
                 to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            from_iso_str = f"{from_date}T00:00:00"
+            to_iso_str = f"{to_date}T23:59:59.999999"
             query["$or"] = [
                 {"certificate_date": {"$gte": from_date, "$lte": to_date}},
                 {"certificate_date": {"$gte": from_dt, "$lte": to_dt}},
-                {"created_at": {"$gte": from_dt, "$lte": to_dt}},
+                {"meeting_date": {"$gte": from_date, "$lte": to_date}},
+                {"meeting_date": {"$gte": from_dt, "$lte": to_dt}},
                 {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_date": {"$gte": from_iso_str, "$lte": to_iso_str}},
+                {"created_at": {"$gte": from_dt, "$lte": to_dt}},
             ]
         elif from_date:
             from_dt = _parse_to_datetime(from_date)
             query["$or"] = [
                 {"certificate_date": {"$gte": from_date}},
                 {"certificate_date": {"$gte": from_dt}},
+                {"created_date": {"$gte": from_dt}},
                 {"created_at": {"$gte": from_dt}},
             ]
         elif to_date:
@@ -721,34 +694,27 @@ def list_tumour_board_certificates(request):
             query["$or"] = [
                 {"certificate_date": {"$lte": to_date}},
                 {"certificate_date": {"$lte": to_dt}},
+                {"created_date": {"$lte": to_dt}},
                 {"created_at": {"$lte": to_dt}},
             ]
 
-        docs = list(col.find(query).sort("created_at", -1))
+        docs = list(col.find(query).sort([("created_date", -1), ("created_at", -1)]))
 
-        # Format and enrich each certificate with resolved created_by name
+        # Format and enrich each certificate with dynamically resolved employee name from Global profile
         results = []
         for d in docs:
             d_id = str(d.get("_id"))
             created_by = d.get("created_by") or ""
-            created_by_name = d.get("created_by_name") or ""
-            if not created_by_name and created_by:
-                created_by_name = resolve_created_by_name(created_by) or str(created_by)
+            created_by_name = (resolve_created_by_name(created_by) or str(created_by)) if created_by else ""
 
             lastmod_by = d.get("lastmodified_by") or d.get("updated_by") or ""
-            lastmod_by_name = d.get("lastmodified_by_name") or ""
-            if not lastmod_by_name and lastmod_by:
-                lastmod_by_name = resolve_created_by_name(lastmod_by) or str(lastmod_by)
+            lastmod_by_name = (resolve_created_by_name(lastmod_by) or str(lastmod_by)) if lastmod_by else ""
 
             approved_by = d.get("approved_by") or ""
-            approved_by_name = d.get("approved_by_name") or ""
-            if not approved_by_name and approved_by:
-                approved_by_name = resolve_created_by_name(approved_by) or str(approved_by)
+            approved_by_name = (resolve_created_by_name(approved_by) or str(approved_by)) if approved_by else ""
 
             deleted_by = d.get("deleted_by") or ""
-            deleted_by_name = d.get("deleted_by_name") or ""
-            if not deleted_by_name and deleted_by:
-                deleted_by_name = resolve_created_by_name(deleted_by) or str(deleted_by)
+            deleted_by_name = (resolve_created_by_name(deleted_by) or str(deleted_by)) if deleted_by else ""
 
             results.append({
                 "id": d_id,
@@ -767,7 +733,7 @@ def list_tumour_board_certificates(request):
                 "primary_referral_dept": d.get("primary_referral_dept", "") or d.get("field_values", {}).get("primary_referral_dept", ""),
                 "treating_consultant": d.get("treating_consultant", "") or d.get("field_values", {}).get("treating_consultant", ""),
                 "template_id": d.get("template_id", 1),
-                "template_name": d.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)"),
+                "template_name": d.get("template_name") or "TUMOUR BOARD CERTIFICATE",
                 "primary_site": d.get("primary_site", "") or d.get("field_values", {}).get("site_of_malignancy", "") or d.get("field_values", {}).get("primary_site", ""),
                 "stage": d.get("stage", "") or d.get("field_values", {}).get("stage", "") or d.get("field_values", {}).get("stage_group", "") or d.get("field_values", {}).get("clinical_stage_tnm", ""),
                 "board_remarks": d.get("board_remarks", "") or d.get("field_values", {}).get("board_remarks", ""),
@@ -838,7 +804,7 @@ def save_tumour_board_certificate(request):
         treating_consultant = payload.get("treating_consultant") or field_values.get("treating_consultant", "")
 
         # Extract audit credentials from auth-user-id
-        user_id, user_name = _get_auth_user_info(request, fallback_id=payload.get("created_by") or "system")
+        user_id, user_name = _get_auth_user_info(request, fallback_id="system")
 
         branch_code = (
             request.data.get("auth-branch-code")
@@ -899,19 +865,30 @@ def save_tumour_board_certificate(request):
                 "primary_referral_dept": primary_referral_dept,
                 "treating_consultant": treating_consultant,
                 "template_id": payload.get("template_id", existing.get("template_id", 1)),
-                "template_name": payload.get("template_name", existing.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)")),
+                "template_name": payload.get("template_name") or existing.get("template_name") or "TUMOUR BOARD CERTIFICATE",
                 "primary_site": primary_site,
                 "stage": stage,
                 "board_remarks": board_remarks,
                 "field_values": field_values,
-                "updated_at": now_dt,
-                "updated_by": user_id,
                 "lastmodified_by": user_id,
-                "lastmodified_by_name": user_name,
                 "lastmodified_date": now_dt,
             }
 
-            col.update_one({"_id": existing["_id"]}, {"$set": update_data})
+            col.update_one(
+                {"_id": existing["_id"]},
+                {
+                    "$set": update_data,
+                    "$unset": {
+                        "created_by_name": "",
+                        "lastmodified_by_name": "",
+                        "approved_by_name": "",
+                        "deleted_by_name": "",
+                        "created_at": "",
+                        "updated_at": "",
+                        "updated_by": "",
+                    },
+                },
+            )
             return Response(
                 {
                     "success": True,
@@ -946,7 +923,7 @@ def save_tumour_board_certificate(request):
             "primary_referral_dept": primary_referral_dept,
             "treating_consultant": treating_consultant,
             "template_id": payload.get("template_id", 1),
-            "template_name": payload.get("template_name", "TUMOUR BOARD CERTIFICATE (For AB-PMJAY/State Health Schemes)"),
+            "template_name": payload.get("template_name") or "TUMOUR BOARD CERTIFICATE",
             "primary_site": primary_site,
             "stage": stage,
             "board_remarks": board_remarks,
@@ -954,13 +931,9 @@ def save_tumour_board_certificate(request):
             "is_approved": False,
             "status": "Draft",
             "created_by": user_id,
-            "created_by_name": user_name,
-            "created_at": now_dt,
             "created_date": now_dt,
             "lastmodified_by": user_id,
-            "lastmodified_by_name": user_name,
             "lastmodified_date": now_dt,
-            "updated_at": now_dt,
             "branch_code": branch_code,
             "outlet_code": outlet_code,
             "hospital_code": hospital_code,
@@ -1017,15 +990,18 @@ def delete_tumour_board_certificate(request, cert_id):
                 "$set": {
                     "is_active": False,
                     "is_deleted": True,
-                    "deleted_at": now_dt,
                     "deleted_date": now_dt,
                     "deleted_by": user_id,
-                    "deleted_by_name": user_name,
                     "lastmodified_by": user_id,
-                    "lastmodified_by_name": user_name,
                     "lastmodified_date": now_dt,
-                    "updated_at": now_dt,
-                }
+                },
+                "$unset": {
+                    "deleted_by_name": "",
+                    "lastmodified_by_name": "",
+                    "deleted_at": "",
+                    "created_at": "",
+                    "updated_at": "",
+                },
             },
         )
         return Response({"success": True, "message": "Certificate deleted successfully."}, status=status.HTTP_200_OK)
@@ -1059,29 +1035,38 @@ def approve_tumour_board_certificate(request, cert_id):
             )
 
         data = request.data if isinstance(request.data, dict) else {}
-        user_id, user_name = _get_auth_user_info(request, fallback_id=data.get("approved_by") or "system")
+        user_id, user_name = _get_auth_user_info(request, fallback_id="system")
         now_dt = datetime.now()
 
         update_fields = {
             "is_approved": True,
             "status": "Approved",
             "approved_by": user_id,
-            "approved_by_name": user_name,
             "approved_date": now_dt,
             "lastmodified_by": user_id,
-            "lastmodified_by_name": user_name,
             "lastmodified_date": now_dt,
-            "updated_at": now_dt,
         }
 
-        col.update_one({"_id": existing["_id"]}, {"$set": update_fields})
+        col.update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": update_fields,
+                "$unset": {
+                    "approved_by_name": "",
+                    "lastmodified_by_name": "",
+                    "created_at": "",
+                    "updated_at": "",
+                },
+            },
+        )
+        approved_by_name = (resolve_created_by_name(user_id) or str(user_id)) if user_id else ""
         return Response(
             {
                 "success": True,
                 "message": "Certificate approved successfully. Certificate printing is now enabled.",
                 "approved_date": _format_display_iso(now_dt),
                 "approved_by": user_id,
-                "approved_by_name": user_name,
+                "approved_by_name": approved_by_name,
             },
             status=status.HTTP_200_OK,
         )
