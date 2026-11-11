@@ -269,10 +269,13 @@ def format_shift_response(shift):
         "ClosingBalance": convert_decimal(shift.ClosingBalance),
 
         "collected_Amount": convert_decimal(shift.collected_Amount),
+        "CreditAmount": convert_decimal(getattr(shift, "CreditAmount", 0)),
+        "credit_amount": convert_decimal(getattr(shift, "CreditAmount", 0)),
 
         "PettyCashBalance": convert_decimal(shift.PettyCashBalance),
 
         "RemittedToBank": convert_decimal(shift.RemittedToBank),
+        "SubmittedToAccount": convert_decimal(getattr(shift, "SubmittedToAccount", 0)),
 
         "HandOverAmount": convert_decimal(shift.HandOverAmount),
         "SalesReturnAmount": convert_decimal(shift.SalesReturnAmount),
@@ -485,8 +488,9 @@ def cash_counter_shiftdetails(request):
         # Recalculate collection before closing to ensure accuracy
         totals = calculate_shift_collection(shift_no)
         
-        shift.collected_Amount = safe_dec(totals['total_collection'])
-        shift.SalesReturnAmount = safe_dec(totals['sales_return'])
+        shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
+        shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
+        shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
         
         # Use provided fields or defaults
         shift.RemittedToBank = safe_dec(data.get("RemittedToBank", shift.RemittedToBank))
@@ -496,7 +500,7 @@ def cash_counter_shiftdetails(request):
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
-            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 
+            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 'CreditAmount',
             'PettyCashBalance', 'RemittedToBank', 'SubmittedToAccount', 
             'HandOverAmount', 'PendingAmount', 'IPAdvanceAmount', 'SalesReturnAmount'
         ]:
@@ -508,6 +512,22 @@ def cash_counter_shiftdetails(request):
         shift.lastmodified_by = employee_id
         shift.lastmodified_date = timezone.now()
         shift.save()
+
+        try:
+            m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            m_db = m_client["HMS"]
+            m_db["hospital_cashcountershiftdetails"].update_one(
+                {"shiftno": str(shift_no)},
+                {"$set": {
+                    "collected_Amount": Decimal128(str(shift.collected_Amount)),
+                    "CreditAmount": Decimal128(str(shift.CreditAmount)),
+                    "ClosingBalance": Decimal128(str(shift.ClosingBalance)),
+                    "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
+                }}
+            )
+            m_client.close()
+        except Exception:
+            pass
 
         # ✅ Record remitted/submitted transactions in hospital_cashcountercollection
         try:
@@ -597,10 +617,79 @@ def cash_counter_shiftdetails(request):
             "data": format_shift_response(shift)
         })
 
+def parse_payment_split(doc, default_amt=0.0):
+    """
+    Parses a bill or receipt document to separate payment into:
+    cash_amount, credit_amount (where credit_amount includes UPI, Card, Credit, Cheque, Online, etc.)
+    """
+    def _clean_num(v):
+        if v is None:
+            return 0.0
+        if hasattr(v, 'to_decimal'):
+            try:
+                return float(v.to_decimal())
+            except:
+                pass
+        try:
+            return float(v)
+        except:
+            return 0.0
+
+    tot = _clean_num(default_amt)
+
+    pd = doc.get("payment_details")
+    if isinstance(pd, str):
+        import json, ast
+        try:
+            pd = json.loads(pd)
+        except:
+            try:
+                pd = ast.literal_eval(pd)
+            except:
+                pd = None
+
+    if isinstance(pd, dict):
+        method = str(pd.get("method") or "").strip().lower()
+        if "multiple" in method or pd.get("breakdown"):
+            bd = pd.get("breakdown") or []
+            cash_sum = 0.0
+            credit_sum = 0.0
+            for item in bd:
+                if isinstance(item, dict):
+                    m = str(item.get("method") or "").strip().lower()
+                    amt = _clean_num(item.get("Paid_amount") or item.get("amount") or 0)
+                    if "cash" in m:
+                        cash_sum += amt
+                    else:
+                        credit_sum += amt
+            if (cash_sum + credit_sum) > 0:
+                return cash_sum, credit_sum
+        else:
+            amt = _clean_num(pd.get("Paid_amount") or pd.get("amount") or tot)
+            if "cash" in method:
+                return amt, 0.0
+            elif method:
+                return 0.0, amt
+
+    # Check payment_method / payment_mode / PaymentType / mode_of_payment
+    for k in ["payment_method", "payment_mode", "paymentMode", "PaymentType", "mode_of_payment"]:
+        val = str(doc.get(k) or "").strip().lower()
+        if not val or val == "none":
+            continue
+        if "cash" in val:
+            return tot, 0.0
+        elif any(term in val for term in ["card", "upi", "credit", "cheque", "checque", "check", "chq", "bank", "online", "pos", "pay later", "insurance", "neft", "rtgs", "dd", "demand draft"]):
+            return 0.0, tot
+
+    # If payment mode is completely unspecified, default to cash
+    return tot, 0.0
+
+
 def calculate_shift_collection(shift_no):
     """
     Calculates the total collected amount and other financial metrics for a shift.
-    Returns a dictionary with all metrics.
+    collected amount only includes cash amount.
+    UPI, CARD, CREDIT, CHEQUE, ONLINE, etc. are calculated into total_credit (Credit Amount).
     """
     def to_float(val):
         if val is None:
@@ -616,7 +705,10 @@ def calculate_shift_collection(shift_no):
             return 0.0
 
     results = {
-        "total_collection": 0.0,
+        "total_collection": 0.0,  # Only cash amount
+        "total_credit": 0.0,      # UPI, Card, Credit, Cheque, Online, etc.
+        "cash_collection": 0.0,
+        "credit_collection": 0.0,
         "pending_amount": 0.0,
         "ip_advance": 0.0,
         "sales_return": 0.0,
@@ -640,52 +732,97 @@ def calculate_shift_collection(shift_no):
         shift_vals = list(set(shift_vals))
 
         # 1. Billing (Registration/Consultation)
-        # Paid
-        paid_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}}, {"total_fees": 1}))
+        paid_bills = list(db["hospital_billing"].find(
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}},
+            {"total_fees": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
+        ))
         for b in paid_bills:
-            results["total_collection"] += to_float(b.get("total_fees", 0))
+            fee = to_float(b.get("total_fees", 0))
+            c_amt, cr_amt = parse_payment_split(b, fee)
+            results["total_collection"] += c_amt
+            results["total_credit"] += cr_amt
+            results["cash_collection"] += c_amt
+            results["credit_collection"] += cr_amt
         
         # Pending
-        pending_bills = list(db["hospital_billing"].find({"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}}, {"total_fees": 1}))
+        pending_bills = list(db["hospital_billing"].find(
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}},
+            {"total_fees": 1}
+        ))
         for b in pending_bills:
             results["pending_amount"] += to_float(b.get("total_fees", 0))
 
         # 2. Investigation
-        paid_invest = list(db["hospital_investbilling"].find({"shiftno": {"$in": shift_vals}, "paymentStatus": "Paid"}, {"finalPrice": 1, "total": 1}))
+        paid_invest = list(db["hospital_investbilling"].find(
+            {"shiftno": {"$in": shift_vals}, "paymentStatus": "Paid"},
+            {"finalPrice": 1, "total": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
+        ))
         for d in paid_invest:
-            results["total_collection"] += to_float(d.get("finalPrice") or d.get("total") or 0)
+            inv_amt = to_float(d.get("finalPrice") or d.get("total") or 0)
+            c_amt, cr_amt = parse_payment_split(d, inv_amt)
+            results["total_collection"] += c_amt
+            results["total_credit"] += cr_amt
+            results["cash_collection"] += c_amt
+            results["credit_collection"] += cr_amt
             
-        pending_invest = list(db["hospital_investbilling"].find({"shiftno": {"$in": shift_vals}, "paymentStatus": "Pending"}, {"finalPrice": 1, "total": 1}))
+        pending_invest = list(db["hospital_investbilling"].find(
+            {"shiftno": {"$in": shift_vals}, "paymentStatus": "Pending"},
+            {"finalPrice": 1, "total": 1}
+        ))
         for d in pending_invest:
             results["pending_amount"] += to_float(d.get("finalPrice") or d.get("total") or 0)
 
         # 3. Discharge
-        paid_discharge = list(db["hospital_dischargebilling"].find({"shiftno": {"$in": shift_vals}, "status": "Paid"}, {"net_amount": 1}))
+        paid_discharge = list(db["hospital_dischargebilling"].find(
+            {"shiftno": {"$in": shift_vals}, "status": "Paid"},
+            {"net_amount": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
+        ))
         for d in paid_discharge:
-            results["total_collection"] += to_float(d.get("net_amount", 0))
+            dis_amt = to_float(d.get("net_amount", 0))
+            c_amt, cr_amt = parse_payment_split(d, dis_amt)
+            results["total_collection"] += c_amt
+            results["total_credit"] += cr_amt
+            results["cash_collection"] += c_amt
+            results["credit_collection"] += cr_amt
             
-        pending_discharge = list(db["hospital_dischargebilling"].find({"shiftno": {"$in": shift_vals}, "status": "Pending"}, {"net_amount": 1}))
+        pending_discharge = list(db["hospital_dischargebilling"].find(
+            {"shiftno": {"$in": shift_vals}, "status": "Pending"},
+            {"net_amount": 1}
+        ))
         for d in pending_discharge:
             results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 4. Pharmacy
-        paid_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": {"$in": shift_vals}, "billing_status": "Paid"}, {"net_amount": 1}))
+        paid_pharmacy = list(db["hospital_pharmacybilling"].find(
+            {"shiftno": {"$in": shift_vals}, "billing_status": "Paid"},
+            {"net_amount": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
+        ))
         for d in paid_pharmacy:
-            results["total_collection"] += to_float(d.get("net_amount", 0))
+            ph_amt = to_float(d.get("net_amount", 0))
+            c_amt, cr_amt = parse_payment_split(d, ph_amt)
+            results["total_collection"] += c_amt
+            results["total_credit"] += cr_amt
+            results["cash_collection"] += c_amt
+            results["credit_collection"] += cr_amt
             
-        pending_pharmacy = list(db["hospital_pharmacybilling"].find({"shiftno": {"$in": shift_vals}, "billing_status": "Pending"}, {"net_amount": 1}))
+        pending_pharmacy = list(db["hospital_pharmacybilling"].find(
+            {"shiftno": {"$in": shift_vals}, "billing_status": "Pending"},
+            {"net_amount": 1}
+        ))
         for d in pending_pharmacy:
             results["pending_amount"] += to_float(d.get("net_amount", 0))
 
         # 5. IP Advance (from Admission model's advance_payments)
-        native_adms = list(db["hospital_admission"].find({"advance_payments.shiftno": {"$in": shift_vals}}, {"advance_payments": 1}))
+        native_adms = list(db["hospital_admission"].find(
+            {"advance_payments.shiftno": {"$in": shift_vals}},
+            {"advance_payments": 1}
+        ))
         
         counted_advance_ids = set()
         for adm in native_adms:
             payments = adm.get("advance_payments", [])
             if isinstance(payments, str):
-                import json
-                import ast
+                import json, ast
                 try:
                     payments = json.loads(payments)
                 except:
@@ -702,26 +839,48 @@ def calculate_shift_collection(shift_no):
                             if str(p.get("status", "")).lower() == "paid":
                                 amt = to_float(p.get("advance_amount", 0))
                                 results["ip_advance"] += amt
-                                results["total_collection"] += amt
+                                c_amt, cr_amt = parse_payment_split(p, amt)
+                                results["total_collection"] += c_amt
+                                results["total_credit"] += cr_amt
+                                results["cash_collection"] += c_amt
+                                results["credit_collection"] += cr_amt
                                 counted_advance_ids.add(bill_no)
 
         # 6. Sales Return
-        returns = list(db["hospital_salesreturn"].find({"shiftno": {"$in": shift_vals}}, {"return_amount": 1}))
+        returns = list(db["hospital_salesreturn"].find(
+            {"shiftno": {"$in": shift_vals}},
+            {"return_amount": 1, "payment_details": 1, "payment_method": 1, "PaymentType": 1, "payment_mode": 1}
+        ))
         for r in returns:
             amt = to_float(r.get("return_amount", 0))
             results["sales_return"] += amt
-            results["total_collection"] -= amt
+            c_ret, cr_ret = parse_payment_split(r, amt)
+            if cr_ret > 0 and c_ret == 0:
+                results["total_credit"] = max(0.0, results["total_credit"] - cr_ret)
+                results["credit_collection"] = max(0.0, results["credit_collection"] - cr_ret)
+            else:
+                deduct = c_ret if c_ret > 0 else amt
+                results["total_collection"] = max(0.0, results["total_collection"] - deduct)
+                results["cash_collection"] = max(0.0, results["cash_collection"] - deduct)
 
         # 7. Receipt and Payment
-        rp_docs = list(db["hospital_receiptandpayment"].find({"shiftno": {"$in": shift_vals}}, {"amount": 1, "receipt_type": 1}))
+        rp_docs = list(db["hospital_receiptandpayment"].find(
+            {"shiftno": {"$in": shift_vals}},
+            {"amount": 1, "receipt_type": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1, "mode_of_payment": 1}
+        ))
         for d in rp_docs:
             amt = to_float(d.get("amount", 0))
             if d.get("receipt_type") == "Receipt":
                 results["receipts"] += amt
-                results["total_collection"] += amt
+                c_amt, cr_amt = parse_payment_split(d, amt)
+                results["total_collection"] += c_amt
+                results["total_credit"] += cr_amt
+                results["cash_collection"] += c_amt
+                results["credit_collection"] += cr_amt
             elif d.get("receipt_type") == "Payment":
                 results["payments"] += amt
                 results["total_collection"] -= amt
+                results["cash_collection"] -= amt
 
         client.close()
 
@@ -753,8 +912,9 @@ def recalculate_and_update_shift_details(shift_no):
         # 1. Recalculate collection and returns using existing function
         totals = calculate_shift_collection(shift_no)
         
-        # 2. Update collected_Amount and SalesReturnAmount
+        # 2. Update collected_Amount, CreditAmount, and SalesReturnAmount
         shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
+        shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
         shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
 
         # 3. Sum up RemittedToBank and HandOverAmount, and check for close-shift records or manual entries in MongoDB directly
@@ -803,12 +963,12 @@ def recalculate_and_update_shift_details(shift_no):
         if extra_submit > 0:
             shift.SubmittedToAccount = extra_submit
 
-        # ClosingBalance = OpeningBalance + collected_Amount - RemittedToBank - SubmittedToAccount - HandOverAmount
+        # ClosingBalance = OpeningBalance + collected_Amount (Cash) - RemittedToBank - SubmittedToAccount - HandOverAmount
         shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
 
         # Clean all decimal fields to avoid conversion/saving errors
         for field in [
-            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 
+            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 'CreditAmount',
             'PettyCashBalance', 'RemittedToBank', 'SubmittedToAccount', 
             'HandOverAmount', 'PendingAmount', 'IPAdvanceAmount', 'SalesReturnAmount'
         ]:
@@ -816,6 +976,24 @@ def recalculate_and_update_shift_details(shift_no):
                 setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
         shift.save()
+
+        # Also sync directly to MongoDB
+        try:
+            m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            m_db = m_client["HMS"]
+            m_db["hospital_cashcountershiftdetails"].update_one(
+                {"shiftno": str(shift_no)},
+                {"$set": {
+                    "collected_Amount": Decimal128(str(shift.collected_Amount)),
+                    "CreditAmount": Decimal128(str(shift.CreditAmount)),
+                    "ClosingBalance": Decimal128(str(shift.ClosingBalance)),
+                    "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
+                }}
+            )
+            m_client.close()
+        except Exception:
+            pass
+
         print(f"[recalculate_and_update_shift_details] Shift {shift_no} updated successfully.")
 
     except Exception as e:
@@ -922,6 +1100,7 @@ def admin_close_shift(request):
         # 2. Recalculate totals
         totals = calculate_shift_collection(shift_no)
         collected_amount = float(safe_dec(totals.get('total_collection', 0)))
+        credit_amount = float(safe_dec(totals.get('total_credit', 0)))
         sales_return = float(safe_dec(totals.get('sales_return', 0)))
 
         def to_num(val, default=0.0):
@@ -948,6 +1127,7 @@ def admin_close_shift(request):
             "closingTime": closing_time,
             "ClosingBalance": Decimal128(f"{closing_balance:.2f}"),
             "collected_Amount": Decimal128(f"{collected_amount:.2f}"),
+            "CreditAmount": Decimal128(f"{credit_amount:.2f}"),
             "SalesReturnAmount": Decimal128(f"{sales_return:.2f}"),
             "RemittedToBank": Decimal128(f"{remitted_val:.2f}"),
             "SubmittedToAccount": Decimal128(f"{submitted_val:.2f}"),
@@ -982,6 +1162,7 @@ def admin_close_shift(request):
                 orm_shift.closingTime = closing_time
                 orm_shift.ClosingBalance = safe_dec(closing_balance)
                 orm_shift.collected_Amount = safe_dec(collected_amount)
+                orm_shift.CreditAmount = safe_dec(credit_amount)
                 orm_shift.SalesReturnAmount = safe_dec(sales_return)
                 orm_shift.RemittedToBank = safe_dec(remitted_val)
                 orm_shift.SubmittedToAccount = safe_dec(submitted_val)
@@ -1088,6 +1269,8 @@ def admin_close_shift(request):
             "OpeningBalance": opening_balance,
             "ClosingBalance": round(closing_balance, 2),
             "collected_Amount": round(collected_amount, 2),
+            "CreditAmount": round(credit_amount, 2),
+            "credit_amount": round(credit_amount, 2),
             "RemittedToBank": round(remitted_val, 2),
             "SubmittedToAccount": round(submitted_val, 2),
             "HandOverAmount": round(handover_val, 2),
@@ -1243,19 +1426,36 @@ def get_active_shift(request):
 
         # Thoroughly clean all decimal fields before saving to avoid Decimal128/String conflicts
         totals = calculate_shift_collection(shift.shiftno)
-        shift.collected_Amount = safe_dec(totals['total_collection'])
-        shift.SalesReturnAmount = safe_dec(totals['sales_return'])
+        shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
+        shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
+        shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
         shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
-            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 
+            'OpeningBalance', 'ClosingBalance', 'collected_Amount', 'CreditAmount',
             'PettyCashBalance', 'RemittedToBank', 'SubmittedToAccount', 
             'HandOverAmount', 'PendingAmount', 'IPAdvanceAmount', 'SalesReturnAmount'
         ]:
             setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
         shift.save()
+
+        try:
+            m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            m_db = m_client["HMS"]
+            m_db["hospital_cashcountershiftdetails"].update_one(
+                {"shiftno": str(shift.shiftno)},
+                {"$set": {
+                    "collected_Amount": Decimal128(str(shift.collected_Amount)),
+                    "CreditAmount": Decimal128(str(shift.CreditAmount)),
+                    "ClosingBalance": Decimal128(str(shift.ClosingBalance)),
+                    "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
+                }}
+            )
+            m_client.close()
+        except Exception:
+            pass
         
         return Response({
             "success": True, 
@@ -3196,6 +3396,7 @@ def get_shift_summary_report(request):
             st = shift_totals.get(sno, {})
 
             col_amt = st.get("collected") if sno in shift_totals else _to_num(s.get("collected_Amount"))
+            credit_amt = _to_num(s.get("CreditAmount"))
             ret_amt = st.get("returns") if sno in shift_totals else _to_num(s.get("SalesReturnAmount"))
             rem_amt = st.get("remitted") if sno in shift_totals else _to_num(s.get("RemittedToBank"))
             sub_amt = st.get("submitted") if sno in shift_totals else _to_num(s.get("SubmittedToAccount"))
@@ -3247,6 +3448,8 @@ def get_shift_summary_report(request):
                 "OpeningBalance": _to_num(s.get("OpeningBalance")),
                 "ClosingBalance": _to_num(s.get("ClosingBalance")),
                 "collected_Amount": round(col_amt - ret_amt, 2),
+                "CreditAmount": round(credit_amt, 2),
+                "credit_amount": round(credit_amt, 2),
                 "PettyCashBalance": _to_num(s.get("PettyCashBalance")),
                 "RemittedToBank": round(rem_amt, 2),
                 "SubmittedToAccount": round(sub_amt, 2),

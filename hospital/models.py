@@ -1670,6 +1670,7 @@ class Cashcountershiftdetails(AuditModel):
     closingTime    = models.DateTimeField(null=True, blank=True)
     date         = models.DateField(default=timezone.now)
     collected_Amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    CreditAmount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     PettyCashBalance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     RemittedToBank = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     SubmittedToAccount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
