@@ -96,7 +96,7 @@ def department_dashboard_stats(request):
         ))
         monthly_discharge = list(DischargeBilling.objects.filter(
             status="Billed",
-            bill_date__range=(month_start.date(), month_end.date())
+            bill_date__range=(month_start, month_end)
         ))
 
         # 4. Aggregate Stats per Department

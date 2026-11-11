@@ -1799,39 +1799,58 @@ def get_active_admission(request):
 
         # ── Patient (indexed lookup) ──────────────────────────────────────
         patient_data = {}
+        patient_doc = None
         adm_uhid = str(admission.get("uhid") or "").strip()
         if adm_uhid:
-            patient = hms_db["hospital_patient"].find_one({"uhid": adm_uhid})
-            if patient:
+            patient_doc = hms_db["hospital_patient"].find_one({"uhid": adm_uhid})
+            if patient_doc:
+                sal = str(patient_doc.get("salutation") or "").strip()
+                fname = str(patient_doc.get("firstName") or "").strip()
+                mname = str(patient_doc.get("middleName") or "").strip()
+                lname = str(patient_doc.get("lastName") or "").strip()
+                full_name = " ".join(x for x in [sal, fname, mname, lname] if x).strip() or f"{fname} {lname}".strip()
+                perm_addr = str(patient_doc.get("permanent_address") or patient_doc.get("address") or "").strip()
+                if not perm_addr:
+                    perm_addr = ", ".join(x for x in [patient_doc.get("area"), patient_doc.get("city"), patient_doc.get("state"), patient_doc.get("zipcode")] if x)
                 patient_data = {
-                    "uhid":        str(patient.get("uhid") or ""),
-                    "patientname": f"{patient.get('firstName') or ''} {patient.get('lastName') or ''}".strip(),
-                    "firstName":   str(patient.get("firstName") or ""),
-                    "lastName":    str(patient.get("lastName") or ""),
-                    "age":         str(patient.get("age") or ""),
-                    "gender":      str(patient.get("gender") or ""),
-                    "mobilePhone": str(patient.get("mobilePhone") or ""),
-                    "email":       str(patient.get("email") or ""),
-                    "city":        str(patient.get("city") or ""),
-                    "state":       str(patient.get("state") or ""),
-                    "area":        str(patient.get("area") or ""),
-                    "zipcode":     str(patient.get("zipcode") or ""),
+                    "uhid":              str(patient_doc.get("uhid") or ""),
+                    "patientname":       full_name,
+                    "salutation":        sal,
+                    "firstName":         fname,
+                    "lastName":          lname,
+                    "age":               str(patient_doc.get("age") or ""),
+                    "age_type":          str(patient_doc.get("age_type") or "Y"),
+                    "gender":            str(patient_doc.get("gender") or ""),
+                    "mobilePhone":       str(patient_doc.get("mobilePhone") or patient_doc.get("phone") or ""),
+                    "email":             str(patient_doc.get("email") or ""),
+                    "permanent_address": perm_addr,
+                    "city":              str(patient_doc.get("city") or ""),
+                    "state":             str(patient_doc.get("state") or ""),
+                    "area":              str(patient_doc.get("area") or ""),
+                    "zipcode":           str(patient_doc.get("zipcode") or ""),
+                    "customerType":      str(patient_doc.get("customer_type") or patient_doc.get("customerType") or ""),
                 }
 
-        # ── Active room from room_details ─────────────────────────────────
+        # ── Active room (prioritize active room shifting over initial room_details) ─
+        shiftings   = _safe_list(admission.get("roomShitingDetails"))
+        has_shifted = any(isinstance(s, dict) for s in shiftings)
         room_details = _safe_list(admission.get("room_details"))
         active_room  = {}
-        for r in reversed(room_details):
-            if isinstance(r, dict) and r.get("is_roomActive"):
-                active_room = r
+        for s in reversed(shiftings):
+            if isinstance(s, dict) and s.get("is_roomActive"):
+                active_room = {
+                    "roomNo": str(s.get("newRoomNo") or s.get("roomNo") or ""),
+                    "bedNo":  str(s.get("newBedNo") or s.get("bedNo") or ""),
+                }
                 break
+        if not active_room:
+            for r in reversed(room_details):
+                if isinstance(r, dict) and r.get("is_roomActive"):
+                    active_room = r
+                    break
         if not active_room and room_details:
             last = room_details[-1]
             active_room = last if isinstance(last, dict) else {}
-
-        # ── Has already been shifted? ─────────────────────────────────────
-        shiftings   = _safe_list(admission.get("roomShitingDetails"))
-        has_shifted = any(isinstance(s, dict) for s in shiftings)
 
         # ── Check RoomBooking for a pre-reserved room ─────────────────────
         reserved_room = None
@@ -1849,9 +1868,10 @@ def get_active_admission(request):
                 reserved_room   = str(booking.get("room_number") or "")
                 reserved_bed    = str(booking.get("bed_number") or "")
 
-        # ── Admission date + time formatting ─────────────────────────────
+        # ── Admission date + time formatting & stay duration ──────────────
         admission_date = admission_time = ""
         formatted_datetime = ""
+        total_days = 1
 
         dt = admission.get("admissionDateTime")
         if dt:
@@ -1860,6 +1880,7 @@ def get_active_admission(request):
                 admission_date = dt_ist.strftime("%Y-%m-%d")
                 admission_time = dt_ist.strftime("%H:%M:%S")
                 formatted_datetime = dt_ist.strftime("%d-%m-%Y %I:%M %p")
+                total_days = max(1, (_now_ist().date() - dt_ist.date()).days)
             else:
                 dt_str = str(dt)
                 admission_date = dt_str[:10]
@@ -1882,6 +1903,26 @@ def get_active_admission(request):
             except Exception:
                 pass
 
+        # ── Billing / Insurance Company ──────────────────────────────────
+        customer_type = str(
+            admission.get("customerType")
+            or admission.get("customer_type")
+            or (patient_doc.get("customer_type") if patient_doc else "")
+            or "General"
+        ).strip()
+        ins_id = str(admission.get("insurance_id") or (patient_doc.get("insurance_id") if patient_doc else "") or "").strip()
+        company_name = str(
+            admission.get("companyName")
+            or admission.get("company_name")
+            or admission.get("company")
+            or (patient_doc.get("company_name") if patient_doc else "")
+            or ""
+        ).strip()
+        if not company_name and ins_id:
+            ins_doc = hms_db["hospital_insuranceprovider"].find_one({"insurance_id": ins_id}, {"company_name": 1})
+            if ins_doc:
+                company_name = str(ins_doc.get("company_name") or "").strip()
+
         return Response({
             "success": True,
             "data": {
@@ -1890,11 +1931,18 @@ def get_active_admission(request):
                 "ipserial_number":  str(admission.get("ipserial_number") or ""),
                 "admittingDoctor":      doctor_id,
                 "admittingDoctorName":  doctor_name,
+                "department":           str(admission.get("department") or ""),
                 "admissionDate":        admission_date,
                 "admissionTime":        admission_time,
                 "admissionDateTime":    formatted_datetime,
+                "total_days":           total_days,
                 "consultingDoctor": str(admission.get("consultingDoctor") or ""),
                 "packageName":      str(admission.get("packageName") or ""),
+                "customerType":     customer_type,
+                "customer_type":    customer_type,
+                "company":          company_name,
+                "companyName":      company_name,
+                "ward_status":      str(admission.get("ward_status") or ""),
                 "roomNo":           active_room.get("roomNo", ""),
                 "bedNo":            active_room.get("bedNo", ""),
                 "room_details":     _normalize_ist_timestamps(room_details),

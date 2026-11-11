@@ -121,9 +121,10 @@ def doctor_report_view(request):
         discharge_query = {
             "hospital_code": hospital_code,
             "branch_code": branch_code,
-            # DischargeBilling.bill_date is a DateField, persisted as an ISO
-            # date string ("YYYY-MM-DD"), not a BSON datetime.
-            "bill_date": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()},
+            "$or": [
+                {"bill_date": {"$gte": start_date, "$lte": end_date}},
+                {"bill_date": {"$gte": start_date.date().isoformat(), "$lte": end_date.date().isoformat()}},
+            ],
             "status": "Billed",
             "is_active": True
         }

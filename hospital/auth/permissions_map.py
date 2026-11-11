@@ -176,6 +176,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/admission-advance/.+/?(\?.*)?$': 'HMS-P-AA',
     r'^/_b_a_c_k_e_n_d/HMS/today-registered-patients/?(\?.*)?$': 'HMS-P-ADML',
     r'^/_b_a_c_k_e_n_d/HMS/admission-requests/?(\?.*)?$': 'HMS-P-ADML',
+    r'^/_b_a_c_k_e_n_d/HMS/admitted-patients/?(\?.*)?$': ['HMS-P-AA', 'HMS-P-GADM', 'HMS-P-RSHFT', 'HMS-P-ADML'],
     r'^/_b_a_c_k_e_n_d/HMS/ip-patient-analysis/?(\?.*)?$': 'HMS-P-IPA',
 
 

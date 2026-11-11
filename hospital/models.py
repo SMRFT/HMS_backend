@@ -1038,8 +1038,8 @@ class IpAdvance_Refund(models.Model):
     advance_amount   = models.DecimalField(max_digits=12, decimal_places=2)
     remarks          = models.TextField(blank=True, default="")
 
-    bill_type        = models.CharField(max_length=20)
-    billTypeNo       = models.CharField(max_length=20, blank=True, default="") 
+    bill_type        = models.CharField(max_length=20, blank=True, default="1")
+    billTypeNo       = models.CharField(max_length=20, blank=True, default="AD01") 
     status           = models.CharField(max_length=20, default="Pending")
 
 
@@ -1054,8 +1054,8 @@ class DischargeBilling(AuditModel):
     uhid            = models.CharField(max_length=50, blank=True, null=True, db_index=True)
     ip_number       = models.CharField(max_length=50, blank=True, null=True, db_index=True)
 
-    # ── Bill Date (auto today from backend) ───────────────────────────────────
-    bill_date       = models.DateField(default=timezone.now)
+    # ── Bill Date (auto now datetime from backend) ────────────────────────────
+    bill_date       = models.DateTimeField(default=timezone.now)
 
     # ── Items stored as JSON array ────────────────────────────────────────────
     # Each item: { investigation_id, itemName, category, quantity, rate, discount, amount, doctor, doctor_fee, item_description }
@@ -1097,6 +1097,8 @@ class DischargeBilling(AuditModel):
     insurance_bill_number = models.CharField(max_length=100, blank=True, null=True)
     company_name          = models.CharField(max_length=255, blank=True, null=True)
     payment_method        = models.CharField(max_length=50, blank=True, null=True, default="Cash")
+    billTypeNo            = models.CharField(max_length=50, blank=True, null=True, default="DIS01")
+    bill_type             = models.IntegerField(blank=True, null=True, default=2)
 
     def save(self, *args, **kwargs):
         if self.discharge_id is None:

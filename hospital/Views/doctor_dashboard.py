@@ -102,7 +102,7 @@ def doctor_dashboard_stats(request):
         # per line-item inside `items` (each item may carry its own doctor/doctor_fee).
         monthly_discharge_billings = list(DischargeBilling.objects.filter(
             status="Billed",
-            bill_date__range=(month_start.date(), month_end.date())
+            bill_date__range=(month_start, month_end)
         ))
         department_income = 0.0
         for bill in monthly_discharge_billings:

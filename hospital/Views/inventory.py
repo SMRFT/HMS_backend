@@ -914,6 +914,25 @@ def grn_view(request, pk=None):
             if status_f:
                 filter_q["status"] = status_f
 
+            cat_f = str(request.GET.get("purchase_category", "") or request.GET.get("type", "")).strip()
+            if cat_f:
+                cat_upper = cat_f.upper()
+                if cat_upper == "IP":
+                    cat_or = [
+                        {"purchase_category": {"$regex": r"^IP\b|_IP$", "$options": "i"}},
+                        {"grn_number": {"$regex": r"^IP/", "$options": "i"}},
+                    ]
+                elif cat_upper == "OP":
+                    cat_or = [
+                        {"purchase_category": {"$regex": r"^OP\b|^MEDICINE_PURCHASE$", "$options": "i"}},
+                        {"grn_number": {"$regex": r"^OP/", "$options": "i"}},
+                    ]
+                else:
+                    cat_or = [
+                        {"purchase_category": {"$regex": f"^{re.escape(cat_f)}$", "$options": "i"}},
+                    ]
+                filter_q.setdefault("$and", []).append({"$or": cat_or})
+
             filter_q = apply_date_filter(filter_q, request, "created_date")
 
             return Response(paginate_mongo_query(
