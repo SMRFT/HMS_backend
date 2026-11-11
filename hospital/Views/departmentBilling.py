@@ -980,7 +980,7 @@ def get_investigation_items(request):
     try:
         bill_type_no = request.GET.get('billTypeNo')
         bill_type = request.GET.get('billType')
-        item_name = request.GET.get('itemName')
+        search_query_name = request.GET.get('itemName')
         
         # Validate billTypeNo
         if bill_type_no is None or bill_type_no == 'undefined' or bill_type_no == 'null':
@@ -1014,8 +1014,10 @@ def get_investigation_items(request):
             test_collection = diag_db['core_testdetails']
             
             query = {"is_active": True}
-            if item_name:
-                query["test_name"] = {"$regex": item_name, "$options": "i"}
+            if search_query_name and str(search_query_name).strip():
+                import re
+                escaped_item = re.escape(str(search_query_name).strip())
+                query["test_name"] = {"$regex": escaped_item, "$options": "i"}
 
             tests = list(test_collection.find(
                 query,
@@ -1093,6 +1095,20 @@ def get_investigation_items(request):
                     "nabh_code": nabh_code
                 })
 
+            if search_query_name and str(search_query_name).strip():
+                import re
+                q_clean = str(search_query_name).strip().lower()
+                def test_sort_key(it):
+                    t_name = str(it.get("itemName", "")).strip().lower()
+                    if t_name.startswith(q_clean):
+                        return (0, t_name)
+                    if re.search(rf'(?:^|\s){re.escape(q_clean)}', t_name):
+                        return (1, t_name)
+                    return (2, t_name)
+                formatted_items.sort(key=test_sort_key)
+            else:
+                formatted_items.sort(key=lambda it: str(it.get("itemName", "")).strip().lower())
+
             return JsonResponse({"items": formatted_items}, safe=True)
         
         # Regular case: Fetch from hospital_investigationprice
@@ -1153,6 +1169,25 @@ def get_investigation_items(request):
                             "price": price,
                             "nabh_code": nabh_code
                         })
+
+            if search_query_name and str(search_query_name).strip():
+                import re
+                q_clean = str(search_query_name).strip().lower()
+                # Filter matching query
+                formatted_items = [
+                    it for it in formatted_items
+                    if q_clean in str(it.get("itemName", "")).lower()
+                ]
+                def test_sort_key_nonlab(it):
+                    t_name = str(it.get("itemName", "")).strip().lower()
+                    if t_name.startswith(q_clean):
+                        return (0, t_name)
+                    if re.search(rf'(?:^|\s){re.escape(q_clean)}', t_name):
+                        return (1, t_name)
+                    return (2, t_name)
+                formatted_items.sort(key=test_sort_key_nonlab)
+            else:
+                formatted_items.sort(key=lambda it: str(it.get("itemName", "")).strip().lower())
 
             return JsonResponse({"items": formatted_items}, safe=True)
 

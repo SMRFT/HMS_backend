@@ -5149,36 +5149,70 @@ def get_nursing_station_pharmacy_stock(request):
             return s[:10]
 
         matching_item_ids = None
+        item_priority_map = {}
 
         if search_query:
             escaped = re.escape(search_query)
-            item_match = {
+            item_match_base = {
                 "is_active": True,
                 "is_blocked": False
             }
             if hospital_code and hospital_code != "system":
-                item_match["hospital_code"] = hospital_code
+                item_match_base["hospital_code"] = hospital_code
             if branch_code and branch_code != "system":
-                item_match["branch_code"] = branch_code
+                item_match_base["branch_code"] = branch_code
 
-            regex_conditions = [
-                {"item_name": {"$regex": f"^{escaped}", "$options": "i"}},
-                {"item_name": {"$regex": f"(?:^|\\s){escaped}", "$options": "i"}},
+            seen_ids = set()
+            found_ordered_ids = []
+
+            # 1. Exact starting with search query (Priority 0 - Highest)
+            prefix_items = list(db["hospital_pharmacyitem"].find(
+                {**item_match_base, "item_name": {"$regex": f"^{escaped}", "$options": "i"}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ).sort("item_name", 1).limit(100))
+
+            for it in prefix_items:
+                iid = it.get("item_id")
+                if iid is not None and iid not in seen_ids:
+                    seen_ids.add(iid)
+                    found_ordered_ids.append(iid)
+                    item_priority_map[iid] = 0
+
+            # 2. Word boundary starting with search query (Priority 1)
+            word_items = list(db["hospital_pharmacyitem"].find(
+                {**item_match_base, "item_name": {"$regex": f"(?:^|\\s){escaped}", "$options": "i"}, "item_id": {"$nin": list(seen_ids)}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ).sort("item_name", 1).limit(60))
+
+            for it in word_items:
+                iid = it.get("item_id")
+                if iid is not None and iid not in seen_ids:
+                    seen_ids.add(iid)
+                    found_ordered_ids.append(iid)
+                    item_priority_map[iid] = 1
+
+            # 3. Substring match in item_name, brand_name, or chemical_composition (Priority 2)
+            sub_conditions = [
                 {"item_name": {"$regex": escaped, "$options": "i"}},
                 {"brand_name": {"$regex": escaped, "$options": "i"}},
                 {"chemical_composition": {"$regex": escaped, "$options": "i"}}
             ]
             if search_query.isdigit():
-                regex_conditions.append({"item_id": int(search_query)})
+                sub_conditions.append({"item_id": int(search_query)})
 
-            item_match["$or"] = regex_conditions
+            sub_items = list(db["hospital_pharmacyitem"].find(
+                {**item_match_base, "$or": sub_conditions, "item_id": {"$nin": list(seen_ids)}},
+                {"item_id": 1, "item_name": 1, "_id": 0}
+            ).sort("item_name", 1).limit(80))
 
-            found_items = list(db["hospital_pharmacyitem"].find(
-                item_match,
-                {"item_id": 1, "_id": 0}
-            ).limit(150))
+            for it in sub_items:
+                iid = it.get("item_id")
+                if iid is not None and iid not in seen_ids:
+                    seen_ids.add(iid)
+                    found_ordered_ids.append(iid)
+                    item_priority_map[iid] = 2
 
-            if not found_items:
+            if not found_ordered_ids:
                 return Response({
                     "success": True,
                     "count": 0,
@@ -5186,7 +5220,7 @@ def get_nursing_station_pharmacy_stock(request):
                     "data": []
                 }, status=200)
 
-            matching_item_ids = [it["item_id"] for it in found_items if "item_id" in it]
+            matching_item_ids = found_ordered_ids
 
         # Build Stock match stage
         stock_match = {}
@@ -5281,7 +5315,8 @@ def get_nursing_station_pharmacy_stock(request):
             pipeline.append({"$match": {"available_stock": {"$gt": 0}}})
 
         pipeline.append({"$sort": {"item_details.item_name": 1, "expiry_date": 1}})
-        pipeline.append({"$limit": limit_val})
+        # If searching, limit pipeline loosely so we can re-order by priority in Python before final limit
+        pipeline.append({"$limit": max(limit_val * 3, 200) if search_query else limit_val})
 
         raw_records = list(db["hospital_pharmacystock"].aggregate(pipeline))
 
@@ -5320,6 +5355,14 @@ def get_nursing_station_pharmacy_stock(request):
                 "is_low_stock": avail_stock <= reorder_val,
                 "high_risk": bool(item_info.get("high_risk", False))
             })
+
+        if search_query:
+            results.sort(key=lambda x: (
+                item_priority_map.get(x.get("item_id"), 99),
+                str(x.get("item_name", "")).lower(),
+                x.get("expiry_date", "")
+            ))
+            results = results[:limit_val]
 
         return Response({
             "success": True,

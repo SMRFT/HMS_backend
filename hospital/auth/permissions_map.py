@@ -832,7 +832,15 @@ PAGE_MAPPING = DynamicPageMapping({
         '/_b_a_c_k_e_n_d/HMS/get_360_testlist/'     : 'HMS-P-S360',
         r'^/_b_a_c_k_e_n_d/HMS/360_report/?(\?.*)?$': 'HMS-P-S360',
         '/_b_a_c_k_e_n_d/HMS/sample_collector/'     : 'HMS-P-S360',
-
+       
+        r'^/_b_a_c_k_e_n_d/HMS/get-all-outlets/?(\?.*)?$': 'HMS-P-WR',
+        r'^/_b_a_c_k_e_n_d/HMS/ward-bill-types/?(\?.*)?$': 'HMS-P-WR',
+        r'^/_b_a_c_k_e_n_d/HMS/get_nursing_station_pharmacy_stock/?(\?.*)?$': 'HMS-P-WR',
+        '/_b_a_c_k_e_n_d/HMS/get_nursing_station_pharmacy_stock/': 'HMS-P-WR',
+        r'^/_b_a_c_k_e_n_d/HMS/nursing_station_pharmacy_stock/?(\?.*)?$': 'HMS-P-WR',
+        '/_b_a_c_k_e_n_d/HMS/nursing_station_pharmacy_stock/':'HMS-P-WR',
+        r'^/_b_a_c_k_e_n_d/HMS/get_nursing_pharmacy_stock/?(\?.*)?$': 'HMS-P-WR',
+        '/_b_a_c_k_e_n_d/HMS/get_nursing_pharmacy_stock/': 'HMS-P-WR',
 
         # Tanuh (Publicly accessible like QRScan / InPatientFeedback)
         r'/_b_a_c_k_e_n_d/HMS/tanuh_breast_cancer_screening/?(\?.*)?$'     : 'HMS-P-TBCS',
