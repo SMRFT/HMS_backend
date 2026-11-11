@@ -39,17 +39,50 @@ def pharmacy_notifications(request):
 
         _, db = get_hms_db()
 
-        outlet_map = {
-            "OLET001": "IP Pharmacy",
-            "OLET002": "OP Pharmacy",
-            "OLET003": "Main Store",
-        }
+        outlet_map = {}
+        stock_outlets_map = {}
+        requested_outlet_is_stock = None
         try:
-            for o in db.hospital_outlet.find({}, {"outlet_code": 1, "outlet_name": 1, "_id": 0}):
-                if o.get("outlet_code") and o.get("outlet_name"):
-                    outlet_map[o["outlet_code"]] = o["outlet_name"]
+            for o in db["hospital_outlets"].find({}, {"outlet_code": 1, "outlet_name": 1, "is_stock_outlet": 1, "is_active": 1, "_id": 0}):
+                code = str(o.get("outlet_code") or "").strip()
+                if not code:
+                    continue
+                name = o.get("outlet_name") or code
+                outlet_map[code] = name
+                if bool(o.get("is_stock_outlet", False)) and o.get("is_active", True) is not False:
+                    stock_outlets_map[code] = name
+                if outlet_code and code == outlet_code:
+                    requested_outlet_is_stock = bool(o.get("is_stock_outlet", False))
         except Exception:
             pass
+
+        # Only outlets with is_stock_outlet=True from hospital_outlets receive stock notifications
+        if outlet_code:
+            is_allowed_stock_outlet = (
+                requested_outlet_is_stock
+                if requested_outlet_is_stock is not None
+                else (outlet_code in stock_outlets_map)
+            )
+            if not is_allowed_stock_outlet:
+                return JsonResponse({
+                    "success": True,
+                    "is_stock_outlet": False,
+                    "outlet_code": outlet_code,
+                    "outlet_name": outlet_map.get(outlet_code, outlet_code),
+                    "stock_outlets": [{"outlet_code": k, "outlet_name": v} for k, v in stock_outlets_map.items()],
+                    "expiry_alerts": [],
+                    "low_stock_alerts": [],
+                    "counts": {
+                        "total": 0,
+                        "op_total": 0,
+                        "ip_total": 0,
+                        "op_expiry": 0,
+                        "ip_expiry": 0,
+                        "op_low_stock": 0,
+                        "ip_low_stock": 0,
+                    },
+                    "total_count": 0,
+                })
 
         stock_filter = {}
         if hospital_code and hospital_code != "system":
@@ -57,9 +90,11 @@ def pharmacy_notifications(request):
         if branch_code and branch_code != "system":
             stock_filter["branch_code"] = branch_code
 
-        # If user is in specific outlet (OLET001 - IP Pharmacy or OLET002 - OP Pharmacy)
-        if outlet_code in ("OLET001", "OLET002"):
+        # Scope to the active stock outlet (or all is_stock_outlet=True outlets if none provided)
+        if outlet_code:
             stock_filter["outlet_code"] = outlet_code
+        elif stock_outlets_map:
+            stock_filter["outlet_code"] = {"$in": list(stock_outlets_map.keys())}
 
         # Projection to fetch only required fields
         stock_projection = {
@@ -161,7 +196,7 @@ def pharmacy_notifications(request):
             # Low Stock Calculation (per item & outlet)
             # -----------------------------
             if item_id:
-                key = (item_id, s_out) if outlet_code not in ("OLET001", "OLET002") else item_id
+                key = (item_id, s_out) if not outlet_code else item_id
                 low_stock_map[key] = low_stock_map.get(key, 0) + available
 
         # Sort expiry alerts
@@ -210,8 +245,10 @@ def pharmacy_notifications(request):
 
         return JsonResponse({
             "success": True,
+            "is_stock_outlet": True,
             "outlet_code": outlet_code or "ALL",
-            "outlet_name": outlet_map.get(outlet_code, "All Outlets (Common)"),
+            "outlet_name": outlet_map.get(outlet_code, "All Stock Outlets"),
+            "stock_outlets": [{"outlet_code": k, "outlet_name": v} for k, v in stock_outlets_map.items()],
             "expiry_alerts": expiry_data,
             "low_stock_alerts": low_stock_data,
             "counts": {
