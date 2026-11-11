@@ -3310,7 +3310,7 @@ def get_shift_summary_report(request):
 
         projection = {
             "shiftno": 1, "CashierID": 1, "CashCounter": 1,
-            "OpeningBalance": 1, "ClosingBalance": 1, "collected_Amount": 1,
+            "OpeningBalance": 1, "ClosingBalance": 1, "collected_Amount": 1, "CreditAmount": 1,
             "PettyCashBalance": 1, "RemittedToBank": 1, "SubmittedToAccount": 1,
             "HandOverAmount": 1, "SalesReturnAmount": 1, "ShiftStatus": 1,
             "StartingTime": 1, "closingTime": 1, "date": 1,
@@ -3348,35 +3348,33 @@ def get_shift_summary_report(request):
         shift_totals = {}
         if active_nos:
             try:
+                for s_no in active_nos:
+                    calc = calculate_shift_collection(s_no)
+                    shift_totals[s_no] = {
+                        "collected": float(calc.get("total_collection") or 0.0),
+                        "credit": float(calc.get("total_credit") or 0.0),
+                        "returns": float(calc.get("sales_return") or 0.0),
+                        "remitted": 0.0,
+                        "submitted": 0.0,
+                    }
                 col_c = hms_db["hospital_cashcountercollection"]
                 ccc_docs = list(col_c.find(
-                    {"shift_no": {"$in": active_nos}},
-                    {"shift_no": 1, "billing_category": 1, "transaction_type": 1, "collected_amount": 1, "Returned_amount": 1}
+                    {"shift_no": {"$in": active_nos}, "billing_category": {"$in": ["remitted", "submit"]}},
+                    {"shift_no": 1, "billing_category": 1, "transaction_type": 1, "collected_amount": 1, "RemittedToBank": 1}
                 ))
                 for doc in ccc_docs:
                     s_no = doc.get("shift_no")
-                    if not s_no:
-                        continue
-                    st = shift_totals.setdefault(s_no, {"collected": 0.0, "returns": 0.0, "remitted": 0.0, "submitted": 0.0})
-                    cat = (doc.get("billing_category") or "").lower()
-                    tx_type = (doc.get("transaction_type") or "").lower()
-                    try:
-                        col_amt = float(str(doc.get("collected_amount") or 0))
-                    except Exception:
-                        col_amt = 0.0
-                    try:
-                        ret_amt = float(str(doc.get("Returned_amount") or 0))
-                    except Exception:
-                        ret_amt = 0.0
-
-                    if "return" in cat or tx_type in ("payment", "returned"):
-                        st["returns"] += col_amt or ret_amt
-                    elif cat == "remitted" or tx_type == "remitted":
-                        st["remitted"] += col_amt
-                    elif cat == "submit" or tx_type == "submit":
-                        st["submitted"] += col_amt
-                    else:
-                        st["collected"] += col_amt
+                    if s_no in shift_totals:
+                        cat = (doc.get("billing_category") or "").lower()
+                        tx_type = (doc.get("transaction_type") or "").lower()
+                        try:
+                            amt = float(str(doc.get("collected_amount") or doc.get("RemittedToBank") or 0))
+                        except Exception:
+                            amt = 0.0
+                        if cat == "remitted" or tx_type == "remitted":
+                            shift_totals[s_no]["remitted"] += amt
+                        elif cat == "submit" or tx_type == "submit":
+                            shift_totals[s_no]["submitted"] += amt
             except Exception as e:
                 print("Error aggregating active shift collections:", e)
 
@@ -3396,10 +3394,10 @@ def get_shift_summary_report(request):
             st = shift_totals.get(sno, {})
 
             col_amt = st.get("collected") if sno in shift_totals else _to_num(s.get("collected_Amount"))
-            credit_amt = _to_num(s.get("CreditAmount"))
+            credit_amt = st.get("credit") if sno in shift_totals else _to_num(s.get("CreditAmount"))
             ret_amt = st.get("returns") if sno in shift_totals else _to_num(s.get("SalesReturnAmount"))
-            rem_amt = st.get("remitted") if sno in shift_totals else _to_num(s.get("RemittedToBank"))
-            sub_amt = st.get("submitted") if sno in shift_totals else _to_num(s.get("SubmittedToAccount"))
+            rem_amt = st.get("remitted") if (sno in shift_totals and st.get("remitted", 0) > 0) else _to_num(s.get("RemittedToBank"))
+            sub_amt = st.get("submitted") if (sno in shift_totals and st.get("submitted", 0) > 0) else _to_num(s.get("SubmittedToAccount"))
 
             # Standard Indian Time (IST = UTC+05:30)
             IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
