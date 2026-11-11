@@ -232,14 +232,24 @@ def mhc_report(request):
         if timezone.is_naive(to_dt):
             to_dt = timezone.make_aware(to_dt)
 
-        queryset = MasterHealthcheckup.objects.filter(
-            Q(registration_date__gte=from_date_str, registration_date__lte=to_date_str + '\uffff') |
-            Q(
-                Q(registration_date__isnull=True) | Q(registration_date=''),
-                created_date__gte=from_dt,
-                created_date__lte=to_dt
-            )
-        ).order_by('-registration_date', '-created_date', '-mhc_no')
+        filter_by = (request.query_params.get('filter_by') or request.query_params.get('type') or '').strip().lower()
+
+        if filter_by in ('follow_up', 'followup') or request.query_params.get('is_followup') == 'true':
+            # Follow-up Report: filter by follow_up date
+            queryset = MasterHealthcheckup.objects.filter(
+                follow_up__gte=from_date_str,
+                follow_up__lte=to_date_str + '\uffff'
+            ).order_by('follow_up', '-mhc_no')
+        else:
+            # Registration / Checkup Report: filter by registration_date or created_date
+            queryset = MasterHealthcheckup.objects.filter(
+                Q(registration_date__gte=from_date_str, registration_date__lte=to_date_str + '\uffff') |
+                Q(
+                    Q(registration_date__isnull=True) | Q(registration_date=''),
+                    created_date__gte=from_dt,
+                    created_date__lte=to_dt
+                )
+            ).order_by('-registration_date', '-created_date', '-mhc_no')
 
         serializer = MasterHealthcheckupSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -277,12 +287,20 @@ def mhc_dashboard(request):
         to_dt = datetime.strptime(to_date_str, '%Y-%m-%d').replace(
             hour=23, minute=59, second=59, microsecond=999999
         )
+        if timezone.is_naive(from_dt):
+            from_dt = timezone.make_aware(from_dt)
+        if timezone.is_naive(to_dt):
+            to_dt = timezone.make_aware(to_dt)
 
         records = MasterHealthcheckup.objects.filter(
-            created_date__gte=from_dt,
-            created_date__lte=to_dt,
+            Q(registration_date__gte=from_date_str, registration_date__lte=to_date_str + '\uffff') |
+            Q(
+                Q(registration_date__isnull=True) | Q(registration_date=''),
+                created_date__gte=from_dt,
+                created_date__lte=to_dt
+            )
         ).values(
-            'created_date', 'package', 'package_category',
+            'registration_date', 'created_date', 'package', 'package_category',
             'package_fee', 'doctor_fee', 'add_tests', 'pharmacy', 'ip', 'total_fees'
         )
 
@@ -303,12 +321,20 @@ def mhc_dashboard(request):
         month_order       = []  # preserves sorted order
 
         for rec in records:
-            dt = rec['created_date']
-            # Handle both datetime and date objects
-            if hasattr(dt, 'strftime'):
-                mkey = dt.strftime('%b-%Y')
-            else:
-                mkey = 'Unknown'
+            reg_date_str = rec.get('registration_date')
+            mkey = None
+            if reg_date_str and isinstance(reg_date_str, str) and len(reg_date_str.strip()) >= 7:
+                try:
+                    rd = datetime.strptime(reg_date_str.strip()[:10], '%Y-%m-%d')
+                    mkey = rd.strftime('%b-%Y')
+                except Exception:
+                    pass
+            if not mkey:
+                dt = rec.get('created_date')
+                if hasattr(dt, 'strftime'):
+                    mkey = dt.strftime('%b-%Y')
+                else:
+                    mkey = 'Unknown'
 
             if mkey not in month_order:
                 month_order.append(mkey)

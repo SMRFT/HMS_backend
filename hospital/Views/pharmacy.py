@@ -75,6 +75,39 @@ def to_utc_iso(dt_val):
 
 
 
+def resolve_request_outlet(request, data=None):
+    if data is None:
+        data = getattr(request, "data", {}) if isinstance(getattr(request, "data", None), dict) else {}
+
+    # 1. Primary: Active outlet from headers, GET query param, or body
+    active_outlet = (
+        (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+        or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+        or (request.META.get("HTTP_OUTLET_CODE") if hasattr(request, "META") else None)
+        or (request.META.get("HTTP_AUTH_OUTLET_CODE") if hasattr(request, "META") else None)
+        or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        or (data.get("outlet_code") if isinstance(data, dict) else None)
+    )
+
+    if active_outlet and str(active_outlet).strip().lower() not in ("null", "undefined", "none", "", "all"):
+        return str(active_outlet).strip()
+
+    # 2. Fallback: auth-outlet-code from token
+    auth_outlet = (
+        data.get("auth-outlet-code") if isinstance(data, dict) else None
+    ) or (
+        request.data.get("auth-outlet-code") if hasattr(request, "data") and isinstance(request.data, dict) else None
+    )
+
+    if isinstance(auth_outlet, (list, tuple)):
+        if "OLET002" in auth_outlet:
+            return "OLET002"
+        elif "OLET001" in auth_outlet:
+            return "OLET001"
+        return auth_outlet[0] if auth_outlet else None
+    return auth_outlet
+
+
 @api_view(["POST","GET"])
 @permission_classes([HasRoleAndDataPermission])
 def get_pharmacy_stock(request):
@@ -82,7 +115,7 @@ def get_pharmacy_stock(request):
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
         hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
         branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-        outlet_code   = data.get("auth-outlet-code") or (request.GET.get("outlet_code") if hasattr(request, "GET") else None)
+        outlet_code   = resolve_request_outlet(request, data)
         if isinstance(outlet_code, (list, tuple)):
             if len(outlet_code) == 1:
                 outlet_code = outlet_code[0]
@@ -731,10 +764,7 @@ def save_pharmacy_bill(request):
     # ✅ AUTH CODES
     hospital_code = data.get("auth-hospital-code")
     branch_code   = data.get("auth-branch-code")
-    outlet_code   = data.get("auth-outlet-code")
-
-    if isinstance(outlet_code, (list, tuple)) and outlet_code:
-        outlet_code = outlet_code[0]
+    outlet_code   = resolve_request_outlet(request, data)
 
     # --------------------------------------------------
     # STATUS NORMALIZATION
@@ -1440,18 +1470,9 @@ def get_active_estimates(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_estimate_bills(request):
     try:
-        hospital_code = (
-            request.data.get("auth-hospital-code")
-            
-        )
-        branch_code = (
-            request.data.get("auth-branch-code")
-            
-        )
-        outlet_code = (
-            request.data.get("auth-outlet-code")
-            
-        )
+        hospital_code = request.data.get("auth-hospital-code")
+        branch_code   = request.data.get("auth-branch-code")
+        active_outlet = resolve_request_outlet(request, request.data if hasattr(request, "data") else None)
 
         # ── 1. Automatically purge and log any expired estimates (>24 hours from bill save time) ──
         process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_code=None)
@@ -1464,11 +1485,8 @@ def get_estimate_bills(request):
             filter_query["hospital_code"] = hospital_code
         if branch_code:
             filter_query["branch_code"] = branch_code
-
-        # If a specific outlet is filtered via query parameter, apply it; otherwise show all active estimates for the branch
-        requested_outlet = request.GET.get("outlet_code")
-        if requested_outlet and requested_outlet.strip().upper() not in ["ALL", ""]:
-            filter_query["outlet_code"] = requested_outlet.strip()
+        if active_outlet:
+            filter_query["outlet_code"] = active_outlet
 
         cursor = bill_collection.find(filter_query).sort("Bill_id", -1)
         data = []
@@ -2807,7 +2825,10 @@ def admissionstatus(request):
 
     uhid = request.GET.get("uhid")
 
-    admission = mongo_db["hospital_admission"].find_one({"uhid": uhid})
+    # Prefer actively admitted record first
+    admission = mongo_db["hospital_admission"].find_one({"uhid": uhid, "is_admitted": True})
+    if not admission:
+        admission = mongo_db["hospital_admission"].find_one({"uhid": uhid}, sort=[("_id", -1)])
 
     if not admission:
         return Response({
@@ -2816,7 +2837,7 @@ def admissionstatus(request):
             "data": []
         })
 
-    admitted = admission.get("is_admitted", False)
+    admitted = bool(admission.get("is_admitted", False))
 
     # ✅ Convert _id
     admission["_id"] = str(admission["_id"])
@@ -2929,30 +2950,67 @@ def patient_details(request):
     client      = MongoClient(os.getenv("GLOBAL_DB_HOST"))
     global_db   = client["Global"]
     employee_collection = global_db["backend_diagnostics_profile"]
+    hms_db      = client["HMS"]
+    admission_collection = hms_db["hospital_admission"]
 
     serializer   = PatientSerializer(patients, many=True)
     patient_data = serializer.data
 
-    # ── Step 3: Attach billing + doctor_name to each patient ──────────
+    # ── Step 3: Attach billing + doctor_name + admission_status to each patient ──────────
     for patient in patient_data:
         patient_id = int(patient["id"])
-        billings   = Billing.objects.filter(patient_id=patient_id)
+        billings   = Billing.objects.filter(patient_id=patient_id).order_by('-billed_date')
         billing_list = []
 
         for bill in billings:
-            doctor_id   = bill.doctor_id
-            employee    = employee_collection.find_one({"employeeId": doctor_id})
-            doctor_name = employee["employeeName"] if employee else None
+            raw_doc_id  = bill.doctor_id
+            resolved_id = resolve_doctor_id(raw_doc_id) if raw_doc_id else ""
+            doc_name    = get_doctor_name_by_id(resolved_id or raw_doc_id) if (resolved_id or raw_doc_id) else ""
+            if not doc_name and raw_doc_id:
+                doc_name = raw_doc_id
             billing_list.append({
                 "bill_number"    : bill.bill_number,
-                "doctor_id"      : doctor_id,
-                "doctor_name"    : doctor_name,
+                "doctor_id"      : resolved_id or raw_doc_id,
+                "doctor_name"    : doc_name,
+                "raw_doctor_id"  : raw_doc_id,
                 "total_fees"     : str(bill.total_fees),
                 "payment_status" : bill.payment_status,
                 "billed_date"    : bill.billed_date,
             })
 
         patient["billing"] = billing_list
+
+        # Resolve patient's default doctor as well
+        pat_doc_input = patient.get("doctorName") or patient.get("doctor_id")
+        if pat_doc_input:
+            resolved_pat_doc_id = resolve_doctor_id(pat_doc_input)
+            patient["doctor_id"] = resolved_pat_doc_id or patient.get("doctor_id") or ""
+            if not patient.get("doctor_name"):
+                patient["doctor_name"] = get_doctor_name_by_id(resolved_pat_doc_id or pat_doc_input) or pat_doc_input
+
+        # Live admission status check from hospital_admission
+        pat_uhid = patient.get("uhid")
+        adm = None
+        if pat_uhid:
+            try:
+                adm = admission_collection.find_one({"uhid": pat_uhid, "is_admitted": True})
+                if not adm:
+                    adm = admission_collection.find_one({"uhid": pat_uhid}, sort=[("_id", -1)])
+            except Exception:
+                adm = None
+
+        is_adm = bool(adm.get("is_admitted", False)) if adm else False
+        patient["is_admitted"] = is_adm
+        patient["admission_status"] = "Admitted" if is_adm else "Not Admitted"
+        if adm:
+            if is_adm:
+                patient["ip_number"] = adm.get("ipNumber") or adm.get("ip_number") or patient.get("ip_number") or ""
+            consulting_doc = adm.get("consultingDoctor") or adm.get("admittingDoctor") or ""
+            patient["consulting_doctor"] = consulting_doc
+            res_c_id = resolve_doctor_id(consulting_doc) if consulting_doc else ""
+            res_c_name = get_doctor_name_by_id(res_c_id or consulting_doc) if (res_c_id or consulting_doc) else consulting_doc
+            patient["consulting_doctor_id"] = res_c_id or ""
+            patient["consulting_doctor_name"] = res_c_name or consulting_doc
 
     return Response({
         "success": True,
@@ -4081,7 +4139,7 @@ def pharmacy_view_bills(request):
     employee_id    = request.data.get("auth-user-id")
     hospital_code  = request.data.get("auth-hospital-code")
     branch_code    = request.data.get("auth-branch-code")
-    request_outlet = request.data.get("auth-outlet-code")
+    request_outlet = resolve_request_outlet(request, request.data)
 
     # =========================================================
     # ✅ Guard
