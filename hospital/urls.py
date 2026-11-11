@@ -65,6 +65,7 @@ from .Views import (
     employee_master,
     report_config_views,
     tumourboard,
+    ward_geo_verification,
 )
 from .auth import permissions_map
 from .Views.AccountsReport import (
@@ -867,6 +868,10 @@ urlpatterns = [
     path('report-configuration-master/', report_config_views.report_configuration_master_view, name='report_configuration_master_view'),
     path('report-configuration-copy/', report_config_views.report_configuration_copy_view, name='report_configuration_copy_view'),
     path('my-report-permissions/', report_config_views.my_report_permissions_view, name='my_report_permissions_view'),
+
+    # Ward Geo-tagged Bedside Verification
+    path('ward-geo-verification/', ward_geo_verification.ward_geo_verification_view, name='ward_geo_verification_view'),
+    path('ward-geo-verification/photo/<str:file_id>/', ward_geo_verification.stream_geo_photo, name='stream_geo_photo'),
 ]
 
 
