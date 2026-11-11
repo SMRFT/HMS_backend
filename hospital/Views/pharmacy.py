@@ -869,8 +869,11 @@ def save_pharmacy_bill(request):
 
         # 🔥 UPDATE ESTIMATE
         if status == "Estimate":
+            if not record.get("estimate_no"):
+                update_data["estimate_no"] = generate_estimate_no()
             update_data["billing_status"] = "Estimate"
             update_data["billing_mode"]   = "ESTIMATE"
+            update_data["bill_date"]      = datetime.utcnow()
 
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
@@ -915,7 +918,7 @@ def save_pharmacy_bill(request):
             "bill_no":         update_data.get("bill_no") or record.get("bill_no"),
             "bill_date":       to_utc_iso(update_data.get("bill_date") or record.get("bill_date")),
             "created_date":    to_utc_iso(record.get("created_date")),
-            "estimate_no":     record.get("estimate_no"),
+            "estimate_no":     update_data.get("estimate_no") or record.get("estimate_no"),
             "age":             update_data.get("age", record.get("age") or 0),
             "edit_reason":     update_data.get("edit_reason"),
             "edited_by":       update_data.get("edited_by"),
@@ -1325,7 +1328,7 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
 
         for bill in list(cursor):
             Bill_id = bill.get("Bill_id")
-            raw_date = bill.get("bill_date") or bill.get("created_date")
+            raw_date = bill.get("bill_date") or bill.get("lastmodified_date") or bill.get("created_date")
             if not raw_date:
                 continue
 
@@ -2858,10 +2861,80 @@ from rest_framework import status
 from django.views.decorators.csrf import csrf_exempt
 from pymongo import MongoClient
 import os
+import time
+from collections import defaultdict
 from django.db.models import Q
 from ..models import Patient, Billing
 from ..serializers import PatientSerializer, BillingSerializer
 
+_DOCTOR_CACHE_TIME = 0
+_DOCTOR_ID_TO_NAME = {}
+_DOCTOR_NAME_TO_ID = {}
+
+def _get_doctor_lookup_maps():
+    global _DOCTOR_CACHE_TIME, _DOCTOR_ID_TO_NAME, _DOCTOR_NAME_TO_ID
+    now = time.time()
+    if _DOCTOR_ID_TO_NAME and (now - _DOCTOR_CACHE_TIME) < 300:
+        return _DOCTOR_ID_TO_NAME, _DOCTOR_NAME_TO_ID
+
+    try:
+        c = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        profiles = list(c["Global"]["backend_diagnostics_profile"].find(
+            {}, {"employeeId": 1, "employeeName": 1, "designation": 1, "_id": 0}
+        ))
+        id_to_name = {}
+        name_to_id = {}
+        for p in profiles:
+            eid = str(p.get("employeeId") or "").strip()
+            ename = str(p.get("employeeName") or "").strip()
+            if eid:
+                id_to_name[eid] = ename
+                try:
+                    id_to_name[str(int(eid))] = ename
+                except Exception:
+                    pass
+            if ename:
+                name_to_id[ename.lower()] = eid
+
+        _DOCTOR_ID_TO_NAME = id_to_name
+        _DOCTOR_NAME_TO_ID = name_to_id
+        _DOCTOR_CACHE_TIME = now
+    except Exception as e:
+        logger.error(f"Error loading doctor lookup maps: {e}")
+
+    return _DOCTOR_ID_TO_NAME, _DOCTOR_NAME_TO_ID
+
+def fast_resolve_doctor_pharmacy(doc_input):
+    if not doc_input:
+        return "", ""
+    s = str(doc_input).strip()
+    if not s:
+        return "", ""
+
+    id_to_name, name_to_id = _get_doctor_lookup_maps()
+
+    # 1. Direct ID match
+    if s in id_to_name:
+        return s, id_to_name[s]
+    try:
+        num_s = str(int(s))
+        if num_s in id_to_name:
+            return s, id_to_name[num_s]
+    except Exception:
+        pass
+
+    # 2. Exact name match
+    s_lower = s.lower()
+    if s_lower in name_to_id:
+        eid = name_to_id[s_lower]
+        return eid, id_to_name.get(eid, s)
+
+    # 3. Substring match in loaded doctor profiles
+    for ename_lower, eid in name_to_id.items():
+        if s_lower in ename_lower or ename_lower in s_lower:
+            return eid, id_to_name.get(eid, s)
+
+    return s, s
 
 
 @api_view(['GET'])
@@ -2946,32 +3019,50 @@ def patient_details(request):
 
     patients = Patient.objects.filter(query).order_by('-id')[:50]
 
-    # ── Step 2: MongoDB connection ────────────────────────────────────
-    client      = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    global_db   = client["Global"]
-    employee_collection = global_db["backend_diagnostics_profile"]
-    hms_db      = client["HMS"]
-    admission_collection = hms_db["hospital_admission"]
-
     serializer   = PatientSerializer(patients, many=True)
     patient_data = serializer.data
 
-    # ── Step 3: Attach billing + doctor_name + admission_status to each patient ──────────
+    if not patient_data:
+        return Response({
+            "success": True,
+            "data"   : []
+        }, status=status.HTTP_200_OK)
+
+    # ── High Performance Batch Queries ────────────────────────────────
+    # 1. Batch Billing query (single SQL query for all patients)
+    patient_ids = [int(p["id"]) for p in patient_data if p.get("id")]
+    all_billings = list(Billing.objects.filter(patient_id__in=patient_ids).order_by('-billed_date'))
+    billing_by_patient = defaultdict(list)
+    for b in all_billings:
+        billing_by_patient[b.patient_id].append(b)
+
+    # 2. Batch Admissions query (single MongoDB query for all UHIDs)
+    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+    hms_db = client["HMS"]
+    admission_collection = hms_db["hospital_admission"]
+
+    uhids = [p["uhid"] for p in patient_data if p.get("uhid")]
+    all_adms = list(admission_collection.find({"uhid": {"$in": uhids}}).sort([("_id", -1)]))
+    adm_by_uhid = {}
+    for adm in all_adms:
+        u = adm.get("uhid")
+        if u not in adm_by_uhid or (adm.get("is_admitted") and not adm_by_uhid[u].get("is_admitted")):
+            adm_by_uhid[u] = adm
+
+    # ── Step 3: Attach billing + doctor_name + admission_status (in-memory 0ms resolution) ──
     for patient in patient_data:
         patient_id = int(patient["id"])
-        billings   = Billing.objects.filter(patient_id=patient_id).order_by('-billed_date')
+        bills = billing_by_patient.get(patient_id, [])
         billing_list = []
 
-        for bill in billings:
-            raw_doc_id  = bill.doctor_id
-            resolved_id = resolve_doctor_id(raw_doc_id) if raw_doc_id else ""
-            doc_name    = get_doctor_name_by_id(resolved_id or raw_doc_id) if (resolved_id or raw_doc_id) else ""
-            if not doc_name and raw_doc_id:
-                doc_name = raw_doc_id
+        # Keep top 5 latest bills for lightweight and instant payload
+        for bill in bills[:5]:
+            raw_doc_id = bill.doctor_id
+            resolved_id, doc_name = fast_resolve_doctor_pharmacy(raw_doc_id)
             billing_list.append({
                 "bill_number"    : bill.bill_number,
                 "doctor_id"      : resolved_id or raw_doc_id,
-                "doctor_name"    : doc_name,
+                "doctor_name"    : doc_name or raw_doc_id,
                 "raw_doctor_id"  : raw_doc_id,
                 "total_fees"     : str(bill.total_fees),
                 "payment_status" : bill.payment_status,
@@ -2980,25 +3071,17 @@ def patient_details(request):
 
         patient["billing"] = billing_list
 
-        # Resolve patient's default doctor as well
+        # Resolve patient's default doctor
         pat_doc_input = patient.get("doctorName") or patient.get("doctor_id")
         if pat_doc_input:
-            resolved_pat_doc_id = resolve_doctor_id(pat_doc_input)
+            resolved_pat_doc_id, pat_doc_name = fast_resolve_doctor_pharmacy(pat_doc_input)
             patient["doctor_id"] = resolved_pat_doc_id or patient.get("doctor_id") or ""
             if not patient.get("doctor_name"):
-                patient["doctor_name"] = get_doctor_name_by_id(resolved_pat_doc_id or pat_doc_input) or pat_doc_input
+                patient["doctor_name"] = pat_doc_name or pat_doc_input
 
-        # Live admission status check from hospital_admission
+        # Live admission status check
         pat_uhid = patient.get("uhid")
-        adm = None
-        if pat_uhid:
-            try:
-                adm = admission_collection.find_one({"uhid": pat_uhid, "is_admitted": True})
-                if not adm:
-                    adm = admission_collection.find_one({"uhid": pat_uhid}, sort=[("_id", -1)])
-            except Exception:
-                adm = None
-
+        adm = adm_by_uhid.get(pat_uhid)
         is_adm = bool(adm.get("is_admitted", False)) if adm else False
         patient["is_admitted"] = is_adm
         patient["admission_status"] = "Admitted" if is_adm else "Not Admitted"
@@ -3007,8 +3090,7 @@ def patient_details(request):
                 patient["ip_number"] = adm.get("ipNumber") or adm.get("ip_number") or patient.get("ip_number") or ""
             consulting_doc = adm.get("consultingDoctor") or adm.get("admittingDoctor") or ""
             patient["consulting_doctor"] = consulting_doc
-            res_c_id = resolve_doctor_id(consulting_doc) if consulting_doc else ""
-            res_c_name = get_doctor_name_by_id(res_c_id or consulting_doc) if (res_c_id or consulting_doc) else consulting_doc
+            res_c_id, res_c_name = fast_resolve_doctor_pharmacy(consulting_doc)
             patient["consulting_doctor_id"] = res_c_id or ""
             patient["consulting_doctor_name"] = res_c_name or consulting_doc
 
@@ -5641,7 +5723,7 @@ def PharmacyItemPatientAnalysis(request):
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
         hospital_code = data.get("auth-hospital-code") 
         branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code") or data.get("outlet_code")
+        outlet_code   = data.get("auth-outlet-code") 
         raw_outlet    = outlet_code
 
         if isinstance(raw_outlet, (list, tuple)):
