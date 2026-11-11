@@ -264,6 +264,46 @@ def _resolve_seed_room_kit(db):
 # Core Atomic Sequence Generator
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resolve_initial_seed(db, counter_name, seed_resolver=None, default_seed=0):
+    """Computes the initial seed value when a counter document does not yet exist."""
+    seed = 0
+    if seed_resolver and callable(seed_resolver):
+        try:
+            seed = seed_resolver(db)
+        except Exception as e:
+            print(f"[counter_service] Error resolving seed for {counter_name}: {e}")
+    if seed == 0 and default_seed > 0:
+        seed = default_seed
+    return seed
+
+
+def peek_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db_instance=None):
+    """
+    Read-only preview of the next integer sequence (current seq + 1) for counter_name
+    WITHOUT incrementing or mutating the 'counters' collection.
+    """
+    should_close = False
+    if db_instance is not None:
+        db = db_instance
+    else:
+        client, db = _get_db()
+        should_close = True
+
+    try:
+        counters = db["counters"]
+        existing = counters.find_one({"_id": counter_name})
+        if existing is not None and "seq" in existing:
+            return int(existing["seq"]) + 1
+        seed = _resolve_initial_seed(db, counter_name, seed_resolver, default_seed)
+        return int(seed) + 1
+    finally:
+        if should_close:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db_instance=None):
     """
     Atomically increments and returns the next integer sequence for counter_name.
@@ -283,15 +323,7 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
         existing = counters.find_one({"_id": counter_name})
 
         if existing is None:
-            # Seed the counter from existing database data
-            seed = 0
-            if seed_resolver and callable(seed_resolver):
-                try:
-                    seed = seed_resolver(db)
-                except Exception as e:
-                    print(f"[counter_service] Error resolving seed for {counter_name}: {e}")
-            if seed == 0 and default_seed > 0:
-                seed = default_seed
+            seed = _resolve_initial_seed(db, counter_name, seed_resolver, default_seed)
 
             # Insert document with initial seed
             try:
@@ -324,13 +356,26 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
 # ─────────────────────────────────────────────────────────────────────────────
 
 # 1. Admission IP Number
-def get_next_admission_ip(prefix=None):
+def peek_next_admission_ip(prefix=None, db_instance=None):
+    """Read-only preview of next IP number (e.g. 'S026/500224') without consuming a sequence."""
+    p = prefix or _current_admission_prefix()
+    counter_name = f"admission_ip_{p}"
+    seq = peek_next_sequence_value(
+        counter_name,
+        seed_resolver=lambda db: _resolve_seed_admission_ip(db, p),
+        db_instance=db_instance,
+    )
+    return f"{p}/{seq:06d}"
+
+
+def get_next_admission_ip(prefix=None, db_instance=None):
     """Returns next sequential IP number, e.g. 'S026/001692'."""
     p = prefix or _current_admission_prefix()
     counter_name = f"admission_ip_{p}"
     seq = get_next_sequence_value(
         counter_name,
-        seed_resolver=lambda db: _resolve_seed_admission_ip(db, p)
+        seed_resolver=lambda db: _resolve_seed_admission_ip(db, p),
+        db_instance=db_instance,
     )
     return f"{p}/{seq:06d}"
 

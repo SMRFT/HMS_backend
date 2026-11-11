@@ -13,6 +13,8 @@ from django.utils import timezone as tz, timezone
 from datetime import datetime, timedelta
 import traceback
 
+from .admission import _now_ist, _now_ist_iso, _normalize_ist_timestamps, _to_ist_dt, _to_ist_iso
+
 from ..models import Block, RoomCategory, Room, Admission, Patient, RoomBooking, RoomKitItems, RoomServiceDescription, NursingStation
 from ..serializers import (
     BlockSerializer,
@@ -1260,10 +1262,10 @@ def room_enquiry_view(request):
 
             patient_info["admittingDoctor"]   = doc_name
             patient_info["admittingDoctorId"] = doc_id
-            patient_info["admissionDateTime"] = str(admission.get("admissionDateTime") or "")
+            patient_info["admissionDateTime"] = _to_ist_iso(admission.get("admissionDateTime")) or ""
             patient_info["is_high_risk"]      = bool(admission.get("is_high_risk", False))
             patient_info["high_risk_reason"]  = str(admission.get("high_risk_reason") or "")
-            patient_info["high_risk_date"]    = str(admission.get("high_risk_date") or "")
+            patient_info["high_risk_date"]    = _to_ist_iso(admission.get("high_risk_date")) or ""
 
             details = _safe_list(admission.get("room_details"))
             shifts  = _safe_list(admission.get("roomShitingDetails"))
@@ -1853,10 +1855,11 @@ def get_active_admission(request):
 
         dt = admission.get("admissionDateTime")
         if dt:
-            if isinstance(dt, datetime):
-                admission_date = dt.strftime("%Y-%m-%d")
-                admission_time = dt.strftime("%H:%M:%S")
-                formatted_datetime = dt.strftime("%d-%m-%Y %I:%M %p")
+            dt_ist = _to_ist_dt(dt)
+            if dt_ist is not None:
+                admission_date = dt_ist.strftime("%Y-%m-%d")
+                admission_time = dt_ist.strftime("%H:%M:%S")
+                formatted_datetime = dt_ist.strftime("%d-%m-%Y %I:%M %p")
             else:
                 dt_str = str(dt)
                 admission_date = dt_str[:10]
@@ -1894,7 +1897,7 @@ def get_active_admission(request):
                 "packageName":      str(admission.get("packageName") or ""),
                 "roomNo":           active_room.get("roomNo", ""),
                 "bedNo":            active_room.get("bedNo", ""),
-                "room_details":     room_details,
+                "room_details":     _normalize_ist_timestamps(room_details),
                 "has_shifted":      has_shifted,
                 # ── Reservation fields ─────────────────────────────────────
                 "has_reservation":  has_reservation,
@@ -2002,7 +2005,10 @@ def room_shifting_view(request):
                     raw_dt = shift.get("shiftingDateTime") or shift.get("startDateTime") or ""
                     if isinstance(raw_dt, dict) and "$date" in raw_dt:
                         raw_dt = raw_dt["$date"]
-                    if hasattr(raw_dt, "strftime"):
+                    raw_dt_ist = _to_ist_dt(raw_dt)
+                    if raw_dt_ist is not None:
+                        shift_date = raw_dt_ist.strftime("%Y-%m-%d")
+                    elif hasattr(raw_dt, "strftime"):
                         shift_date = raw_dt.strftime("%Y-%m-%d")
                     else:
                         shift_date = str(raw_dt).replace("T", " ")[:10]
@@ -2022,9 +2028,9 @@ def room_shifting_view(request):
                         "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
                         "newRoomNo":        str(shift.get("newRoomNo",        "")),
                         "newBedNo":         str(shift.get("newBedNo",         "")),
-                        "shiftingDateTime": str(shift.get("shiftingDateTime", "")),
-                        "startDateTime":    str(shift.get("startDateTime",    "")),
-                        "endDateTime":      str(shift.get("endDateTime",      "") or ""),
+                        "shiftingDateTime": _to_ist_iso(shift.get("shiftingDateTime")) or "",
+                        "startDateTime":    _to_ist_iso(shift.get("startDateTime")) or "",
+                        "endDateTime":      _to_ist_iso(shift.get("endDateTime")) or "",
                         "shifted_by":       str(shift.get("shifted_by",       "")),
                         "is_roomActive":    bool(shift.get("is_roomActive",   False)),
                         "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
@@ -2126,7 +2132,7 @@ def room_shifting_view(request):
                     old_bed_no  = str(last.get("bedNo",  ""))
 
             # ── Deactivate current room in room_details & set endDateTime ─────
-            now_iso = timezone.now().isoformat()
+            now_iso = _now_ist_iso()
             updated_room_details = []
             for room in room_details:
                 if not isinstance(room, dict):
@@ -2165,7 +2171,7 @@ def room_shifting_view(request):
 
             admission.roomShitingDetails = cleaned_shiftings
             admission.lastmodified_by    = str(user_id)
-            admission.lastmodified_date  = timezone.now()
+            admission.lastmodified_date  = _now_ist()
 
             ap = _safe_list(admission.advance_payments)
             _save_admission(admission, updated_room_details, cleaned_shiftings, ap)
@@ -2254,7 +2260,7 @@ def room_shifting_detail_view(request, ip_number):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    now_iso = timezone.now().isoformat()
+    now_iso = _now_ist_iso()
 
     # ── Mark the old shift as inactive and stamp endDateTime ─────────────
     updated_shiftings = []
@@ -2305,7 +2311,7 @@ def room_shifting_detail_view(request, ip_number):
     admission.roomShitingDetails = updated_shiftings
     admission.room_details       = updated_rooms
     admission.lastmodified_by    = str(user_id)
-    admission.lastmodified_date  = timezone.now()
+    admission.lastmodified_date  = _now_ist()
     _save_admission(admission, updated_rooms, updated_shiftings, advance_payments)
 
     return Response(
