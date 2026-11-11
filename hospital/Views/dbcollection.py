@@ -1,6 +1,12 @@
 from pymongo import MongoClient
 import os
+from pathlib import Path
 from dotenv import load_dotenv
+
+# Ensure .env is loaded from backend directory regardless of working directory
+_backend_env = Path(__file__).resolve().parent.parent.parent / ".env"
+if _backend_env.exists():
+    load_dotenv(dotenv_path=_backend_env, override=False)
 load_dotenv(override=True)
 
 # Create Mongo client (single place)
