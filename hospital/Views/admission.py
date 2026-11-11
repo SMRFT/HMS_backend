@@ -20,13 +20,101 @@ from ..serializers import AdmissionSerializer
 import traceback
 import json
 import ast
-from datetime import datetime, date
+import pytz
+from datetime import datetime, date, time as dt_time, timezone as dt_timezone
+
+IST_TZ = pytz.timezone(getattr(settings, 'TIME_ZONE', 'Asia/Kolkata') or 'Asia/Kolkata')
+_ISO_DT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$')
+
+
+def _now_ist():
+    """Return current timezone-aware datetime in IST (Asia/Kolkata)."""
+    return timezone.localtime(timezone.now(), IST_TZ)
+
+
+def _now_ist_iso():
+    """Return current IST timestamp as an ISO-8601 string with +05:30 offset."""
+    return _now_ist().isoformat()
+
+
+def _to_ist_dt(val):
+    """
+    Convert a datetime or ISO datetime string (including naive UTC datetimes
+    from PyMongo ISODate or naive UTC strings) into an IST-aware datetime.
+    """
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        dt = val
+    elif isinstance(val, str):
+        s = val.strip()
+        if not s or not _ISO_DT_RE.match(s):
+            return None
+        s_norm = s.replace(' ', 'T', 1)
+        try:
+            dt = datetime.fromisoformat(s_norm.replace('Z', '+00:00'))
+        except Exception:
+            dt = parse_datetime(s_norm)
+            if dt is None:
+                return None
+    else:
+        return None
+
+    if timezone.is_naive(dt):
+        dt = dt.replace(tzinfo=dt_timezone.utc)
+    return dt.astimezone(IST_TZ)
+
+
+def _to_ist_iso(val):
+    """
+    Convert a datetime, date, or ISO datetime string into an IST ISO-8601
+    string (+05:30). Plain date values stay 'YYYY-MM-DD'.
+    """
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        dt_ist = _to_ist_dt(val)
+        return dt_ist.isoformat() if dt_ist else val.isoformat()
+    if isinstance(val, date):
+        return val.isoformat()
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        dt_ist = _to_ist_dt(s)
+        if dt_ist is not None:
+            return dt_ist.isoformat()
+        return s
+    return str(val)
+
+
+def _normalize_ist_timestamps(obj):
+    """Recursively convert datetime values and ISO datetime strings in nested dicts/lists to IST."""
+    if obj is None:
+        return None
+    if isinstance(obj, datetime):
+        return _to_ist_iso(obj)
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, str):
+        return _to_ist_iso(obj) if _ISO_DT_RE.match(obj.strip()) else obj
+    if isinstance(obj, dict):
+        return {str(k): _normalize_ist_timestamps(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_normalize_ist_timestamps(v) for v in obj]
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
+        return str(obj)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
+        return float(obj)
+    return obj
 
 
 def make_json_serializable(obj):
     if obj is None:
         return None
-    if isinstance(obj, (datetime, date)):
+    if isinstance(obj, datetime):
+        return _to_ist_iso(obj)
+    if isinstance(obj, date):
         return obj.isoformat()
     if isinstance(obj, dict):
         return {str(k): make_json_serializable(v) for k, v in obj.items()}
@@ -493,7 +581,7 @@ def _compute_next_ip_number(hms_db=None):
     using the centralized atomic MongoDB counter service.
     """
     from ..counter_service import get_next_admission_ip
-    return get_next_admission_ip()
+    return get_next_admission_ip(db_instance=hms_db)
 
 
 @api_view(['GET'])
@@ -501,9 +589,11 @@ def _compute_next_ip_number(hms_db=None):
 @csrf_exempt
 def get_next_ip_number(request):
     try:
+        from ..counter_service import peek_next_admission_ip
         client, hms_db = _get_hms_db()
         try:
-            next_ip = _compute_next_ip_number(hms_db)
+            # Read-only preview: do NOT increment the counter when opening the form
+            next_ip = peek_next_admission_ip(db_instance=hms_db)
         finally:
             if client:
                 client.close()
@@ -535,7 +625,7 @@ def search_rooms(request):
         client, hms_db = _get_hms_db()
         try:
             # Query ONLY active / occupied / recently discharged uncleaned admissions
-            recent_dt = datetime.now() - timezone.timedelta(days=7)
+            recent_dt = timezone.now() - timezone.timedelta(days=7)
             adm_query = {
                 "$or": [
                     {"is_admitted": True, "is_discharged": False, "is_cancelled": {"$ne": True}},
@@ -615,7 +705,7 @@ def search_rooms(request):
                         b_dt = booking.get("booking_date")
                         booking_map[(rno, bno)] = {
                             "ip_number": str(booking.get("ipNumber") or ""),
-                            "booking_date": b_dt.isoformat() if hasattr(b_dt, "isoformat") else str(b_dt or ""),
+                            "booking_date": _to_ist_iso(b_dt) or "",
                         }
             except Exception:
                 pass
@@ -650,7 +740,7 @@ def search_rooms(request):
                 doc_name = f"Dr. {doc_name}"
 
             adm_dt       = admission.get("admissionDateTime")
-            adm_dt_str   = adm_dt.isoformat() if hasattr(adm_dt, "isoformat") else str(adm_dt or "")
+            adm_dt_str   = _to_ist_iso(adm_dt) or ""
 
             patient_info = dict(patient_map.get(uhid, {"uhid": uhid}))
             if not patient_info.get("patientname"):
@@ -664,7 +754,7 @@ def search_rooms(request):
             patient_info["is_high_risk"]      = bool(admission.get("is_high_risk", False))
             patient_info["high_risk_reason"]  = str(admission.get("high_risk_reason") or "")
             hr_dt = admission.get("high_risk_date")
-            patient_info["high_risk_date"]    = hr_dt.isoformat() if hasattr(hr_dt, "isoformat") else str(hr_dt or "")
+            patient_info["high_risk_date"]    = _to_ist_iso(hr_dt) or ""
 
             active_shifts = [s for s in shifts if bool(s.get("is_roomActive", False))]
             active_shift  = None
@@ -968,9 +1058,12 @@ def admission_view(request):
                     pass
 
             if from_date or to_date:
-                dt_gte = datetime.combine(from_date, datetime.min.time()) if from_date else datetime.min
-                dt_lte = datetime.combine(to_date, datetime.max.time()) if to_date else datetime.max
-                query["admissionDateTime"] = {"$gte": dt_gte, "$lte": dt_lte}
+                dt_filter = {}
+                if from_date:
+                    dt_filter["$gte"] = IST_TZ.localize(datetime.combine(from_date, dt_time.min)).astimezone(dt_timezone.utc)
+                if to_date:
+                    dt_filter["$lte"] = IST_TZ.localize(datetime.combine(to_date, dt_time.max)).astimezone(dt_timezone.utc)
+                query["admissionDateTime"] = dt_filter
 
             client, hms_db = _get_hms_db()
             try:
@@ -982,17 +1075,10 @@ def admission_view(request):
 
             result = []
             for adm in adm_docs:
-                adm_dt = adm.get("admissionDateTime")
-                adm_dt_iso = adm_dt.isoformat() if hasattr(adm_dt, "isoformat") else str(adm_dt) if adm_dt else None
-                
-                hr_dt = adm.get("high_risk_date")
-                hr_dt_iso = hr_dt.isoformat() if hasattr(hr_dt, "isoformat") else str(hr_dt) if hr_dt else None
-
-                c_dt = adm.get("created_date")
-                c_dt_iso = c_dt.isoformat() if hasattr(c_dt, "isoformat") else str(c_dt) if c_dt else None
-
-                m_dt = adm.get("lastmodified_date")
-                m_dt_iso = m_dt.isoformat() if hasattr(m_dt, "isoformat") else str(m_dt) if m_dt else None
+                adm_dt_iso = _to_ist_iso(adm.get("admissionDateTime"))
+                hr_dt_iso  = _to_ist_iso(adm.get("high_risk_date"))
+                c_dt_iso   = _to_ist_iso(adm.get("created_date"))
+                m_dt_iso   = _to_ist_iso(adm.get("lastmodified_date"))
 
                 d = {
                     "id": str(adm.get("_id") or adm.get("pk") or adm.get("id") or ""),
@@ -1019,14 +1105,14 @@ def admission_view(request):
                     "is_high_risk":          bool(adm.get("is_high_risk", False)),
                     "high_risk_reason":      adm.get("high_risk_reason") or "",
                     "high_risk_date":        hr_dt_iso,
-                    "room_details":      _safe_list(adm.get("room_details")),
-                    "roomShitingDetails":_safe_list(adm.get("roomShitingDetails")),
-                    "advance_payments":  _safe_list(adm.get("advance_payments")),
+                    "room_details":      _normalize_ist_timestamps(_safe_list(adm.get("room_details"))),
+                    "roomShitingDetails":_normalize_ist_timestamps(_safe_list(adm.get("roomShitingDetails"))),
+                    "advance_payments":  _normalize_ist_timestamps(_safe_list(adm.get("advance_payments"))),
                     # ── Cancellation status & Edit history ───────────────────
                     "is_cancelled":      bool(adm.get("is_cancelled", False)),
                     "cancelled_by":      adm.get("cancelled_by"),
                     "cancelled_Reason":  adm.get("cancelled_Reason"),
-                    "edit_history":      _safe_list(adm.get("edit_history")),
+                    "edit_history":      _normalize_ist_timestamps(_safe_list(adm.get("edit_history"))),
                     "ward_status":       adm.get("ward_status"),
                     # ──────────────────────────────────────────────────────────
                     "is_admitted":       bool(adm.get("is_admitted")),
@@ -1113,8 +1199,7 @@ def admission_view(request):
                     "is_cancelled": {"$ne": True}
                 })
                 if existing_adm:
-                    adm_dt = existing_adm.get("admissionDateTime")
-                    adm_dt_iso = adm_dt.isoformat() if hasattr(adm_dt, "isoformat") else str(adm_dt) if adm_dt else None
+                    adm_dt_iso = _to_ist_iso(existing_adm.get("admissionDateTime"))
                     cur_room = _get_current_room(existing_adm)
                     return JsonResponse({
                         "error": "Patient already admitted",
@@ -1124,9 +1209,6 @@ def admission_view(request):
                         "roomNo": cur_room.get("roomNo", ""),
                         "bedNo":  cur_room.get("bedNo",  ""),
                     }, status=400)
-
-                # ── Fast Next IP calculation from database sequence ──
-                ip_number = _compute_next_ip_number(hms_db)
 
                 # ── Patient info lookup ──
                 patient_obj = hms_db["hospital_patient"].find_one({
@@ -1139,8 +1221,8 @@ def admission_view(request):
                 if client:
                     client.close()
 
-            admission_dt = parse_datetime(str(data.get('admissionDateTime') or '')) or timezone.now()
-            now_iso   = datetime.now().isoformat()
+            admission_dt = _to_ist_dt(str(data.get('admissionDateTime') or '')) or _now_ist()
+            now_iso   = _now_ist_iso()
             room_details = [{
                 "room_entry_id": 1,
                 "roomNo": str(data.get("roomNo") or ""),
@@ -1190,9 +1272,9 @@ def admission_view(request):
                     else:
                         high_risk_date = datetime.strptime(str(high_risk_date_val).strip()[:10], '%Y-%m-%d').date()
                 except Exception:
-                    high_risk_date = timezone.now().date()
+                    high_risk_date = _now_ist().date()
             elif is_high_risk:
-                high_risk_date = timezone.now().date()
+                high_risk_date = _now_ist().date()
 
             # MLC handling (GridFS file upload + remarks)
             mlc_type = str(data.get("mlc_type") or "").strip() or None
@@ -1213,6 +1295,9 @@ def admission_view(request):
             attender_relationship = str(data.get("attender_relationship") or data.get("attenderRelationship") or data.get("relationship") or "").strip() or None
             attender_phone = str(data.get("attender_phone") or data.get("attenderPhone") or "").strip() or None
 
+            # Assign sequential IP number only right before creating the admission record
+            ip_number = _compute_next_ip_number()
+
             adm = Admission.objects.create(
                 uhid=uhid, ipNumber=ip_number, admissionDateTime=admission_dt,
                 hospital_code=hospital_code, branch_code=branch_code, outlet_code=outlet_code,
@@ -1230,8 +1315,8 @@ def admission_view(request):
                 edit_history=[],
                 ward_status=None,
                 is_discharged=False, is_admitted=True,
-                created_by=employee_id, created_date=timezone.now(),
-                lastmodified_by=employee_id, lastmodified_date=timezone.now(),
+                created_by=employee_id, created_date=_now_ist(),
+                lastmodified_by=employee_id, lastmodified_date=_now_ist(),
             )
             _sync_to_mongo(ip_number, room_details, [], [], {
                 "bill_number": ip_number,
@@ -1260,7 +1345,7 @@ def admission_view(request):
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
                 "bill_number": adm.ipNumber, "bill_no": adm.ipNumber,
-                "admissionDateTime": adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+                "admissionDateTime": _to_ist_iso(adm.admissionDateTime),
                 "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
                 "customer_type": customer_type, "customerType": customer_type,
@@ -1367,7 +1452,7 @@ def admission_detail(request, ipNumber):
                 'id':                str(adm.pk),
                 'ipNumber':          adm.ipNumber,
                 'uhid':              adm.uhid,
-                'admissionDateTime': adm.admissionDateTime.isoformat() if adm.admissionDateTime else None,
+                'admissionDateTime': _to_ist_iso(adm.admissionDateTime),
                 'admittingDoctor':   adm.admittingDoctor  or "",
                 'consultingDoctor':  adm.consultingDoctor or "",
                 'packageNo':         adm.packageName      or "",
@@ -1389,20 +1474,20 @@ def admission_detail(request, ipNumber):
                 'attender_phone':        getattr(adm, 'attender_phone', '') or "",
                 'is_high_risk':          bool(getattr(adm, 'is_high_risk', False)),
                 'high_risk_reason':      getattr(adm, 'high_risk_reason', '') or "",
-                'high_risk_date':        adm.high_risk_date.isoformat() if hasattr(getattr(adm, "high_risk_date", None), "isoformat") else (str(getattr(adm, "high_risk_date", "")) if getattr(adm, "high_risk_date", None) else None),
-                'advance_payments':  ap,
+                'high_risk_date':        _to_ist_iso(getattr(adm, "high_risk_date", None)),
+                'advance_payments':  _normalize_ist_timestamps(ap),
                 # ── Cancellation status & Edit history ───────────────────────
                 'is_cancelled':     bool(getattr(adm, "is_cancelled",    False)),
                 'cancelled_by':     getattr(adm, "cancelled_by",         None),
                 'cancelled_Reason': getattr(adm, "cancelled_Reason",     None),
-                'edit_history':     _safe_list(getattr(adm, "edit_history", [])),
+                'edit_history':     _normalize_ist_timestamps(_safe_list(getattr(adm, "edit_history", []))),
                 'ward_status':      getattr(adm, "ward_status",          ""),
                 # ────────────────────────────────────────────────────────────
                 'is_admitted':       bool(adm.is_admitted),
                 'is_discharged':     bool(adm.is_discharged),
                 'ipserial_number':   adm.ipserial_number,
-                'room_details':      rd,
-                'roomShitingDetails':sd,
+                'room_details':      _normalize_ist_timestamps(rd),
+                'roomShitingDetails':_normalize_ist_timestamps(sd),
                 **_patient_block(str(adm.uhid or "")),
             }
 
@@ -1429,7 +1514,7 @@ def admission_detail(request, ipNumber):
                 cancel_reason = str(get_val(data.get('cancelled_Reason', '')) or '').strip()
                 if not cancel_reason:
                     return JsonResponse({'success': False, 'error': 'cancelled_Reason is required to cancel an admission.'}, status=400)
-                now_iso = timezone.now().isoformat()
+                now_iso = _now_ist_iso()
                 for room in rd:
                     if isinstance(room, dict) and room.get("is_roomActive"):
                         room["is_roomActive"] = False
@@ -1443,7 +1528,7 @@ def admission_detail(request, ipNumber):
                 adm.cancelled_Reason   = cancel_reason
                 adm.is_admitted        = False
                 adm.lastmodified_by    = employee_id
-                adm.lastmodified_date  = timezone.now()
+                adm.lastmodified_date  = _now_ist()
                 _save_admission(adm, rd, sd, ap)
                 return JsonResponse({"success": True, "message": "Admission cancelled successfully"})
 
@@ -1545,7 +1630,7 @@ def admission_detail(request, ipNumber):
                                 adm.roomNo = rd[0]["roomNo"]
                                 adm.bedNo  = rd[0]["bedNo"]
                         elif new_room_no or new_bed_no:
-                            now_iso = timezone.now().isoformat()
+                            now_iso = _now_ist_iso()
                             rd = [{
                                 "room_entry_id": 1,
                                 "roomNo": new_room_no,
@@ -1566,19 +1651,19 @@ def admission_detail(request, ipNumber):
                 edit_history = _safe_list(getattr(adm, "edit_history", []))
                 edit_entry = {
                     "edited_by": str(employee_id),
-                    "edited_date": timezone.now().isoformat(),
+                    "edited_date": _now_ist_iso(),
                     "edited_reason": edit_reason,
                 }
                 edit_history.append(edit_entry)
                 adm.edit_history       = edit_history
                 adm.lastmodified_by    = employee_id
-                adm.lastmodified_date  = timezone.now()
+                adm.lastmodified_date  = _now_ist()
                 _save_admission(adm, rd, sd, ap)
                 return JsonResponse({"success": True, "message": "Updated successfully", "data": _build_result(adm, rd, sd, ap)})
 
         # ── DELETE  (legacy — kept for backward compat, uses cancel logic) ────
         elif request.method == 'DELETE':
-            now_iso = timezone.now().isoformat()
+            now_iso = _now_ist_iso()
             rd = _safe_list(adm.room_details)
             sd = _safe_list(adm.roomShitingDetails)
             ap = _safe_list(adm.advance_payments)
@@ -1595,7 +1680,7 @@ def admission_detail(request, ipNumber):
             adm.cancelled_Reason  = "Cancelled via DELETE"
             adm.is_admitted       = False
             adm.lastmodified_by   = employee_id
-            adm.lastmodified_date = timezone.now()
+            adm.lastmodified_date = _now_ist()
             _save_admission(adm, rd, sd, ap)
             return JsonResponse({"success": True, "message": "Admission cancelled successfully"})
 
@@ -1607,7 +1692,7 @@ def admission_detail(request, ipNumber):
 # ── Advance Helpers ───────────────────────────────────────────────────────────
 
 def _financial_year_prefix(dt=None):
-    dt = dt or timezone.now()
+    dt = _to_ist_dt(dt) or _now_ist()
     year, month = dt.year, dt.month
     fy = (
         f"{year % 100:02d}{(year + 1) % 100:02d}"
@@ -1703,7 +1788,7 @@ def admission_advance(request, ipNumber=None):
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
         branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
         outlet_code   = request.data.get('auth-outlet-code')
-        now_iso = timezone.now().isoformat()
+        now_iso = _now_ist_iso()
 
         # ── GET ───────────────────────────────────────────────────────────────
         if request.method == 'GET':
@@ -1736,12 +1821,14 @@ def admission_advance(request, ipNumber=None):
                 try:
                     from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
                     to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
-                    from_dt_full = datetime.combine(from_dt, datetime.min.time())
-                    to_dt_full   = datetime.combine(to_dt,   datetime.max.time())
+                    from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                    to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
                     q["$or"] = [
                         {"advance_payments.date": {"$gte": from_date, "$lte": to_date}},
-                        {"advance_payments.created_date": {"$gte": from_dt_full, "$lte": to_dt_full}},
-                        {"advance_payments.bill_date": {"$gte": from_dt_full, "$lte": to_dt_full}},
+                        {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                        {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                        {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                        {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
                     ]
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
@@ -1785,9 +1872,7 @@ def admission_advance(request, ipNumber=None):
                     payment_mode = ""
                     if isinstance(p.get("payment_details"), dict):
                         payment_mode = p["payment_details"].get("method", "")
-                    paid_date = p.get("paid_datetime") or ""
-                    if isinstance(paid_date, datetime):
-                        paid_date = paid_date.isoformat()
+                    paid_date = _to_ist_iso(p.get("paid_datetime")) or ""
                     p["ip_number"]    = adm.get("ipNumber")
                     p["uhid"]         = adm.get("uhid")
                     p["room"]         = room_str
@@ -1796,7 +1881,7 @@ def admission_advance(request, ipNumber=None):
                     p["paid_date"]    = paid_date
                     if not isinstance(p.get("refund_details"), list):
                         p["refund_details"] = []
-                    advance_payments.append(p)
+                    advance_payments.append(_normalize_ist_timestamps(p))
 
             if from_date and to_date:
                 try:
@@ -1808,13 +1893,11 @@ def admission_advance(request, ipNumber=None):
                         if not date_value:
                             continue
                         try:
-                            if isinstance(date_value, datetime):
-                                p_date = date_value.date()
+                            ist_dt = _to_ist_dt(date_value)
+                            if ist_dt is not None:
+                                p_date = ist_dt.date()
                             elif isinstance(date_value, str):
-                                if 'T' in date_value:
-                                    p_date = datetime.fromisoformat(date_value.replace('Z', '+00:00')).date()
-                                else:
-                                    p_date = datetime.strptime(date_value[:10], "%Y-%m-%d").date()
+                                p_date = datetime.strptime(date_value[:10], "%Y-%m-%d").date()
                             else:
                                 continue
                             if from_dt <= p_date <= to_dt:
@@ -2115,9 +2198,9 @@ def today_registered_patients(request):
         doctor_query = (request.GET.get('doctor') or '').strip()
         limit_val = int(request.GET.get('limit') or 200)
 
-        # Default date to today's local date if not specified
+        # Default date to today's IST date if not specified
         if not date_str or date_str.lower() == 'today':
-            date_str = timezone.now().date().strftime("%Y-%m-%d")
+            date_str = _now_ist().date().strftime("%Y-%m-%d")
 
         client, hms_db = _get_hms_db()
         try:
@@ -2160,8 +2243,9 @@ def today_registered_patients(request):
 
                 c_dt = p.get("created_date")
                 reg_time = ""
-                if isinstance(c_dt, datetime):
-                    reg_time = c_dt.strftime("%I:%M %p")
+                c_dt_ist = _to_ist_dt(c_dt)
+                if c_dt_ist is not None:
+                    reg_time = c_dt_ist.strftime("%I:%M %p")
 
                 patient_map[u] = {
                     "uhid": u,
@@ -2187,8 +2271,8 @@ def today_registered_patients(request):
             if date_str != 'all':
                 try:
                     target_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    start_dt = datetime.combine(target_dt, time.min)
-                    end_dt = datetime.combine(target_dt, time.max)
+                    start_dt = IST_TZ.localize(datetime.combine(target_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                    end_dt = IST_TZ.localize(datetime.combine(target_dt, dt_time.max)).astimezone(dt_timezone.utc)
                     bills_cursor = hms_db["hospital_billing"].find({
                         "billed_date": {"$gte": start_dt, "$lte": end_dt}
                     }).sort([("billed_date", -1)]).limit(limit_val)
@@ -2224,8 +2308,9 @@ def today_registered_patients(request):
 
                             b_dt = b.get("billed_date")
                             reg_time = ""
-                            if isinstance(b_dt, datetime):
-                                reg_time = b_dt.strftime("%I:%M %p")
+                            b_dt_ist = _to_ist_dt(b_dt)
+                            if b_dt_ist is not None:
+                                reg_time = b_dt_ist.strftime("%I:%M %p")
 
                             if u in patient_map:
                                 if doc_resolved:
