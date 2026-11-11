@@ -3997,6 +3997,7 @@ def _enrich_with_patient(adm_data, hospital_code):
         adm_data["state"]                = getattr(pt, "state",   "") or ""
         adm_data["customerType"]         = str(getattr(pt, "customer_type", "") or
                                                getattr(pt, "customerType", "") or "")
+        adm_data["dob"]                  = pt.dob.isoformat() if getattr(pt, "dob", None) else ""
         adm_data["insuranceCompanyName"] = ins_name
         adm_data["company_code"]         = company_code
     except Exception:
@@ -4010,11 +4011,26 @@ def _enrich_with_patient(adm_data, hospital_code):
 @csrf_exempt
 def searchby_ip(request):
 
-    employee_id   = request.data.get('auth-user-id')       
-    hospital_code = request.data.get("auth-hospital-code") 
-    branch_code   = request.data.get("auth-branch-code")   
-    
-    print("*****************", employee_id, hospital_code, branch_code)
+    data = getattr(request, "data", {}) if isinstance(getattr(request, "data", None), dict) else {}
+
+    employee_id   = (
+        request.headers.get("User-Id")
+        or request.META.get("HTTP_USER_ID")
+        or request.GET.get("employee_id")
+        or data.get("auth-user-id")
+    )
+    hospital_code = (
+        request.headers.get("Hospital-Code")
+        or request.META.get("HTTP_HOSPITAL_CODE")
+        or request.GET.get("hospital_code")
+        or data.get("auth-hospital-code")
+    )
+    branch_code   = (
+        request.headers.get("Branch-Code")
+        or request.META.get("HTTP_BRANCH_CODE")
+        or request.GET.get("branch_code")
+        or data.get("auth-branch-code")
+    )
 
     # ── GET ───────────────────────────────────────────────────────────────────
     if request.method == 'GET':
@@ -4023,7 +4039,7 @@ def searchby_ip(request):
             to_date_str   = request.GET.get('to_date',          '').strip()
             status_filter = request.GET.get('status',           '').strip()
             doctor_filter = request.GET.get('admitting_doctor', '').strip()
-            ip_filter     = request.GET.get('ip_number',        '').strip()  # ← NEW
+            ip_filter     = request.GET.get('ip_number',        '').strip()
 
             from_date = to_date = None
             if from_date_str:
@@ -4033,50 +4049,42 @@ def searchby_ip(request):
                 try: to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
                 except: pass
 
-            admissions = []
-            for adm in Admission.objects.filter(
-                hospital_code=hospital_code,
-                branch_code=branch_code,
-            ):
-                # ── IP Number filter ─────────────────────────────────────────
-                # Full IP typed  (contains "/") → exact match:  "S026/500008" == ipNumber
-                # Suffix typed   (no "/")       → suffix match: "500008" in "S026/500008"
-                if ip_filter:
-                    ip = (adm.ipNumber or "").strip()
-                    if "/" in ip_filter:
-                        # Full IP: must match exactly (case-insensitive)
-                        if ip.lower() != ip_filter.lower():
-                            continue
-                    else:
-                        # Suffix match: "500008" matches "S026/500008", "S027/500008" …
-                        slash_idx = ip.rfind("/")
-                        suffix = ip[slash_idx + 1:] if slash_idx != -1 else ip
-                        if ip_filter.lower() not in suffix.lower():
-                            continue
+            q = Q()
+            if hospital_code:
+                q &= Q(hospital_code=hospital_code)
+            if branch_code:
+                q &= Q(branch_code=branch_code)
 
-                # ── Status filter ────────────────────────────────────────────
-                if status_filter == 'Admitted':
-                    if not (adm.is_admitted and not adm.is_discharged): continue
-                elif status_filter == 'Discharged':
-                    if not adm.is_discharged: continue
+            if ip_filter:
+                if "/" in ip_filter:
+                    q &= Q(ipNumber__iexact=ip_filter)
+                else:
+                    q &= (Q(ipNumber__iendswith=f"/{ip_filter}") | Q(ipNumber__icontains=ip_filter))
 
-                # ── Date filter ──────────────────────────────────────────────
-                if from_date or to_date:
-                    adm_date = None
-                    if adm.admissionDateTime:
-                        try: adm_date = adm.admissionDateTime.date()
-                        except: pass
-                    if adm_date:
-                        if from_date and adm_date < from_date: continue
-                        if to_date   and adm_date > to_date:   continue
-                    else:
-                        continue
+            if status_filter == 'Admitted':
+                q &= Q(is_admitted=True, is_discharged=False)
+            elif status_filter == 'Discharged':
+                q &= Q(is_discharged=True)
 
-                # ── Doctor filter ────────────────────────────────────────────
-                if doctor_filter and doctor_filter.lower() not in (adm.admittingDoctor or '').lower():
-                    continue
+            if from_date:
+                q &= Q(admissionDateTime__date__gte=from_date)
+            if to_date:
+                q &= Q(admissionDateTime__date__lte=to_date)
 
-                admissions.append(adm)
+            if doctor_filter:
+                q &= (Q(admittingDoctor__icontains=doctor_filter) | Q(consultingDoctor__icontains=doctor_filter))
+
+            # Database-direct query sorted by active status and latest admission date
+            admissions = list(
+                Admission.objects.filter(q).order_by('-is_admitted', '-admissionDateTime')[:50]
+            )
+
+            # Fallback if no admissions found with hospital/branch filter
+            if not admissions and ip_filter:
+                fallback_q = Q(ipNumber__iexact=ip_filter) if "/" in ip_filter else (Q(ipNumber__iendswith=f"/{ip_filter}") | Q(ipNumber__icontains=ip_filter))
+                admissions = list(
+                    Admission.objects.filter(fallback_q).order_by('-is_admitted', '-admissionDateTime')[:50]
+                )
 
             result = []
             for adm in admissions:
@@ -4104,7 +4112,7 @@ def searchby_ip(request):
                     "lastmodified_by":    adm.lastmodified_by,
                     "lastmodified_date":  adm.lastmodified_date.isoformat() if adm.lastmodified_date else None,
                 }
-                _enrich_with_patient(d, hospital_code)
+                _enrich_with_patient(d, hospital_code or adm.hospital_code)
                 result.append(d)
 
             return JsonResponse({"success": True, "data": result})
