@@ -1994,7 +1994,7 @@ from pymongo import MongoClient
 from bson.decimal128 import Decimal128
 from bson import ObjectId
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from django.utils import timezone
 
 # =========================================================
@@ -2034,6 +2034,12 @@ def serialize_mongo(doc):
             elif isinstance(v, Decimal128):
                 new_doc[k] = float(v.to_decimal())
 
+            elif isinstance(v, (datetime, date)):
+                if isinstance(v, datetime):
+                    new_doc[k] = v.isoformat() + ("Z" if v.tzinfo is None else "")
+                else:
+                    new_doc[k] = v.isoformat()
+
             elif isinstance(v, (dict, list)):
                 new_doc[k] = serialize_mongo(v)
 
@@ -2041,6 +2047,11 @@ def serialize_mongo(doc):
                 new_doc[k] = v
 
         return new_doc
+
+    if isinstance(doc, (datetime, date)):
+        if isinstance(doc, datetime):
+            return doc.isoformat() + ("Z" if doc.tzinfo is None else "")
+        return doc.isoformat()
 
     return doc
 
@@ -2204,8 +2215,7 @@ def get_mainblock_pendingbills(request):
         )
         outlet_code = (
             data.get("auth-outlet-code") 
-           
-        )
+           )
 
         final_data = []
 
@@ -2374,16 +2384,46 @@ def get_mainblock_pendingbills(request):
                 date_query = {"$gte": d_start, "$lt": d_end}
 
         # =========================================================
-        # ✅ CASH PAYMENT FILTER (Shared across OP, Inv, Discharge - No duplicate coding)
+        # ✅ PAYMENT FILTERS:
+        # - Pending Bills: strictly Cash alone (no Credit / Insurance)
+        # - Received Bills: allow all counter payments (Cash, Multiple Payment, Card, UPI, etc.)
         # =========================================================
-        cash_filter = {
+        pending_cash_filter = {
             "$or": [
-                {"payment_method": {"$in": ["Cash", "cash", "CASH"]}},
-                {"paymentMethod": {"$in": ["Cash", "cash", "CASH"]}},
-                {"payment_details.method": {"$in": ["Cash", "cash", "CASH"]}},
-                {"payment_details.payment_mode": {"$in": ["Cash", "cash", "CASH"]}},
+                {"payment_method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"paymentMethod": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"payment_details.method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"payment_details.payment_mode": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
             ]
         }
+
+        received_payment_filter = {
+            "$or": [
+                {"payment_method": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
+                {"paymentMethod": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
+                {"payment_details.method": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
+                {"payment_details.breakdown.method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"shiftno": {"$ne": None}},
+                {"CashierID": {"$ne": None}},
+            ]
+        }
+
+        def is_allowed_bill_doc(doc):
+            if not isinstance(doc, dict):
+                return False
+            if is_received_req:
+                return True
+            for fld in ("payment_method", "paymentMethod"):
+                val = doc.get(fld)
+                if isinstance(val, str) and val.strip().lower() == "cash":
+                    return True
+            pd = doc.get("payment_details")
+            if isinstance(pd, dict):
+                for fld in ("method", "payment_mode"):
+                    val = pd.get(fld)
+                    if isinstance(val, str) and val.strip().lower() == "cash":
+                        return True
+            return False
 
         def build_module_query(status_key, status_val, date_key):
             conds = [
@@ -2391,28 +2431,28 @@ def get_mainblock_pendingbills(request):
                 {"is_cancelled": {"$ne": True}}
             ]
             if is_received_req:
-                conds.append(cash_filter)
+                conds.append(received_payment_filter)
             else:
-                conds.append({
-                    "$or": [
-                        {"payment_method": {"$in": ["Cash", "cash", "CASH"]}},
-                        {"paymentMethod": {"$in": ["Cash", "cash", "CASH"]}},
-                        {"payment_details.method": {"$in": ["Cash", "cash", "CASH"]}},
-                        {"payment_details.payment_mode": {"$in": ["Cash", "cash", "CASH"]}},
-                        {"payment_method": None},
-                        {"payment_method": {"$exists": False}},
-                        {"payment_details": None},
-                        {"payment_details": {"$exists": False}},
-                    ]
-                })
+                conds.append(pending_cash_filter)
+
             if hospital_code:
                 conds.append({"hospital_code": hospital_code})
             if branch_code:
                 conds.append({"branch_code": branch_code})
             if target_outlet:
                 conds.append({"outlet_code": target_outlet})
+
             if date_query:
-                conds.append({date_key: date_query})
+                if is_received_req:
+                    conds.append({
+                        "$or": [
+                            {"paid_date": date_query},
+                            {date_key: date_query}
+                        ]
+                    })
+                else:
+                    conds.append({date_key: date_query})
+
             return {"$and": conds}
 
         # =========================================================
@@ -2485,6 +2525,8 @@ def get_mainblock_pendingbills(request):
         billing_docs = list(billing_col.find(billing_query).sort("billed_date", -1).limit(500 if not date_query else 1000))
 
         for bill in billing_docs:
+            if not is_allowed_bill_doc(bill):
+                continue
             bill_type = bill.get("bill_type")
             try:
                 bt_num = int(bill_type)
@@ -2514,11 +2556,11 @@ def get_mainblock_pendingbills(request):
 
             doc_display = _get_doctor_display(bill.get("doctor_id") or bill.get("doctor_name") or bill.get("doctor"))
             raw_pm = bill.get("payment_method") or (bill.get("payment_details", {}).get("method") if isinstance(bill.get("payment_details"), dict) else None)
-            pay_method = str(raw_pm).capitalize() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
+            pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
             total_fee = convert_decimal(bill.get("total_fees") or bill.get("consulting_fee") or 0)
 
-            final_uhid = resolved_uhid or (f"P-{bill.get('patient_id')}" if bill.get("patient_id") else "-")
-            final_patient_name = resolved_patient_name or (f"Patient #{bill.get('patient_id')}" if bill.get("patient_id") else "-")
+            final_uhid = resolved_uhid or (f"P-{bill.get('patient_id')}" if bill.get('patient_id') else "-")
+            final_patient_name = resolved_patient_name or (f"Patient #{bill.get('patient_id')}" if bill.get('patient_id') else "-")
 
             final_data.append({
                 "type": "Billing",
@@ -2535,7 +2577,11 @@ def get_mainblock_pendingbills(request):
                 "doctor": doc_display,
                 "doctor_name": doc_display,
                 "payment_method": pay_method,
-                "date": bill.get("billed_date") or bill.get("created_date"),
+                "date": (bill.get("paid_date") if is_received_req else None) or bill.get("billed_date") or bill.get("created_date"),
+                "billed_date": bill.get("billed_date") or bill.get("created_date"),
+                "paid_date": bill.get("paid_date"),
+                "payment_details": serialize_mongo(bill.get("payment_details")),
+                "payment_breakdown": serialize_mongo(bill.get("payment_details", {}).get("breakdown")) if isinstance(bill.get("payment_details"), dict) else None,
                 "raw": serialize_mongo(bill)
             })
 
@@ -2546,6 +2592,8 @@ def get_mainblock_pendingbills(request):
         invest_docs = list(invest_col.find(invest_query).sort("investBillDate", -1).limit(200 if not date_query else 500))
 
         for inv in invest_docs:
+            if not is_allowed_bill_doc(inv):
+                continue
             bill_type = inv.get("bill_type")
             try:
                 bt_num = int(bill_type)
@@ -2574,11 +2622,11 @@ def get_mainblock_pendingbills(request):
 
             doc_display = _get_doctor_display(inv.get("doctor") or inv.get("doctor_name") or inv.get("referedDoctor") or inv.get("prescribedBy"))
             raw_pm = inv.get("payment_method") or inv.get("paymentMethod") or (inv.get("payment_details", {}).get("method") if isinstance(inv.get("payment_details"), dict) else None)
-            pay_method = str(raw_pm).capitalize() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
+            pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
             total_amt = convert_decimal(inv.get("finalPrice") or inv.get("totalAmount") or 0)
 
-            final_uhid = resolved_uhid or (f"P-{inv.get('patient_id')}" if inv.get("patient_id") else "-")
-            final_patient_name = resolved_patient_name or (f"Patient #{inv.get('patient_id')}" if inv.get("patient_id") else "-")
+            final_uhid = resolved_uhid or (f"P-{inv.get('patient_id')}" if inv.get('patient_id') else "-")
+            final_patient_name = resolved_patient_name or (f"Patient #{inv.get('patient_id')}" if inv.get('patient_id') else "-")
 
             final_data.append({
                 "type": "Investigation",
@@ -2595,7 +2643,11 @@ def get_mainblock_pendingbills(request):
                 "doctor": doc_display,
                 "doctor_name": doc_display,
                 "payment_method": pay_method,
-                "date": inv.get("investBillDate") or inv.get("created_date"),
+                "date": (inv.get("paid_date") if is_received_req else None) or inv.get("investBillDate") or inv.get("created_date"),
+                "billed_date": inv.get("investBillDate") or inv.get("created_date"),
+                "paid_date": inv.get("paid_date"),
+                "payment_details": serialize_mongo(inv.get("payment_details")),
+                "payment_breakdown": serialize_mongo(inv.get("payment_details", {}).get("breakdown")) if isinstance(inv.get("payment_details"), dict) else None,
                 "raw": serialize_mongo(inv)
             })
 
@@ -2618,6 +2670,8 @@ def get_mainblock_pendingbills(request):
         discharge_docs = list(discharge_col.find(discharge_query).sort("bill_date", -1).limit(100 if not date_query else 500))
 
         for dis in discharge_docs:
+            if not is_allowed_bill_doc(dis):
+                continue
             if not is_discharge_allowed and allowed_bill_type_ids:
                 continue
 
@@ -2653,7 +2707,7 @@ def get_mainblock_pendingbills(request):
 
             doc_display = _get_doctor_display(dis.get("doctor_name") or dis.get("doctor") or dis.get("admittingDoctor") or dis.get("consultingDoctor"))
             raw_pm = dis.get("payment_method") or (dis.get("payment_details", {}).get("method") if isinstance(dis.get("payment_details"), dict) else None)
-            pay_method = str(raw_pm).capitalize() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
+            pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
             total_amt = convert_decimal(dis.get("net_amount") or dis.get("total_amount") or 0)
 
             final_uhid = resolved_uhid or (f"P-{dis.get('patient_id')}" if dis.get("patient_id") else "-")
@@ -2674,7 +2728,11 @@ def get_mainblock_pendingbills(request):
                 "doctor": doc_display,
                 "doctor_name": doc_display,
                 "payment_method": pay_method,
-                "date": dis.get("bill_date") or dis.get("created_date"),
+                "date": (dis.get("paid_date") if is_received_req else None) or dis.get("bill_date") or dis.get("created_date"),
+                "billed_date": dis.get("bill_date") or dis.get("created_date"),
+                "paid_date": dis.get("paid_date"),
+                "payment_details": serialize_mongo(dis.get("payment_details")),
+                "payment_breakdown": serialize_mongo(dis.get("payment_details", {}).get("breakdown")) if isinstance(dis.get("payment_details"), dict) else None,
                 "items": serialize_mongo(matched_items),
                 "raw": serialize_mongo(dis)
             })
@@ -4673,7 +4731,7 @@ def ipadvance_bills(request):
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from rest_framework import status
 from pymongo import MongoClient
 import os
