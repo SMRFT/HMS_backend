@@ -56,9 +56,15 @@ def pharmacy_notifications(request):
         except Exception:
             pass
 
-        # Only outlets with is_stock_outlet=True from hospital_outlets receive stock notifications
+        # Drug Purchase (OLET006) views combined IP & OP Pharmacy notifications;
+        # other outlets only see stock notifications when is_stock_outlet=True in hospital_outlets
+        is_drug_purchase = (
+            outlet_code == "OLET006"
+            or outlet_map.get(outlet_code, "").strip().lower() == "drug purchase"
+        ) if outlet_code else False
+
         if outlet_code:
-            is_allowed_stock_outlet = (
+            is_allowed_stock_outlet = is_drug_purchase or (
                 requested_outlet_is_stock
                 if requested_outlet_is_stock is not None
                 else (outlet_code in stock_outlets_map)
@@ -90,8 +96,10 @@ def pharmacy_notifications(request):
         if branch_code and branch_code != "system":
             stock_filter["branch_code"] = branch_code
 
-        # Scope to the active stock outlet (or all is_stock_outlet=True outlets if none provided)
-        if outlet_code:
+        # Scope to IP & OP Pharmacy for Drug Purchase (OLET006), active stock outlet, or all stock outlets
+        if is_drug_purchase:
+            stock_filter["outlet_code"] = {"$in": ["OLET001", "OLET002"]}
+        elif outlet_code:
             stock_filter["outlet_code"] = outlet_code
         elif stock_outlets_map:
             stock_filter["outlet_code"] = {"$in": list(stock_outlets_map.keys())}
@@ -196,7 +204,7 @@ def pharmacy_notifications(request):
             # Low Stock Calculation (per item & outlet)
             # -----------------------------
             if item_id:
-                key = (item_id, s_out) if not outlet_code else item_id
+                key = (item_id, s_out) if (not outlet_code or is_drug_purchase) else item_id
                 low_stock_map[key] = low_stock_map.get(key, 0) + available
 
         # Sort expiry alerts
