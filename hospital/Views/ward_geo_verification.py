@@ -19,6 +19,26 @@ def _now():
 def _get_gridfs():
     return gridfs.GridFS(hms_db)
 
+
+def _generate_thumbnail(image_bytes, max_size=(320, 240)):
+    """Creates a compressed lightweight base64 thumbnail from image bytes."""
+    if not image_bytes:
+        return ""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=75, optimize=True)
+        encoded = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception as e:
+        print("Thumbnail generation error:", e)
+        return ""
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def ward_geo_verification_view(request):
@@ -109,8 +129,7 @@ def ward_geo_verification_view(request):
             filename = f"geotag_{safe_ip}_{int(datetime.utcnow().timestamp())}.jpg"
             image_bytes = image_file.read()
             image_file_id = fs.put(image_bytes, filename=filename, content_type='image/jpeg')
-            if len(image_bytes) < 300000:
-                thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+            thumbnail_base64 = _generate_thumbnail(image_bytes)
         else:
             base64_str = data.get('image') or data.get('photo') or data.get('image_base64') or ''
             if base64_str and ',' in base64_str:
@@ -120,7 +139,7 @@ def ward_geo_verification_view(request):
                     safe_ip = re.sub(r'[^a-zA-Z0-9_\-]', '_', ip_number)
                     filename = f"geotag_{safe_ip}_{int(datetime.utcnow().timestamp())}.jpg"
                     image_file_id = fs.put(image_bytes, filename=filename, content_type='image/jpeg')
-                    thumbnail_base64 = base64_str[:150000] if len(base64_str) < 150000 else ""
+                    thumbnail_base64 = _generate_thumbnail(image_bytes)
                 except Exception as e:
                     print("Error decoding base64 image:", e)
 
