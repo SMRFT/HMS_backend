@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 from hospital.Views.dbcollection import hms_db
+from hospital.Views.report_defaults import seed_default_report_masters
 
 
 def _now():
@@ -80,6 +81,9 @@ def report_master_list_create(request):
     collection = hms_db['hospital_reportmaster']
 
     if request.method == 'GET':
+        if str(request.GET.get('seed', '')).lower() in ['true', '1'] or collection.count_documents({}) == 0:
+            seed_default_report_masters(force=(str(request.GET.get('seed', '')).lower() in ['true', '1']))
+
         query = {}
         group_filter = request.GET.get('group') or request.GET.get('report_title')
         if group_filter:
