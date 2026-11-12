@@ -602,8 +602,6 @@ def get_next_ip_number(request):
             "success": True,
             "next_ipNumber": next_ip,
             "ipNumber": next_ip,
-            "bill_number": next_ip,
-            "bill_no": next_ip
         })
     except Exception as e:
         traceback.print_exc()
@@ -1319,8 +1317,6 @@ def admission_view(request):
                 lastmodified_by=employee_id, lastmodified_date=_now_ist(),
             )
             _sync_to_mongo(ip_number, room_details, [], [], {
-                "bill_number": ip_number,
-                "bill_no": ip_number,
                 "customer_type": customer_type,
                 "company_code": company_code,
                 "insurance_company": insurance_company,
@@ -1344,7 +1340,6 @@ def admission_view(request):
             })
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
-                "bill_number": adm.ipNumber, "bill_no": adm.ipNumber,
                 "admissionDateTime": _to_ist_iso(adm.admissionDateTime),
                 "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
@@ -1772,8 +1767,10 @@ def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
 
 
 def _bill_type_fields(payload):
-    bill_type = payload.get('bill_type')
-    bill_type_no = payload.get('billTypeNo') or payload.get('bill_type_no')
+    raw_bt = payload.get('bill_type')
+    raw_btn = payload.get('billTypeNo') or payload.get('bill_type_no')
+    bill_type = str(raw_bt).strip() if raw_bt not in (None, '') else "1"
+    bill_type_no = str(raw_btn).strip() if raw_btn not in (None, '') else "AD01"
     return bill_type, bill_type_no
 
 
@@ -1986,8 +1983,6 @@ def admission_advance(request, ipNumber=None):
                 return JsonResponse({'success': False, 'error': f'Sum of IP Advance (₹{ip_adv:.2f}) and Billing Advance (₹{bill_adv:.2f}) must equal Advance Amount (₹{adv_amt:.2f})'}, status=400)
 
             bill_type, bill_type_no = _bill_type_fields(request.data)
-            if bill_type is None or not bill_type_no:
-                return JsonResponse({'success': False, 'error': 'bill_type and billTypeNo are required'}, status=400)
 
             adv_bill_no = _generate_advance_bill_no(hospital_code, branch_code, outlet_code)
             new_entry = {
@@ -2062,8 +2057,10 @@ def admission_advance(request, ipNumber=None):
                     )
 
                 refund_bill_type, refund_bill_type_no = _bill_type_fields(request.data)
-                if refund_bill_type is None or not refund_bill_type_no:
-                    refund_bill_type, refund_bill_type_no = entry.get('bill_type'), entry.get('billTypeNo')
+                if request.data.get('bill_type') in (None, ''):
+                    refund_bill_type = str(entry.get('bill_type') or "1")
+                if not (request.data.get('billTypeNo') or request.data.get('bill_type_no')):
+                    refund_bill_type_no = str(entry.get('billTypeNo') or "AD01")
 
                 refund_bill_no = _generate_refund_bill_no(hospital_code, branch_code, outlet_code)
 
@@ -2127,8 +2124,10 @@ def admission_advance(request, ipNumber=None):
                     return JsonResponse({'success': False, 'error': f"Cannot edit — status is '{entry.get('status')}'"}, status=400)
 
                 bill_type, bill_type_no = _bill_type_fields(request.data)
-                if bill_type is None or not bill_type_no:
-                    bill_type, bill_type_no = entry.get('bill_type'), entry.get('billTypeNo')
+                if request.data.get('bill_type') in (None, ''):
+                    bill_type = str(entry.get('bill_type') or "1")
+                if not (request.data.get('billTypeNo') or request.data.get('bill_type_no')):
+                    bill_type_no = str(entry.get('billTypeNo') or "AD01")
 
                 original_bill_no = entry.get('bill_no')
                 entry['is_advanceActive'] = False
@@ -2139,6 +2138,7 @@ def admission_advance(request, ipNumber=None):
                 new_entry = {
                     "advance_id":       f"ADV{len(ap) + 1}",
                     "bill_no":          original_bill_no,
+                    "bill_number":      original_bill_no,
                     "bill_type":        bill_type,
                     "billTypeNo":       bill_type_no,
                     "date":             request.data.get('date', now_iso[:10]),
@@ -2432,6 +2432,196 @@ def today_registered_patients(request):
             if client:
                 client.close()
 
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"success": False, "error": str(e)}, status=500)
+
+
+def _resolve_current_room(admission):
+    """Return (roomNo, bedNo) prioritizing active room shiftings over initial room_details."""
+    shiftings = _safe_list(admission.get("roomShitingDetails"))
+    for s in reversed(shiftings):
+        if isinstance(s, dict) and s.get("is_roomActive"):
+            return str(s.get("newRoomNo") or s.get("roomNo") or ""), str(s.get("newBedNo") or s.get("bedNo") or "")
+
+    room_details = _safe_list(admission.get("room_details"))
+    for r in reversed(room_details):
+        if isinstance(r, dict) and r.get("is_roomActive"):
+            return str(r.get("roomNo") or ""), str(r.get("bedNo") or "")
+    if room_details and isinstance(room_details[-1], dict):
+        return str(room_details[-1].get("roomNo") or ""), str(room_details[-1].get("bedNo") or "")
+    return "", ""
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def admitted_patients(request):
+    """
+    Returns currently admitted patients (is_admitted: True, is_discharged != True,
+    is_cancelled != True) for quick access in IP Advance & Room Shifting.
+    Supports optional `date` ("all" default, "today", or "YYYY-MM-DD"),
+    `search` (UHID / IP Number / Patient Name / Doctor / Room / Mobile),
+    and `limit` (default 500).
+    """
+    try:
+        hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
+        branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
+
+        date_str = (request.GET.get("date") or "all").strip()
+        search_query = (request.GET.get("search") or "").strip()
+        try:
+            limit_val = min(max(int(request.GET.get("limit") or 500), 1), 1000)
+        except (TypeError, ValueError):
+            limit_val = 500
+
+        target_date = date_str
+        if target_date.lower() == "today":
+            target_date = _now_ist().date().strftime("%Y-%m-%d")
+
+        client, hms_db = _get_hms_db()
+        try:
+            adm_filter = {
+                "is_admitted": True,
+                "is_discharged": {"$ne": True},
+                "is_cancelled": {"$ne": True},
+            }
+            if hospital_code and hospital_code != "system":
+                adm_filter["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                adm_filter["branch_code"] = branch_code
+
+            admissions = list(
+                hms_db["hospital_admission"]
+                .find(adm_filter)
+                .sort([("admissionDateTime", -1), ("_id", -1)])
+                .limit(limit_val)
+            )
+
+            uhids = list({str(a.get("uhid") or "").strip() for a in admissions if a.get("uhid")})
+            patient_map = {}
+            if uhids:
+                for p in hms_db["hospital_patient"].find({"uhid": {"$in": uhids}}):
+                    u = str(p.get("uhid") or "").strip()
+                    if u:
+                        patient_map[u] = p
+
+            emp_map = {}
+            try:
+                global_db = client["Global"]
+                for doc in global_db["backend_diagnostics_profile"].find({}, {"employeeId": 1, "employeeName": 1}):
+                    e_id = str(doc.get("employeeId") or "").strip()
+                    e_name = doc.get("employeeName")
+                    if e_id and e_name:
+                        emp_map[e_id] = e_name
+            except Exception:
+                pass
+
+            ins_map = {}
+            ins_ids = list({str(a.get("insurance_id") or "").strip() for a in admissions if a.get("insurance_id")})
+            if ins_ids:
+                for ins in hms_db["hospital_insuranceprovider"].find({"insurance_id": {"$in": ins_ids}}, {"insurance_id": 1, "company_name": 1}):
+                    iid = str(ins.get("insurance_id") or "").strip()
+                    cname = str(ins.get("company_name") or "").strip()
+                    if iid and cname:
+                        ins_map[iid] = cname
+
+            today_ist_date = _now_ist().date()
+            results = []
+            for a in admissions:
+                u = str(a.get("uhid") or "").strip()
+                ip_no = str(a.get("ipNumber") or "").strip()
+                if not u and not ip_no:
+                    continue
+
+                p = patient_map.get(u, {})
+                sal = str(p.get("salutation") or a.get("salutation") or "").strip()
+                fname = str(p.get("firstName") or a.get("firstName") or "").strip()
+                mname = str(p.get("middleName") or a.get("middleName") or "").strip()
+                lname = str(p.get("lastName") or a.get("lastName") or "").strip()
+                full_name = " ".join(x for x in [sal, fname, mname, lname] if x).strip() or str(a.get("patientName") or u)
+
+                raw_doc = str(a.get("admittingDoctor") or "").strip()
+                doc_resolved = _clean_doc_name(emp_map.get(raw_doc, raw_doc))
+
+                room_no, bed_no = _resolve_current_room(a)
+
+                adm_dt_ist = _to_ist_dt(a.get("admissionDateTime"))
+                adm_date_iso = adm_dt_ist.strftime("%Y-%m-%d") if adm_dt_ist else ""
+                adm_date_disp = adm_dt_ist.strftime("%d-%m-%Y") if adm_dt_ist else ""
+                adm_time_disp = adm_dt_ist.strftime("%I:%M %p") if adm_dt_ist else ""
+                adm_dt_disp = adm_dt_ist.strftime("%d-%m-%Y %I:%M %p") if adm_dt_ist else ""
+
+                if target_date and target_date.lower() != "all":
+                    if adm_date_iso != target_date:
+                        continue
+
+                total_days = max(1, (today_ist_date - adm_dt_ist.date()).days) if adm_dt_ist else 1
+
+                cust_type = str(
+                    a.get("customerType") or a.get("customer_type") or p.get("customer_type") or p.get("customerType") or "General"
+                ).strip()
+                ins_id = str(a.get("insurance_id") or p.get("insurance_id") or "").strip()
+                company = str(
+                    a.get("companyName") or a.get("company_name") or ins_map.get(ins_id, "") or p.get("company_name") or ""
+                ).strip()
+
+                addr = str(
+                    p.get("permanent_address") or p.get("address") or a.get("permanent_address") or ""
+                ).strip()
+                if not addr:
+                    addr = ", ".join(x for x in [p.get("area"), p.get("city"), p.get("state"), p.get("zipcode")] if x)
+
+                mobile = str(p.get("mobilePhone") or p.get("phone") or a.get("mobilePhone") or "").strip()
+
+                row = {
+                    "uhid": u,
+                    "ipNumber": ip_no,
+                    "ipserial_number": str(a.get("ipserial_number") or ""),
+                    "patientName": full_name,
+                    "age": p.get("age") or a.get("age") or "",
+                    "age_type": p.get("age_type") or a.get("age_type") or "Y",
+                    "gender": p.get("gender") or a.get("gender") or "",
+                    "mobile": mobile,
+                    "address": addr,
+                    "doctor": doc_resolved,
+                    "admittingDoctor": raw_doc,
+                    "admittingDoctorName": doc_resolved,
+                    "department": str(a.get("department") or ""),
+                    "roomNo": room_no,
+                    "bedNo": bed_no,
+                    "wardStatus": str(a.get("ward_status") or ""),
+                    "customerType": cust_type,
+                    "company": company,
+                    "admissionDate": adm_date_iso,
+                    "admissionDateDisplay": adm_date_disp,
+                    "admissionTime": adm_time_disp,
+                    "admissionDateTime": adm_dt_disp,
+                    "total_days": total_days,
+                    "is_admitted": True,
+                }
+                results.append(row)
+
+            if search_query:
+                sq = search_query.lower()
+                results = [
+                    r for r in results
+                    if sq in r["uhid"].lower()
+                    or sq in r["ipNumber"].lower()
+                    or sq in r["patientName"].lower()
+                    or sq in r["doctor"].lower()
+                    or sq in r["mobile"].lower()
+                    or sq in r["roomNo"].lower()
+                ]
+
+            return Response({
+                "success": True,
+                "date": target_date,
+                "total": len(results),
+                "data": results,
+            }, status=200)
+        finally:
+            if client:
+                client.close()
     except Exception as e:
         traceback.print_exc()
         return Response({"success": False, "error": str(e)}, status=500)

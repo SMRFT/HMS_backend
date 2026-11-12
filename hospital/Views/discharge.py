@@ -145,6 +145,22 @@ def _parse_dt(val):
     return None
 
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _IST_TZ = _ZoneInfo("Asia/Kolkata")
+except Exception:
+    _IST_TZ = _dt_module.timezone(timedelta(hours=5, minutes=30))
+
+
+def _to_ist_dt(val):
+    dt = _parse_dt(val)
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt_module.timezone.utc)
+    return dt.astimezone(_IST_TZ)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Raw PyMongo — InvestBilling ONLY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -357,8 +373,8 @@ def _sanitize_item(it):
         "amount":           _to_float(it.get("amount", 0)),
         "doctor":           str(it.get("doctor") or ""),
         "doctor_fee":       str(it.get("doctor_fee") or ""),
-        "bill_type":        it.get("bill_type") if it.get("bill_type") is not None else 2,
-        "billTypeNo":       str(it.get("billTypeNo") or ""),
+        "bill_type":        it.get("bill_type") if (it.get("bill_type") is not None and str(it.get("bill_type")).strip() != "") else 2,
+        "billTypeNo":       str(it.get("billTypeNo") or "DIS01"),
         "item_description": str(it.get("item_description") or "") if str(it.get("item_description") or "").strip() not in ["DIS01", str(it.get("billTypeNo") or "").strip()] else "",
         "package_name":     str(it.get("package_name") or ""),
         "rate_category":    str(it.get("rate_category") or it.get("_rateCategory") or "").strip(),
@@ -398,6 +414,11 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             update_dict = {"items": items}
             if getattr(obj, "created_by", None): update_dict["created_by"] = str(obj.created_by)
             if getattr(obj, "created_date", None): update_dict["created_date"] = obj.created_date
+            if getattr(obj, "bill_date", None):
+                bd_val = obj.bill_date
+                if isinstance(bd_val, _date) and not isinstance(bd_val, _datetime):
+                    bd_val = _datetime(bd_val.year, bd_val.month, bd_val.day, tzinfo=_dt_module.timezone.utc)
+                update_dict["bill_date"] = bd_val
             if getattr(obj, "lastmodified_by", None): update_dict["lastmodified_by"] = str(obj.lastmodified_by)
             if getattr(obj, "lastmodified_date", None): update_dict["lastmodified_date"] = obj.lastmodified_date
             if getattr(obj, "branch_code", None): update_dict["branch_code"] = str(obj.branch_code)
@@ -415,6 +436,8 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "company_name", None) is not None: update_dict["company_name"] = str(obj.company_name)
             if getattr(obj, "implant_amount", None) is not None: update_dict["implant_amount"] = _to_float(obj.implant_amount)
             if getattr(obj, "payment_method", None) is not None: update_dict["payment_method"] = str(obj.payment_method)
+            update_dict["billTypeNo"] = str(getattr(obj, "billTypeNo", None) or "DIS01")
+            update_dict["bill_type"] = int(getattr(obj, "bill_type")) if getattr(obj, "bill_type", None) is not None else 2
 
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
@@ -751,6 +774,35 @@ def _resolve_insurance_member_details(uhid=None, patient_name=None, member_numbe
     }
 
 
+def _extract_adm_room_and_date(adm):
+    if not adm:
+        return "", ""
+    adm_dt = adm.get("admissionDateTime")
+    adm_ist = _to_ist_dt(adm_dt)
+    if adm_ist:
+        adm_str = adm_ist.strftime("%d-%m-%Y %I:%M %p")
+    elif isinstance(adm_dt, _date):
+        adm_str = adm_dt.strftime("%d-%m-%Y")
+    elif isinstance(adm_dt, str) and adm_dt:
+        adm_str = adm_dt
+    else:
+        adm_str = ""
+
+    current_room = ""
+    rd = parse_json_field(adm.get("room_details", []))
+    if isinstance(rd, list) and rd:
+        last_room = rd[-1]
+        if isinstance(last_room, dict):
+            current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
+    sd = parse_json_field(adm.get("roomShitingDetails", []))
+    if isinstance(sd, list) and sd:
+        active_shifts = [s for s in sd if isinstance(s, dict) and s.get("is_roomActive")]
+        target_shift = active_shifts[-1] if active_shifts else (sd[-1] if isinstance(sd[-1], dict) else None)
+        if target_shift and target_shift.get("newRoomNo"):
+            current_room = str(target_shift.get("newRoomNo"))
+    return adm_str, current_room
+
+
 def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
     """
     Ultra-fast in-memory serializer for DischargeBilling raw MongoDB document.
@@ -782,30 +834,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
                 except Exception:
                     adm = None
 
-            adm_dt = adm.get("admissionDateTime") if adm else None
-            if isinstance(adm_dt, _datetime):
-                adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
-            elif isinstance(adm_dt, _date):
-                adm_str = adm_dt.strftime("%d-%m-%Y")
-            elif isinstance(adm_dt, str) and adm_dt:
-                try:
-                    p_dt = _datetime.fromisoformat(adm_dt.replace("Z", "+00:00"))
-                    adm_str = p_dt.strftime("%d-%m-%Y %I:%M %p")
-                except Exception:
-                    adm_str = adm_dt
-            else:
-                adm_str = ""
-
-            current_room = ""
-            if adm:
-                rd = adm.get("room_details", [])
-                if isinstance(rd, str):
-                    try: rd = _json.loads(rd)
-                    except Exception: rd = []
-                if isinstance(rd, list) and len(rd) > 0:
-                    last_room = rd[-1]
-                    if isinstance(last_room, dict):
-                        current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
+            adm_str, current_room = _extract_adm_room_and_date(adm)
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             doc_name, dept_name = _resolve_doctor_and_department(doc_id)
@@ -869,7 +898,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
     manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
 
     bd = doc.get("bill_date")
-    bd_str = bd.isoformat() if isinstance(bd, (_datetime, _date)) else (str(bd)[:10] if bd else None)
+    if isinstance(bd, _datetime):
+        bd_ist = _to_ist_dt(bd)
+        bd_str = bd_ist.isoformat() if bd_ist is not None else bd.isoformat()
+    elif isinstance(bd, _date):
+        bd_str = bd.isoformat()
+    else:
+        bd_str = str(bd) if bd else None
 
     return {
         "id":                discharge_id,
@@ -879,6 +914,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "bill_no":           doc.get("bill_no"),
         "uhid":              doc.get("uhid"),
         "ip_number":         doc.get("ip_number"),
+        "billTypeNo":        str(doc.get("billTypeNo") or "DIS01"),
+        "bill_type":         doc.get("bill_type") if doc.get("bill_type") is not None else 2,
         "bill_date":         bd_str,
         "items":             _parse_items(doc.get("items")),
         "total_amount":      _to_float(doc.get("total_amount")),
@@ -951,26 +988,7 @@ def _obj_to_dict(obj):
                 except Exception:
                     pass
 
-            adm_dt = adm.get("admissionDateTime") if adm else None
-            if isinstance(adm_dt, _datetime):
-                adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
-            elif isinstance(adm_dt, _date):
-                adm_str = adm_dt.strftime("%d-%m-%Y")
-            elif isinstance(adm_dt, str) and adm_dt:
-                adm_str = adm_dt
-            else:
-                adm_str = ""
-
-            current_room = ""
-            if adm:
-                rd = adm.get("room_details", [])
-                if isinstance(rd, str):
-                    try: rd = _json.loads(rd)
-                    except Exception: rd = []
-                if isinstance(rd, list) and len(rd) > 0:
-                    last_room = rd[-1]
-                    if isinstance(last_room, dict):
-                        current_room = str(last_room.get("roomNo") or last_room.get("roomNumber") or last_room.get("room_number") or "")
+            adm_str, current_room = _extract_adm_room_and_date(adm)
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             doc_name, dept_name = _resolve_doctor_and_department(doc_id)
@@ -1043,7 +1061,7 @@ def _obj_to_dict(obj):
         "bill_no":           obj.bill_no,
         "uhid":              obj.uhid,
         "ip_number":         obj.ip_number,
-        "bill_date":         _safe_isoformat(obj.bill_date),
+        "bill_date":         _safe_isoformat(_to_ist_dt(obj.bill_date) if isinstance(obj.bill_date, _datetime) else obj.bill_date),
         "items":             _parse_items(obj.items),
         "total_amount":      _to_float(obj.total_amount),
         "advance_amount":    _to_float(obj.advance_amount),
@@ -1066,6 +1084,8 @@ def _obj_to_dict(obj):
         "insurance_bill_number": getattr(obj, "insurance_bill_number", "") or "",
         "company_name":          getattr(obj, "company_name", "") or "",
         "payment_method":        getattr(obj, "payment_method", "Cash") or "Cash",
+        "billTypeNo":            getattr(obj, "billTypeNo", None) or "DIS01",
+        "bill_type":             getattr(obj, "bill_type") if getattr(obj, "bill_type", None) is not None else 2,
         "created_by":             created_by_val,
         "created_by_name":        created_by_name,
         "created_by_designation": created_by_designation,
@@ -1135,6 +1155,21 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.remarks          = s("remarks")
     obj.shiftno          = s("shiftno")
     obj.payment_method   = s("payment_method", "Cash")
+
+    raw_btn = data.get("billTypeNo")
+    if raw_btn is not None and str(raw_btn).strip() != "":
+        obj.billTypeNo = str(raw_btn).strip()
+    elif not existing or not getattr(existing, "billTypeNo", None):
+        obj.billTypeNo = "DIS01"
+
+    raw_bt = data.get("bill_type")
+    if raw_bt is not None and str(raw_bt).strip() != "":
+        try:
+            obj.bill_type = int(raw_bt)
+        except (ValueError, TypeError):
+            obj.bill_type = 2
+    elif not existing or getattr(existing, "bill_type", None) is None:
+        obj.bill_type = 2
 
     # ── Insurance Fields ─────────────────────────────────────────────────────
     if "is_insurance_bill" in data:
@@ -1633,9 +1668,9 @@ def search_discharge_patient(request):
         )
 
     for_print = request.GET.get("for_print") in ["true", "1", "True"]
+    ward_status = str(admission_doc.get("ward_status") or "").strip()
     if not for_print:
         # Verify patient discharge state: if already discharged, disallow billing again
-        ward_status = str(admission_doc.get("ward_status") or "").strip()
         adm_status = str(admission_doc.get("status") or "").strip()
         is_discharged = bool(admission_doc.get("is_discharged", False))
 
@@ -1659,16 +1694,13 @@ def search_discharge_patient(request):
             )
 
     adm_dt = admission_doc.get("admissionDateTime")
-    if isinstance(adm_dt, _datetime):
-        adm_str = adm_dt.strftime("%d-%m-%Y %I:%M %p")
+    adm_ist = _to_ist_dt(adm_dt)
+    if adm_ist:
+        adm_str = adm_ist.strftime("%d-%m-%Y %I:%M %p")
     elif isinstance(adm_dt, _date):
         adm_str = adm_dt.strftime("%d-%m-%Y")
     elif isinstance(adm_dt, str) and adm_dt:
-        try:
-            parsed_dt = _datetime.fromisoformat(adm_dt.replace("Z", "+00:00"))
-            adm_str = parsed_dt.strftime("%d-%m-%Y %I:%M %p")
-        except Exception:
-            adm_str = adm_dt
+        adm_str = adm_dt
     else:
         adm_str = ""
 
@@ -1692,10 +1724,13 @@ def search_discharge_patient(request):
             current_bed  = str(last_shift.get("newBedNo") or current_bed)
 
     total_days = 0
-    if adm_dt:
+    if adm_ist:
+        today = _datetime.now(_IST_TZ).date()
+        total_days = max(1, (today - adm_ist.date()).days)
+    elif adm_dt:
         try:
-            today = _date.today()
-            adm_date = adm_dt.date() if isinstance(adm_dt, _datetime) else (adm_dt if isinstance(adm_dt, _date) else _parse_dt(adm_dt).date())
+            today = _datetime.now(_IST_TZ).date()
+            adm_date = adm_dt if isinstance(adm_dt, _date) else _parse_dt(adm_dt).date()
             total_days = max(1, (today - adm_date).days)
         except Exception:
             total_days = 1
@@ -1809,14 +1844,15 @@ def search_discharge_patient(request):
         # ── 0. Room Charges (Services & Room Kits) ───────────────────────────
         try:
             raw_movements = []
-            adm_start_dt = _parse_dt(adm_dt) or _datetime.now()
+            now_dt = _datetime.now(_IST_TZ)
+            adm_start_dt = _to_ist_dt(adm_dt) or now_dt
 
             for r in room_details:
                 if isinstance(r, dict):
                     r_no = str(r.get("roomNo") or r.get("roomNumber") or r.get("room_number") or "").strip()
                     b_no = str(r.get("bedNo") or r.get("bedNumber") or r.get("bed_number") or "").strip()
-                    s_dt = _parse_dt(r.get("startDateTime")) or adm_start_dt
-                    e_dt = _parse_dt(r.get("endDateTime"))
+                    s_dt = _to_ist_dt(r.get("startDateTime")) or adm_start_dt
+                    e_dt = _to_ist_dt(r.get("endDateTime"))
                     if r_no:
                         raw_movements.append({
                             "room_no": r_no,
@@ -1829,8 +1865,8 @@ def search_discharge_patient(request):
                 if isinstance(s, dict):
                     r_no = str(s.get("newRoomNo") or "").strip()
                     b_no = str(s.get("newBedNo") or "").strip()
-                    s_dt = _parse_dt(s.get("shiftingDateTime") or s.get("startDateTime")) or adm_start_dt
-                    e_dt = _parse_dt(s.get("endDateTime"))
+                    s_dt = _to_ist_dt(s.get("shiftingDateTime") or s.get("startDateTime")) or adm_start_dt
+                    e_dt = _to_ist_dt(s.get("endDateTime"))
                     if r_no:
                         raw_movements.append({
                             "room_no": r_no,
@@ -1849,7 +1885,6 @@ def search_discharge_patient(request):
                 else:
                     room_stays.append(dict(mov))
 
-            now_dt = _datetime.now()
             accumulated_days = 0
 
             if not room_stays and current_room:
@@ -1864,6 +1899,7 @@ def search_discharge_patient(request):
             room_numbers_set = list({s["room_no"] for s in room_stays if s.get("room_no")})
             room_docs_cursor = list(db["hospital_room"].find({"room_number": {"$in": room_numbers_set}})) if room_numbers_set else []
             room_doc_map = {str(rd.get("room_number")).strip(): rd for rd in room_docs_cursor if rd.get("room_number")}
+            room_doc_lower_map = {k.lower(): v for k, v in room_doc_map.items()}
 
             for stay in room_stays:
                 r_no = stay["room_no"]
@@ -1874,7 +1910,7 @@ def search_discharge_patient(request):
                 stay_days = max(1, days_diff)
                 accumulated_days += stay_days
 
-                room_doc = room_doc_map.get(str(r_no).strip())
+                room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_lower_map.get(str(r_no).strip().lower())
 
                 if room_doc:
                     room_cat = room_doc.get("room_category", "")
@@ -2565,14 +2601,14 @@ def discharge_billing_list_create(request):
             date_filter = {}
             if from_f:
                 try:
-                    from_dt = datetime.strptime(str(from_f).strip(), "%Y-%m-%d")
-                    date_filter["$gte"] = from_dt
+                    from_dt_ist = _datetime.strptime(str(from_f).strip(), "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=_IST_TZ)
+                    date_filter["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc)
                 except Exception:
                     date_filter["$gte"] = str(from_f).strip()
             if to_f:
                 try:
-                    to_dt = datetime.strptime(str(to_f).strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-                    date_filter["$lte"] = to_dt
+                    to_dt_ist = _datetime.strptime(str(to_f).strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=_IST_TZ)
+                    date_filter["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc)
                 except Exception:
                     date_filter["$lte"] = str(to_f).strip()
             if date_filter:
@@ -2681,7 +2717,7 @@ def discharge_billing_list_create(request):
         obj = DischargeBilling()
         _apply_fields(obj, data, request=request)
         obj.status    = billing_status
-        obj.bill_date = timezone.now().date()
+        obj.bill_date = timezone.now()
 
         if billing_status == "Estimate":
             obj.estimate_number = generate_estimate_number()
@@ -2805,7 +2841,7 @@ def convert_estimate_to_bill(request, pk):
 
     estimate.status    = "Billed"
     estimate.bill_no   = generate_bill_number()
-    estimate.bill_date = timezone.now().date()   # USE_TZ-safe
+    estimate.bill_date = timezone.now()   # full datetime matching admissionDateTime
     estimate.shiftno   = request.data.get("shiftno")
     if request.data.get("payment_method"):
         estimate.payment_method = str(request.data.get("payment_method")).strip()
@@ -3936,3 +3972,189 @@ def get_discharge_signatories(request):
             }
         }
     })
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def get_discharge_requests(request):
+    """
+    List active admissions ready for discharge billing:
+    is_admitted=True, ward_status='Sent for billing', not discharged/cancelled,
+    and no active Billed record in hospital_dischargebilling.
+    """
+    ensure_discharge_indexes()
+    client, db = get_hms_db()
+    g_db = client["Global"]
+
+    date_param = (request.GET.get("date") or "all").strip()
+    search_param = (request.GET.get("search") or "").strip().lower()
+    hospital_code = (request.GET.get("hospital_code") or "").strip()
+
+    adm_query = {
+        "is_admitted": True,
+        "ward_status": "Sent for billing",
+        "is_discharged": {"$ne": True},
+        "is_cancelled": {"$ne": True},
+    }
+    if hospital_code:
+        adm_query["hospital_code"] = hospital_code
+
+    admissions = list(
+        db["hospital_admission"].find(
+            adm_query,
+            {
+                "uhid": 1,
+                "ipNumber": 1,
+                "admittingDoctor": 1,
+                "consultingDoctor": 1,
+                "admissionDateTime": 1,
+                "lastmodified_date": 1,
+                "created_date": 1,
+                "customer_type": 1,
+                "insurance_company": 1,
+                "room_details": 1,
+                "roomShitingDetails": 1,
+                "ward_status": 1,
+                "age": 1,
+                "age_type": 1,
+            },
+        )
+    )
+
+    if not admissions:
+        return Response({"success": True, "count": 0, "data": []}, status=status.HTTP_200_OK)
+
+    ip_list = [str(a.get("ipNumber") or "").strip() for a in admissions if a.get("ipNumber")]
+    billed_ips = set()
+    if ip_list:
+        for b in db["hospital_dischargebilling"].find(
+            {"ip_number": {"$in": ip_list}, "status": "Billed", "is_cancelled": {"$ne": True}},
+            {"ip_number": 1},
+        ):
+            if b.get("ip_number"):
+                billed_ips.add(str(b["ip_number"]).strip())
+
+    uhid_list = list({str(a.get("uhid") or "").strip() for a in admissions if a.get("uhid")})
+    patient_map = {}
+    if uhid_list:
+        for p in db["hospital_patient"].find(
+            {"uhid": {"$in": uhid_list}},
+            {
+                "uhid": 1,
+                "salutation": 1,
+                "firstName": 1,
+                "lastName": 1,
+                "age": 1,
+                "age_type": 1,
+                "gender": 1,
+                "mobile": 1,
+            },
+        ):
+            patient_map[str(p.get("uhid") or "").strip()] = p
+
+    doc_ids = list({
+        str(a.get("admittingDoctor") or a.get("consultingDoctor") or "").strip()
+        for a in admissions
+        if (a.get("admittingDoctor") or a.get("consultingDoctor"))
+    })
+    doc_map = {}
+    if doc_ids:
+        for d in g_db["backend_diagnostics_profile"].find(
+            {"employeeId": {"$in": doc_ids}},
+            {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1},
+        ):
+            eid = str(d.get("employeeId") or "").strip()
+            name = (d.get("employeeName") or f"{d.get('firstName', '')} {d.get('lastName', '')}".strip()).strip()
+            if eid:
+                doc_map[eid] = name
+
+    results = []
+    for a in admissions:
+        ip_num = str(a.get("ipNumber") or "").strip()
+        if ip_num and ip_num in billed_ips:
+            continue
+
+        uhid = str(a.get("uhid") or "").strip()
+        p = patient_map.get(uhid, {})
+        salutation = str(p.get("salutation") or "").strip()
+        full_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or uhid
+        display_name = f"{salutation} {full_name}".strip() if salutation else full_name
+
+        age_val = a.get("age") if a.get("age") not in (None, "") else p.get("age", "")
+        age_type = a.get("age_type") or p.get("age_type") or "Y"
+        gender = p.get("gender") or ""
+
+        doc_id = str(a.get("admittingDoctor") or a.get("consultingDoctor") or "").strip()
+        doc_name = doc_map.get(doc_id) or (_resolve_employee_name(doc_id) if doc_id else "")
+
+        room_no = ""
+        bed_no = ""
+        room_details = parse_json_field(a.get("room_details", []))
+        if isinstance(room_details, list) and room_details:
+            active_rooms = [r for r in room_details if isinstance(r, dict) and r.get("is_roomActive")]
+            chosen_room = active_rooms[-1] if active_rooms else (room_details[-1] if isinstance(room_details[-1], dict) else {})
+            room_no = str(chosen_room.get("roomNo") or chosen_room.get("roomNumber") or chosen_room.get("room_number") or "")
+            bed_no = str(chosen_room.get("bedNo") or chosen_room.get("bedNumber") or chosen_room.get("bed_number") or "")
+
+        shift_details = parse_json_field(a.get("roomShitingDetails", []))
+        if isinstance(shift_details, list) and shift_details:
+            active_shifts = [s for s in shift_details if isinstance(s, dict) and s.get("is_roomActive")]
+            if active_shifts:
+                last_shift = active_shifts[-1]
+                room_no = str(last_shift.get("newRoomNo") or room_no)
+                bed_no = str(last_shift.get("newBedNo") or bed_no)
+
+        req_dt = (
+            _to_ist_dt(a.get("lastmodified_date"))
+            or _to_ist_dt(a.get("admissionDateTime"))
+            or _to_ist_dt(a.get("created_date"))
+        )
+        adm_dt = _to_ist_dt(a.get("admissionDateTime"))
+
+        req_date_str = req_dt.strftime("%Y-%m-%d") if req_dt else ""
+        if date_param and date_param.lower() != "all" and req_date_str != date_param:
+            continue
+
+        row = {
+            "id": str(a.get("_id") or ip_num or uhid),
+            "uhid": uhid,
+            "ipNumber": ip_num,
+            "patientName": display_name,
+            "age": age_val,
+            "age_type": age_type,
+            "gender": gender,
+            "mobile": p.get("mobile") or "",
+            "doctorId": doc_id,
+            "doctorName": doc_name,
+            "roomNo": room_no,
+            "bedNo": bed_no,
+            "customerType": a.get("customer_type") or "General",
+            "insuranceCompany": a.get("insurance_company") or "",
+            "wardStatus": a.get("ward_status") or "",
+            "requestDate": req_date_str,
+            "requestDateDisplay": req_dt.strftime("%d/%m/%Y") if req_dt else "",
+            "requestTime": req_dt.strftime("%I:%M %p") if req_dt else "",
+            "admissionDateDisplay": adm_dt.strftime("%d/%m/%Y %I:%M %p") if adm_dt else "",
+            "_sort_ts": req_dt.timestamp() if req_dt else 0,
+        }
+
+        if search_param:
+            haystack = " ".join([
+                row["uhid"],
+                row["ipNumber"],
+                row["patientName"],
+                row["doctorName"],
+                row["roomNo"],
+                row["customerType"],
+                row["insuranceCompany"],
+            ]).lower()
+            if search_param not in haystack:
+                continue
+
+        results.append(row)
+
+    results.sort(key=lambda r: r["_sort_ts"], reverse=True)
+    for r in results:
+        r.pop("_sort_ts", None)
+
+    return Response({"success": True, "count": len(results), "data": results}, status=status.HTTP_200_OK)

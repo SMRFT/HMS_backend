@@ -106,6 +106,7 @@ urlpatterns = [
     path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
     path('today-registered-patients/', admission.today_registered_patients, name='today_registered_patients'),
     path('admission-requests/', admission.today_registered_patients, name='admission_requests'),
+    path('admitted-patients/', admission.admitted_patients, name='admitted_patients'),
 
     
     # Inventory URLs
@@ -267,6 +268,7 @@ urlpatterns = [
 
     # Discharge URLs
     path("search-discharge-patient/", discharge.search_discharge_patient, name="search-discharge-patient"),
+    path("discharge-billing/requests/", discharge.get_discharge_requests, name="discharge-requests"),
     path("discharge-billing/signatories/", discharge.get_discharge_signatories, name="discharge-signatories"),
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
     path("discharge-billing/<str:pk>/", discharge.discharge_billing_detail, name="discharge-billing-detail"),
