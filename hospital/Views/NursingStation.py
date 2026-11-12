@@ -316,10 +316,10 @@ def get_admission_list(request):
                     {
                         "ipNumber": {"$in": active_ips},
                         "is_ward_request": True,
-                        "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]},
+                        "status": {"$nin": ["Cancelled", "Completed", "Result Entered", "Outsourced", "Printed", "Dispatched", "cancelled", "completed", "outsourced", "printed", "dispatched"]},
                         "is_active": True
                     },
-                    {"ipNumber": 1, "ward_request_type": 1, "_id": 0}
+                    {"ipNumber": 1, "ward_request_type": 1, "item": 1, "status": 1, "_id": 0}
                 ))
                 pending_pharm = list(mongo_db["hospital_pharmacybilling"].find(
                     {
@@ -355,6 +355,15 @@ def get_admission_list(request):
                 for p_doc in pending_inv:
                     p_ip = p_doc.get("ipNumber")
                     w_type = p_doc.get("ward_request_type", "LAB")
+                    doc_st = str(p_doc.get("status") or "").strip().lower()
+                    raw_items = p_doc.get("item", [])
+                    if isinstance(raw_items, list) and raw_items:
+                        has_pending = any(
+                            isinstance(it, dict) and str(it.get("status") or doc_st).strip().lower() not in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] and not it.get("cancelled")
+                            for it in raw_items
+                        )
+                        if not has_pending:
+                            continue
                     k = "radiology" if w_type == "RADIOLOGY" else "lab"
                     pending_map.setdefault(p_ip, {}).setdefault(k, 0)
                     pending_map[p_ip][k] += 1
@@ -3046,7 +3055,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                 "is_ward_request": True,
                 "ward_request_type": "LAB",
                 "is_active": True,
-                "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]}
+                "status": {"$nin": ["Cancelled", "Completed", "Result Entered", "Outsourced", "Printed", "Dispatched", "cancelled", "completed", "outsourced", "printed", "dispatched"]}
             }
         ]
     }
@@ -3073,12 +3082,12 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         item_details = []
         for it in (raw_items if isinstance(raw_items, list) else []):
             if isinstance(it, dict) and it.get("itemName"):
-                it_st = it.get("status") or status_str
-                if it_st in ["Cancelled", "Completed", "Result Entered"] or it.get("cancelled"):
+                it_st = str(it.get("status") or status_str or "").strip().lower()
+                if it_st in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] or it.get("cancelled"):
                     continue
                 p = it.get("price")
                 p_str = f" (Rs. {p})" if p else ""
-                item_details.append(f"{it.get('itemName')}{p_str} [{it_st}]")
+                item_details.append(f"{it.get('itemName')}{p_str} [{it.get('status') or status_str}]")
 
         if item_details:
             lab_bills.append({
@@ -3099,7 +3108,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                 "is_ward_request": True,
                 "ward_request_type": "RADIOLOGY",
                 "is_active": True,
-                "status": {"$in": ["Result Pending", "Pending", "Partially Completed"]}
+                "status": {"$nin": ["Cancelled", "Completed", "Result Entered", "Dispatched", "Printed", "Outsourced", "cancelled", "completed", "dispatched", "printed", "outsourced"]}
             }
         ]
     }
@@ -3126,12 +3135,12 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         item_details = []
         for it in (raw_items if isinstance(raw_items, list) else []):
             if isinstance(it, dict) and it.get("itemName"):
-                it_st = it.get("status") or status_str
-                if it_st in ["Cancelled", "Completed", "Result Entered"] or it.get("cancelled"):
+                it_st = str(it.get("status") or status_str or "").strip().lower()
+                if it_st in ["cancelled", "completed", "result entered", "dispatched", "printed", "outsourced"] or it.get("cancelled"):
                     continue
                 p = it.get("price")
                 p_str = f" (Rs. {p})" if p else ""
-                item_details.append(f"{it.get('itemName')}{p_str} [{it_st}]")
+                item_details.append(f"{it.get('itemName')}{p_str} [{it.get('status') or status_str}]")
 
         if item_details:
             rad_bills.append({
