@@ -692,6 +692,8 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/get_active_shift/?(\?.*)?$' : 'HMS-P-CCGAS',
         '/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/': 'HMS-P-CCSTSD',
         r'^/_b_a_c_k_e_n_d/HMS/cash_counter_shiftdetails/?(\?.*)?$': 'HMS-P-CCSTSD',
+        '/_b_a_c_k_e_n_d/HMS/cashcounter_auto_rollover/': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/cashcounter_auto_rollover/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/admin_close_shift/?(\?.*)?$': 'HMS-P-CCC',
         
 
@@ -742,6 +744,7 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/patient-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/purchase-gst-report/?(\?.*)?$': 'HMS-P-CCC',
 
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',

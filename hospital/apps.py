@@ -23,3 +23,16 @@ class HospitalConfig(AppConfig):
 
             t = threading.Thread(target=_estimate_cleaner_worker, daemon=True, name="EstimateAutoDeleteWorker")
             t.start()
+
+            def _cashcounter_rollover_worker():
+                time.sleep(15)  # Wait for Django server startup
+                while True:
+                    try:
+                        from hospital.Views.AccountsReport.cashcounter_rollover_service import trigger_rollover_check
+                        trigger_rollover_check()
+                    except Exception:
+                        pass
+                    time.sleep(25)  # Check every 25 seconds for exact 23:59 / 00:00 IST
+
+            t_rollover = threading.Thread(target=_cashcounter_rollover_worker, daemon=True, name="CashCounterAutoRolloverWorker")
+            t_rollover.start()

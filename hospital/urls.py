@@ -72,6 +72,8 @@ from .Views.AccountsReport import (
     cash_counter_manager,
     bill_wise_report,
     accounting_reports,
+    purchase_gst_report,
+    cashcounter_rollover_service,
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
@@ -225,6 +227,7 @@ urlpatterns = [
     path('cash_counter_shiftdetails/', cashcounter.cash_counter_shiftdetails, name='cash_counter_shiftdetails'),
     path('admin_close_shift/', cashcounter.admin_close_shift, name='admin_close_shift'),
     path('admin_close_cashcounter_shift/', cashcounter.admin_close_shift, name='admin_close_cashcounter_shift'),
+    path('cashcounter_auto_rollover/', cashcounter_rollover_service.cashcounter_auto_rollover_api, name='cashcounter_auto_rollover'),
     path('get_active_shift/', cashcounter.get_active_shift, name='get_active_shift'),
     path('get_shift_summary_report/', cashcounter.get_shift_summary_report, name='get_shift_summary_report'),
     path('get_active_account_heads/', cashcounter.get_active_account_heads, name='get_active_account_heads'),
@@ -696,6 +699,7 @@ urlpatterns = [
     path('patient-advance-report/', accounting_reports.patient_advance_details_report, name='patient_advance_details_report'),
     path('ip-advance-report/', accounting_reports.patient_advance_details_report, name='ip_advance_report'),
     path('discount-bills-report/', accounting_reports.discount_bills_report, name='discount_bills_report'),
+    path('purchase-gst-report/', purchase_gst_report.purchase_gst_report_api, name='purchase_gst_report'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),
