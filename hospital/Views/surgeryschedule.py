@@ -1417,13 +1417,14 @@ def get_ot_medicine_ward_requests(request):
                         item_id,
                         itm.get("itemName", itm.get("item_name", ""))
                     ),
-                    "qty": itm.get("qty", 1),
+                    "qty": itm.get("qty", itm.get("quantity", "")),
                     "doctor": itm.get("doctor", ""),
                     "dosage": itm.get("dosage", ""),
                     "noOfDays": itm.get("noOfDays", ""),
                     "dose": itm.get("dose", ""),
                     "doseUnit": itm.get("doseUnit", ""),
                     "route": itm.get("route", ""),
+                    "dispatched_qty": itm.get("dispatched_qty", ""),
                     "instruction": itm.get("instruction", ""),
                     "remark": itm.get("remark", "")
                 })
