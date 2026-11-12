@@ -342,6 +342,12 @@ def format_shift_response(shift):
     except:
         pass
 
+    prev_closing = 0.0
+    try:
+        prev_closing = convert_decimal(getattr(shift, "previous_closing_balance", 0.0))
+    except Exception:
+        pass
+
     return {
 
         "shiftno": shift.shiftno,
@@ -354,6 +360,8 @@ def format_shift_response(shift):
 
         "OpeningBalance": convert_decimal(shift.OpeningBalance),
 
+        "previous_closing_balance": prev_closing,
+
         "ClosingBalance": convert_decimal(shift.ClosingBalance),
 
         "collected_Amount": convert_decimal(shift.collected_Amount),
@@ -362,10 +370,6 @@ def format_shift_response(shift):
 
         "PettyCashBalance": convert_decimal(shift.PettyCashBalance),
 
-        "RemittedToBank": convert_decimal(shift.RemittedToBank),
-        "SubmittedToAccount": convert_decimal(getattr(shift, "SubmittedToAccount", 0)),
-
-        "HandOverAmount": convert_decimal(shift.HandOverAmount),
         "SalesReturnAmount": convert_decimal(shift.SalesReturnAmount),
         "SelectedOutlet": shift.SelectedOutlet,
 
@@ -547,11 +551,13 @@ def cash_counter_shiftdetails(request):
 
         # 5. START SHIFT WITH CANONICAL DATA
         shift_no = generate_shift_no(canonical_counter_id)
-        opening_balance = convert_decimal128(data.get("OpeningBalance", 0))
+        # Opening balance defaults to 0.00 for all shifts
+        opening_balance = convert_decimal128(data.get("OpeningBalance") if data.get("OpeningBalance") is not None else 0)
         petty_cash_balance = convert_decimal128(data.get("PettyCashBalance", 0))
 
         final_outlet_code = allotted_outlet_code or current_outlet_code or "OLET003"
         final_selected_outlet = allotted_outlet_code or current_outlet_code or "OLET003"
+        prev_closing = get_previous_shift_balance(canonical_counter_id, final_selected_outlet, hospital_code, branch_code)
 
         payload = {
             "shiftno": shift_no,
@@ -560,6 +566,7 @@ def cash_counter_shiftdetails(request):
             "CashCounterName": str(counter_name),
             "SelectedOutlet": str(final_selected_outlet),
             "OpeningBalance": opening_balance,
+            "previous_closing_balance": Decimal128(str(prev_closing)),
             "PettyCashBalance": petty_cash_balance,
             "StartingTime": data.get("StartingTime") or timezone.now(),
             "ShiftStatus": "active",
@@ -626,11 +633,12 @@ def cash_counter_shiftdetails(request):
         shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
         shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
         
-        # Use provided fields or defaults
-        shift.RemittedToBank = safe_dec(data.get("RemittedToBank", shift.RemittedToBank))
-        shift.SubmittedToAccount = safe_dec(data.get("SubmittedToAccount", shift.SubmittedToAccount))
-        shift.HandOverAmount = safe_dec(data.get("HandOverAmount", 0))
-        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
+        # RemittedToBank, SubmittedToAccount, HandOverAmount are not used/subtracted
+        shift.RemittedToBank = Decimal('0.00')
+        shift.SubmittedToAccount = Decimal('0.00')
+        shift.HandOverAmount = Decimal('0.00')
+        # Formula: Opening Balance + Cash Collected - Sales Return
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.SalesReturnAmount)
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
@@ -1091,14 +1099,13 @@ def recalculate_and_update_shift_details(shift_no):
 
         client.close()
 
-        # 4. Set fields
-        shift.RemittedToBank = safe_dec(remitted_sum) + extra_remitted
-        shift.HandOverAmount = safe_dec(handover_sum)
-        if extra_submit > 0:
-            shift.SubmittedToAccount = extra_submit
+        # 4. Set fields - RemittedToBank and HandOverAmount are not used
+        shift.RemittedToBank = Decimal('0.00')
+        shift.HandOverAmount = Decimal('0.00')
+        shift.SubmittedToAccount = Decimal('0.00')
 
-        # ClosingBalance = OpeningBalance + collected_Amount (Cash) - RemittedToBank - SubmittedToAccount - HandOverAmount
-        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
+        # ClosingBalance = OpeningBalance + collected_Amount (Cash) - SalesReturnAmount
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.SalesReturnAmount)
 
         # Clean all decimal fields to avoid conversion/saving errors
         for field in [
@@ -1248,11 +1255,12 @@ def admin_close_shift(request):
                 return default
 
         opening_balance = to_num(m_shift.get("OpeningBalance", 0))
-        remitted_val = to_num(data.get("RemittedToBank"), to_num(m_shift.get("RemittedToBank", 0)))
-        submitted_val = to_num(data.get("SubmittedToAccount"), to_num(m_shift.get("SubmittedToAccount", 0)))
-        handover_val = to_num(data.get("HandOverAmount"), to_num(m_shift.get("HandOverAmount", 0)))
+        remitted_val = 0.0
+        submitted_val = 0.0
+        handover_val = 0.0
 
-        closing_balance = opening_balance + collected_amount - remitted_val - submitted_val - handover_val
+        # Formula: Opening Balance + Cash Collected - Sales Return
+        closing_balance = opening_balance + collected_amount - sales_return
 
         # 3. Update MongoDB shift document
         update_fields = {
@@ -1263,9 +1271,6 @@ def admin_close_shift(request):
             "collected_Amount": Decimal128(f"{collected_amount:.2f}"),
             "CreditAmount": Decimal128(f"{credit_amount:.2f}"),
             "SalesReturnAmount": Decimal128(f"{sales_return:.2f}"),
-            "RemittedToBank": Decimal128(f"{remitted_val:.2f}"),
-            "SubmittedToAccount": Decimal128(f"{submitted_val:.2f}"),
-            "HandOverAmount": Decimal128(f"{handover_val:.2f}"),
             "closed_by_admin": True,
             "admin_id": str(admin_id),
             "admin_close_remarks": remarks,
@@ -1405,9 +1410,6 @@ def admin_close_shift(request):
             "collected_Amount": round(collected_amount, 2),
             "CreditAmount": round(credit_amount, 2),
             "credit_amount": round(credit_amount, 2),
-            "RemittedToBank": round(remitted_val, 2),
-            "SubmittedToAccount": round(submitted_val, 2),
-            "HandOverAmount": round(handover_val, 2),
             "ShiftStatus": "inactive",
             "StartingTime": str(m_shift.get("StartingTime")),
             "closingTime": str(closing_time),
@@ -1581,7 +1583,8 @@ def get_active_shift(request):
                     f"Cash Counter '{counter_name}' ({canonical_counter_id}) is currently in use by cashier '{occupied_by}' (Shift #{occupied_shiftno}). Only one active shift is permitted per counter."
                     if counter_occupied else None
                 ),
-                "expected_opening": expected,
+                "expected_opening": 0.0,
+                "previous_closing_balance": expected,
                 "default_petty_cash": 1000.0,
                 "is_active": False,
                 "shift_active": False,
@@ -1595,7 +1598,11 @@ def get_active_shift(request):
         shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
         shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
         shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
-        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.RemittedToBank) - safe_dec(shift.SubmittedToAccount) - safe_dec(shift.HandOverAmount)
+        shift.RemittedToBank = Decimal('0.00')
+        shift.SubmittedToAccount = Decimal('0.00')
+        shift.HandOverAmount = Decimal('0.00')
+        # Formula: Opening Balance + Cash Collected - Sales Return
+        shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.SalesReturnAmount)
         
         # ✅ Thoroughly clean all decimal fields before saving to avoid conflicts
         for field in [
@@ -1623,9 +1630,16 @@ def get_active_shift(request):
         except Exception:
             pass
         
+        shift_data = format_shift_response(shift)
+        try:
+            prev_closing = get_previous_shift_balance(canonical_counter_id, allotted_outlet_code, hospital_code, branch_code)
+            shift_data["previous_closing_balance"] = prev_closing
+        except Exception:
+            pass
+
         return Response({
             "success": True, 
-            "data": format_shift_response(shift),
+            "data": shift_data,
             "counter_allocated": True,
             "outlet_match": True,
             "allotted_outlet": allotted_outlet_code,
@@ -3691,9 +3705,9 @@ def get_shift_summary_report(request):
                 "CreditAmount": round(credit_amt, 2),
                 "credit_amount": round(credit_amt, 2),
                 "PettyCashBalance": _to_num(s.get("PettyCashBalance")),
-                "RemittedToBank": round(rem_amt, 2),
-                "SubmittedToAccount": round(sub_amt, 2),
-                "HandOverAmount": _to_num(s.get("HandOverAmount")),
+                "RemittedToBank": 0.0,
+                "SubmittedToAccount": 0.0,
+                "HandOverAmount": 0.0,
                 "SalesReturnAmount": round(ret_amt, 2),
                 "ShiftStatus": s.get("ShiftStatus", ""),
                 "StartingTime": st_iso,

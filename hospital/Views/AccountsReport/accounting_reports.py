@@ -206,22 +206,23 @@ def fetch_detailed_billing_data(db, ccc_records):
     # Bulk fetch helper for collections with projection for high speed
     PROJECTIONS = {
         "hospital_pharmacybilling": {
-            "bill_no": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1,
-            "payment_mode": 1, "payment_method": 1, "payment_details": 1, "items": 1,
+            "bill_no": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1,
+            "payment_mode": 1, "payment_method": 1, "paymentMethod": 1, "payment_details": 1, "items": 1,
             "medicine_particulars": 1, "inpatient_number": 1, "ip_no": 1, "admission_id": 1
         },
         "hospital_investbilling": {
             "investBillNo": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1,
-            "payment_mode": 1, "payment_details": 1, "item": 1, "billTypeNo": 1
+            "finalPrice": 1, "total": 1, "paymentMethod": 1, "payment_method": 1,
+            "payment_mode": 1, "payment_details": 1, "item": 1, "billTypeNo": 1, "bill_type": 1
         },
         "hospital_billing": {
-            "bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "payment_mode": 1,
-            "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1,
+            "bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "net_amount": 1, "payment_mode": 1,
+            "payment_method": 1, "paymentMethod": 1, "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1,
             "discount_amount": 1, "discount": 1, "advance_amount": 1, "advance": 1, "scheme": 1, "company_name": 1, "status": 1, "is_cancelled": 1
         },
         "hospital_dischargebilling": {
-            "bill_no": 1, "uhid": 1, "ip_number": 1, "net_amount": 1, "total_amount": 1,
-            "payment_mode": 1, "payment_details": 1, "items": 1,
+            "bill_no": 1, "uhid": 1, "ip_number": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1, "paid_amount": 1,
+            "payment_mode": 1, "payment_method": 1, "payment_details": 1, "items": 1,
             "advance_amount": 1, "discount_amount": 1, "sales_return": 1, "patient_debit": 1, "company_name": 1, "insurance_company": 1, "card_number": 1, "status": 1, "is_cancelled": 1
         },
         "hospital_salesreturn": {
@@ -330,12 +331,15 @@ def fetch_detailed_billing_data(db, ccc_records):
             d = pharmacy_map[bill_no]
             is_ip = bool(d.get("inpatient_number") or d.get("ip_no") or d.get("admission_id"))
             p_mode = d.get("payment_mode") or d.get("payment_method") or "Cash"
+            pharm_amt = _to_float(d.get("net_amount") or d.get("total_amount"))
+            if pharm_amt == 0.0:
+                pharm_amt = _to_float(r.get("collected_amount"))
             detail.update({
                 "type": "Pharmacy",
                 "type_name": "PHARMACY IP BILL (SH)" if is_ip else "PHARMACY OP BILL (SH)",
-                "uhid": d.get("uhid"),
-                "net_amount": _to_float(d.get("net_amount")),
-                "display_amount": _to_float(d.get("net_amount")),
+                "uhid": d.get("uhid") or detail.get("uhid"),
+                "net_amount": pharm_amt,
+                "display_amount": pharm_amt,
                 "payment_mode": p_mode,
                 "payment_details": d.get("payment_details") or {},
                 "items": d.get("items") or d.get("medicine_particulars") or []
@@ -351,18 +355,26 @@ def fetch_detailed_billing_data(db, ccc_records):
                 first_item = d.get("item")[0]
                 bt_no = first_item.get("billTypeNo")
                 bt_name = billtype_map.get(bt_no) if bt_no else None
+            if not bt_name and d.get("bill_type") is not None:
+                bt_name = billtype_id_map.get(str(d.get("bill_type")).strip())
             
             display_type = bt_name or "Investigation"
             if "(SH)" not in display_type:
                 display_type = f"{display_type} (SH)"
             
+            inv_amt = _to_float(d.get("finalPrice") or d.get("total") or d.get("net_amount") or d.get("total_amount"))
+            if inv_amt == 0.0:
+                inv_amt = _to_float(r.get("collected_amount"))
+            
+            p_mode = (d.get("payment_details") or {}).get("method") or d.get("paymentMethod") or d.get("payment_method") or d.get("payment_mode") or "Cash"
+            
             detail.update({
                 "type": "Investigation",
                 "type_name": display_type,
-                "uhid": d.get("uhid"),
-                "net_amount": _to_float(d.get("finalPrice") or d.get("total")),
-                "display_amount": _to_float(d.get("finalPrice") or d.get("total")),
-                "payment_mode": d.get("paymentMethod") or d.get("payment_method") or "Cash",
+                "uhid": d.get("uhid") or detail.get("uhid"),
+                "net_amount": inv_amt,
+                "display_amount": inv_amt,
+                "payment_mode": p_mode,
                 "payment_details": d.get("payment_details") or {},
                 "items": d.get("item") or []
             })
@@ -496,6 +508,8 @@ def fetch_detailed_billing_data(db, ccc_records):
                 qty = float(m.get("return_qty", 0))
                 price = float(m.get("price", 0))
                 amt += qty * price
+            if amt == 0.0:
+                amt = _to_float(d.get("return_amount") or r.get("collected_amount") or 0.0)
             
             detail.update({
                 "type": "Sales Return",
