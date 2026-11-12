@@ -1382,6 +1382,8 @@ def dispatch_report(request, investBillNo, item_id):
     client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
     collection = client['HMS']['hospital_radiologyreport']
     radiology_format_collection = client['HMS']['hospital_radiology_formats']
+    invest_billing_collection = client['HMS']['hospital_investbilling'] 
+
     try:
         user_id = request.data.get('auth-user-id', 'system')
 
@@ -1416,6 +1418,39 @@ def dispatch_report(request, investBillNo, item_id):
                 "lastmodified_by":   user_id,
                 "lastmodified_date": timezone.now(),
             }}
+        )
+                # ── Mark the matching item in hospital_investbilling as Dispatched ──
+        now_dt = timezone.now()
+
+        billing_result = invest_billing_collection.update_one(
+            {'investBillNo': investBillNo, 'is_active': True},
+            {'$set': {
+                'item.$[elem].status':          'Dispatched',
+                'item.$[elem].dispatch_date':   dispatch_dt,
+                'item.$[elem].dispatched_by':   user_id,
+                'lastmodified_by':              user_id,
+                'lastmodified_date':            now_dt,
+            }},
+            array_filters=[{
+                '$or': [
+                    {'elem.test_id': item_id_int},
+                    {'elem.item_id': item_id_int},
+                ]
+            }],
+        )
+        if billing_result.matched_count == 0:
+            logger.warning(
+                f"dispatch_report: no billing record for {investBillNo}/{item_id_int}"
+            )
+
+        # Bill-level status becomes Dispatched only when every item is dispatched
+        invest_billing_collection.update_one(
+            {
+                'investBillNo': investBillNo,
+                'is_active': True,
+                'item': {'$not': {'$elemMatch': {'status': {'$ne': 'Dispatched'}}}},
+            },
+            {'$set': {'status': 'Dispatched', 'lastmodified_date': now_dt}},
         )
         updated = collection.find_one({"_id": report["_id"]})
         serialized = _serialize_report(updated)
