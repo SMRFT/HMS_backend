@@ -5182,6 +5182,7 @@ def PharmacyBillanalysis(request):
         cc_col    = hms_db["hospital_cashcountercollection"]
         disch_col = hms_db["hospital_dischargebilling"]
         bt_col    = hms_db["hospital_billtype"]
+        pi_col    = hms_db["hospital_pharmacyitem"]
 
         # Date handling (Default to today in IST if not provided)
         kolkata_tz = pytz.timezone("Asia/Kolkata")
@@ -5373,10 +5374,13 @@ def PharmacyBillanalysis(request):
                         "items": wr.get("medicine_particulars") or [],
                     })
 
-        # 5. Batch fetch Cash Counter Collections
+        # 5. Batch fetch Cash Counter Collections (Pharmacy collections only)
         cash_map = {}
         if bill_nos:
-            for cc in cc_col.find({"bill_no": {"$in": bill_nos}}):
+            for cc in cc_col.find({
+                "bill_no": {"$in": bill_nos},
+                "billing_category": {"$in": ["OPPharmacyBills", "Pharmacy"]}
+            }):
                 b_no = cc.get("bill_no")
                 if b_no:
                     if b_no not in cash_map:
@@ -5403,6 +5407,30 @@ def PharmacyBillanalysis(request):
                     billtype_map[int(bt_id)] = bt.get("bill_name", "")
                 except Exception:
                     pass
+
+        # 7. Batch fetch Pharmacy Item Names from hospital_pharmacyitem
+        item_ids_to_fetch = set()
+        for b in raw_bills:
+            for m in b.get("medicine_particulars") or []:
+                if isinstance(m, dict):
+                    iid = m.get("item_id")
+                    if iid is not None:
+                        try:
+                            item_ids_to_fetch.add(int(iid))
+                        except Exception:
+                            item_ids_to_fetch.add(iid)
+
+        item_names_map = {}
+        if item_ids_to_fetch:
+            for pi in pi_col.find({"item_id": {"$in": list(item_ids_to_fetch)}}, {"item_id": 1, "item_name": 1}):
+                iid = pi.get("item_id")
+                iname = pi.get("item_name")
+                if iid is not None and iname:
+                    try:
+                        item_names_map[int(iid)] = iname
+                    except Exception:
+                        pass
+                    item_names_map[str(iid)] = iname
 
         # Helper for float conversion
         def to_num(val):
@@ -5449,6 +5477,9 @@ def PharmacyBillanalysis(request):
 
             # Admission details
             adm = admissions_map.get(ip_num) or admissions_map.get(u) or {}
+            if not adm.get("room_label") and b.get("room_no"):
+                adm = dict(adm)
+                adm["room_label"] = b.get("room_no")
             adv_amt = float(adm.get("total_ip_advance", 0.0))
             is_ip_cleared = adm.get("is_discharged", False)
 
@@ -5490,24 +5521,41 @@ def PharmacyBillanalysis(request):
 
             # Cash collection details
             cash_list = cash_map.get(b_no, [])
-            is_cash_bill = len(cash_list) > 0 or b.get("billing_mode") == "DIRECT" or bool(b.get("payment_details"))
 
             # Monetary amounts
             gross = to_num(b.get("total_amount", 0))
             discount = to_num(b.get("overall_discount_amount", 0))
             net = to_num(b.get("net_amount", 0))
 
-            # Status determination (matching Screenshot 1: "Ip Credit Bills", "Cash Bill", "Cancelled")
+            # Status & Credit determination (matching Screenshot 1: "Ip Credit Bills", "Cash Bill", "Cancelled")
             b_status = b.get("billing_status") or "Billed"
             is_cancelled = b_status.lower() in ["cancelled", "deleted"] or b.get("is_deleted") is True
             p_mode = str(b.get("payment_mode") or "").strip().lower()
+            b_mode = str(b.get("billing_mode") or "").strip().upper()
+            is_ins = b.get("is_insurance") is True or str(b.get("customer_type") or "").strip().lower() == "insurance"
+
+            is_credit = (
+                p_mode == "credit"
+                or b_mode in ["WARD REQUEST", "IP CREDIT", "CREDIT"]
+                or is_ins
+                or bool(ip_num)
+                or "IP" in bt_name.upper()
+            )
 
             if is_cancelled:
                 derived_status = "Cancelled"
-            elif p_mode == "credit" or ip_num or "IP" in bt_name.upper() or b.get("billing_mode") in ["WARD REQUEST", "IP CREDIT", "CREDIT"]:
+            elif is_credit:
                 derived_status = "Ip Credit Bills"
             else:
                 derived_status = "Cash Bill"
+
+            # A bill is a Cash Bill ONLY if it is not an IP/Credit bill and not cancelled
+            is_cash_bill = not is_credit and not is_cancelled and (
+                p_mode == "cash"
+                or b_mode == "DIRECT"
+                or len(cash_list) > 0
+                or bool(b.get("payment_details"))
+            )
 
             # Status filter
             if status_filter != "all":
@@ -5550,9 +5598,16 @@ def PharmacyBillanalysis(request):
             serialized_meds = []
             for m in med_list:
                 if isinstance(m, dict):
+                    m_id = m.get("item_id")
+                    m_name = m.get("item_name")
+                    if not m_name and m_id is not None:
+                        try:
+                            m_name = item_names_map.get(int(m_id)) or item_names_map.get(str(m_id))
+                        except Exception:
+                            m_name = item_names_map.get(str(m_id))
                     serialized_meds.append({
-                        "item_id": m.get("item_id"),
-                        "item_name": m.get("item_name", "—"),
+                        "item_id": m_id,
+                        "item_name": m_name or "—",
                         "batch_number": m.get("batch_number", "—"),
                         "qty": to_num(m.get("qty") or m.get("quantity") or 0),
                         "price": to_num(m.get("price", 0)),
@@ -5582,6 +5637,12 @@ def PharmacyBillanalysis(request):
                 "sales_return_amount": round(sales_ret_amt, 2),
                 "net_amount": round(net, 2),
                 "status": derived_status,
+                "billing_mode": b.get("billing_mode", "DIRECT"),
+                "outlet_code": b.get("outlet_code") or outlet_code,
+                "room_no": b.get("room_no") or "",
+                "doctor_id": b.get("doctor_id") or "—",
+                "shift_no": b.get("shiftno") or "—",
+                "medicine_particulars": serialized_meds,
                 # Indicators matching Screenshot 2
                 "bill_cancelled": "Yes" if is_cancelled else "No",
                 "is_cash_bill": "Yes" if is_cash_bill else "No",
@@ -5598,6 +5659,7 @@ def PharmacyBillanalysis(request):
                         "shift_no": b.get("shiftno") or "—",
                         "doctor_id": b.get("doctor_id") or "—",
                         "created_by": b.get("created_by") or "—",
+                        "billed_id": b.get("billed_id") or "—",
                         "outlet_code": b.get("outlet_code") or outlet_code,
                     },
                     "patient": {
