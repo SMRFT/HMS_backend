@@ -3123,7 +3123,7 @@ def patient_advance_details_report(request):
     - search: search query on IP Number, Patient Name, Room Number, or Company Name
     """
     try:
-        as_on_date_str = request.GET.get("as_on_date") or request.GET.get("date")
+        as_on_date_str = request.GET.get("as_on_date") or request.GET.get("date") or request.GET.get("to_date")
         floor_filter = (request.GET.get("floor") or "").strip()
         has_advance_filter = (request.GET.get("has_advance") or "all").strip().lower()
         customer_type_filter = (request.GET.get("customer_type") or "all").strip()
