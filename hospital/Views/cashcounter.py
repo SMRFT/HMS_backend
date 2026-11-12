@@ -1,5 +1,6 @@
 from pymongo import MongoClient, DESCENDING
 import os
+import re
 from rest_framework.decorators import api_view
 
 from rest_framework.response import Response
@@ -128,6 +129,93 @@ def generate_shift_no(cash_counter=None):
 
     new_number = last_number + 1
     return f"{prefix}{str(new_number).zfill(6)}"
+
+
+def resolve_outlet(outlet_input, db):
+    """
+    Resolves an outlet input (which could be an outlet_code like 'OLET003' or
+    an outlet_name like 'MAIN BLOCK') to (outlet_code, outlet_name).
+    """
+    if not outlet_input:
+        return None, None
+    clean = str(outlet_input).strip()
+    col = db["hospital_outlets"]
+    doc = col.find_one({"outlet_code": re.compile(f"^{re.escape(clean)}$", re.I)})
+    if not doc:
+        doc = col.find_one({"outlet_name": re.compile(f"^{re.escape(clean)}$", re.I)})
+    if doc:
+        return doc.get("outlet_code"), doc.get("outlet_name")
+    return clean, clean
+
+
+def outlets_match(out1, out2, db):
+    """
+    Checks if two outlet identifiers match, whether passed as codes or names.
+    """
+    if not out1 or not out2:
+        return False
+    c1, n1 = resolve_outlet(out1, db)
+    c2, n2 = resolve_outlet(out2, db)
+    if c1 and c2 and str(c1).strip().upper() == str(c2).strip().upper():
+        return True
+    if n1 and n2 and str(n1).strip().upper() == str(n2).strip().upper():
+        return True
+    return False
+
+
+def find_cashcounter_doc(counter_input, db):
+    """
+    Looks up a cash counter document in hospital_cashcounter by counter_id or counter_name,
+    handling code variations like CC001 vs CC0001.
+    """
+    if not counter_input:
+        return None
+    clean = str(counter_input).strip()
+    col = db["hospital_cashcounter"]
+
+    # 1. Exact or case-insensitive match on counter_id
+    doc = col.find_one({"counter_id": re.compile(f"^{re.escape(clean)}$", re.I)})
+    if doc:
+        return doc
+
+    # 2. Number normalization: CC001 -> matches CC0001, CC01, CC1
+    m = re.match(r"^([A-Za-z]+)0*(\d+)$", clean)
+    if m:
+        prefix, num = m.group(1), int(m.group(2))
+        doc = col.find_one({"counter_id": re.compile(f"^{prefix}0*{num}$", re.I)})
+        if doc:
+            return doc
+
+    # 3. Match by counter_name
+    return col.find_one({"counter_name": re.compile(f"^{re.escape(clean)}$", re.I)})
+
+
+def get_counter_aliases(counter_doc, counter_id_input):
+    """
+    Returns a list of aliases (e.g. ['CC0001', 'CC001', 'CC01', 'CC1', counter_name])
+    for robust MongoDB queries against running shifts.
+    """
+    aliases = set()
+    for val in [counter_id_input, counter_doc.get("counter_id") if counter_doc else None, counter_doc.get("counter_name") if counter_doc else None]:
+        if val:
+            aliases.add(str(val).strip())
+
+    raw_candidates = [counter_id_input]
+    if counter_doc and counter_doc.get("counter_id"):
+        raw_candidates.append(counter_doc.get("counter_id"))
+
+    for item in raw_candidates:
+        if not item:
+            continue
+        m = re.match(r"^([A-Za-z]+)0*(\d+)$", str(item).strip())
+        if m:
+            prefix, num = m.group(1).upper(), int(m.group(2))
+            aliases.add(f"{prefix}{num}")
+            aliases.add(f"{prefix}{num:02d}")
+            aliases.add(f"{prefix}{num:03d}")
+            aliases.add(f"{prefix}{num:04d}")
+
+    return list(aliases)
 
 def generate_accounts_bill_no(db, date_val):
     if date_val.month >= 4:
@@ -341,12 +429,15 @@ def cash_counter_shiftdetails(request):
         }, status=401)
 
     # =====================================================
-    # :white_check_mark: CREATE SHIFT (POST)
+    # ✅ CREATE SHIFT (POST)
     # =====================================================
     if request.method == "POST":
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         global_db = client["Global"]
+        hms_db = client["HMS"]
         profile_col = global_db["backend_diagnostics_profile"]
+        shift_col = hms_db["hospital_cashcountershiftdetails"]
+
         try:
             query_id = str(employee_id).strip()
             search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
@@ -354,77 +445,120 @@ def cash_counter_shiftdetails(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
+        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
+
+        # 1. ENFORCE: Profile must have an assigned cash counter
+        if not emp_cashcounter or not str(emp_cashcounter).strip():
+            return Response({
+                "success": False,
+                "code": "NO_COUNTER_ALLOCATED",
+                "message": "No cash counter is allocated to your profile. Please assign a cash counter in Employee Master before starting a shift."
+            }, status=400)
+
+        assigned_counter = str(emp_cashcounter).strip()
         req_counter = data.get("CashCounter")
 
-        if emp_cashcounter and str(emp_cashcounter).strip():
-            assigned_counter = str(emp_cashcounter).strip()
-            # If client explicitly specifies a counter code starting with CC, verify it matches assigned counter
-            if req_counter and str(req_counter).strip().startswith("CC"):
-                if str(req_counter).strip().upper() != assigned_counter.upper():
-                    return Response({
-                        "success": False,
-                        "code": "COUNTER_ACCESS_DENIED",
-                        "message": f"Access blocked: Cashier {employee_id} is assigned to counter '{assigned_counter}' and cannot start counter '{req_counter}'."
-                    }, status=403)
-            cash_counter = assigned_counter
-        elif req_counter and str(req_counter).strip().startswith("CC"):
-            cash_counter = str(req_counter).strip()
-        else:
-            cash_counter = "CC0001"
-            
-        # Ensure outlet_code is resolved (from counter doc or default)
-        hms_db = client["HMS"]
-        cc_doc = hms_db["hospital_cashcounter"].find_one({"counter_id": cash_counter, "is_active": True})
+        # Resolve counter doc in hospital_cashcounter
+        cc_doc = find_cashcounter_doc(assigned_counter, hms_db)
         if not cc_doc:
-            cc_doc = hms_db["hospital_cashcounter"].find_one({"counter_id": cash_counter})
+            return Response({
+                "success": False,
+                "code": "COUNTER_NOT_FOUND",
+                "message": f"Assigned cash counter '{assigned_counter}' was not found in hospital cash counter master."
+            }, status=400)
 
-        if cc_doc and cc_doc.get("outlet"):
-            outlet_code = str(cc_doc.get("outlet")).strip()
-        if not outlet_code:
-            outlet_code = "OLET002"
-        
-        # ✅ ACCESS CONTROL: Check if there is already an active shift for this counter
-        query = {
-            "CashCounter": cash_counter,
-            "ShiftStatus": "active",
-            "is_active": True,
-            "hospital_code": hospital_code,
-            "branch_code": branch_code
-        }
-        if outlet_code:
-            query["SelectedOutlet"] = outlet_code
-        existing_active = get_shift_pymongo(query, "StartingTime")
-        
-        if existing_active:
-            if str(existing_active.CashierID) != str(employee_id):
+        canonical_counter_id = str(cc_doc.get("counter_id") or assigned_counter).strip()
+        counter_name = str(cc_doc.get("counter_name") or canonical_counter_id).strip()
+        allotted_outlet = str(cc_doc.get("outlet") or "").strip()
+        allotted_outlet_code, allotted_outlet_name = resolve_outlet(allotted_outlet, hms_db)
+
+        # If client explicitly specifies a counter code starting with CC, verify it matches assigned counter
+        if req_counter and str(req_counter).strip().startswith("CC"):
+            req_doc = find_cashcounter_doc(req_counter, hms_db)
+            req_canonical = (req_doc.get("counter_id") if req_doc else req_counter).strip().upper()
+            if req_canonical != canonical_counter_id.upper():
                 return Response({
                     "success": False,
-                    "message": f"Cash Counter {cash_counter} is already being used by another cashier ({existing_active.CashierID}). Please close that shift first."
+                    "code": "COUNTER_ACCESS_DENIED",
+                    "message": f"Access blocked: Cashier {employee_id} is assigned to counter '{canonical_counter_id}' ({counter_name}) and cannot start counter '{req_counter}'."
+                }, status=403)
+
+        # 2. ENFORCE OUTLET ALLOCATION: Compare request active outlet against counter's allotted outlet
+        raw_current_outlet = (
+            data.get("SelectedOutlet")
+            or data.get("auth-outlet-code")
+            or data.get("outlet_code")
+            or request.headers.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or outlet_code
+        )
+        if isinstance(raw_current_outlet, (list, tuple)):
+            raw_current_outlet = raw_current_outlet[0] if raw_current_outlet else None
+        raw_current_outlet = str(raw_current_outlet).strip() if raw_current_outlet else ""
+        current_outlet_code, current_outlet_name = resolve_outlet(raw_current_outlet, hms_db)
+
+        if not outlets_match(raw_current_outlet, allotted_outlet, hms_db):
+            return Response({
+                "success": False,
+                "code": "OUTLET_MISMATCH",
+                "message": f"Cash Counter '{counter_name}' ({canonical_counter_id}) is allotted to outlet '{allotted_outlet_name}' ({allotted_outlet_code}). You are currently on '{current_outlet_name or raw_current_outlet}'. You can only start a shift for this counter in '{allotted_outlet_name}'."
+            }, status=400)
+
+        # 3. ENFORCE NO RUNNING SHIFT ON THIS COUNTER: Check globally across ALL outlets
+        counter_aliases = get_counter_aliases(cc_doc, assigned_counter)
+        existing_counter_shift = shift_col.find_one({
+            "CashCounter": {"$in": counter_aliases},
+            "ShiftStatus": "active",
+            "is_active": True,
+            "closingTime": None
+        }, sort=[("StartingTime", -1)])
+
+        if existing_counter_shift:
+            existing_cashier = str(existing_counter_shift.get("CashierID", "")).strip()
+            if existing_cashier != str(employee_id).strip():
+                return Response({
+                    "success": False,
+                    "code": "COUNTER_ALREADY_RUNNING",
+                    "message": f"Cash Counter '{counter_name}' ({canonical_counter_id}) already has an active running shift ({existing_counter_shift.get('shiftno')}) started by cashier '{existing_cashier}'. Only one active shift is permitted per counter."
                 }, status=400)
             else:
+                existing_model = Cashcountershiftdetails.objects.filter(shiftno=existing_counter_shift.get("shiftno")).first()
                 return Response({
                     "success": True,
                     "message": "You already have an active shift for this counter.",
-                    "data": format_shift_response(existing_active)
+                    "data": format_shift_response(existing_model) if existing_model else existing_counter_shift
                 })
 
-        shift_no = generate_shift_no(cash_counter)
+        # 4. ENFORCE CASHIER ONLY HAS ONE ACTIVE SHIFT: Check if cashier is active on another counter
+        existing_cashier_shift = shift_col.find_one({
+            "CashierID": str(employee_id).strip(),
+            "CashCounter": {"$nin": counter_aliases},
+            "ShiftStatus": "active",
+            "is_active": True,
+            "closingTime": None
+        }, sort=[("StartingTime", -1)])
+
+        if existing_cashier_shift:
+            return Response({
+                "success": False,
+                "code": "CASHIER_ALREADY_ACTIVE",
+                "message": f"Cashier {employee_id} already has an active running shift ({existing_cashier_shift.get('shiftno')}) on counter '{existing_cashier_shift.get('CashCounter')}'. Please close that shift before starting a new one."
+            }, status=400)
+
+        # 5. START SHIFT WITH CANONICAL DATA
+        shift_no = generate_shift_no(canonical_counter_id)
         opening_balance = convert_decimal128(data.get("OpeningBalance", 0))
         petty_cash_balance = convert_decimal128(data.get("PettyCashBalance", 0))
 
-        selected_outlet = data.get("SelectedOutlet") or outlet_code
-        if isinstance(selected_outlet, (list, tuple)):
-            selected_outlet = selected_outlet[0] if selected_outlet else None
-        selected_outlet = str(selected_outlet).strip() if selected_outlet else (outlet_code or "OLET002")
-
-        final_outlet_code = outlet_code or selected_outlet
+        final_outlet_code = allotted_outlet_code or current_outlet_code or "OLET003"
+        final_selected_outlet = allotted_outlet_code or current_outlet_code or "OLET003"
 
         payload = {
             "shiftno": shift_no,
             "CashierID": str(employee_id),
-            "CashCounter": str(cash_counter),
-            "SelectedOutlet": str(selected_outlet),
+            "CashCounter": str(canonical_counter_id),
+            "CashCounterName": str(counter_name),
+            "SelectedOutlet": str(final_selected_outlet),
             "OpeningBalance": opening_balance,
             "PettyCashBalance": petty_cash_balance,
             "StartingTime": data.get("StartingTime") or timezone.now(),
@@ -1313,7 +1447,7 @@ def admin_close_shift(request):
 @permission_classes([HasRoleAndDataPermission])
 def get_active_shift(request):
     try:
-        data = request.data
+        data = request.data or {}
  
         hospital_code = data.get("auth-hospital-code")
         branch_code   = data.get("auth-branch-code")
@@ -1326,7 +1460,9 @@ def get_active_shift(request):
         # Get cashcounter from employee profile
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         global_db = client["Global"]
+        hms_db = client["HMS"]
         profile_col = global_db["backend_diagnostics_profile"]
+        shift_col = hms_db["hospital_cashcountershiftdetails"]
         
         try:
             query_id = str(employee_id).strip()
@@ -1335,96 +1471,126 @@ def get_active_shift(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
-        requested_cashcounter = (data.get("CashCounter") if data else None) or request.GET.get("CashCounter")
+        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
 
-        if emp_cashcounter and str(emp_cashcounter).strip():
-            cash_counter = str(emp_cashcounter).strip()
-        elif requested_cashcounter and str(requested_cashcounter).strip().startswith("CC"):
-            cash_counter = str(requested_cashcounter).strip()
-        else:
-            cash_counter = requested_cashcounter or "CC0001"
+        if not emp_cashcounter or not str(emp_cashcounter).strip():
+            return Response({
+                "success": False,
+                "message": "No cash counter is allocated to your profile. Please assign a cash counter in Employee Master before starting a shift.",
+                "counter_allocated": False,
+                "is_active": False,
+                "shift_active": False
+            })
 
-        # Fetch cash counter details matching counter code and outlet with bill_types
-        hms_db = client["HMS"]
-        cashcounter_col = hms_db["hospital_cashcounter"]
-        cashcounter_doc = cashcounter_col.find_one({"counter_id": cash_counter, "is_active": True})
-        if not cashcounter_doc:
-            cashcounter_doc = cashcounter_col.find_one({"counter_id": cash_counter})
+        assigned_counter = str(emp_cashcounter).strip()
+        cc_doc = find_cashcounter_doc(assigned_counter, hms_db)
+        if not cc_doc:
+            return Response({
+                "success": False,
+                "message": f"Assigned cash counter '{assigned_counter}' was not found in hospital cash counter master.",
+                "counter_allocated": False,
+                "is_active": False,
+                "shift_active": False
+            })
 
-        cashcounter_details = None
-        allowed_bill_type_details = []
-        if cashcounter_doc:
-            cashcounter_details = {
-                "counter_id": cashcounter_doc.get("counter_id"),
-                "counter_name": cashcounter_doc.get("counter_name"),
-                "outlet": cashcounter_doc.get("outlet")
-            }
-            allowed_bill_type_details = cashcounter_doc.get("bill_type", [])
-        
-        today = timezone.now().date()
-        # Bypassing Djongo ORM for the active shift query to avoid SQLDecodeError
-        flat_candidates = []
-        raw_candidates = [cash_counter, outlet_code]
-        if cashcounter_details:
-            raw_candidates.append(cashcounter_details.get("counter_id"))
-            raw_candidates.append(cashcounter_details.get("outlet"))
+        canonical_counter_id = str(cc_doc.get("counter_id") or assigned_counter).strip()
+        counter_name = str(cc_doc.get("counter_name") or canonical_counter_id).strip()
+        allotted_outlet = str(cc_doc.get("outlet") or "").strip()
+        allotted_outlet_code, allotted_outlet_name = resolve_outlet(allotted_outlet, hms_db)
 
-        for item in raw_candidates:
-            if isinstance(item, (list, tuple, set)):
-                flat_candidates.extend(str(x).strip() for x in item if x)
-            elif item:
-                flat_candidates.append(str(item).strip())
+        # Resolve current active outlet from request
+        raw_current_outlet = (
+            outlet_code
+            or data.get("SelectedOutlet")
+            or data.get("outlet_code")
+            or request.headers.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+        )
+        if isinstance(raw_current_outlet, (list, tuple)):
+            raw_current_outlet = raw_current_outlet[0] if raw_current_outlet else None
+        raw_current_outlet = str(raw_current_outlet).strip() if raw_current_outlet else ""
+        current_outlet_code, current_outlet_name = resolve_outlet(raw_current_outlet, hms_db)
 
-        query = {
-            "CashCounter": {"$in": list(set(flat_candidates))},
+        outlet_match = outlets_match(raw_current_outlet, allotted_outlet, hms_db) if raw_current_outlet else True
+
+        cashcounter_details = {
+            "counter_id": canonical_counter_id,
+            "counter_name": counter_name,
+            "outlet": allotted_outlet_code,
+            "outlet_name": allotted_outlet_name
+        }
+        allowed_bill_type_details = cc_doc.get("bill_type", [])
+
+        # Check running shifts
+        counter_aliases = get_counter_aliases(cc_doc, assigned_counter)
+
+        # Check running shift on this counter globally
+        counter_running_shift = shift_col.find_one({
+            "CashCounter": {"$in": counter_aliases},
             "ShiftStatus": "active",
             "is_active": True,
-            "hospital_code": hospital_code,
-            "branch_code": branch_code
-        }
-        shift = get_shift_pymongo(query, "StartingTime")
+            "closingTime": None
+        }, sort=[("StartingTime", -1)])
+
+        counter_occupied = False
+        occupied_by = None
+        occupied_shiftno = None
+        if counter_running_shift:
+            shift_cashier = str(counter_running_shift.get("CashierID", "")).strip()
+            if shift_cashier != str(employee_id).strip():
+                counter_occupied = True
+                occupied_by = shift_cashier
+                occupied_shiftno = str(counter_running_shift.get("shiftno", ""))
+
+        # Check if the active user has their own running shift on this counter
+        shift = None
+        if counter_running_shift and not counter_occupied:
+            shift = get_shift_pymongo({"_id": counter_running_shift["_id"]}, "StartingTime")
 
         if not shift:
-            # Check if there is an active shift for this CashierID
-            fallback_query = {
-                "CashierID": str(employee_id),
+            # Fallback check for this CashierID on this counter
+            fallback_doc = shift_col.find_one({
+                "CashierID": str(employee_id).strip(),
+                "CashCounter": {"$in": counter_aliases},
                 "ShiftStatus": "active",
                 "is_active": True,
-                "hospital_code": hospital_code,
-                "branch_code": branch_code
-            }
-            shift_col = hms_db["hospital_cashcountershiftdetails"]
-            fallback_doc = shift_col.find_one(fallback_query)
+                "closingTime": None
+            }, sort=[("StartingTime", -1)])
             if fallback_doc:
                 shift = get_shift_pymongo({"_id": fallback_doc["_id"]}, "StartingTime")
 
-        if not cashcounter_details and shift:
-            shift_cc = getattr(shift, "CashCounter", None)
-            shift_outlet = getattr(shift, "SelectedOutlet", outlet_code)
-            shift_name = getattr(shift, "CashCounterName", "OP Pharmacy")
-            cashcounter_details = {
-                "counter_id": shift_cc or "CC0002",
-                "counter_name": shift_name or "OP Pharmacy",
-                "outlet": shift_outlet or "OLET002"
-            }
-            cdoc = cashcounter_col.find_one({"counter_id": cashcounter_details["counter_id"]})
-            if cdoc:
-                allowed_bill_type_details = cdoc.get("bill_type", [])
-
         if not shift:
-            expected = get_previous_shift_balance(cash_counter, outlet_code or (cashcounter_details.get("outlet") if cashcounter_details else None), hospital_code, branch_code)
+            expected = get_previous_shift_balance(canonical_counter_id, allotted_outlet_code, hospital_code, branch_code)
             return Response({
-                "success": False, "message": "No active shift found",
+                "success": False,
+                "message": "No active shift found",
                 "counter_allocated": True,
-                "expected_opening": expected, "default_petty_cash": 1000.0, "is_active": False,
+                "outlet_match": outlet_match,
+                "allotted_outlet": allotted_outlet_code,
+                "allotted_outlet_name": allotted_outlet_name,
+                "current_outlet": current_outlet_code,
+                "current_outlet_name": current_outlet_name,
+                "outlet_mismatch_message": (
+                    f"Cash Counter '{counter_name}' ({canonical_counter_id}) is allotted to outlet '{allotted_outlet_name}' ({allotted_outlet_code}). You are currently on '{current_outlet_name or raw_current_outlet}'. Please switch to '{allotted_outlet_name}' before starting a shift."
+                    if not outlet_match else None
+                ),
+                "counter_occupied": counter_occupied,
+                "occupied_by": occupied_by,
+                "occupied_shiftno": occupied_shiftno,
+                "occupied_message": (
+                    f"Cash Counter '{counter_name}' ({canonical_counter_id}) is currently in use by cashier '{occupied_by}' (Shift #{occupied_shiftno}). Only one active shift is permitted per counter."
+                    if counter_occupied else None
+                ),
+                "expected_opening": expected,
+                "default_petty_cash": 1000.0,
+                "is_active": False,
+                "shift_active": False,
                 "cashcounter": cashcounter_details,
                 "allowed_bill_type_details": allowed_bill_type_details
             })
 
         # Using global safe_dec
-
-        # Thoroughly clean all decimal fields before saving to avoid Decimal128/String conflicts
+        # Active shift found for this cashier
         totals = calculate_shift_collection(shift.shiftno)
         shift.collected_Amount = safe_dec(totals.get('total_collection', 0))
         shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
@@ -1461,6 +1627,12 @@ def get_active_shift(request):
             "success": True, 
             "data": format_shift_response(shift),
             "counter_allocated": True,
+            "outlet_match": True,
+            "allotted_outlet": allotted_outlet_code,
+            "allotted_outlet_name": allotted_outlet_name,
+            "current_outlet": current_outlet_code,
+            "current_outlet_name": current_outlet_name,
+            "counter_occupied": False,
             "cashcounter": cashcounter_details,
             "allowed_bill_type_details": allowed_bill_type_details
         })
@@ -3428,12 +3600,24 @@ def get_shift_summary_report(request):
             st_disp = st_ist.strftime("%I:%M %p") if st_ist else ""
             cl_disp = cl_ist.strftime("%I:%M %p") if cl_ist else ""
 
-            # Standard Indian Date (DD/MM/YYYY)
-            if st_ist:
+            # Standard Indian Date (DD/MM/YYYY) and raw sortable date (YYYY-MM-DD)
+            dt = s.get("date")
+            dt_str = ""
+            raw_date_str = ""
+            if dt:
+                if isinstance(dt, datetime.datetime):
+                    dt_ist = _to_ist(dt) or dt
+                    dt_str = dt_ist.strftime("%d/%m/%Y")
+                    raw_date_str = dt_ist.strftime("%Y-%m-%d")
+                elif isinstance(dt, datetime.date):
+                    dt_str = dt.strftime("%d/%m/%Y")
+                    raw_date_str = dt.strftime("%Y-%m-%d")
+                else:
+                    dt_str = str(dt)
+                    raw_date_str = str(dt)
+            elif st_ist:
                 dt_str = st_ist.strftime("%d/%m/%Y")
-            else:
-                dt = s.get("date")
-                dt_str = dt.strftime("%d/%m/%Y") if isinstance(dt, (datetime.datetime, datetime.date)) else str(dt or "")
+                raw_date_str = st_ist.strftime("%Y-%m-%d")
 
             report_data.append({
                 "_id": str(s.get("_id", "")),
@@ -3459,6 +3643,7 @@ def get_shift_summary_report(request):
                 "closingTime": cl_iso,
                 "EndTime": cl_disp,
                 "date": dt_str,
+                "raw_date": raw_date_str,
                 "hospital_code": s.get("hospital_code", ""),
                 "branch_code": s.get("branch_code", ""),
                 "outlet_code": s.get("outlet_code", ""),
