@@ -3172,12 +3172,43 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     for d in pharm_pending_docs:
         for m in d.get("medicine_particulars", []):
             if isinstance(m, dict) and m.get("item_id"):
-                pharm_item_ids.add(m.get("item_id"))
+                try:
+                    pharm_item_ids.add(int(m.get("item_id")))
+                except (ValueError, TypeError):
+                    pharm_item_ids.add(m.get("item_id"))
+
+    # Also collect items from return docs for name resolution
+    pharm_return_query = {
+        "$and": [
+            match_ip,
+            {
+                "is_ward_request": True,
+                "is_deleted": {"$ne": True},
+                "pending_returns": {"$exists": True, "$not": {"$size": 0}}
+            }
+        ]
+    }
+    pharm_return_docs = list(mongo_db["hospital_pharmacybilling"].find(
+        pharm_return_query,
+        {"Bill_id": 1, "bill_no": 1, "pending_returns": 1}
+    ))
+    for d in pharm_return_docs:
+        for r in d.get("pending_returns", []):
+            if isinstance(r, dict):
+                ret_items = r.get("items") if isinstance(r.get("items"), list) else [r]
+                for it in ret_items:
+                    if isinstance(it, dict) and it.get("item_id"):
+                        try:
+                            pharm_item_ids.add(int(it.get("item_id")))
+                        except (ValueError, TypeError):
+                            pharm_item_ids.add(it.get("item_id"))
+
     pharm_map = {}
     if pharm_item_ids:
         try:
             for r in mongo_db["hospital_pharmacyitem"].find({"item_id": {"$in": list(pharm_item_ids)}}, {"item_id": 1, "item_name": 1}):
                 pharm_map[r.get("item_id")] = r.get("item_name")
+                pharm_map[str(r.get("item_id"))] = r.get("item_name")
         except Exception:
             pass
 
@@ -3195,7 +3226,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         item_details = []
         for m in d.get("medicine_particulars", []):
             if isinstance(m, dict):
-                m_name = m.get("item_name") or pharm_map.get(m.get("item_id")) or f"Medicine #{m.get('item_id')}"
+                m_name = m.get("item_name") or pharm_map.get(m.get("item_id")) or pharm_map.get(str(m.get("item_id"))) or f"Medicine #{m.get('item_id')}"
                 qty = m.get("qty") or m.get("quantity") or 1
                 item_details.append(f"{m_name} (Qty: {qty})")
 
@@ -3209,40 +3240,42 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         pharm_pending_items.append(f"{b_label} ({st_str}): {', '.join(item_details[:3])}" if item_details else f"{b_label} (Status: {st_str})")
 
     # Check unapproved returns in pharmacy
-    pharm_return_query = {
-        "$and": [
-            match_ip,
-            {
-                "is_ward_request": True,
-                "is_deleted": {"$ne": True},
-                "pending_returns": {"$exists": True, "$not": {"$size": 0}}
-            }
-        ]
-    }
-    pharm_return_docs = list(mongo_db["hospital_pharmacybilling"].find(
-        pharm_return_query,
-        {"Bill_id": 1, "bill_no": 1, "pending_returns": 1}
-    ))
     pharm_returns_pending_count = 0
     for d in pharm_return_docs:
         rets = d.get("pending_returns", [])
-        unapproved = [r for r in rets if isinstance(r, dict) and not r.get("is_approved") and not r.get("is_rejected")]
+        unapproved = []
+        for r in rets:
+            if not isinstance(r, dict):
+                continue
+            st = str(r.get("status") or "").strip().lower()
+            # Only consider returns that are truly Pending (NOT Approved, Completed, or Rejected)
+            if st == "pending" or (not st and not r.get("is_approved") and not r.get("is_rejected") and not r.get("return_bill_no")):
+                unapproved.append(r)
+
         if unapproved:
-            pharm_returns_pending_count += len(unapproved)
             b_num = d.get("bill_no") or d.get("Bill_id") or "Req"
             b_label = f"Bill #{b_num}" if not str(b_num).startswith("Bill") else str(b_num)
             return_details = []
             for r in unapproved:
-                r_name = r.get("item_name") or pharm_map.get(r.get("item_id")) or f"Item #{r.get('item_id')}"
-                r_qty = r.get("return_qty") or r.get("qty") or 1
-                return_details.append(f"{r_name} (Return Qty: {r_qty})")
+                ret_items = r.get("items") if isinstance(r.get("items"), list) else [r]
+                for it in ret_items:
+                    if not isinstance(it, dict):
+                        continue
+                    it_id = it.get("item_id")
+                    it_name = it.get("item_name") or it.get("name") or pharm_map.get(it_id) or pharm_map.get(str(it_id)) or (f"Medicine #{it_id}" if it_id else "Medicine")
+                    it_qty = it.get("return_qty") or it.get("returned_qty") or it.get("qty") or 1
+                    it_batch = f" ({it.get('batch_number')})" if it.get("batch_number") else ""
+                    it_reason = f" - Reason: {it.get('reason')}" if it.get("reason") else ""
+                    return_details.append(f"{it_name}{it_batch} (Return Qty: {it_qty}){it_reason}")
 
-            pharm_bills.append({
-                "bill_no": f"{b_label} - Return Request",
-                "status": "Return Pending Approval",
-                "items": return_details
-            })
-            pharm_pending_items.append(f"{b_label}: {len(unapproved)} Medicine return(s) pending approval")
+            if return_details:
+                pharm_returns_pending_count += len(return_details)
+                pharm_bills.append({
+                    "bill_no": f"{b_label} - Return Request",
+                    "status": "Return Pending Approval",
+                    "items": return_details
+                })
+                pharm_pending_items.append(f"{b_label}: {len(return_details)} Medicine return item(s) pending approval")
 
     # --- 4. Implants ---
     implant_query = {
