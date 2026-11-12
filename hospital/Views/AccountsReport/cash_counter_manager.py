@@ -158,14 +158,16 @@ def get_employee_counter_assignments(request):
             dept_name = depts.get(dept_code, dept_code or '-')
             desig_name = desigs.get(desig_code, desig_code or '-')
 
-            cid = str(emp.get('cashcounter') or emp.get('assigned_counter') or '')
-            cname = emp.get('assigned_counter_name') or counters.get(cid, cid)
+            cid = str(emp.get('cashcounter') or '').strip()
+            cname = counters.get(cid, cid)
 
             result.append({
                 "employeeId": str(emp_id),
                 "employeeName": str(emp_name),
                 "department": dept_name,
                 "designation": desig_name,
+                "cashcounter": cid,
+                "cashcounter_name": cname,
                 "assigned_counter": cid,
                 "assigned_counter_name": cname
             })
@@ -197,13 +199,18 @@ def assign_employee_cash_counter(request):
             if cc:
                 counter_name = cc.counter_name
 
+        update_doc = {
+            "$set": {
+                "cashcounter": counter_id or ""
+            },
+            "$unset": {
+                "assigned_counter": "",
+                "assigned_counter_name": ""
+            }
+        }
         res = profile_collection.update_one(
             {"employeeId": str(employee_id)},
-            {"$set": {
-                "cashcounter": counter_id or "",
-                "assigned_counter": counter_id or "",
-                "assigned_counter_name": counter_name or ""
-            }}
+            update_doc
         )
 
         if res.matched_count > 0:

@@ -449,7 +449,7 @@ def cash_counter_shiftdetails(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
 
         # 1. ENFORCE: Profile must have an assigned cash counter
         if not emp_cashcounter or not str(emp_cashcounter).strip():
@@ -1473,7 +1473,7 @@ def get_active_shift(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
 
         if not emp_cashcounter or not str(emp_cashcounter).strip():
             return Response({
