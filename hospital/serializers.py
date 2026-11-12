@@ -153,6 +153,7 @@ class PhysicalStockEntrySerializer(serializers.ModelSerializer):
     class Meta:
         model = PhysicalStockEntry
         fields = "__all__"
+        read_only_fields = ["entry_id"]
 
 
 from .models import PurchaseOrder

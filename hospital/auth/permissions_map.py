@@ -230,6 +230,15 @@ PAGE_MAPPING = DynamicPageMapping({
 
     r"^/_b_a_c_k_e_n_d/HMS/medicine-tracking/?$":          "HMS-P-MT",
 
+    # Physical Stock Entry & Approval
+    r'^/_b_a_c_k_e_n_d/HMS/pharmacy-stock-batches/?(\?.*)?$': 'HMS-P-MT',
+    r'^/_b_a_c_k_e_n_d/HMS/physical-stock-entry/?(\?.*)?$': 'HMS-P-MT',
+    r'^/_b_a_c_k_e_n_d/HMS/physical-stock-entry/[0-9]+/?(\?.*)?$': 'HMS-P-MT',
+    r'^/_b_a_c_k_e_n_d/HMS/physical-stock-approval/?(\?.*)?$': 'HMS-P-MT',
+    r'^/_b_a_c_k_e_n_d/HMS/physical-stock-approval/[0-9]+/?(\?.*)?$': 'HMS-P-MT',
+
+
+
     # ==================== STORES & INVENTORY ====================
     # Item Master & Masters
     r'^(/_b_a_c_k_e_n_d/HMS)?/item-master/?(\?.*)?$': 'HMS-API-IT',

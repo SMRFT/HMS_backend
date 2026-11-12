@@ -789,8 +789,8 @@ from django.db import models
 # PharmacyStock.  Approval workflow: is_approved=False until a manager approves.
 # ─────────────────────────────────────────────────────────────────────────────
 
-class PhysicalStockEntry(models.Model):
-    entry_id        = models.AutoField(primary_key=True)
+class PhysicalStockEntry(AuditModel):
+    entry_id        = models.IntegerField(primary_key=True)
 
     # ── Item / batch reference (denormalised for quick reads) ──────────────
     item_id         = models.IntegerField()
@@ -814,6 +814,16 @@ class PhysicalStockEntry(models.Model):
 
     # ── Audit ──────────────────────────────────────────────────────────────
     is_active        = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        if self.entry_id is None:
+            while True:
+                last = PhysicalStockEntry.objects.order_by("-entry_id").first()
+                next_id = (last.entry_id + 1) if last and last.entry_id is not None else 1
+                if not PhysicalStockEntry.objects.filter(entry_id=next_id).exists():
+                    self.entry_id = next_id
+                    break
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.item_name} | {self.batch_number} | {self.stock_date}"
@@ -1026,7 +1036,7 @@ class Admission(AuditModel):
         return f"{self.uhid} | {self.ipNumber}"
 
 
-class IpAdvance_Refund(models.Model):
+class IpAdvance_Refund(AuditModel):
     refund_bill_no   = models.CharField(max_length=30, unique=True)
     refund_date      = models.DateTimeField()
     refund_amount    = models.DecimalField(max_digits=12, decimal_places=2)
