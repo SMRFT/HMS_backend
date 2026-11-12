@@ -4666,8 +4666,16 @@ def pharmacy_expiry_report(request):
             "hospital_code": hospital_code,
             "branch_code": branch_code
         }
-        if outlet_code:
-            match_stage["outlet_code"] = outlet_code
+        if outlet_code and str(outlet_code).strip() not in ["", "ALL", "all", "All"]:
+            clean_outlet = str(outlet_code).strip()
+            if clean_outlet == "OLET006":
+                match_stage["$or"] = [
+                    {"outlet_code": "OLET006"},
+                    {"outlet_code": None},
+                    {"outlet_code": ""}
+                ]
+            else:
+                match_stage["outlet_code"] = clean_outlet
             
         # Apply report_type specific match filters
         if report_type == "fast_moving":
