@@ -988,22 +988,36 @@ def calculate_shift_collection(shift_no):
                                 results["credit_collection"] += cr_amt
                                 counted_advance_ids.add(bill_no)
 
-        # 6. Sales Return
-        returns = list(db["hospital_salesreturn"].find(
-            {"shiftno": {"$in": shift_vals}},
-            {"return_amount": 1, "payment_details": 1, "payment_method": 1, "PaymentType": 1, "payment_mode": 1}
-        ))
-        for r in returns:
-            amt = to_float(r.get("return_amount", 0))
-            results["sales_return"] += amt
-            c_ret, cr_ret = parse_payment_split(r, amt)
-            if cr_ret > 0 and c_ret == 0:
-                results["total_credit"] = max(0.0, results["total_credit"] - cr_ret)
-                results["credit_collection"] = max(0.0, results["credit_collection"] - cr_ret)
-            else:
-                deduct = c_ret if c_ret > 0 else amt
-                results["total_collection"] = max(0.0, results["total_collection"] - deduct)
-                results["cash_collection"] = max(0.0, results["cash_collection"] - deduct)
+        # 6. Sales Return & Refunds
+        for col_name, amt_fields in [
+            ("hospital_salesreturn", ["return_amount", "amount"]),
+            ("hospital_refund", ["refund_amount", "amount"]),
+            ("hospital_investrefund", ["refund_finalPrice", "refund_amount", "amount"]),
+            ("hospital_ipadvance_refund", ["refund_amount", "advance_amount", "amount"]),
+        ]:
+            col_returns = list(db[col_name].find(
+                {"shiftno": {"$in": shift_vals}},
+                {"return_amount": 1, "refund_amount": 1, "refund_finalPrice": 1, "advance_amount": 1, "amount": 1,
+                 "payment_details": 1, "payment_method": 1, "PaymentType": 1, "payment_mode": 1}
+            ))
+            for r in col_returns:
+                amt = 0.0
+                for fld in amt_fields:
+                    if r.get(fld):
+                        amt = to_float(r.get(fld))
+                        break
+                if amt == 0.0 and isinstance(r.get("payment_details"), dict):
+                    amt = to_float(r["payment_details"].get("Paid_amount", 0))
+
+                results["sales_return"] += amt
+                c_ret, cr_ret = parse_payment_split(r, amt)
+                if cr_ret > 0 and c_ret == 0:
+                    results["total_credit"] = max(0.0, results["total_credit"] - cr_ret)
+                    results["credit_collection"] = max(0.0, results["credit_collection"] - cr_ret)
+                else:
+                    deduct = c_ret if c_ret > 0 else amt
+                    results["total_collection"] = max(0.0, results["total_collection"] - deduct)
+                    results["cash_collection"] = max(0.0, results["cash_collection"] - deduct)
 
         # 7. Receipt and Payment
         rp_docs = list(db["hospital_receiptandpayment"].find(
@@ -1970,10 +1984,10 @@ def get_receipt_payments(request):
             return str(v).strip()
 
         data = request.data or {}
-        employee_id   = _clean_val(data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID"))
-        hospital_code = _clean_val(data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE"))
-        branch_code   = _clean_val(data.get("auth-branch-code") or request.META.get("HTTP_AUTH_BRANCH_CODE"))
-        outlet_code   = _clean_val(data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE"))
+        employee_id   = _clean_val(data.get("auth-user-id"))
+        hospital_code = _clean_val(data.get("auth-hospital-code"))
+        branch_code   = _clean_val(data.get("auth-branch-code"))
+        outlet_code   = _clean_val(data.get("auth-outlet-code"))
 
         if not employee_id:
             return Response({"status": "error", "message": "User not authenticated"}, status=401)
@@ -1991,14 +2005,14 @@ def get_receipt_payments(request):
         transaction_col = db["hospital_receiptandpayment"]
         account_col     = db["hospital_Receiptpayment"]
 
-        # Base query for hospital and branch
-        base_query = {}
+        # Base query strictly based on hospital_code, branch_code, and outlet_code
+        query = {}
         if hospital_code:
-            base_query["hospital_code"] = hospital_code
+            query["hospital_code"] = hospital_code
         if branch_code:
-            base_query["branch_code"] = branch_code
-
-        query = dict(base_query)
+            query["branch_code"] = branch_code
+        if outlet_code:
+            query["outlet_code"] = outlet_code
 
         # Optional voucher_type filter
         if voucher_type and str(voucher_type).strip().lower() not in ["all", ""]:
@@ -2019,24 +2033,13 @@ def get_receipt_payments(request):
             except Exception:
                 pass
         else:
-            # If no date filter is passed (daily screen):
-            # Check if there are vouchers for today. If not, show recent vouchers so UI doesn't show empty table.
+            # ✅ Default main screen: display current date alone
             today = timezone.localdate()
             today_start = datetime.combine(today, time.min)
             today_end   = today_start + timedelta(days=1)
-            today_q = {**query, "voucher_date": {"$gte": today_start, "$lt": today_end}}
-            if outlet_code:
-                today_q["outlet_code"] = outlet_code
-            if transaction_col.count_documents(today_q) > 0:
-                query["voucher_date"] = {"$gte": today_start, "$lt": today_end}
+            query["voucher_date"] = {"$gte": today_start, "$lt": today_end}
 
-        # Outlet handling: Central Cash Counter sees vouchers for this outlet, or across the branch if outlet has none
-        if outlet_code:
-            outlet_check = {**query, "outlet_code": outlet_code}
-            if transaction_col.count_documents(outlet_check) > 0:
-                query["outlet_code"] = outlet_code
-
-        # ✅ FETCH DATA
+        # ✅ FETCH DATA (strictly for this outlet, branch, hospital)
         transactions = list(transaction_col.find(query).sort("voucher_no", -1).limit(200))
 
 
@@ -3917,17 +3920,20 @@ def _save_cash_counter(
 # =====================================================
 
 def _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status):
+    now_dt = datetime.utcnow()
     return {
-        "status":           "Paid",            # was "Pending" → always "Paid" after cashier processes
-        "payment_status":   new_status,        # "Refund" or "Partial"
-        "payment_details":  payment_details,
-        "shiftno":          shiftno,
-        "refund_datetime":  datetime.utcnow().isoformat(),
-        "paid_at":          datetime.utcnow().isoformat(),
-        "CashierID":        cashier_id,
-        "lastmodified_by":  cashier_id,
-        "lastmodified_date": datetime.utcnow(),
-        "pendingAmount":    Decimal128(str(pending_amount)),
+        "status":            "Paid",            # was "Pending" → always "Paid" after cashier processes
+        "payment_status":    new_status,        # "Refund" or "Partial"
+        "paymentStatus":     "Paid",            # for collections using camelCase (hospital_investrefund)
+        "payment_details":   payment_details,
+        "shiftno":           shiftno,
+        "refund_datetime":   now_dt.isoformat(),
+        "paid_at":           now_dt.isoformat(),
+        "paid_date":         now_dt,
+        "CashierID":         cashier_id,
+        "lastmodified_by":   cashier_id,
+        "lastmodified_date": now_dt,
+        "pendingAmount":     Decimal128(str(pending_amount)),
     }
 
 
@@ -3961,13 +3967,13 @@ def collectpayment_return_bills(request):
     Logic
     ──────
     1. Try each Mongo collection in order:
-       hospital_salesreturn      → field: return_bill_no
-       hospital_refund           → field: refund_bill_no
-       hospital_investrefund     → field: refund_bill_no
-       hospital_ipadvance_refund → field: refund_bill_no
+       hospital_salesreturn      → field: return_bill_no / refund_bill_no / refundBillNo
+       hospital_refund           → field: refund_bill_no / refundBillNo / return_bill_no
+       hospital_investrefund     → field: refundBillNo / refund_bill_no / return_bill_no
+       hospital_ipadvance_refund → field: refund_bill_no / refundBillNo / return_bill_no
 
     2. When matched:
-       • Update document: document_status / payment_status → "Refund"
+       • Update document: status / paymentStatus → "Paid", payment_status → "Refund"
          (or "Partial" if pending_amount > 0), add payment_details,
          shiftno, CashierID, refund_datetime.
        • Insert one CashCounterCollection row:
@@ -3981,13 +3987,43 @@ def collectpayment_return_bills(request):
 
     try:
 
-        data = request.data
+        data = request.data if isinstance(request.data, dict) else {}
 
         # ── Auth context ────────────────────────────────────────────────────
-        hospital_code = data.get("auth-hospital-code")
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
-        cashier_id    = data.get("auth-user-id")
+        hospital_code = (
+            data.get("auth-hospital-code") or
+            request.headers.get("auth-hospital-code") or
+            request.headers.get("Hospital-Code") or
+            request.GET.get("auth-hospital-code")
+        )
+        branch_code = (
+            data.get("auth-branch-code") or
+            request.headers.get("auth-branch-code") or
+            request.headers.get("Branch-Code") or
+            request.GET.get("auth-branch-code")
+        )
+        outlet_code = (
+            data.get("auth-outlet-code") or
+            request.headers.get("auth-outlet-code") or
+            request.headers.get("Outlet-Code") or
+            request.GET.get("auth-outlet-code")
+        )
+        cashier_id = (
+            data.get("auth-user-id") or
+            request.headers.get("auth-user-id") or
+            request.headers.get("User-Id") or
+            request.GET.get("auth-user-id")
+        )
+
+        def _clean_str(val):
+            if isinstance(val, (list, tuple)):
+                val = val[0] if val else None
+            return str(val).strip() if val is not None else None
+
+        clean_hospital = _clean_str(hospital_code) or "SH001"
+        clean_branch   = _clean_str(branch_code) or "SHB001"
+        clean_outlet   = _clean_str(outlet_code)
+        clean_cashier  = _clean_str(cashier_id) or "admin"
 
         # ── Request payload ─────────────────────────────────────────────────
         uhid            = data.get("uhid")
@@ -3995,15 +4031,15 @@ def collectpayment_return_bills(request):
         return_bill_no  = data.get("return_bill_no")     # return/refund bill (e.g. "2627/000003")
         bill_type       = data.get("bill_type")          # int, from the bill row
         counter_id      = data.get("counter_id")
-        if not counter_id and cashier_id:
+        if not counter_id and clean_cashier:
             client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             global_db = client["Global"]
             profile_col = global_db["backend_diagnostics_profile"]
             try:
-                query_id = str(cashier_id)
+                query_id = str(clean_cashier)
                 search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
             except:
-                search_query = {"employeeId": str(cashier_id)}
+                search_query = {"employeeId": str(clean_cashier)}
             profile_data = profile_col.find_one(search_query)
             emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
             if emp_cashcounter:
@@ -4044,9 +4080,9 @@ def collectpayment_return_bills(request):
         is_valid, msg, active_shift = validate_active_shift(
             shiftno=shiftno,
             counter_id=counter_id,
-            outlet_code=outlet_code,
-            hospital_code=hospital_code,
-            branch_code=branch_code
+            outlet_code=clean_outlet,
+            hospital_code=clean_hospital,
+            branch_code=clean_branch
         )
         if not is_valid:
             return Response(
@@ -4062,33 +4098,55 @@ def collectpayment_return_bills(request):
 
         new_status = "Partial" if pending_amount > 0 else "Refund"
 
-        base_filter = {
-            "hospital_code": hospital_code,
-            "branch_code":   branch_code,
-            "outlet_code":   outlet_code,
+        base_filter = {}
+        if clean_hospital:
+            base_filter["hospital_code"] = clean_hospital
+        if clean_branch:
+            base_filter["branch_code"] = clean_branch
+        if clean_outlet:
+            base_filter["outlet_code"] = clean_outlet
+
+        return_query = {
+            "$or": [
+                {"refundBillNo": return_bill_no},
+                {"refund_bill_no": return_bill_no},
+                {"return_bill_no": return_bill_no},
+            ]
         }
 
         # ═══════════════════════════════════════════════════════════════
         # 1. hospital_salesreturn  — keyed on return_bill_no
         # ═══════════════════════════════════════════════════════════════
-        doc = sales_return_col.find_one(
-            {**base_filter, "return_bill_no": return_bill_no}
-        )
+        doc = sales_return_col.find_one({**base_filter, **return_query})
+        if not doc and "outlet_code" in base_filter:
+            doc = sales_return_col.find_one({
+                "hospital_code": base_filter.get("hospital_code"),
+                "branch_code": base_filter.get("branch_code"),
+                **return_query
+            })
 
         if doc:
             sales_return_col.update_one(
                 {"_id": doc["_id"]},
-                {"$set": _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status)},
+                {"$set": _payment_set(clean_cashier, payment_details, shiftno, pending_amount, new_status)},
             )
 
             # Resolve the original bill_no from the matched document (most reliable source)
-            original_bill_no = doc.get("bill_no") or bill_no or ""
+            original_bill_no = (
+                doc.get("bill_no")
+                or doc.get("investBillNo")
+                or doc.get("original_bill_no")
+                or bill_no
+                or ""
+            )
 
             ok, errors = _save_cash_counter(
-                hospital_code, branch_code, outlet_code,
-                cashier_id,
+                clean_hospital,
+                clean_branch,
+                clean_outlet or doc.get("outlet_code"),
+                clean_cashier,
                 original_bill_no,   # original bill_no  → bill_no + bill_number
-                return_bill_no,     # return bill_no    → return_bill_no  ← NEW
+                return_bill_no,     # return bill_no    → return_bill_no
                 bill_type,
                 counter_id,
                 shiftno,
@@ -4111,7 +4169,7 @@ def collectpayment_return_bills(request):
                     "bill_no":             original_bill_no,
                     "return_bill_no":      return_bill_no,
                     "bill_type":           bill_type,
-                    "uhid":                uhid,
+                    "uhid":                uhid or doc.get("uhid"),
                     "new_document_status": new_status,
                 },
                 status=status.HTTP_200_OK,
@@ -4120,21 +4178,33 @@ def collectpayment_return_bills(request):
         # ═══════════════════════════════════════════════════════════════
         # 2. hospital_refund  — keyed on refund_bill_no
         # ═══════════════════════════════════════════════════════════════
-        doc = refund_collection.find_one(
-            {**base_filter, "refund_bill_no": return_bill_no}
-        )
+        doc = refund_collection.find_one({**base_filter, **return_query})
+        if not doc and "outlet_code" in base_filter:
+            doc = refund_collection.find_one({
+                "hospital_code": base_filter.get("hospital_code"),
+                "branch_code": base_filter.get("branch_code"),
+                **return_query
+            })
 
         if doc:
             refund_collection.update_one(
                 {"_id": doc["_id"]},
-                {"$set": _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status)},
+                {"$set": _payment_set(clean_cashier, payment_details, shiftno, pending_amount, new_status)},
             )
 
-            original_bill_no = doc.get("bill_no") or bill_no or ""
+            original_bill_no = (
+                doc.get("bill_no")
+                or doc.get("investBillNo")
+                or doc.get("original_bill_no")
+                or bill_no
+                or ""
+            )
 
             ok, errors = _save_cash_counter(
-                hospital_code, branch_code, outlet_code,
-                cashier_id,
+                clean_hospital,
+                clean_branch,
+                clean_outlet or doc.get("outlet_code"),
+                clean_cashier,
                 original_bill_no,
                 return_bill_no,
                 bill_type,
@@ -4159,30 +4229,42 @@ def collectpayment_return_bills(request):
                     "bill_no":             original_bill_no,
                     "return_bill_no":      return_bill_no,
                     "bill_type":           bill_type,
-                    "uhid":                uhid,
+                    "uhid":                uhid or doc.get("uhid"),
                     "new_document_status": new_status,
                 },
                 status=status.HTTP_200_OK,
             )
 
         # ═══════════════════════════════════════════════════════════════
-        # 3. hospital_investrefund  — keyed on refund_bill_no
+        # 3. hospital_investrefund  — keyed on refundBillNo / refund_bill_no
         # ═══════════════════════════════════════════════════════════════
-        doc = investrefund_collection.find_one(
-            {**base_filter, "refund_bill_no": return_bill_no}
-        )
+        doc = investrefund_collection.find_one({**base_filter, **return_query})
+        if not doc and "outlet_code" in base_filter:
+            doc = investrefund_collection.find_one({
+                "hospital_code": base_filter.get("hospital_code"),
+                "branch_code": base_filter.get("branch_code"),
+                **return_query
+            })
 
         if doc:
             investrefund_collection.update_one(
                 {"_id": doc["_id"]},
-                {"$set": _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status)},
+                {"$set": _payment_set(clean_cashier, payment_details, shiftno, pending_amount, new_status)},
             )
 
-            original_bill_no = doc.get("bill_no") or bill_no or ""
+            original_bill_no = (
+                doc.get("bill_no")
+                or doc.get("investBillNo")
+                or doc.get("original_bill_no")
+                or bill_no
+                or ""
+            )
 
             ok, errors = _save_cash_counter(
-                hospital_code, branch_code, outlet_code,
-                cashier_id,
+                clean_hospital,
+                clean_branch,
+                clean_outlet or doc.get("outlet_code"),
+                clean_cashier,
                 original_bill_no,
                 return_bill_no,
                 bill_type,
@@ -4207,7 +4289,7 @@ def collectpayment_return_bills(request):
                     "bill_no":             original_bill_no,
                     "return_bill_no":      return_bill_no,
                     "bill_type":           bill_type,
-                    "uhid":                uhid,
+                    "uhid":                uhid or doc.get("uhid"),
                     "new_document_status": new_status,
                 },
                 status=status.HTTP_200_OK,
@@ -4216,21 +4298,33 @@ def collectpayment_return_bills(request):
         # ═══════════════════════════════════════════════════════════════
         # 4. hospital_ipadvance_refund  — keyed on refund_bill_no
         # ═══════════════════════════════════════════════════════════════
-        doc = ipadvance_refund_collection.find_one(
-            {**base_filter, "refund_bill_no": return_bill_no}
-        )
+        doc = ipadvance_refund_collection.find_one({**base_filter, **return_query})
+        if not doc and "outlet_code" in base_filter:
+            doc = ipadvance_refund_collection.find_one({
+                "hospital_code": base_filter.get("hospital_code"),
+                "branch_code": base_filter.get("branch_code"),
+                **return_query
+            })
 
         if doc:
             ipadvance_refund_collection.update_one(
                 {"_id": doc["_id"]},
-                {"$set": _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status)},
+                {"$set": _payment_set(clean_cashier, payment_details, shiftno, pending_amount, new_status)},
             )
 
-            original_bill_no = doc.get("bill_no") or bill_no or ""
+            original_bill_no = (
+                doc.get("bill_no")
+                or doc.get("investBillNo")
+                or doc.get("original_bill_no")
+                or bill_no
+                or ""
+            )
 
             ok, errors = _save_cash_counter(
-                hospital_code, branch_code, outlet_code,
-                cashier_id,
+                clean_hospital,
+                clean_branch,
+                clean_outlet or doc.get("outlet_code"),
+                clean_cashier,
                 original_bill_no,
                 return_bill_no,
                 bill_type,
@@ -4255,7 +4349,7 @@ def collectpayment_return_bills(request):
                     "bill_no":             original_bill_no,
                     "return_bill_no":      return_bill_no,
                     "bill_type":           bill_type,
-                    "uhid":                uhid,
+                    "uhid":                uhid or doc.get("uhid"),
                     "new_document_status": new_status,
                 },
                 status=status.HTTP_200_OK,
