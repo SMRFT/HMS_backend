@@ -1665,6 +1665,10 @@ def get_medicine_ward_requests(request):
 
                     "quantity": itm.get("quantity", itm.get("qty", 0)),
 
+                    "qty": itm.get("qty", itm.get("quantity", 0)),
+
+                    "dispatched_qty": itm.get("dispatched_qty", None),
+
                     "dosage": itm.get("dosage", ""),
 
                     "noOfDays": itm.get("noOfDays", ""),
@@ -1673,7 +1677,11 @@ def get_medicine_ward_requests(request):
 
                     "doseunit": itm.get("doseunit", ""),
 
+                    "doseUnit": itm.get("doseUnit", itm.get("doseunit", "")),
+
                     "route": itm.get("route", ""),
+
+                    "remark": itm.get("remark", ""),
 
                     "price": itm.get("price", itm.get("mrp", 0)),
 
@@ -1985,6 +1993,11 @@ def update_medicine_ward_request(request):
 
                         current["dosage"] = new_dosage
 
+                if "dispatched_qty" in incoming:
+                    current["dispatched_qty"] = incoming.get("dispatched_qty")
+                elif "dispatched_qty" not in current:
+                    current["dispatched_qty"] = None
+
             if audit_entry:
 
                 eh = current.get("edit_history", [])
@@ -2107,13 +2120,21 @@ def save_medicine_ward_request(request):
 
                 "qty": item.get("quantity", item.get("qty", 0)),
 
+                "dispatched_qty": item.get("dispatched_qty", None),
+
                 "dosage": item.get("dosage", ""),
 
                 "noOfDays": item.get("noOfDays", ""),
 
+                "remark": item.get("remark", ""),
+
                 "dose": item.get("dose", ""),
 
-                "doseunit": item.get("doseunit", ""),
+                "doseUnit": item.get("doseUnit", item.get("doseunit", "")),
+
+                "doseunit": item.get("doseunit", item.get("doseUnit", "")),
+
+                "route": item.get("route", ""),
 
                 "batch_number": item.get("batch_number", ""),
 

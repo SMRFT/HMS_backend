@@ -270,6 +270,7 @@ class CustomerType(AuditModel):
 
 class Billing(AuditModel):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
+    uhid = models.CharField(max_length=50, blank=True, null=True)
     registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -286,6 +287,8 @@ class Billing(AuditModel):
     edit_history = models.JSONField(default=list, blank=True)
 
     def save(self, *args, **kwargs):
+        if not self.uhid and self.patient:
+            self.uhid = getattr(self.patient, 'uhid', '')
 
         if not self.bill_number:
 
