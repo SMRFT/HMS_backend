@@ -3564,7 +3564,14 @@ def get_shift_summary_report(request):
             "outlet_code": 1, "SelectedOutlet": 1, "hospital_code": 1, "branch_code": 1
         }
 
-        cursor = col_shifts.find(query, projection).sort([("date", -1), ("StartingTime", -1)])
+        sort_by = data.get("sort_by") or "shiftno"
+        sort_dir = -1 if str(data.get("sort_order", "desc")).lower() == "desc" else 1
+
+        if sort_by == "shiftno":
+            cursor = col_shifts.find(query, projection).sort([("shiftno", sort_dir), ("date", sort_dir), ("StartingTime", sort_dir)])
+        else:
+            cursor = col_shifts.find(query, projection).sort([(sort_by, sort_dir), ("shiftno", sort_dir)])
+
         if limit_val > 0:
             cursor = cursor.limit(limit_val)
         shifts = list(cursor)
