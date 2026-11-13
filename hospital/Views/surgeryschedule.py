@@ -1184,7 +1184,7 @@ def save_ot_medicine_ward_request(request):
 
             net_amount=total_amount,
 
-            billing_mode="WARD REQUEST",
+            billing_mode="OT REQUEST",
             billing_status="Pending",
             payment_mode="Credit",
 
@@ -1239,7 +1239,8 @@ def get_ot_medicine_ward_requests(request):
 
         query_params = {
             "uhid": uhid,
-            "is_ward_request": True
+            "is_ward_request": True,
+            "billing_mode": "OT REQUEST",
         }
 
         if ip_number:
