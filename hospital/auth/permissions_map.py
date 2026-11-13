@@ -74,7 +74,10 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/front-office-reports/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/RoomOccupencyReport/?(\?.*)?$': 'HMS-P-ROR',
     r'^/_b_a_c_k_e_n_d/HMS/PreDayRoomOccupancyReport/?(\?.*)?$': 'HMS-P-ROR',
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-credit-report/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-credit-report/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/InsuranceReportsDashboard/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports-dashboard/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
@@ -292,7 +295,24 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/?(\?.*)?$': 'HMS-P-GPR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-returns/[^/]+/?(\?.*)?$': 'HMS-P-GPR',
 
-    # Stores Advanced Reports
+    # Stores Advanced Reports & Drug Purchase Reports Dashboard
+    r'^(/_b_a_c_k_e_n_d/HMS)?/DrugPurchaseReportsDashboard/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-purchase-reports-dashboard/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-purchase-reports/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-supplier-grn-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-purchase-analysis-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-supplier-wise-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-previous-day-stock-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-short-expiry-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-purchase-return-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-non-moving-items-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-reorder-level-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-rack-classification-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-grn-general-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-abc-ved-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-department-indent-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-intent-approval-report/?(\?.*)?$': 'HMS-P-DPRD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/drug-opening-stock-report/?(\?.*)?$': 'HMS-P-DPRD',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-purchase-analysis-report/?(\?.*)?$': 'HMS-P-SGRN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-previous-day-stock-report/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-supplier-wise-report/?(\?.*)?$': 'HMS-P-VNDD',
@@ -734,6 +754,7 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/purchase-gst-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-sales-report/?(\?.*)?$': 'HMS-P-CCC',
 
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',

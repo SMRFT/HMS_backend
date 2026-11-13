@@ -74,7 +74,13 @@ def insurance_credit_report_view(request):
     2. Active and recent IP Admissions & Bed Occupancy (hospital_admission)
     3. Investigation / Lab Bills & Tests ordered (hospital_investbilling)
     4. Patient & TPA Company Details (hospital_patient & hospital_insuranceprovider)
+    5. Specialized Reports support via ?report_key=<key>
     """
+    report_key = request.GET.get('report_key') or request.GET.get('report_type')
+    if report_key:
+        from .insurance_specialized_reports import build_specialized_insurance_report
+        return build_specialized_insurance_report(request, report_key)
+
     client = None
     try:
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))

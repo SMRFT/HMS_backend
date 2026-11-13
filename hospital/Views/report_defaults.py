@@ -343,6 +343,30 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                           'page_id': 123,
                           'permissions': {   'Purchase GST Register': 'HMS-ACC-PURCHASE-GST-RPT'},
                           'route': '/PurchaseGSTReport'},
+                      {   'description': 'OP Pharmacy outward patient sales invoices with Bill No as Invoice No, Customer Name, and GST tax breakdown.',
+                          'icon': 'FileText',
+                          'name': 'OP Pharmacy Sales - Invoices',
+                          'page_id': 132,
+                          'permissions': {   'OP Pharmacy Sales - Invoices': 'HMS-ACC-OP-PHARMACY-SALES-RPT'},
+                          'route': '/OPPharmacyB2BReport'},
+                      {   'description': 'HSN-wise medicine product sales summary with quantities, tax rates, and output GST totals.',
+                          'icon': 'Boxes',
+                          'name': 'OP Pharmacy Sales - HSN Wise Summary',
+                          'page_id': 133,
+                          'permissions': {   'OP Pharmacy Sales - HSN Wise Summary': 'HMS-ACC-OP-PHARMACY-SALES-RPT'},
+                          'route': '/OPPharmacyHSNReport'},
+                      {   'description': 'Document summary of OP Pharmacy outward supply bills, serial number series from/to, and cancellations.',
+                          'icon': 'Layers',
+                          'name': 'OP Pharmacy Sales - Document Summary',
+                          'page_id': 134,
+                          'permissions': {   'OP Pharmacy Sales - Document Summary': 'HMS-ACC-OP-PHARMACY-SALES-RPT'},
+                          'route': '/OPPharmacyDocsReport'},
+                      {   'description': 'Consolidated multi-tab sales register covering sales invoices, HSN summary, and document summary in Winman format.',
+                          'icon': 'FileSpreadsheet',
+                          'name': 'OP Pharmacy Sales GST Register - Consolidated (GSTR-1)',
+                          'page_id': 135,
+                          'permissions': {   'OP Pharmacy Sales GST Register': 'HMS-ACC-OP-PHARMACY-SALES-RPT'},
+                          'route': '/OPPharmacySalesReport'},
                      {   'description': 'Cash counter shift handovers, closing '
                                         'balances, and discrepancy logs.',
                          'icon': 'Clock',
@@ -435,7 +459,19 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                          'name': 'Pharmacy Sales Return Report',
                          'page_id': 210,
                          'permissions': {   'Pharmacy Sales Return Report': 'HMS-RPT-SALES-RETURN'},
-                         'route': '/SalesReturnReport'}]},
+                         'route': '/SalesReturnReport'},
+                      {   'description': 'Comprehensive corporate, ECHS, railway, and TPA insurance reports dashboard.',
+                          'icon': 'ShieldCheck',
+                          'name': 'Insurance Reports Dashboard',
+                          'page_id': 211,
+                          'permissions': {   'Insurance Reports Dashboard': 'HMS-P-FOR'},
+                          'route': '/InsuranceReportsDashboard'},
+                      {   'description': 'Drug purchase, procurement, inventory, and stock movement reports dashboard.',
+                          'icon': 'Pill',
+                          'name': 'Drug Purchase Reports Dashboard',
+                          'page_id': 212,
+                          'permissions': {   'Drug Purchase Reports Dashboard': 'HMS-P-DPRD'},
+                          'route': '/DrugPurchaseReportsDashboard'}]},
     {   'created_by': 'system',
         'group': 'Front Office Reports',
         'group_id': 4,
@@ -512,7 +548,385 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                          'name': 'Insurance & Credit Billing Report',
                          'page_id': 410,
                          'permissions': {   'Insurance & Credit Billing Report': 'HMS-RPT-INSURANCE-CREDIT'},
-                         'route': '/InsuranceCreditReport'}]}]
+                         'route': '/InsuranceCreditReport'}]},
+    {   'created_by': 'system',
+        'group': 'Insurance Reports',
+        'group_id': 5,
+        'is_active': True,
+        'lastmodified_by': 'system',
+        'order': 5,
+        'pages': [
+            {
+                'description': 'Real-time billing, despatch and settlement status with disallowed and due amounts.',
+                'icon': 'FileText',
+                'name': 'Insurance Bills Status',
+                'page_id': 501,
+                'permissions': {'Insurance Bills Status': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatus'
+            },
+            {
+                'description': 'ECHS eligibility, polyclinic reference, and medical fitness certificates.',
+                'icon': 'Award',
+                'name': 'Echs Certificates',
+                'page_id': 502,
+                'permissions': {'Echs Certificates': 'HMS-RPT-INSURANCE'},
+                'route': '/EchsCertificatesReport'
+            },
+            {
+                'description': 'Diagnostic, biochemistry, pathology, and radiology tests ordered under credit.',
+                'icon': 'Activity',
+                'name': 'Lab Investigation Report',
+                'page_id': 503,
+                'permissions': {'Lab Investigation Report': 'HMS-RPT-INSURANCE'},
+                'route': '/LabInvestigationReport'
+            },
+            {
+                'description': 'Branch-level due amounts, pending claims, and settlement aging for insurance.',
+                'icon': 'Building2',
+                'name': 'Insurance Bills Status(Report Branch Wise) Dues',
+                'page_id': 504,
+                'permissions': {'Insurance Bills Status(Report Branch Wise) Dues': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatusBranchDuesReport'
+            },
+            {
+                'description': 'Employees State Insurance (ESI) outpatient claim submissions and status.',
+                'icon': 'ShieldCheck',
+                'name': 'Esi Claim For Op',
+                'page_id': 505,
+                'permissions': {'Esi Claim For Op': 'HMS-RPT-INSURANCE'},
+                'route': '/EsiClaimOpReport'
+            },
+            {
+                'description': 'Southern Railway outpatient medical reimbursement and credit clearance log.',
+                'icon': 'CheckCircle',
+                'name': 'Railway Claim For Op',
+                'page_id': 506,
+                'permissions': {'Railway Claim For Op': 'HMS-RPT-INSURANCE'},
+                'route': '/RailwayClaimOpReport'
+            },
+            {
+                'description': 'Live and historical company-wise ward and room bed occupancy.',
+                'icon': 'BedDouble',
+                'name': 'Occupancy List Company Wise',
+                'page_id': 507,
+                'permissions': {'Occupancy List Company Wise': 'HMS-RPT-INSURANCE'},
+                'route': '/OccupancyListCompanyWiseReport'
+            },
+            {
+                'description': 'Standard inpatient discharge settlement vouchers with ticket reference.',
+                'icon': 'ClipboardList',
+                'name': 'Insurance Discharge Bill (Tkt)',
+                'page_id': 508,
+                'permissions': {'Insurance Discharge Bill (Tkt)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillTktReport'
+            },
+            {
+                'description': 'Southern Railway inpatient discharge billing statement with medical grade.',
+                'icon': 'FileSpreadsheet',
+                'name': 'Insurance Discharge Bill(Railway).',
+                'page_id': 509,
+                'permissions': {'Insurance Discharge Bill(Railway).': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillRailwayReport'
+            },
+            {
+                'description': 'Surgical procedure charges, OT tariffs, and implants for ticketed insurance patients.',
+                'icon': 'HeartPulse',
+                'name': 'Insurance Discharge Bill (Tkt) Surgery',
+                'page_id': 510,
+                'permissions': {'Insurance Discharge Bill (Tkt) Surgery': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillTktSurgeryReport'
+            },
+            {
+                'description': 'Pending receivable balances and overdue hospital claim accounts.',
+                'icon': 'Clock',
+                'name': 'Insurance Bills Due List',
+                'page_id': 511,
+                'permissions': {'Insurance Bills Due List': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsDueList'
+            },
+            {
+                'description': 'Comprehensive multi-company inpatient discharge vouchers.',
+                'icon': 'Layers',
+                'name': 'Insurance Discharge Bill(All Company).',
+                'page_id': 512,
+                'permissions': {'Insurance Discharge Bill(All Company).': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillAllCompanyReport'
+            },
+            {
+                'description': 'Outpatient credit consultation, day care, and pharmacy ticket clearance.',
+                'icon': 'FileText',
+                'name': 'Insurance Discharge Bill (Tkt) OP',
+                'page_id': 513,
+                'permissions': {'Insurance Discharge Bill (Tkt) OP': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillTktOpReport'
+            },
+            {
+                'description': 'Registration registry of patients categorized by corporate and insurance sponsors.',
+                'icon': 'Users',
+                'name': 'Companywise Patient Registration',
+                'page_id': 514,
+                'permissions': {'Companywise Patient Registration': 'HMS-RPT-INSURANCE'},
+                'route': '/CompanywisePatientRegistrationReport'
+            },
+            {
+                'description': 'Consolidated hospital branch performance for corporate and TPA claims.',
+                'icon': 'Building2',
+                'name': 'Insurance Bills Status(Report Branch Wise)',
+                'page_id': 515,
+                'permissions': {'Insurance Bills Status(Report Branch Wise)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatusBranchWiseReport'
+            },
+            {
+                'description': 'Ex-Servicemen Contributory Health Scheme outpatient claim bills and approvals.',
+                'icon': 'ShieldCheck',
+                'name': 'ECHS Claim For OP',
+                'page_id': 516,
+                'permissions': {'ECHS Claim For OP': 'HMS-RPT-INSURANCE'},
+                'route': '/EchsClaimOpReport'
+            },
+            {
+                'description': 'Departmental laboratory tests volume, charges, and insurance recovery analysis.',
+                'icon': 'BarChart3',
+                'name': 'Lab Abstract Report',
+                'page_id': 517,
+                'permissions': {'Lab Abstract Report': 'HMS-RPT-INSURANCE'},
+                'route': '/LabAbstractReport'
+            },
+            {
+                'description': 'Pharmaceutical dispensation abstract and medicine cost share under credit.',
+                'icon': 'Package',
+                'name': 'Medicine Abstract Report',
+                'page_id': 518,
+                'permissions': {'Medicine Abstract Report': 'HMS-RPT-INSURANCE'},
+                'route': '/MedicineAbstractReport'
+            },
+            {
+                'description': 'Complete ECHS inpatient and outpatient claim dossier and approval trail.',
+                'icon': 'ShieldCheck',
+                'name': 'Echs Claim',
+                'page_id': 519,
+                'permissions': {'Echs Claim': 'HMS-RPT-INSURANCE'},
+                'route': '/EchsClaimReport'
+            },
+            {
+                'description': 'ECHS diagnostic test vouchers indexed by polyclinic referral date.',
+                'icon': 'Calendar',
+                'name': 'Insurance Echs Investigation Bills(Referal_Date)',
+                'page_id': 520,
+                'permissions': {'Insurance Echs Investigation Bills(Referal_Date)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceEchsInvestigationReferralReport'
+            },
+            {
+                'description': 'Daily chronological breakdown of insurance invoices and collections.',
+                'icon': 'TrendingUp',
+                'name': 'Date Wise Insurance Bills Details',
+                'page_id': 521,
+                'permissions': {'Date Wise Insurance Bills Details': 'HMS-RPT-INSURANCE'},
+                'route': '/DateWiseInsuranceBillsDetailsReport'
+            },
+            {
+                'description': 'Serial bill continuity check to prevent gaps, duplicates, or missing numbers.',
+                'icon': 'Search',
+                'name': 'Insurance Bill Number Checking',
+                'page_id': 522,
+                'permissions': {'Insurance Bill Number Checking': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillNumberCheckingReport'
+            },
+            {
+                'description': 'Master ledger of all insurance discharge statements across departments.',
+                'icon': 'ClipboardList',
+                'name': 'Insurance Discharge Bill (All)',
+                'page_id': 523,
+                'permissions': {'Insurance Discharge Bill (All)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillAllReport'
+            },
+            {
+                'description': 'Claim performance and recovery grouped by origin polyclinic centers.',
+                'icon': 'MapPin',
+                'name': 'Insurance Bills Status(Polyclinic Wise)',
+                'page_id': 524,
+                'permissions': {'Insurance Bills Status(Polyclinic Wise)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatusPolyclinicReport'
+            },
+            {
+                'description': 'Demographics, medical officer notes, and visit log of ECHS outpatients.',
+                'icon': 'UserCheck',
+                'name': 'Echs Op Patient Details',
+                'page_id': 525,
+                'permissions': {'Echs Op Patient Details': 'HMS-RPT-INSURANCE'},
+                'route': '/EchsOpPatientDetailsReport'
+            },
+            {
+                'description': 'Clinical medication orders and pharmacy fulfillment for credit patients.',
+                'icon': 'FileText',
+                'name': 'Prescription Details',
+                'page_id': 526,
+                'permissions': {'Prescription Details': 'HMS-RPT-INSURANCE'},
+                'route': '/PrescriptionDetailsReport'
+            },
+            {
+                'description': 'Executive summary of total billed, received, TDS, and outstanding insurance.',
+                'icon': 'Banknote',
+                'name': 'Insurance Bills Summary',
+                'page_id': 527,
+                'permissions': {'Insurance Bills Summary': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsSummaryReport'
+            },
+            {
+                'description': 'Investigation bill items for ECHS defense personnel and veterans.',
+                'icon': 'Activity',
+                'name': 'Insurance Echs Investigation Bills',
+                'page_id': 528,
+                'permissions': {'Insurance Echs Investigation Bills': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceEchsInvestigationBillsReport'
+            },
+            {
+                'description': 'Billing and payment status strictly for outpatient credit patients.',
+                'icon': 'Users',
+                'name': 'Insurance Bills Status(Op Patients)',
+                'page_id': 529,
+                'permissions': {'Insurance Bills Status(Op Patients)': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatusOpPatientsReport'
+            },
+            {
+                'description': 'Southern Railway ticketed patient inpatient discharge vouchers.',
+                'icon': 'FileSpreadsheet',
+                'name': 'Insurance Discharge Bill(TKT)Railway',
+                'page_id': 530,
+                'permissions': {'Insurance Discharge Bill(TKT)Railway': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceDischargeBillTktRailwayReport'
+            },
+            {
+                'description': 'Comprehensive corporate and TPA insurance bills status report with patient details and dues.',
+                'icon': 'ShieldCheck',
+                'name': 'Insurance Bills Status Report',
+                'page_id': 531,
+                'permissions': {'Insurance Bills Status Report': 'HMS-RPT-INSURANCE'},
+                'route': '/InsuranceBillsStatusReport'
+            }
+        ]
+    },
+    {   'created_by': 'system',
+        'group': 'Drug Purchase Reports',
+        'group_id': 6,
+        'is_active': True,
+        'lastmodified_by': 'system',
+        'order': 6,
+        'pages': [
+            {
+                'description': 'Return defective or excess goods to suppliers with automatic stock deduction and printable Debit Notes.',
+                'icon': 'RotateCcw',
+                'name': 'Purchase Return & Debit Notes',
+                'page_id': 601,
+                'permissions': {'Purchase Return & Debit Notes': 'HMS-STORES-PURCHASE-RET-RPT'},
+                'route': '/DrugPurchaseReturnReport'
+            },
+            {
+                'description': 'Analyze monthly purchase trends, vendor spend shares, top purchased goods, and price fluctuations over time.',
+                'icon': 'TrendingUp',
+                'name': 'Purchase Analysis Report',
+                'page_id': 602,
+                'permissions': {'Purchase Analysis Report': 'HMS-STORES-PURCHASE-ANALYSIS-RPT'},
+                'route': '/DrugPurchaseAnalysisReport'
+            },
+            {
+                'description': 'Daily opening stock balance, GRN inward receipts, Indent outward issues, returns, and closing valuation.',
+                'icon': 'Layers',
+                'name': 'Previous Day / Daily Stock Report',
+                'page_id': 603,
+                'permissions': {'Previous Day / Daily Stock Report': 'HMS-STORES-PREV-STOCK'},
+                'route': '/DrugPreviousDayStockReport'
+            },
+            {
+                'description': 'Comprehensive directory of suppliers with cumulative order values, total payments made, and pending dues.',
+                'icon': 'Building2',
+                'name': 'Supplier-Wise List & Ledger',
+                'page_id': 604,
+                'permissions': {'Supplier-Wise List & Ledger': 'HMS-STORES-SUPPLIER-WISE-RPT'},
+                'route': '/DrugSupplierWiseReport'
+            },
+            {
+                'description': 'Identify slow-moving and idle items with zero indents over 30 / 60 / 90 / 180+ days to prevent dead capital.',
+                'icon': 'Clock',
+                'name': 'Non-Moving Items Report (Dead Stock)',
+                'page_id': 605,
+                'permissions': {'Non-Moving Items Report (Dead Stock)': 'HMS-STORES-NON-MOVING-RPT'},
+                'route': '/DrugNonMovingReport'
+            },
+            {
+                'description': 'Early warning alert report tracking pharmaceutical and medical items nearing expiry within 30, 60, or 90 days.',
+                'icon': 'AlertTriangle',
+                'name': 'Short Expiry & Expired List',
+                'page_id': 606,
+                'permissions': {'Short Expiry & Expired List': 'HMS-STORES-SHORT-EXPIRY-RPT'},
+                'route': '/DrugShortExpiryReport'
+            },
+            {
+                'description': 'Real-time stock threshold monitoring, identifying out-of-stock and low-stock items with suggested reorder quantities.',
+                'icon': 'AlertCircle',
+                'name': 'Reorder Level Indication',
+                'page_id': 607,
+                'permissions': {'Reorder Level Indication': 'HMS-STORES-REORDER-RPT'},
+                'route': '/DrugReorderLevelReport'
+            },
+            {
+                'description': 'Spatial inventory mapping to manage Racks, Shelves, and Bins with barcode scanner integration.',
+                'icon': 'Grid',
+                'name': 'Barcode Entry & Rack Classification',
+                'page_id': 608,
+                'permissions': {'Barcode Entry & Rack Classification': 'HMS-STORES-RACK-RPT'},
+                'route': '/DrugRackClassificationReport'
+            },
+            {
+                'description': 'Goods Received Note (GRN) report categorized by Supplier / Vendor with tax details and payment status.',
+                'icon': 'ShieldCheck',
+                'name': 'Supplier-Based GRN Report',
+                'page_id': 609,
+                'permissions': {'Supplier-Based GRN Report': 'HMS-STORES-SUPPLIER-GRN-RPT'},
+                'route': '/DrugSupplierGrnReport'
+            },
+            {
+                'description': 'Store item requisitions (indents) grouped by Department with approval status and item quantities.',
+                'icon': 'ClipboardList',
+                'name': 'Department-Based Indent Report',
+                'page_id': 610,
+                'permissions': {'Department-Based Indent Report': 'HMS-STORES-DEPT-INDENT-RPT'},
+                'route': '/DrugDepartmentIndentReport'
+            },
+            {
+                'description': 'Comprehensive general GRN report with invoice details, vendor mapping, and payment tracking.',
+                'icon': 'FileText',
+                'name': 'Drug Purchase GRN General Report',
+                'page_id': 611,
+                'permissions': {'Stores GRN General Report': 'HMS-STORES-GRN-GEN-RPT'},
+                'route': '/DrugGRNGeneralReport'
+            },
+            {
+                'description': 'Review, approve, and track department store intent requisitions.',
+                'icon': 'ClipboardList',
+                'name': 'Drug Purchase Intent Approval Report',
+                'page_id': 612,
+                'permissions': {'Stores Intent Approval Report': 'HMS-STORES-INDENT-RET-RPT'},
+                'route': '/DrugIntentReturnReport'
+            },
+            {
+                'description': 'Analysis report categorizing inventory items based on ABC value and VED criticality.',
+                'icon': 'BarChart3',
+                'name': 'Drug Purchase ABC & VED Analysis Report',
+                'page_id': 613,
+                'permissions': {'Stores ABC & VED Analysis Report': 'HMS-STORES-ABC-VED-RPT'},
+                'route': '/DrugAbcVedReport'
+            },
+            {
+                'description': 'Complete audit trail of Item Master opening stock values, adjustments, audit remarks, and user history.',
+                'icon': 'CheckCircle',
+                'name': 'Opening Stock Audit Report',
+                'page_id': 614,
+                'permissions': {'Opening Stock Audit Report': 'HMS-STORES-OPENING-RPT'},
+                'route': '/DrugOpeningStockReport'
+            }
+        ]
+    }]
 
 def seed_default_report_masters(force=False):
     collection = hms_db['hospital_reportmaster']
