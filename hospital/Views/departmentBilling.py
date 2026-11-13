@@ -1128,7 +1128,7 @@ def get_investigation_items(request):
 
         if investigation_data and "Items" in investigation_data:
             items = investigation_data["Items"]
-            is_surgery_type = str(bill_type_no).upper().startswith("SUR")
+            is_surgery_type = str(bill_type_no).upper().startswith(("SUR", "CAT"))
             formatted_items = []
             for item in items:
                 item_name = item.get("itemName", "")
@@ -1347,8 +1347,8 @@ def invest_billing_create(request):
         else:
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-        prefix_key = f"{financial_year}/{bill_type}"
-        prefix = f"{prefix_key}/"
+        prefix_key = f"{financial_year}{bill_type}"
+        prefix = f"{prefix_key}"
 
         # 🔥 ATOMIC COUNTER (Concurrency Safe)
         counter = counters_collection.find_one_and_update(
@@ -1991,7 +1991,7 @@ def invest_refund_create(request):
         # fixed — financial year only
         bill_type  = data['bill_type']   
         prefix_key = f"{financial_year}"   # e.g. "2627"
-        prefix     = f"{prefix_key}/"      # e.g. "2627/"
+        prefix     = f"{prefix_key}"      # e.g. "2627/"
 
         # ── Last-incremental refundBillNo (no atomic counter) ────────────────
         # Find the highest existing refundBillNo for this prefix and add 1.
