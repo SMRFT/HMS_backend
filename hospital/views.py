@@ -273,6 +273,7 @@ def patientCreateView(request):
 
             billing = Billing.objects.create(
                 patient=patient,
+                uhid=patient.uhid,
                 registration_fee=registration_fee,
                 consulting_fee=consulting_fee,
                 total_fees=total_fees,
@@ -288,6 +289,21 @@ def patientCreateView(request):
                 shiftno=request.data.get('shiftno'),
                 bill_type=bill_type
             )
+
+            # Ensure uhid is saved directly on MongoDB document as well
+            if patient and patient.uhid and billing and billing.bill_number:
+                try:
+                    from pymongo import MongoClient
+                    mongo_host = os.getenv("GLOBAL_DB_HOST")
+                    if mongo_host:
+                        m_client = MongoClient(mongo_host, serverSelectionTimeoutMS=2000)
+                        m_client["HMS"]["hospital_billing"].update_one(
+                            {"bill_number": billing.bill_number},
+                            {"$set": {"uhid": patient.uhid}}
+                        )
+                        m_client.close()
+                except Exception as m_err:
+                    print("Error ensuring uhid on hospital_billing document:", m_err)
 
             return Response({
                 "message": "Patient registered successfully.",

@@ -1142,6 +1142,7 @@ def save_ot_medicine_ward_request(request):
             }
 
             # Ensure required/default fields exist
+            cleaned.setdefault("dispatched_qty", med.get("dispatched_qty", None))
             cleaned.setdefault("remark", "")
             cleaned.setdefault("dose", "")
             cleaned.setdefault("doseUnit", "")
