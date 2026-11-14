@@ -1663,11 +1663,10 @@ def get_medicine_ward_requests(request):
                     "batch_number": itm.get("batch_number", ""),
 
                     "quantity": itm.get("quantity", itm.get("qty", 0)),
-
                     "qty": itm.get("qty", itm.get("quantity", 0)),
-
-                    "dispatched_qty": itm.get("dispatched_qty", None),
-
+                    "requested_qty": itm.get("qty", itm.get("quantity", 0)),
+                    "dispatched_qty": itm.get("dispatched_qty", 0),
+                    "pending_qty": max(0, float(itm.get("qty", itm.get("quantity", 0)) or 0) - float(itm.get("dispatched_qty", 0) or 0)),
                     "dosage": itm.get("dosage", ""),
 
                     "noOfDays": itm.get("noOfDays", ""),
@@ -2112,35 +2111,20 @@ def save_medicine_ward_request(request):
         cleaned_particulars = []
 
         for item in (medicine_particulars or []):
-
+            orig_q = float(item.get("quantity", item.get("qty", 0)) or 0)
             cleaned_item = {
-
                 "item_id": item.get("item_id"),
-
-                "qty": item.get("quantity", item.get("qty", 0)),
-
-                "dispatched_qty": item.get("dispatched_qty", None),
-
+                "qty": orig_q,
+                "quantity": orig_q,
+                "dispatched_qty": 0.0,
+                "pending_qty": orig_q,
                 "dosage": item.get("dosage", ""),
-
                 "noOfDays": item.get("noOfDays", ""),
-
-                "remark": item.get("remark", ""),
-
                 "dose": item.get("dose", ""),
-
-                "doseUnit": item.get("doseUnit", item.get("doseunit", "")),
-
-                "doseunit": item.get("doseunit", item.get("doseUnit", "")),
-
-                "route": item.get("route", ""),
-
+                "doseunit": item.get("doseunit", ""),
                 "batch_number": item.get("batch_number", ""),
-
                 "instruction": item.get("instruction", "")
-
             }
-
             cleaned_particulars.append(cleaned_item)
 
         # Create Bill via Django Model (Handles auto-increment and defaults)
@@ -3893,7 +3877,11 @@ def get_pending_ward_returns(request):
 
                 "return_request_id": pr.get("return_request_id"),
 
-                "requested_by": pr.get("requested_by"),
+                "requested_by": (get_employee_name_by_id(pr.get("requested_by")) if (get_employee_name_by_id(pr.get("requested_by")) and get_employee_name_by_id(pr.get("requested_by")) != "Unknown") else pr.get("requested_by")) or "Ward Staff",
+
+                "requested_by_id": pr.get("requested_by"),
+
+                "requested_by_name": (get_employee_name_by_id(pr.get("requested_by")) if (get_employee_name_by_id(pr.get("requested_by")) and get_employee_name_by_id(pr.get("requested_by")) != "Unknown") else pr.get("requested_by")) or "Ward Staff",
 
                 "requested_at": pr.get("requested_at"),
 
@@ -5434,4 +5422,5 @@ def get_nursing_station_pharmacy_stock(request):
     finally:
         if client:
             client.close()
-
+
+

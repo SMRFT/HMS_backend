@@ -550,13 +550,14 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
 
     for itm in pharmacy_item_collection.find(
         item_filter,
-        {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
+        {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "_id": 0}
     ):
         raw_id = itm.get("item_id")
         entry = {
             "item_name": itm.get("item_name") or "",
             "is_consumable_items": bool(itm.get("is_consumable_items", False)),
-            "item_id": raw_id
+            "item_id": raw_id,
+            "hsn_code": itm.get("hsn") or itm.get("hsn_code") or "",
         }
         items_map[raw_id] = entry
         items_map[str(raw_id).strip()] = entry
@@ -570,13 +571,14 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
     if missing_ids and hospital_code and branch_code:
         for itm in pharmacy_item_collection.find(
             {"item_id": {"$in": missing_ids}},
-            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
+            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "_id": 0}
         ):
             raw_id = itm.get("item_id")
             entry = {
                 "item_name": itm.get("item_name") or "",
                 "is_consumable_items": bool(itm.get("is_consumable_items", False)),
-                "item_id": raw_id
+                "item_id": raw_id,
+                "hsn_code": itm.get("hsn") or itm.get("hsn_code") or "",
             }
             items_map[raw_id] = entry
             items_map[str(raw_id).strip()] = entry
@@ -619,13 +621,14 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
             # Query pharmacy_item_collection for master item info
             for itm in pharmacy_item_collection.find(
                 {"item_id": {"$in": resolved_item_ids}},
-                {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "_id": 0}
+                {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "_id": 0}
             ):
                 raw_id = itm.get("item_id")
                 entry = {
                     "item_name": itm.get("item_name") or "",
                     "is_consumable_items": bool(itm.get("is_consumable_items", False)),
-                    "item_id": raw_id
+                    "item_id": raw_id,
+                    "hsn_code": itm.get("hsn") or itm.get("hsn_code") or "",
                 }
                 items_map[raw_id] = entry
                 items_map[str(raw_id).strip()] = entry
@@ -683,6 +686,8 @@ def get_pharmacy_items_with_stock(hospital_code, branch_code, outlet_code, item_
         "SGST_Percentage": 1,
         "CGST_Amt": 1,
         "SGST_Amt": 1,
+        "hsn": 1,
+        "hsn_code": 1,
         "outlet_code": 1,
         "_id": 0
     }
@@ -819,10 +824,22 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
         mrp = selling_price = cgst_per = sgst_per = cgst_amt = sgst_amt = 0.0
         exp_date = None
 
+    hsn_val = (
+        item_dict.get("hsn_code")
+        or item_dict.get("hsn")
+        or (latest_stock.get("hsn_code") if latest_stock else None)
+        or (latest_stock.get("hsn") if latest_stock else None)
+        or item_meta.get("hsn_code")
+        or item_meta.get("hsn")
+        or ""
+    )
+
     return {
         "item_name": item_name,
         "batch_number": req_batch,
         "expiry_date": exp_date,
+        "hsn_code": hsn_val,
+        "hsn": hsn_val,
         "mrp": mrp,
         "Selling_Price": selling_price,
         "available_stock": available_stock,
