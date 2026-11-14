@@ -629,6 +629,8 @@ def get_summaries(request):
             for s in summaries:
                 if s.get('created_by'):
                     emp_ids.add(str(s['created_by']).strip())
+                if s.get('preliminary_approved_by'):
+                    emp_ids.add(str(s['preliminary_approved_by']).strip())
                 if s.get('approved_by'):
                     emp_ids.add(str(s['approved_by']).strip())
 
@@ -650,6 +652,9 @@ def get_summaries(request):
 
                 cb = str(s.get('created_by') or '').strip()
                 s['created_by_name'] = emp_name_map.get(cb) or resolve_created_by_name(cb)
+
+                pb = str(s.get('preliminary_approved_by') or '').strip()
+                s['preliminary_approved_by_name'] = (emp_name_map.get(pb) or resolve_created_by_name(pb)) if pb else ''
 
                 ab = str(s.get('approved_by') or '').strip()
                 s['approved_by_name'] = emp_name_map.get(ab) or resolve_created_by_name(ab)
@@ -928,27 +933,37 @@ def approve_summary(request, ip_no):
     collection = db['hospital_summary']
 
     try:
-        created_by = request.data.get('auth-user-id', "system")
-        now_dt = datetime.utcnow()
-        
-        # Find the summary by IP number and update
-        result = collection.update_one(
-            {"ipNo": ip_no},  # Query to find the document by IP No
+        decoded_ip_no = unquote(ip_no)
+        approver = request.data.get('auth-user-id', "system")
+
+        doc = collection.find_one(
+            {"ipNo": decoded_ip_no, "is_active": {"$ne": False}},
+            {"approve": 1, "preliminary_approve": 1}
+        )
+        if not doc:
+            return Response({"error": "Summary not found"}, status=status.HTTP_404_NOT_FOUND)
+        if doc.get('approve'):
+            return Response({"error": "Summary is already approved"}, status=status.HTTP_400_BAD_REQUEST)
+        if not doc.get('preliminary_approve'):
+            return Response(
+                {"error": "Preliminary approval is required before final approval"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        collection.update_one(
+            {"ipNo": decoded_ip_no},
             {"$set": {
                 "approve": True,
-                "approved_by": created_by,
-                "approve_time": now_dt  # Store as Date/Time object in MongoDB (ISODate)
+                "approved_by": approver,
+                "approve_time": datetime.utcnow()
             }}
         )
-        
-        # Check if the document was updated
-        if result.matched_count > 0:
-            return Response({"message": "Summary approved successfully"}, status=status.HTTP_200_OK)
-        else:
-            return Response({"error": "Summary not found"}, status=status.HTTP_404_NOT_FOUND)
-    
+        return Response({"message": "Summary approved successfully"}, status=status.HTTP_200_OK)
+
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        client.close()
 
 
 @api_view(['PATCH'])  # Changed from DELETE to PATCH
@@ -1211,7 +1226,7 @@ def update_summary_fields(request, ip_no):
         exclude_keys = {
             # Immutable / auth fields
             '_id', 'created_by', 'created_date',
-            'lastmodified_date', 'lastmodified_by',
+            'lastmodified_date', 'lastmodified_by','preliminary_approve', 'preliminary_approved_by', 'preliminary_approve_time',
             # Strip ALL auth-* keys
             *[k for k in request.data.keys() if k.startswith('auth-')],
             # Frontend-only state fields not stored in DB
@@ -1461,6 +1476,55 @@ def get_printsummary(request, ip_no):
         summary['investBillNo'] = None
         summary['signatures']   = []
 
+         # ── Helper: fetch employee signature ──────────────────────────────────
+        def get_employee_signature_data(employee_id):
+            if not employee_id:
+                return None
+            try:
+                profile = profile_collection.find_one({"employeeId": employee_id})
+                if not profile:
+                    return None
+
+                employee_name       = profile.get("employeeName", "")
+                designation         = profile.get("designation", "")
+                signature_file_id   = profile.get("signatureFileId")
+                signature_base64    = None
+
+                if signature_file_id:
+                    try:
+                        if isinstance(signature_file_id, str):
+                            signature_file_id = ObjectId(signature_file_id)
+                        sig_file         = fs.get(signature_file_id)
+                        signature_base64 = base64.b64encode(sig_file.read()).decode('utf-8')
+                    except Exception as e:
+                        print(f"Signature fetch error for {employee_id}: {e}")
+
+                return {
+                    "employeeName":    employee_name,
+                    "designation":     designation,
+                    "signatureBase64": signature_base64
+                }
+            except Exception as e:
+                print(f"Employee data error for {employee_id}: {e}")
+                return None
+                from .dbcollection import resolve_created_by_name
+
+        def _sign_for(emp_id):
+            emp_id = str(emp_id or '').strip()
+            if not emp_id:
+                return None
+            sig = get_employee_signature_data(emp_id)
+            if sig:
+                return sig
+            return {
+                "employeeName": resolve_created_by_name(emp_id) or emp_id,
+                "designation": "",
+                "signatureBase64": None,
+            }
+
+        summary['prepared_by_sign'] = _sign_for(summary.get('preliminary_approved_by'))
+        summary['approved_by_sign'] = _sign_for(summary.get('approved_by'))
+
         # ── STEP 3: Get barcode strictly requiring ipnumber == decoded_ip_no ──
         barcode_record = None
 
@@ -1539,38 +1603,7 @@ def get_printsummary(request, ip_no):
 
             return None
 
-        # ── Helper: fetch employee signature ──────────────────────────────────
-        def get_employee_signature_data(employee_id):
-            if not employee_id:
-                return None
-            try:
-                profile = profile_collection.find_one({"employeeId": employee_id})
-                if not profile:
-                    return None
-
-                employee_name       = profile.get("employeeName", "")
-                designation         = profile.get("designation", "")
-                signature_file_id   = profile.get("signatureFileId")
-                signature_base64    = None
-
-                if signature_file_id:
-                    try:
-                        if isinstance(signature_file_id, str):
-                            signature_file_id = ObjectId(signature_file_id)
-                        sig_file         = fs.get(signature_file_id)
-                        signature_base64 = base64.b64encode(sig_file.read()).decode('utf-8')
-                    except Exception as e:
-                        print(f"Signature fetch error for {employee_id}: {e}")
-
-                return {
-                    "employeeName":    employee_name,
-                    "designation":     designation,
-                    "signatureBase64": signature_base64
-                }
-            except Exception as e:
-                print(f"Employee data error for {employee_id}: {e}")
-                return None
-
+       
         # ── STEP 5: Parse & enrich STANDARD test details ──────────────────────
         test_details   = []
         lab_approvers  = set()   # approvers from standard core_testvalue
@@ -1861,6 +1894,64 @@ def get_printsummary(request, ip_no):
         import traceback
         print(traceback.format_exc())
         return JsonResponse({'error': str(e)}, status=500)
+
+
+def build_medicine_list(hms_db, bills):
+    items_collection = hms_db['hospital_pharmacyitem']
+    comp_collection = hms_db['hospital_chemicalcomposition']
+
+    # 1. unique item_ids across all bills
+    item_ids = set()
+    for bill in bills:
+        for item in bill.get('medicine_particulars', []):
+            if item.get('item_id') is not None:
+                item_ids.add(item['item_id'])
+
+    # 2. item_id -> item_name + chemical_composition
+    item_map = {}
+    comp_ids = set()
+    if item_ids:
+        for i in items_collection.find(
+            {'item_id': {'$in': list(item_ids)}},
+            {'_id': 0, 'item_id': 1, 'item_name': 1, 'chemical_composition': 1}
+        ):
+            item_map[i['item_id']] = i
+            try:
+                comp_ids.add(int(str(i.get('chemical_composition') or '').strip()))
+            except (ValueError, TypeError):
+                pass
+
+    # 3. composition_id -> composition_name
+    comp_name_map = {}
+    if comp_ids:
+        for c in comp_collection.find(
+            {'composition_id': {'$in': list(comp_ids)}},
+            {'_id': 0, 'composition_id': 1, 'composition_name': 1}
+        ):
+            comp_name_map[int(c['composition_id'])] = (c.get('composition_name') or '').strip()
+
+    # 4. flatten
+    medicines = []
+    for bill in bills:
+        for item in bill.get('medicine_particulars', []):
+            item_id = item.get('item_id')
+            item_doc = item_map.get(item_id, {})
+            try:
+                comp_id = int(str(item_doc.get('chemical_composition') or '').strip())
+            except (ValueError, TypeError):
+                comp_id = None
+            medicines.append({
+                'itemName': item_doc.get('item_name') or f'Item {item_id}',
+                'chemicalComposition': comp_name_map.get(comp_id, '') if comp_id is not None else '',
+                'dosage': item.get('dosage', ''),
+                'noOfDays': item.get('noOfDays', ''),
+                'qty': item.get('qty', ''),
+                'doseUnit': item.get('doseunit', ''),
+                'route': item.get('route', ''),
+                'remark': item.get('instruction', ''),
+                'bill_no': bill.get('bill_no', ''),
+            })
+    return medicines
     
 
 @api_view(['GET'])
@@ -1890,6 +1981,8 @@ def get_patient_medicines(request, ip_no):
 
         if not bills:
             return Response([], status=status.HTTP_200_OK)
+
+        return Response(build_medicine_list(hms_db, bills), status=status.HTTP_200_OK)
 
         # Collect all unique item_ids across all bills
         item_ids = set()
@@ -1959,6 +2052,8 @@ def get_patient_discharge_medicines(request, ip_no):
 
         if not bills:
             return Response([], status=status.HTTP_200_OK)
+
+        return Response(build_medicine_list(hms_db, bills), status=status.HTTP_200_OK)
 
         # Collect all unique item_ids across all bills
         item_ids = set()
@@ -2097,3 +2192,39 @@ def ai_summarize_notes(request):
         "summarized": summarized_text,
         "original": raw_text,
     }, status=status.HTTP_200_OK)
+
+@api_view(['PATCH'])
+@permission_classes([HasRoleAndDataPermission])
+def preliminary_approve_summary(request, ip_no):
+    client = None
+    try:
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        collection = client['HMS']['hospital_summary']
+        decoded_ip_no = unquote(ip_no)
+        user_id = request.data.get('auth-user-id', "system")
+
+        doc = collection.find_one(
+            {"ipNo": decoded_ip_no, "is_active": {"$ne": False}},
+            {"approve": 1, "preliminary_approve": 1}
+        )
+        if not doc:
+            return Response({"error": "Summary not found"}, status=status.HTTP_404_NOT_FOUND)
+        if doc.get('approve'):
+            return Response({"error": "Summary is already approved"}, status=status.HTTP_400_BAD_REQUEST)
+        if doc.get('preliminary_approve'):
+            return Response({"error": "Summary is already preliminarily approved"}, status=status.HTTP_400_BAD_REQUEST)
+
+        collection.update_one(
+            {"ipNo": decoded_ip_no},
+            {"$set": {
+                "preliminary_approve": True,
+                "preliminary_approved_by": user_id,
+                "preliminary_approve_time": datetime.utcnow(),
+            }}
+        )
+        return Response({"message": "Summary preliminarily approved"}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
