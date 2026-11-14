@@ -428,16 +428,18 @@ def purchase_return_view(request, pk=None):
         try:
             if pk:
                 try:
-                    pr = PurchaseReturn.objects.get(
+                    pr = PurchaseReturn.objects.filter(
                         purchase_return_bill_no=pk,
                         hospital_code=hospital_code,
                         branch_code=branch_code,
-                    )
+                    ).first()
+                    if not pr:
+                        return Response({"success": False, "error": "Record not found"}, status=404)
                     enriched = _enrich_purchase_returns_batch([PurchaseReturnSerializer(pr).data], hospital_code, branch_code)
                     enriched = enrich_employee_names(enriched)[0]
                     return Response({"success": True, "data": enriched})
-                except PurchaseReturn.DoesNotExist:
-                    return Response({"success": False, "error": "Record not found"}, status=404)
+                except Exception as e:
+                    return Response({"success": False, "error": str(e)}, status=500)
 
             filter_q = {}
             if hospital_code and hospital_code != "system":
@@ -634,11 +636,13 @@ def purchase_return_view(request, pk=None):
             )
 
         try:
-            pr = PurchaseReturn.objects.get(
+            pr = PurchaseReturn.objects.filter(
                 purchase_return_bill_no=bill_no,
                 hospital_code=hospital_code,
                 branch_code=branch_code
-            )
+            ).first()
+            if not pr:
+                return Response({"success": False, "error": f"Purchase return '{bill_no}' not found"}, status=404)
             if new_status == "Returned" and pr.status != "Returned":
                 # Parse items if it's a string, else use directly
                 items_data = pr.items
