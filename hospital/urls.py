@@ -80,7 +80,7 @@ from .Views.AccountsReport import (
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report, drug_purchase_reports
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report, drug_purchase_reports, admission_vs_discharge_report
 from .Views.INPatientcare import ip_patient_analysis
 from .Views.Complaints import complaints
 from .Views.QRScan import qrscan
@@ -511,6 +511,8 @@ urlpatterns = [
     path('drug-opening-stock-report/', drug_purchase_reports.drug_opening_stock_report_view, name='drug_opening_stock_report'),
     path('ip-patient-analysis/', ip_patient_analysis.ip_patient_analysis_view, name='ip_patient_analysis'),
     path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
+    path('admission-vs-discharge-report/', admission_vs_discharge_report.admission_vs_discharge_report_view, name='admission_vs_discharge_report'),
+    path('AdmissionVsDischargeReport/', admission_vs_discharge_report.admission_vs_discharge_report_view, name='AdmissionVsDischargeReport'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
 
     # Velavan Items

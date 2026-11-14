@@ -18,6 +18,65 @@ def clean_num(val):
     except Exception:
         return 0.0
 
+
+def parse_record_date(dt_val):
+    if not dt_val:
+        return None
+    if isinstance(dt_val, datetime):
+        return dt_val
+    if isinstance(dt_val, str):
+        val = dt_val.strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(val[:10], fmt)
+            except Exception:
+                continue
+    return None
+
+
+def get_sample_date(dt_start, dt_end, index):
+    if dt_start and dt_end:
+        span = max(1, (dt_end - dt_start).days)
+        offset = (index * 3 + 1) % span
+        return (dt_start + timedelta(days=offset)).strftime("%d/%m/%Y")
+    return (datetime.now() - timedelta(days=index % 30)).strftime("%d/%m/%Y")
+
+
+def row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map=None):
+    # 1. Date Range Filter
+    if dt_start and dt_end:
+        rec_date = parse_record_date(
+            row.get('bill_date') or row.get('date') or row.get('discharge_date') or row.get('cert_date') or row.get('reg_date')
+        )
+        if rec_date:
+            rec_date_only = rec_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_only = dt_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_only = dt_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+            if not (start_only <= rec_date_only <= end_only):
+                return False
+
+    # 2. Company Filter
+    if company_filter and str(company_filter).strip().lower() != 'all':
+        cf_low = str(company_filter).strip().lower()
+        c_name = str(row.get('company_name') or '').lower()
+        c_code = str(row.get('company_code') or '').lower()
+        matched = (cf_low in c_name or (c_code and cf_low in c_code))
+        if not matched and company_map:
+            mapped_name = str(company_map.get(company_filter, '')).lower()
+            if mapped_name and (mapped_name in c_name or c_name in mapped_name):
+                matched = True
+        if not matched:
+            return False
+
+    # 3. Search Query Filter
+    if search_query:
+        sq_low = str(search_query).strip().lower()
+        haystack = " ".join(str(v) for v in row.values() if v is not None).lower()
+        if sq_low not in haystack:
+            return False
+
+    return True
+
 def build_specialized_insurance_report(request, report_key):
     """
     Builds specialized insurance dataset and column schemas for all 30 Shanmuga Hospital insurance reports.
@@ -474,14 +533,8 @@ def build_specialized_insurance_report(request, report_key):
 
             sno = 1
             for row in all_pool:
-                c_name = row.get('company_name', '')
-                if company_filter and company_filter != 'all':
-                    if company_filter.lower() not in c_name.lower():
-                        continue
-                if search_query:
-                    hay = f"{row.get('patient_name')} {row.get('op_number')} {c_name} {row.get('bill_id')} {row.get('claim_ref')} {row.get('card_number')}".lower()
-                    if search_query not in hay:
-                        continue
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
+                    continue
 
                 r = dict(row)
                 r['sno'] = sno
@@ -538,14 +591,8 @@ def build_specialized_insurance_report(request, report_key):
                 # Filter specifically for due bills (DUE > 0)
                 if row.get('due_amount', 0) <= 0:
                     continue
-                c_name = row.get('company_name', '')
-                if company_filter and company_filter != 'all':
-                    if company_filter.lower() not in c_name.lower():
-                        continue
-                if search_query:
-                    hay = f"{row.get('patient_name')} {row.get('op_number')} {c_name} {row.get('bill_id')} {row.get('sh_bill_no')}".lower()
-                    if search_query not in hay:
-                        continue
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
+                    continue
 
                 r = dict(row)
                 r['sno'] = sno
@@ -602,15 +649,10 @@ def build_specialized_insurance_report(request, report_key):
             comp_counters = {}
             sno = 1
             for row in all_pool:
-                c_name = row.get('company_name', '')
-                if company_filter and company_filter != 'all':
-                    if company_filter.lower() not in c_name.lower():
-                        continue
-                if search_query:
-                    hay = f"{row.get('patient_name')} {row.get('op_number')} {c_name} {row.get('bill_id')} {row.get('status')}".lower()
-                    if search_query not in hay:
-                        continue
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
+                    continue
 
+                c_name = row.get('company_name', '')
                 comp_counters[c_name] = comp_counters.get(c_name, 0) + 1
                 r = dict(row)
                 r['sno'] = sno
@@ -649,7 +691,7 @@ def build_specialized_insurance_report(request, report_key):
             for i, p in enumerate(patient_pool[:80]):
                 uhid = p.get('uhid', f"S026/{str(i+2000).zfill(6)}")
                 name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or f"Patient {uhid}"
-                c_date = (now - timedelta(days=i % 30)).strftime("%d/%m/%Y")
+                c_date = get_sample_date(dt_start, dt_end, i)
                 doctor = p.get('doctorName') or "DR.ARUN KUMAR.B,MD (MED) DNB (CARDIO)"
                 
                 row = {
@@ -667,7 +709,7 @@ def build_specialized_insurance_report(request, report_key):
                     "status": "APPROVED" if i % 7 != 0 else "PENDING"
                 }
 
-                if search_query and search_query not in f"{name} {uhid} {row['service_no']} {row['polyclinic']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 records.append(row)
@@ -712,7 +754,7 @@ def build_specialized_insurance_report(request, report_key):
                 elif i % 5 == 3: test_title = "ECHOCARDIOGRAPHY (2D ECHO)"
 
                 b_amt = clean_num(inv.get('finalPrice') or inv.get('total') or (850.0 + (i * 230) % 4500))
-                b_date = inv.get('investBillDate') or (now - timedelta(days=i % 40)).strftime("%d/%m/%Y")
+                b_date = inv.get('investBillDate') or get_sample_date(dt_start, dt_end, i)
                 if isinstance(b_date, datetime):
                     b_date = b_date.strftime("%d/%m/%Y")
 
@@ -730,7 +772,7 @@ def build_specialized_insurance_report(request, report_key):
                     "payment_status": "CREDIT CLAIMED"
                 }
 
-                if search_query and search_query not in f"{pname} {uhid} {row['test_name']} {row['bill_no']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 tot_amt += b_amt
@@ -764,7 +806,7 @@ def build_specialized_insurance_report(request, report_key):
                 name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or f"Patient {uhid}"
                 c_name = company_map.get(p.get('company_code')) or (["ECHS", "SOUTHERN RAILWAY", "CGHS CREDIT", "ADITYA BIRLA CAPITAL", "STAR HEALTH"][i % 5])
                 doc = p.get('doctorName') or "DR.ARUN KUMAR.B,MD (MED) DNB (CARDIO)"
-                adm_dt = (now - timedelta(days=(i % 12) + 1)).strftime("%d/%m/%Y")
+                adm_dt = get_sample_date(dt_start, dt_end, i)
                 room_no = f"40{1 + (i % 8)} / Bed-{1 + (i % 2)}"
 
                 row = {
@@ -780,9 +822,7 @@ def build_specialized_insurance_report(request, report_key):
                     "address": p.get('permanent_address') or "SALEM, TAMIL NADU"
                 }
 
-                if company_filter and company_filter != 'all' and company_filter.lower() not in c_name.lower():
-                    continue
-                if search_query and search_query not in f"{name} {uhid} {c_name} {row['ip_number']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 records.append(row)
@@ -814,7 +854,7 @@ def build_specialized_insurance_report(request, report_key):
                 name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or f"Patient {uhid}"
                 c_name = company_map.get(p.get('company_code')) or (["BAJAJ ALLIANZ & ALLIED INSURANCE", "CGHS CREDIT", "ECHS", "SOUTHERN RAILWAY", "CHEQUE."][i % 5])
                 doc = p.get('doctorName') or "DR.VIDHYA., MD,DM"
-                r_date = p.get('registration_date') or (now - timedelta(days=i % 45)).strftime("%d/%m/%Y")
+                r_date = p.get('registration_date') or get_sample_date(dt_start, dt_end, i)
 
                 row = {
                     "sno": sno,
@@ -827,9 +867,7 @@ def build_specialized_insurance_report(request, report_key):
                     "claim_status": "CREDIT APPROVED" if i % 6 != 0 else "UNDER SCRUTINY"
                 }
 
-                if company_filter and company_filter != 'all' and company_filter.lower() not in c_name.lower():
-                    continue
-                if search_query and search_query not in f"{name} {uhid} {c_name} {doc}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 records.append(row)
@@ -870,8 +908,8 @@ def build_specialized_insurance_report(request, report_key):
                 settled = round(amt * 0.75, 2) if i % 3 != 0 else 0.0
                 due = round(amt - settled, 2)
 
-                adm_dt = (now - timedelta(days=(i % 25) + 5)).strftime("%d/%m/%Y")
-                dis_dt = (now - timedelta(days=(i % 25) + 1)).strftime("%d/%m/%Y")
+                dis_dt = get_sample_date(dt_start, dt_end, i)
+                adm_dt = get_sample_date(dt_start, dt_end, i + 5)
 
                 row = {
                     "sno": sno,
@@ -888,9 +926,7 @@ def build_specialized_insurance_report(request, report_key):
                     "due_amount": due
                 }
 
-                if company_filter and company_filter != 'all' and company_filter.lower() not in c_name.lower():
-                    continue
-                if search_query and search_query not in f"{name} {uhid} {c_name} {row['bill_id']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 tot_bill += amt
@@ -944,8 +980,8 @@ def build_specialized_insurance_report(request, report_key):
                 adv = clean_num(dis.get('advance_amount', 0)) if isinstance(dis, dict) and dis.get('advance_amount') else round(gross * 0.1, 2)
                 net = clean_num(dis.get('net_amount', 0)) if isinstance(dis, dict) and dis.get('net_amount') else round(gross - adv, 2)
 
-                adm_dt = (now - timedelta(days=(i % 18) + 6)).strftime("%d/%m/%Y")
-                dis_dt = (now - timedelta(days=(i % 18) + 1)).strftime("%d/%m/%Y")
+                adm_dt = get_sample_date(dt_start, dt_end, i + 6)
+                dis_dt = get_sample_date(dt_start, dt_end, i + 1)
 
                 row = {
                     "sno": sno,
@@ -963,9 +999,7 @@ def build_specialized_insurance_report(request, report_key):
                     "net_amount": net
                 }
 
-                if company_filter and company_filter != 'all' and company_filter.lower() not in c_name.lower():
-                    continue
-                if search_query and search_query not in f"{pname} {uhid} {c_name} {row['bill_no']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 tot_gross += gross
@@ -1009,7 +1043,7 @@ def build_specialized_insurance_report(request, report_key):
                 
                 clm = round(18500.0 + (i * 1920) % 45000, 2)
                 appr = round(clm * 0.92, 2)
-                d_str = (now - timedelta(days=i % 35)).strftime("%d/%m/%Y")
+                d_str = get_sample_date(dt_start, dt_end, i)
 
                 row = {
                     "sno": sno,
@@ -1024,9 +1058,7 @@ def build_specialized_insurance_report(request, report_key):
                     "status": "APPROVED" if i % 5 != 0 else "PENDING"
                 }
 
-                if company_filter and company_filter != 'all' and company_filter.lower() not in c_name.lower():
-                    continue
-                if search_query and search_query not in f"{name} {uhid} {c_name} {row['ref_number']}".lower():
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
 
                 tot_claim += clm
