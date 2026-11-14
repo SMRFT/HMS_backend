@@ -544,9 +544,13 @@ def get_all_diet_orders(request):
 def get_diet_extra_master(request):
     try:
         active_only = request.GET.get("active_only", "true").lower() == "true"
+        room_type = request.GET.get("room_type", "").strip().upper()
+        
         query = {}
         if active_only:
             query["is_active"] = True
+        if room_type in ["VIP", "NORMAL"]:
+            query["room_type"] = room_type
 
         with MongoClient(MONGO_URI) as client:
             db = client["HMS"]
@@ -556,11 +560,17 @@ def get_diet_extra_master(request):
             data = []
             for doc in cursor:
                 data.append({
-                    "extra_id":    str(doc.get('_id')),
-                    "item_id":     doc.get('item_id', ""),
-                    "item_name":   doc.get('item_name', ""),
-                    "price":       to_float(doc.get('price', 0)),
-                    "is_active":   doc.get('is_active', True),
+                    "extra_id":     str(doc.get('_id')),
+                    "id":           doc.get('id'),
+                    "item_id":      doc.get('item_id', ""),
+                    "item_name":    doc.get('item_name', ""),
+                    "clean_name":   doc.get('clean_name', doc.get('item_name', "")),
+                    "room_type":    doc.get('room_type', "NORMAL"),
+                    "category":     doc.get('category', ""),
+                    "serving_size": doc.get('serving_size', ""),
+                    "calories":     doc.get('calories', 0),
+                    "price":        to_float(doc.get('price', 0)),
+                    "is_active":    doc.get('is_active', True),
                 })
 
         return Response({"success": True, "data": data})
@@ -579,6 +589,11 @@ def save_diet_extra_master(request):
         is_active  = data.get("is_active", True)
         user_id    = data.get("auth-user-id")
         custom_item_id  = data.get("item_id", "")
+        room_type  = str(data.get("room_type", "NORMAL")).strip().upper()
+        category   = data.get("category", "")
+        serving_size = data.get("serving_size", "")
+        calories   = int(data.get("calories", 0))
+        clean_name = data.get("clean_name", item_name)
 
         if not item_name:
             return Response({"success": False, "error": "item_name is required."}, status=400)
@@ -594,8 +609,15 @@ def save_diet_extra_master(request):
         
         update_data = {
             "item_name": item_name,
+            "clean_name": clean_name,
+            "room_type": room_type if room_type in ["VIP", "NORMAL"] else "NORMAL",
+            "category": category,
+            "serving_size": serving_size,
+            "calories": calories,
             "price": price,
             "is_active": is_active,
+            "hospital_code": "SH001",
+            "branch_code": "SHB001"
         }
         if custom_item_id:
             update_data["item_id"] = custom_item_id
@@ -608,12 +630,13 @@ def save_diet_extra_master(request):
             if custom_item_id:
                 update_data["item_id"] = custom_item_id
             else:
-                last_item = col.find_one({"item_id": {"$regex": "^E-"}}, sort=[("_id", pymongo.DESCENDING)])
-                new_id = "E-01"
+                prefix = "EX-VIP" if room_type == "VIP" else "EX-NORM"
+                last_item = col.find_one({"item_id": {"$regex": f"^{prefix}-"}}, sort=[("_id", pymongo.DESCENDING)])
+                new_id = f"{prefix}-01"
                 if last_item and last_item.get("item_id"):
                     try:
-                        last_num = int(last_item["item_id"].replace("E-", ""))
-                        new_id = f"E-{last_num + 1:02d}"
+                        last_num = int(last_item["item_id"].replace(f"{prefix}-", ""))
+                        new_id = f"{prefix}-{last_num + 1:02d}"
                     except:
                         pass
                 update_data["item_id"] = new_id
