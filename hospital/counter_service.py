@@ -132,25 +132,31 @@ def _resolve_seed_discharge_bill(db, fy):
 def _resolve_seed_pharmacy_bill(db, outlet_code, fy):
     """Finds maximum bill_no sequence for an outlet under financial year fy."""
     clean_outlet = str(outlet_code or "").strip()
-    match_q = {"bill_no": {"$regex": f"^{fy}/"}}
+    match_q = {"bill_no": {"$regex": f"^{fy}"}}
     if clean_outlet and clean_outlet != "DEFAULT":
         match_q["outlet_code"] = clean_outlet
 
     latest_bills = list(db["hospital_pharmacybilling"].find(
         match_q,
         projection={"bill_no": 1}
-    ).sort("bill_no", -1).limit(10))
+    ).sort("bill_no", -1).limit(20))
 
     max_no = 0
     for b in latest_bills:
         bn = str(b.get("bill_no") or "").strip()
+        num = 0
         if "/" in bn:
             try:
                 num = int(bn.split("/")[-1])
-                if num > max_no:
-                    max_no = num
             except Exception:
                 pass
+        elif bn.startswith(fy):
+            try:
+                num = int(bn[len(fy):])
+            except Exception:
+                pass
+        if num > max_no:
+            max_no = num
     return max_no
 
 
@@ -517,4 +523,4 @@ def get_next_pharmacy_bill_no(outlet_code=None, fy=None, db_instance=None):
         seed_resolver=lambda db: _resolve_seed_pharmacy_bill(db, clean_outlet, year_prefix),
         db_instance=db_instance
     )
-    return f"{year_prefix}/{seq:06d}"
+    return f"{year_prefix}{seq:06d}"

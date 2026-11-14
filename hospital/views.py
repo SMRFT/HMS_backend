@@ -819,11 +819,13 @@ def patient_visit_list(request):
 
         bills = Billing.objects.filter(bill_filter).select_related('patient').order_by('-billed_date')
         
-        # Build lookup map for employee IDs (doctors and edit history users)
+        # Build lookup map for employee IDs (doctors, creators, and edit history users)
         all_emp_ids = set()
         for b in bills:
             if b.doctor_id:
                 all_emp_ids.add(str(b.doctor_id).strip())
+            if b.created_by:
+                all_emp_ids.add(str(b.created_by).strip())
             for h in (b.edit_history or []):
                 if h.get('user'):
                     all_emp_ids.add(str(h.get('user')).strip())
@@ -964,6 +966,8 @@ def patient_visit_list(request):
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
                 "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else '',
+                "created_by": str(bill.created_by or ''),
+                "preparedBy": emp_map.get(str(bill.created_by).strip()) or str(bill.created_by or 'Staff'),
                 "editHistory": formatted_history,
                 "refunds": refund_data,
                 "totalRefunded": str(total_refunded)
