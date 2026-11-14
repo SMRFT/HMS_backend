@@ -17,9 +17,18 @@ from pymongo import MongoClient, ReturnDocument
 
 
 def _get_db():
-    host = os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017")
+    host = os.getenv("GLOBAL_DB_HOST")
+    if not host:
+        try:
+            from django.conf import settings
+            host = getattr(settings, "GLOBAL_DB_HOST", None)
+        except Exception:
+            host = None
+    if not host:
+        host = "mongodb://localhost:27017"
     client = MongoClient(host, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000)
-    return client, client["HMS"]
+    db_name = os.getenv("HMS_DB_NAME", "HMS")
+    return client, client[db_name]
 
 
 def _current_fin_year_prefix():
@@ -32,9 +41,11 @@ def _current_fin_year_prefix():
         return f"{(year - 1) % 100:02d}{year % 100:02d}"
 
 
-def _current_admission_prefix():
+def _current_admission_prefix(is_daycare=False):
     now_dt = datetime.now()
     fy = (now_dt.year - 2001) if now_dt.month < 4 else (now_dt.year - 2000)
+    if is_daycare:
+        return f"SD{fy:02d}"
     return f"S{fy:03d}"
 
 
@@ -43,46 +54,44 @@ def _current_admission_prefix():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_seed_admission_ip(db, prefix):
-    """Finds maximum existing IP number under prefix, excluding legacy test offset >= 500k."""
-    top_ips = list(db["hospital_admission"].find(
+    """
+    Finds maximum existing sequential IP number under prefix in the normal range (< 500000).
+    Ignores test/legacy 5-series (>= 500000).
+    If 000001 does not exist under prefix, starts cleanly at 0 so the first generated IP is 000001.
+    """
+    cursor = db["hospital_admission"].find(
         {"ipNumber": {"$regex": f"^{prefix}/"}},
         {"ipNumber": 1}
-    ).sort("ipNumber", -1).limit(50))
+    )
 
     max_num = 0
-    for a in top_ips:
+    has_first = False
+    for a in cursor:
         ip = str(a.get("ipNumber") or "").strip()
         if "/" in ip:
             try:
                 p, n_str = ip.split("/", 1)
                 if p == prefix:
                     n = int(n_str)
-                    if n < 500000 and n > max_num:
+                    if n == 1:
+                        has_first = True
+                    if 0 < n < 500000 and n > max_num:
                         max_num = n
             except Exception:
                 continue
 
-    if max_num == 0 and top_ips:
-        for a in top_ips:
-            ip = str(a.get("ipNumber") or "").strip()
-            if "/" in ip:
-                try:
-                    p, n_str = ip.split("/", 1)
-                    if p == prefix:
-                        n = int(n_str)
-                        if n > max_num:
-                            max_num = n
-                except Exception:
-                    continue
+    if not has_first:
+        return 0
+
     return max_num
 
 
 def _resolve_seed_advance_bill(db, fy):
     """Finds true maximum bill_no in advance_payments array for financial year."""
     pipeline = [
-        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/"}}},
+        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}}},
         {"$unwind": "$advance_payments"},
-        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/"}}},
+        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}}},
         {"$project": {"bill_no": "$advance_payments.bill_no"}},
         {"$sort": {"bill_no": -1}},
         {"$limit": 5}
@@ -93,8 +102,12 @@ def _resolve_seed_advance_bill(db, fy):
             bn = str(doc.get("bill_no", ""))
             if "/" in bn:
                 n = int(bn.split("/")[-1])
-                if n > max_seq:
-                    max_seq = n
+            elif bn.startswith(fy):
+                n = int(bn[len(fy):])
+            else:
+                continue
+            if n > max_seq:
+                max_seq = n
         except Exception:
             continue
     return max_seq
@@ -102,13 +115,17 @@ def _resolve_seed_advance_bill(db, fy):
 
 def _resolve_seed_advance_refund(db, fy):
     latest = db["hospital_ipadvance_refund"].find_one(
-        {"refund_bill_no": {"$regex": f"^{fy}/"}},
+        {"refund_bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}},
         projection={"refund_bill_no": 1},
         sort=[("refund_bill_no", -1)]
     )
     if latest and latest.get("refund_bill_no"):
         try:
-            return int(str(latest["refund_bill_no"]).split("/")[-1])
+            s = str(latest["refund_bill_no"])
+            if "/" in s:
+                return int(s.split("/")[-1])
+            elif s.startswith(fy):
+                return int(s[len(fy):])
         except Exception:
             pass
     return 0
@@ -117,13 +134,17 @@ def _resolve_seed_advance_refund(db, fy):
 def _resolve_seed_discharge_bill(db, fy):
     """Finds true maximum bill_no in hospital_dischargebilling for financial year."""
     latest = db["hospital_dischargebilling"].find_one(
-        {"bill_no": {"$regex": f"^{fy}/"}},
+        {"bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}},
         projection={"bill_no": 1},
         sort=[("bill_no", -1)]
     )
     if latest and latest.get("bill_no"):
         try:
-            return int(str(latest["bill_no"]).split("/")[-1])
+            s = str(latest["bill_no"])
+            if "/" in s:
+                return int(s.split("/")[-1])
+            elif s.startswith(fy):
+                return int(s[len(fy):])
         except Exception:
             pass
     return 0
@@ -362,9 +383,9 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
 # ─────────────────────────────────────────────────────────────────────────────
 
 # 1. Admission IP Number
-def peek_next_admission_ip(prefix=None, db_instance=None):
-    """Read-only preview of next IP number (e.g. 'S026/500224') without consuming a sequence."""
-    p = prefix or _current_admission_prefix()
+def peek_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
+    """Read-only preview of next IP number (e.g. 'S026/000001' or 'SD26/000001') without consuming a sequence."""
+    p = prefix or _current_admission_prefix(is_daycare=is_daycare)
     counter_name = f"admission_ip_{p}"
     seq = peek_next_sequence_value(
         counter_name,
@@ -374,9 +395,9 @@ def peek_next_admission_ip(prefix=None, db_instance=None):
     return f"{p}/{seq:06d}"
 
 
-def get_next_admission_ip(prefix=None, db_instance=None):
-    """Returns next sequential IP number, e.g. 'S026/001692'."""
-    p = prefix or _current_admission_prefix()
+def get_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
+    """Returns next sequential IP number, e.g. 'S026/000001' or 'SD26/000001'."""
+    p = prefix or _current_admission_prefix(is_daycare=is_daycare)
     counter_name = f"admission_ip_{p}"
     seq = get_next_sequence_value(
         counter_name,
@@ -388,37 +409,37 @@ def get_next_admission_ip(prefix=None, db_instance=None):
 
 # 2. IP Advance & Refund Bill Numbers
 def get_next_advance_bill_no(fy=None):
-    """Returns next sequential IP Advance bill number, e.g. '2627/028226'."""
+    """Returns next sequential IP Advance bill number, e.g. '2627028226'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"ip_advance_bill_{year_prefix}"
     seq = get_next_sequence_value(
         counter_name,
         seed_resolver=lambda db: _resolve_seed_advance_bill(db, year_prefix)
     )
-    return f"{year_prefix}/{seq:06d}"
+    return f"{year_prefix}{seq:06d}"
 
 
 def get_next_advance_refund_bill_no(fy=None):
-    """Returns next sequential IP Advance Refund bill number, e.g. '2627/000003'."""
+    """Returns next sequential IP Advance Refund bill number, e.g. '2627000003'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"ip_refund_bill_{year_prefix}"
     seq = get_next_sequence_value(
         counter_name,
         seed_resolver=lambda db: _resolve_seed_advance_refund(db, year_prefix)
     )
-    return f"{year_prefix}/{seq:06d}"
+    return f"{year_prefix}{seq:06d}"
 
 
 # 3. Discharge Billing Bill Number
 def get_next_discharge_bill_no(fy=None):
-    """Returns next sequential Discharge bill number, e.g. '2627/005691'."""
+    """Returns next sequential Discharge bill number, e.g. '2627005691'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"discharge_bill_{year_prefix}"
     seq = get_next_sequence_value(
         counter_name,
         seed_resolver=lambda db: _resolve_seed_discharge_bill(db, year_prefix)
     )
-    return f"{year_prefix}/{seq:06d}"
+    return f"{year_prefix}{seq:06d}"
 
 
 # 4. Inventory Module IDs

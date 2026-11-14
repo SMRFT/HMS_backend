@@ -217,6 +217,9 @@ PAGE_MAPPING = DynamicPageMapping({
 
     r'^/_b_a_c_k_e_n_d/HMS/stock-transfer/?(\?.*)?$': 'HMS-P-ST',
     '^/_b_a_c_k_e_n_d/HMS/stock-transfer-action/': 'HMS-P-STA',
+    '^/_b_a_c_k_e_n_d/HMS/get_stocktransfer_departments/': 'HMS-P-STA',
+
+    
 
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/?$': 'HMS-P-PO',
     r'^/_b_a_c_k_e_n_d/HMS/purchase-order/.+/?$': 'HMS-P-POL',
