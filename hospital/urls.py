@@ -77,10 +77,10 @@ from .Views.AccountsReport import (
     op_pharmacy_sales_report,
     cashcounter_rollover_service,
 )
-from .Views.Stores import stores
+from .Views.Stores import stores, cathlab_intent
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report, drug_purchase_reports, admission_vs_discharge_report
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report, drug_purchase_reports, admission_vs_discharge_report, insurance_dedicated_apis
 from .Views.INPatientcare import ip_patient_analysis
 from .Views.Complaints import complaints
 from .Views.QRScan import qrscan
@@ -488,6 +488,16 @@ urlpatterns = [
     path('insurance-reports-dashboard/', insurance_credit_report.insurance_credit_report_view, name='insurance_reports_dashboard_kebab'),
     path('insurance-reports/', insurance_credit_report.insurance_credit_report_view, name='insurance_reports'),
 
+    # Dedicated Specialized Insurance Reports APIs
+    path('report-patient-wise-pharmacy-ip-bill/', insurance_dedicated_apis.patient_wise_pharmacy_ip_bill_api, name='report_patient_wise_pharmacy_ip_bill'),
+    path('report-lab-abstract/', insurance_dedicated_apis.lab_abstract_api, name='report_lab_abstract'),
+    path('report-occupancy-company-wise/', insurance_dedicated_apis.occupancy_company_wise_api, name='report_occupancy_company_wise'),
+    path('report-insurance-bills-status/', insurance_dedicated_apis.insurance_bills_status_api, name='report_insurance_bills_status'),
+    path('report-insurance-branch-dues/', insurance_dedicated_apis.insurance_branch_dues_api, name='report_insurance_branch_dues'),
+    path('report-companywise-registration/', insurance_dedicated_apis.companywise_registration_api, name='report_companywise_registration'),
+    path('report-insurance-discharge-bill-all/', insurance_dedicated_apis.insurance_discharge_bill_all_api, name='report_insurance_discharge_bill_all'),
+    path('report-prescription-details/', insurance_dedicated_apis.prescription_details_api, name='report_prescription_details'),
+
     path('DrugPurchaseReportsDashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard'),
     path('drug-purchase-reports-dashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard_kebab'),
     path('drug-purchase-reports/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports'),
@@ -599,6 +609,11 @@ urlpatterns = [
     path('stores-intent/create/', stores.create_stores_intent, name='create_stores_intent'),
     path('stores-intent/update/<str:pk>/', stores.update_stores_intent, name='update_stores_intent'),
     path('stores-intent/delete/<str:pk>/', stores.soft_delete_intent, name='soft_delete_intent'),
+    # Cath Lab Intent Requisition
+    path('cathlab-items/', cathlab_intent.get_cathlab_items, name='get_cathlab_items'),
+    path('cathlab-item-batches/<path:item_id>/', cathlab_intent.get_cathlab_item_batches, name='get_cathlab_item_batches'),
+    path('cathlab-intent/', cathlab_intent.get_cathlab_intents, name='get_cathlab_intents'),
+    path('cathlab-intent/create/', cathlab_intent.create_cathlab_intent, name='create_cathlab_intent'),
     path('stores-intent-department-approval/', stores.stores_intent_department_approval_view, name='stores_intent_department_approval_view'),
     path('stores-intent-department-approval/<str:employee_id>/', stores.stores_intent_department_approval_view, name='stores_intent_department_approval_detail'),
     path('stores-indent-returns/', stores.stores_indent_return_list_create, name='stores_indent_return_list_create'),

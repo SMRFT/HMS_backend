@@ -4,7 +4,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from .models import (
-    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
+    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, cathlabIntent,
     Stores_LabApprovedItem, Stores_LabUsedQtyDetail, GeneralStoreVendor, VendingMachineSale,
     StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn, ItemOpeningStockLog,
     StoresIntentDepartmentApproval
@@ -12,7 +12,7 @@ from .models import (
 from .serializer import (
     ItemMasterSerializer, DepartmentSerializer, 
     GroupSerializer, CategorySerializer, GroupTypeSerializer, RackSerializer, ShelfSerializer,
-    StoresGRNSerializer, StoresIntentSerializer, get_employee_map_for_grns, get_department_map_for_grns,
+    StoresGRNSerializer, StoresIntentSerializer, CathLabIntentSerializer, get_employee_map_for_grns, get_department_map_for_grns,
     get_department_candidates,
     Stores_LabApprovedItemSerializer, Stores_LabUsedQtyDetailSerializer, GeneralStoreVendorSerializer,
     VendingMachineSaleSerializer, StoresPurchaseOrderSerializer, StoresPurchaseReturnSerializer,
@@ -1519,7 +1519,7 @@ def get_stores_intents(request):
             query["date"]["$gte"] = datetime.strptime(from_date, "%Y-%m-%d")
 
         if to_date:
-            query["date"]["$lte"] = datetime.strptime(to_date, "%Y-%m-%d")
+            query["date"]["$lte"] = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
 
     db = connection.cursor().db_conn
 
@@ -1549,6 +1549,30 @@ def get_stores_intents(request):
     }
 
     data = list(intent_collection.find(query).sort("created_date", -1))
+
+    # Also include Cath Lab indents
+    try:
+        cathlab_collection = db["hospital_cathlabintent"]
+        cathlab_query = dict(query)
+        if "department" in cathlab_query:
+            dept_filt = cathlab_query["department"]
+            if isinstance(dept_filt, dict) and "$in" in dept_filt:
+                in_list = [str(x).lower() for x in dept_filt["$in"]]
+                if not any(x in in_list for x in ["dept027", "cath lab"]):
+                    cathlab_query = None
+            else:
+                if str(dept_filt).lower() not in ["dept027", "cath lab"]:
+                    cathlab_query = None
+        if cathlab_query is not None:
+            cathlab_data = list(cathlab_collection.find(cathlab_query).sort("created_date", -1))
+            for cd in cathlab_data:
+                cd["is_cathlab"] = True
+                cd.setdefault("department", "DEPT027")
+                cd.setdefault("department_name", "Cath lab")
+            data = data + cathlab_data
+            data.sort(key=lambda x: str(x.get("created_date") or ""), reverse=True)
+    except Exception:
+        pass
     emp_map = get_employee_name_map()
 
     ns_map = {}
@@ -1645,7 +1669,20 @@ def update_stores_intent(request, pk):
     branch_code = request.data.get('auth-branch-code')
     hospital_code = request.data.get('auth-hospital-code')
 
-    obj = get_object_or_404(storesIntent, intent_id=pk)
+    obj = storesIntent.objects.filter(intent_id=pk).first()
+    is_cathlab = False
+    if not obj:
+        obj = cathlabIntent.objects.filter(intent_id=pk).first()
+        if obj:
+            is_cathlab = True
+        else:
+            db = connection.cursor().db_conn
+            cl_doc = db["hospital_cathlabintent"].find_one({"intent_id": pk, "is_active": True})
+            if not cl_doc:
+                return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+            obj = cathlabIntent(**{k: v for k, v in cl_doc.items() if k != '_id'})
+            is_cathlab = True
+
     if not obj.is_active:
         return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1655,7 +1692,7 @@ def update_stores_intent(request, pk):
         for it in (request.data.get('items') or [])
     )
     is_hod_approving_now = request.data.get('is_hod_approved') is True or request.data.get('hod_status') == 'Approved'
-    already_hod_approved = bool(getattr(obj, 'is_hod_approved', False) or getattr(obj, 'hod_status', '') == 'Approved')
+    already_hod_approved = bool(getattr(obj, 'is_hod_approved', False) or getattr(obj, 'hod_status', '') == 'Approved' or is_cathlab)
 
     if is_store_approval_attempt and not is_hod_approving_now and not already_hod_approved:
         return Response({
@@ -1676,43 +1713,59 @@ def update_stores_intent(request, pk):
         if not data.get('hod_approved_date'):
             data['hod_approved_date'] = timezone.now()
 
-    serializer = StoresIntentSerializer(obj, data=data, partial=True)
+    serializer_class = CathLabIntentSerializer if is_cathlab else StoresIntentSerializer
+    serializer = serializer_class(obj, data=data, partial=True)
 
     if serializer.is_valid():
         instance = serializer.save()
         items = instance.items or []
 
-        # Ensure Mongo document directly stores HOD fields
-        hod_set = {}
+        # Ensure Mongo document directly stores fields
+        db = connection.cursor().db_conn
+        target_col = "hospital_cathlabintent" if is_cathlab else "hospital_storesintent"
+        update_set = {
+            "items": items,
+            "is_approved": bool(instance.is_approved),
+            "lastmodified_by": employee_id,
+            "lastmodified_date": timezone.now()
+        }
         for h_f in ['is_hod_approved', 'hod_status', 'hod_approved_by', 'hod_approved_date', 'hod_remarks']:
             if h_f in data:
-                hod_set[h_f] = data[h_f]
-        if hod_set:
-            try:
-                db = connection.cursor().db_conn
-                db["hospital_storesintent"].update_one({"intent_id": pk}, {"$set": hod_set})
-            except Exception:
-                pass
+                update_set[h_f] = data[h_f]
+        try:
+            db[target_col].update_one({"intent_id": pk}, {"$set": update_set})
+        except Exception:
+            pass
 
         for item in items:
             item_id = item.get("item_id")
             new_qty = int(item.get("approved_quantity", 0))
-            is_approved = item.get("approval", {}).get("approved", False)
+            is_approved = (
+                bool(item.get("approval", {}).get("approved", False))
+                or item.get("status") in ["Approved", "Partially Approved"]
+                or new_qty > int(old_items.get(item_id, 0))
+                or (bool(instance.is_approved) and new_qty > 0)
+            )
 
             if is_approved and item_id:
-                try:
-                    item_obj = ItemMaster.objects.get(item_id=item_id)
+                # Logic: Only update ItemMaster if the quantity has actually changed
+                old_qty = int(old_items.get(item_id, 0))
+                diff = new_qty - old_qty
 
-                    # Logic: Only update ItemMaster if the quantity has actually changed
-                    old_qty = int(old_items.get(item_id, 0))
-                    diff = new_qty - old_qty
-
-                    if diff != 0:
-                        item_obj.approved_quantity += diff
+                if diff != 0:
+                    try:
+                        item_obj = ItemMaster.objects.get(item_id=item_id)
+                        item_obj.approved_quantity = max(0, int(item_obj.approved_quantity or 0) + diff)
                         item_obj.save()
-
-                except ItemMaster.DoesNotExist:
-                    continue
+                    except ItemMaster.DoesNotExist:
+                        try:
+                            db = connection.cursor().db_conn
+                            db["hospital_itemmaster"].update_one(
+                                {"item_id": item_id},
+                                {"$inc": {"approved_quantity": diff}}
+                            )
+                        except Exception:
+                            pass
 
         # --- DEPT002: Save/accumulate approved items in Stores_LabApprovedItem ---
         dept_code = instance.department
@@ -1762,7 +1815,22 @@ def soft_delete_intent(request, pk):
     outlet_code = request.data.get('auth-outlet-code', 'system')
     hospital_code = request.data.get('auth-hospital-code', 'system')
     
-    obj = get_object_or_404(storesIntent, intent_id=pk)
+    obj = storesIntent.objects.filter(intent_id=pk).first()
+    is_cl = False
+    if not obj:
+        obj = cathlabIntent.objects.filter(intent_id=pk).first()
+        is_cl = True
+    if not obj:
+        db = connection.cursor().db_conn
+        cl_raw = db["hospital_cathlabintent"].find_one({"intent_id": pk, "is_active": True})
+        if cl_raw:
+            db["hospital_cathlabintent"].update_one(
+                {"intent_id": pk},
+                {"$set": {"is_active": False, "lastmodified_by": employee_id, "lastmodified_date": timezone.now()}}
+            )
+            return Response({"message": "Soft deleted successfully"})
+        return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+
     if not obj.is_active:
         return Response({"error": "Intent not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1785,7 +1853,10 @@ def soft_delete_intent(request, pk):
             except ItemMaster.DoesNotExist:
                 continue
 
-    storesIntent.objects.filter(intent_id=obj.intent_id).update(is_active=False, lastmodified_by=employee_id)
+    if is_cl:
+        cathlabIntent.objects.filter(intent_id=obj.intent_id).update(is_active=False, lastmodified_by=employee_id)
+    else:
+        storesIntent.objects.filter(intent_id=obj.intent_id).update(is_active=False, lastmodified_by=employee_id)
 
     return Response({"message": "Soft deleted successfully"})
 

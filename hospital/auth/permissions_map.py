@@ -78,6 +78,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/InsuranceReportsDashboard/?(\?.*)?$': 'HMS-P-FOR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports-dashboard/?(\?.*)?$': 'HMS-P-FOR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
     r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
@@ -270,6 +271,10 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/create/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/update/[^/]+/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-intent/delete/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/cathlab-items/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/cathlab-item-batches/[^/]+/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/cathlab-intent/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/cathlab-intent/create/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/[^/]+/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-indent-returns/approve/[^/]+/?(\?.*)?$': 'HMS-API-IT',
