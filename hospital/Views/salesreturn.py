@@ -526,6 +526,7 @@ def salesreturn_get_uhid_bills(request):
                 "total_amount": 1,
                 "billing_mode": 1,
                 "inpatient_number": 1,
+                "outlet_code": 1,
             }
         ).sort("bill_date", -1)  # newest first
  
@@ -544,6 +545,7 @@ def salesreturn_get_uhid_bills(request):
                 "total_amount":      _convert_decimal(b.get("total_amount", 0)),
                 "billing_mode":      b.get("billing_mode", ""),
                 "inpatient_number":  b.get("inpatient_number", ""),
+                "outlet_code":       b.get("outlet_code", ""),
             })
  
         client.close()
@@ -1230,7 +1232,7 @@ def OP_salesreturn_billdetails(request):
             "uhid": uhid,
             "op_number": uhid,
             "patient_name": patient_name,
-            "return_bill_date": now.isoformat(),
+            "return_bill_date": now_ist.isoformat(),
             "formatted_datetime": formatted_dt,
             "pharmacist_name": user_name,
             "created_by": user_name,

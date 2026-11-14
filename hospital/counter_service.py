@@ -418,6 +418,16 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
                 )
             except Exception:
                 pass
+        elif seed_resolver is not None:
+            # Self-healing sync: if database was wiped, cleared, or out-of-sync with counters,
+            # align counter with the true maximum existing sequence in the database.
+            try:
+                actual_max = seed_resolver(db)
+                cur_seq = existing.get("seq", 0)
+                if actual_max != cur_seq:
+                    counters.update_one({"_id": counter_name}, {"$set": {"seq": actual_max}})
+            except Exception:
+                pass
 
         # Atomic increment
         doc = counters.find_one_and_update(
