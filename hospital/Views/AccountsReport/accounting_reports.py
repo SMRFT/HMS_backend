@@ -858,9 +858,19 @@ def advance_registration_report(request):
         if f_d or t_d:
             f_dt = datetime.combine(f_d, datetime.min.time()) if f_d else datetime.min
             t_dt = datetime.combine(t_d, datetime.max.time()) if t_d else datetime.max
+            f_str = f_d.strftime("%Y-%m-%d") if f_d else "1900-01-01"
+            t_str = (t_d.strftime("%Y-%m-%d") + "T23:59:59.999999+05:30") if t_d else "2099-12-31"
+            t_str_day = t_d.strftime("%Y-%m-%d") if t_d else "2099-12-31"
+
             adm_query["$or"] = [
                 {"advance_payments.date": {"$gte": f_dt, "$lte": t_dt}},
+                {"advance_payments.date": {"$gte": f_str, "$lte": t_str_day}},
+                {"advance_payments.bill_date": {"$gte": f_dt, "$lte": t_dt}},
+                {"advance_payments.bill_date": {"$gte": f_str, "$lte": t_str}},
                 {"advance_payments.created_date": {"$gte": f_dt, "$lte": t_dt}},
+                {"advance_payments.created_date": {"$gte": f_str, "$lte": t_str}},
+                {"advance_payments.paid_datetime": {"$gte": f_dt, "$lte": t_dt}},
+                {"advance_payments.paid_datetime": {"$gte": f_str, "$lte": t_str}},
                 {"admissionDateTime": {"$gte": f_dt, "$lte": t_dt}},
                 {"created_date": {"$gte": f_dt, "$lte": t_dt}}
             ]
@@ -986,14 +996,17 @@ def advance_registration_report(request):
                     ""
                 )
                 
-                # Patient Name lookup
-                if p:
+                # Patient Name lookup: prefer payment receipt / admission patient name, fallback to Patient master
+                pay_p_name = pay.get("patient_name") or adm.get("patient_name") or adm.get("patientname")
+                if pay_p_name:
+                    p_name = pay_p_name
+                elif p:
                     p_sal = p.get('salutation', '') if isinstance(p, dict) else getattr(p, 'salutation', '')
                     p_fn = p.get('firstName', '') if isinstance(p, dict) else getattr(p, 'firstName', '')
                     p_ln = p.get('lastName', '') if isinstance(p, dict) else getattr(p, 'lastName', '')
                     p_name = " ".join(filter(None, [p_sal, p_fn, p_ln])).strip()
                 else:
-                    p_name = adm.get("patient_name") or adm.get("patientname") or pay.get("patient_name") or "Patient"
+                    p_name = "Patient"
                 
                 # Payment Mode
                 p_details = pay.get('payment_details')
