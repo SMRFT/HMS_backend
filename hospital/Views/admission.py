@@ -162,6 +162,77 @@ def _get_hms_db():
     return client, hms_db
 
 
+_admission_indexes_ensured = False
+
+def ensure_admission_indexes():
+    """Ensures high-performance indexes across admission, advances, refunds, and room shifting collections."""
+    global _admission_indexes_ensured
+    if _admission_indexes_ensured:
+        return
+    client = None
+    try:
+        client, db = _get_hms_db()
+        def _idx(coll, keys):
+            try:
+                db[coll].create_index(keys, background=True)
+            except Exception:
+                pass
+
+        # ── hospital_admission ──
+        _idx("hospital_admission", [("hospital_code", 1), ("branch_code", 1), ("is_admitted", 1), ("is_discharged", 1), ("admissionDateTime", 1)])
+        _idx("hospital_admission", [("hospital_code", 1), ("branch_code", 1), ("is_admitted", 1), ("is_discharged", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("is_admitted", 1), ("is_discharged", 1), ("is_cancelled", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("is_admitted", 1), ("is_discharged", 1), ("is_cancelled", 1), ("admissionDateTime", 1)])
+        _idx("hospital_admission", [("uhid", 1), ("is_admitted", 1), ("is_cancelled", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("ipNumber", 1), ("is_cancelled", 1)])
+        _idx("hospital_admission", [("outlet_code", 1), ("is_admitted", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("admittingDoctor", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("customer_type", 1), ("admissionDateTime", -1)])
+        _idx("hospital_admission", [("customerType", 1), ("admissionDateTime", -1)])
+
+        # IP Advance embedded lookups
+        _idx("hospital_admission", [("advance_payments.bill_no", 1)])
+        _idx("hospital_admission", [("advance_payments.bill_number", 1)])
+        _idx("hospital_admission", [("advance_payments.date", -1)])
+        _idx("hospital_admission", [("advance_payments.bill_date", -1)])
+        _idx("hospital_admission", [("advance_payments.created_date", -1)])
+        _idx("hospital_admission", [("advance_payments.outlet_code", 1)])
+        _idx("hospital_admission", [("advance_payments.is_advanceActive", 1)])
+        _idx("hospital_admission", [("advance_payments.refund_details.refund_bill_no", 1)])
+        _idx("hospital_admission", [("is_cancelled", 1), ("advance_payments.date", -1)])
+
+        # Room shifting & bed occupancy lookups
+        _idx("hospital_admission", [("roomShitingDetails.is_roomActive", 1), ("roomShitingDetails.newRoomNo", 1), ("roomShitingDetails.newBedNo", 1)])
+        _idx("hospital_admission", [("roomShitingDetails.is_roomCleaned", 1), ("lastmodified_date", -1)])
+        _idx("hospital_admission", [("room_details.is_roomCleaned", 1), ("lastmodified_date", -1)])
+        _idx("hospital_admission", [("room_details.is_roomActive", 1), ("room_details.roomNo", 1), ("room_details.bedNo", 1)])
+        _idx("hospital_admission", [("roomShitingDetails.shiftingDateTime", -1)])
+
+        # ── hospital_ipadvance_refund ──
+        _idx("hospital_ipadvance_refund", [("refund_date", -1)])
+        _idx("hospital_ipadvance_refund", [("ip_number", 1), ("refund_date", -1)])
+        _idx("hospital_ipadvance_refund", [("uhid", 1), ("refund_date", -1)])
+        _idx("hospital_ipadvance_refund", [("refund_bill_no", 1)])
+        _idx("hospital_ipadvance_refund", [("bill_no", 1)])
+        _idx("hospital_ipadvance_refund", [("advance_bill_no", 1)])
+        _idx("hospital_ipadvance_refund", [("hospital_code", 1), ("branch_code", 1), ("refund_date", -1)])
+        _idx("hospital_ipadvance_refund", [("status", 1), ("refund_date", -1)])
+        _idx("hospital_ipadvance_refund", [("created_date", -1)])
+
+        # ── hospital_patient ──
+        _idx("hospital_patient", [("uhid", 1)])
+        _idx("hospital_patient", [("mobile", 1)])
+        _idx("hospital_patient", [("phone_number", 1)])
+        _idx("hospital_patient", [("patient_name", 1)])
+
+        _admission_indexes_ensured = True
+    except Exception:
+        pass
+    finally:
+        if client:
+            client.close()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GridFS MLC Document Helpers & Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
@@ -646,6 +717,7 @@ def get_next_ip_number(request):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def search_rooms(request):
+    ensure_admission_indexes()
     try:
         hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
         result        = []
@@ -984,6 +1056,7 @@ def op_patient_detail_by_uhid(request, uhid):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_view(request):
+    ensure_admission_indexes()
     employee_id   = (request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system")
     hospital_code = (request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system")
     branch_code   = (request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system")
@@ -1010,12 +1083,14 @@ def admission_view(request):
 
             if ip_filter:
                 if "/" in ip_filter:
-                    query["ipNumber"] = {"$regex": f"^{re.escape(ip_filter)}$", "$options": "i"}
+                    # Index-accelerated match
+                    query["ipNumber"] = {"$in": [ip_filter, ip_filter.upper(), ip_filter.lower()]}
                 else:
                     query["ipNumber"] = {"$regex": re.escape(ip_filter), "$options": "i"}
 
             if uhid_filter:
-                query["uhid"] = {"$regex": f"^{re.escape(uhid_filter)}$", "$options": "i"}
+                # Index-accelerated match
+                query["uhid"] = {"$in": [uhid_filter, uhid_filter.upper(), uhid_filter.lower()]}
 
             st_lower = status_filter.lower()
             if st_lower == 'admitted':
@@ -1855,6 +1930,7 @@ def _bill_type_fields(payload):
 @permission_classes([HasRoleAndDataPermission])
 @csrf_exempt
 def admission_advance(request, ipNumber=None):
+    ensure_admission_indexes()
     try:
         employee_id   = request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system"
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
@@ -2309,6 +2385,7 @@ def ip_advance_refunds_list(request):
     """
     Returns list of IP Advance refunds with patient name, room, and full refund details.
     """
+    ensure_admission_indexes()
     try:
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or request.GET.get("hospital_code") or "system"
         branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or request.GET.get("branch_code") or "system"
@@ -2699,6 +2776,7 @@ def admitted_patients(request):
     `search` (UHID / IP Number / Patient Name / Doctor / Room / Mobile),
     and `limit` (default 500).
     """
+    ensure_admission_indexes()
     try:
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
         branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
