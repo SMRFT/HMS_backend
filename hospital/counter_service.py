@@ -25,7 +25,20 @@ def _get_db():
         except Exception:
             host = None
     if not host:
-        host = "mongodb://localhost:27017"
+        try:
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip().startswith("GLOBAL_DB_HOST"):
+                            parts = line.split("=", 1)
+                            if len(parts) == 2:
+                                host = parts[1].strip()
+                                break
+        except Exception:
+            pass
+    if not host:
+        host = "mongodb://admin:SMRFT%40prod2026@45.252.190.162:27017/"
     client = MongoClient(host, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000)
     db_name = os.getenv("HMS_DB_NAME", "HMS")
     return client, client[db_name]
@@ -50,138 +63,165 @@ def _current_admission_prefix(is_daycare=False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Seed Resolvers (only run once when a counter is not yet initialized)
+# Seed Resolvers (find true maximum existing sequence in database)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_seed_admission_ip(db, prefix):
     """
-    Finds maximum existing sequential IP number under prefix in the normal range (< 500000).
-    Ignores test/legacy 5-series (>= 500000).
-    If 000001 does not exist under prefix, starts cleanly at 0 so the first generated IP is 000001.
+    Finds the maximum existing IP number under the given prefix.
+    Preserves the highest sequence even if 000001 does not exist.
     """
     cursor = db["hospital_admission"].find(
-        {"ipNumber": {"$regex": f"^{prefix}/"}},
+        {"ipNumber": {"$regex": f"^{re.escape(prefix)}/"}},
         {"ipNumber": 1}
     )
-
     max_num = 0
-    has_first = False
-    for a in cursor:
-        ip = str(a.get("ipNumber") or "").strip()
-        if "/" in ip:
-            try:
+    for admission in cursor:
+        ip = str(admission.get("ipNumber") or "").strip()
+        try:
+            if "/" in ip:
                 p, n_str = ip.split("/", 1)
                 if p == prefix:
                     n = int(n_str)
-                    if n == 1:
-                        has_first = True
-                    if 0 < n < 500000 and n > max_num:
-                        max_num = n
-            except Exception:
-                continue
-
-    if not has_first:
-        return 0
-
+                    if 0 < n < 500000:
+                        max_num = max(max_num, n)
+        except (ValueError, TypeError):
+            continue
     return max_num
 
 
 def _resolve_seed_advance_bill(db, fy):
     """Finds true maximum bill_no in advance_payments array for financial year."""
-    pipeline = [
-        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}}},
-        {"$unwind": "$advance_payments"},
-        {"$match": {"advance_payments.bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}}},
-        {"$project": {"bill_no": "$advance_payments.bill_no"}},
-        {"$sort": {"bill_no": -1}},
-        {"$limit": 5}
-    ]
     max_seq = 0
-    for doc in db["hospital_admission"].aggregate(pipeline):
-        try:
-            bn = str(doc.get("bill_no", ""))
-            if "/" in bn:
-                n = int(bn.split("/")[-1])
-            elif bn.startswith(fy):
-                n = int(bn[len(fy):])
-            else:
-                continue
-            if n > max_seq:
-                max_seq = n
-        except Exception:
-            continue
+    try:
+        cursor = db["hospital_admission"].find(
+            {"advance_payments.bill_no": {"$regex": f"^{re.escape(fy)}"}},
+            {"advance_payments.bill_no": 1, "advance_payments.bill_number": 1}
+        )
+        for doc in cursor:
+            for adv in doc.get("advance_payments", []):
+                bn = str(adv.get("bill_no") or adv.get("bill_number") or "").strip()
+                try:
+                    if "/" in bn:
+                        p, n_str = bn.split("/", 1)
+                        if p == fy:
+                            n = int(n_str)
+                            if n > max_seq:
+                                max_seq = n
+                    elif bn.startswith(fy):
+                        seq_str = bn[len(fy):]
+                        if seq_str.isdigit():
+                            n = int(seq_str)
+                            if n > max_seq:
+                                max_seq = n
+                except (ValueError, TypeError):
+                    continue
+    except Exception:
+        pass
     return max_seq
 
 
 def _resolve_seed_advance_refund(db, fy):
-    latest = db["hospital_ipadvance_refund"].find_one(
-        {"refund_bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}},
-        projection={"refund_bill_no": 1},
-        sort=[("refund_bill_no", -1)]
-    )
-    if latest and latest.get("refund_bill_no"):
-        try:
-            s = str(latest["refund_bill_no"])
-            if "/" in s:
-                return int(s.split("/")[-1])
-            elif s.startswith(fy):
-                return int(s[len(fy):])
-        except Exception:
-            pass
-    return 0
+    """Finds maximum refund_bill_no in hospital_ipadvance_refund for financial year."""
+    max_seq = 0
+    try:
+        cursor = db["hospital_ipadvance_refund"].find(
+            {"refund_bill_no": {"$regex": f"^{re.escape(fy)}"}},
+            {"refund_bill_no": 1}
+        )
+        for doc in cursor:
+            s = str(doc.get("refund_bill_no") or "").strip()
+            try:
+                if "/" in s:
+                    p, n_str = s.split("/", 1)
+                    if p == fy:
+                        n = int(n_str)
+                        if n > max_seq:
+                            max_seq = n
+                elif s.startswith(fy):
+                    seq_str = s[len(fy):]
+                    if seq_str.isdigit():
+                        n = int(seq_str)
+                        if n > max_seq:
+                            max_seq = n
+            except (ValueError, TypeError):
+                continue
+    except Exception:
+        pass
+    return max_seq
 
 
 def _resolve_seed_discharge_bill(db, fy):
     """Finds true maximum bill_no in hospital_dischargebilling for financial year."""
-    latest = db["hospital_dischargebilling"].find_one(
-        {"bill_no": {"$regex": f"^{fy}/|^{fy}\\d+"}},
-        projection={"bill_no": 1},
-        sort=[("bill_no", -1)]
-    )
-    if latest and latest.get("bill_no"):
-        try:
-            s = str(latest["bill_no"])
-            if "/" in s:
-                return int(s.split("/")[-1])
-            elif s.startswith(fy):
-                return int(s[len(fy):])
-        except Exception:
-            pass
-    return 0
+    max_seq = 0
+    try:
+        cursor = db["hospital_dischargebilling"].find(
+            {"bill_no": {"$regex": f"^{re.escape(fy)}"}},
+            {"bill_no": 1}
+        )
+        for doc in cursor:
+            bn = str(doc.get("bill_no") or "").strip()
+            try:
+                if "/" in bn:
+                    p, n_str = bn.split("/", 1)
+                    if p == fy:
+                        n = int(n_str)
+                        if n > max_seq:
+                            max_seq = n
+                elif bn.startswith(fy):
+                    seq_str = bn[len(fy):]
+                    if seq_str.isdigit():
+                        n = int(seq_str)
+                        if n > max_seq:
+                            max_seq = n
+            except (ValueError, TypeError):
+                continue
+    except Exception:
+        pass
+    return max_seq
 
 
 def _resolve_seed_pharmacy_bill(db, outlet_code, fy, outlet_suffix="01"):
     """Finds maximum bill_no sequence for an outlet under financial year fy and outlet suffix."""
     clean_outlet = str(outlet_code or "").strip()
     prefix = f"{fy}{outlet_suffix}"
+    alt_prefix = f"{fy}/"
     max_no = 0
 
     try:
-        match_q = {"bill_no": {"$regex": f"^{prefix}"}}
+        match_q = {"$or": [
+            {"bill_no": {"$regex": f"^{prefix}"}},
+            {"bill_no": {"$regex": f"^{re.escape(alt_prefix)}"}}
+        ]}
         if clean_outlet and clean_outlet != "DEFAULT":
             match_q["outlet_code"] = clean_outlet
 
-        latest_bills = list(db["hospital_pharmacybilling"].find(
-            match_q,
-            projection={"bill_no": 1}
-        ).sort("bill_no", -1).limit(20))
-
-        for b in latest_bills:
+        cursor = db["hospital_pharmacybilling"].find(match_q, {"bill_no": 1})
+        for b in cursor:
             bn = str(b.get("bill_no") or "").strip()
-            if bn.startswith(prefix):
-                seq_str = bn[len(prefix):]
-                if seq_str.isdigit():
-                    num = int(seq_str)
-                    if num > max_no:
-                        max_no = num
+            try:
+                if bn.startswith(prefix):
+                    seq_str = bn[len(prefix):]
+                    if seq_str.isdigit():
+                        num = int(seq_str)
+                        if num > max_no:
+                            max_no = num
+                elif "/" in bn:
+                    p, seq_str = bn.split("/", 1)
+                    if p == fy and seq_str.isdigit():
+                        num = int(seq_str)
+                        if num > max_no:
+                            max_no = num
+            except (ValueError, TypeError):
+                continue
     except Exception:
         pass
 
     try:
         from hospital.models import PharmacyBilling
-        sql_bills = list(PharmacyBilling.objects.filter(bill_no__startswith=prefix).order_by('-bill_no')[:20])
-        for b in sql_bills:
-            bn = str(b.bill_no or "").strip()
+        sql_bills = list(PharmacyBilling.objects.filter(bill_no__startswith=prefix).values_list('bill_no', flat=True))
+        for bn in sql_bills:
+            bn = str(bn or "").strip()
             if bn.startswith(prefix):
                 seq_str = bn[len(prefix):]
                 if seq_str.isdigit():
@@ -198,34 +238,43 @@ def _resolve_seed_sales_return_bill(db, outlet_code, fy, outlet_suffix="01"):
     """Finds maximum return_bill_no sequence for an outlet under financial year fy and outlet suffix."""
     clean_outlet = str(outlet_code or "").strip()
     prefix = f"{fy}{outlet_suffix}"
+    alt_prefix = f"{fy}/"
     max_no = 0
 
     try:
-        match_q = {"return_bill_no": {"$regex": f"^{prefix}"}}
+        match_q = {"$or": [
+            {"return_bill_no": {"$regex": f"^{prefix}"}},
+            {"return_bill_no": {"$regex": f"^{re.escape(alt_prefix)}"}}
+        ]}
         if clean_outlet and clean_outlet != "DEFAULT":
             match_q["outlet_code"] = clean_outlet
 
-        latest_returns = list(db["hospital_salesreturn"].find(
-            match_q,
-            projection={"return_bill_no": 1}
-        ).sort("return_bill_no", -1).limit(20))
-
-        for b in latest_returns:
+        cursor = db["hospital_salesreturn"].find(match_q, {"return_bill_no": 1})
+        for b in cursor:
             bn = str(b.get("return_bill_no") or "").strip()
-            if bn.startswith(prefix):
-                seq_str = bn[len(prefix):]
-                if seq_str.isdigit():
-                    num = int(seq_str)
-                    if num > max_no:
-                        max_no = num
+            try:
+                if bn.startswith(prefix):
+                    seq_str = bn[len(prefix):]
+                    if seq_str.isdigit():
+                        num = int(seq_str)
+                        if num > max_no:
+                            max_no = num
+                elif "/" in bn:
+                    p, seq_str = bn.split("/", 1)
+                    if p == fy and seq_str.isdigit():
+                        num = int(seq_str)
+                        if num > max_no:
+                            max_no = num
+            except (ValueError, TypeError):
+                continue
     except Exception:
         pass
 
     try:
         from hospital.models import SalesReturn
-        sql_returns = list(SalesReturn.objects.filter(return_bill_no__startswith=prefix).order_by('-return_bill_no')[:20])
-        for b in sql_returns:
-            bn = str(b.return_bill_no or "").strip()
+        sql_returns = list(SalesReturn.objects.filter(return_bill_no__startswith=prefix).values_list('return_bill_no', flat=True))
+        for bn in sql_returns:
+            bn = str(bn or "").strip()
             if bn.startswith(prefix):
                 seq_str = bn[len(prefix):]
                 if seq_str.isdigit():
@@ -239,109 +288,171 @@ def _resolve_seed_sales_return_bill(db, outlet_code, fy, outlet_suffix="01"):
 
 
 def _resolve_seed_pharmacy_item(db):
-    latest = db["hospital_pharmacyitem"].find_one(sort=[("item_id", -1)], projection={"item_id": 1})
-    if latest and latest.get("item_id") is not None:
-        try:
-            return int(latest["item_id"])
-        except Exception:
-            pass
-    return 0
+    """Finds maximum item_id for PharmacyItem across numeric and string records."""
+    max_id = 0
+    try:
+        latest = db["hospital_pharmacyitem"].find_one(
+            {"item_id": {"$type": "number"}},
+            sort=[("item_id", -1)],
+            projection={"item_id": 1}
+        )
+        if latest and latest.get("item_id") is not None:
+            max_id = max(max_id, int(latest["item_id"]))
+    except Exception:
+        pass
+    try:
+        for doc in db["hospital_pharmacyitem"].find({"item_id": {"$type": "string"}}, {"item_id": 1}):
+            try:
+                max_id = max(max_id, int(doc["item_id"]))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 def _resolve_seed_vendor(db):
+    """Finds maximum vendor_id for Vendor."""
     max_v = 0
-    for v in db["hospital_vendor"].find({}, {"vendor_id": 1}):
-        try:
-            vid = int(v.get("vendor_id", 0))
-            if vid > max_v:
-                max_v = vid
-        except Exception:
-            pass
+    try:
+        for v in db["hospital_vendor"].find({}, {"vendor_id": 1}):
+            try:
+                vid = int(v.get("vendor_id", 0))
+                if vid > max_v:
+                    max_v = vid
+            except Exception:
+                pass
+    except Exception:
+        pass
     return max_v
 
 
 def _resolve_seed_pharmacy_category(db):
-    latest = db["hospital_pharmacycategory"].find_one(sort=[("category_id", -1)], projection={"category_id": 1})
-    if latest and latest.get("category_id") is not None:
-        try:
-            return int(latest["category_id"])
-        except Exception:
-            pass
-    return 0
+    """Finds maximum category_id for PharmacyCategory."""
+    max_cat = 0
+    try:
+        for c in db["hospital_pharmacycategory"].find({}, {"category_id": 1}):
+            try:
+                cid = int(c.get("category_id", 0))
+                if cid > max_cat:
+                    max_cat = cid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_cat
 
 
 def _resolve_seed_chemical_composition(db):
-    latest = db["hospital_chemicalcomposition"].find_one(sort=[("composition_id", -1)], projection={"composition_id": 1})
-    if latest and latest.get("composition_id") is not None:
-        try:
-            return int(latest["composition_id"])
-        except Exception:
-            pass
-    return 0
+    """Finds maximum composition_id for ChemicalComposition."""
+    max_comp = 0
+    try:
+        for c in db["hospital_chemicalcomposition"].find({}, {"composition_id": 1}):
+            try:
+                cid = int(c.get("composition_id", 0))
+                if cid > max_comp:
+                    max_comp = cid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_comp
 
 
 def _resolve_seed_grn_draft(db, fy):
-    latest = db["hospital_grn"].find_one(
-        {"draft_number": {"$regex": f"^DRAFT/{fy}/"}},
-        projection={"draft_number": 1},
-        sort=[("draft_number", -1)]
-    )
-    if latest and latest.get("draft_number"):
-        try:
-            return int(str(latest["draft_number"]).split("/")[-1])
-        except Exception:
-            pass
-    return 0
+    """Finds maximum sequential draft number for GRN Draft under financial year."""
+    max_draft = 0
+    try:
+        cursor = db["hospital_grn"].find(
+            {"draft_number": {"$regex": f"^DRAFT/{re.escape(fy)}/"}},
+            {"draft_number": 1}
+        )
+        for doc in cursor:
+            s = str(doc.get("draft_number") or "").split("/")[-1]
+            try:
+                n = int(s)
+                if n > max_draft:
+                    max_draft = n
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_draft
 
 
 def _resolve_seed_room_category(db):
-    latest = db["hospital_roomcategory"].find_one(sort=[("room_category_id", -1)], projection={"room_category_id": 1})
-    if latest and latest.get("room_category_id") is not None:
-        try:
-            return int(latest["room_category_id"])
-        except Exception:
-            pass
-    return 0
+    max_id = 0
+    try:
+        for r in db["hospital_roomcategory"].find({}, {"room_category_id": 1}):
+            try:
+                rid = int(r.get("room_category_id", 0))
+                if rid > max_id:
+                    max_id = rid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 def _resolve_seed_block(db):
-    latest = db["hospital_block"].find_one(sort=[("block_id", -1)], projection={"block_id": 1})
-    if latest and latest.get("block_id") is not None:
-        try:
-            return int(latest["block_id"])
-        except Exception:
-            pass
-    return 0
+    max_id = 0
+    try:
+        for b in db["hospital_block"].find({}, {"block_id": 1}):
+            try:
+                bid = int(b.get("block_id", 0))
+                if bid > max_id:
+                    max_id = bid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 def _resolve_seed_ward(db):
-    latest = db["hospital_nursingstation"].find_one(sort=[("ward_id", -1)], projection={"ward_id": 1})
-    if latest and latest.get("ward_id") is not None:
-        try:
-            return int(latest["ward_id"])
-        except Exception:
-            pass
-    return 0
+    max_id = 0
+    try:
+        for w in db["hospital_nursingstation"].find({}, {"ward_id": 1}):
+            try:
+                wid = int(w.get("ward_id", 0))
+                if wid > max_id:
+                    max_id = wid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 def _resolve_seed_room_service_description(db):
-    latest = db["hospital_roomservicedescription"].find_one(sort=[("description_id", -1)], projection={"description_id": 1})
-    if latest and latest.get("description_id") is not None:
-        try:
-            return int(latest["description_id"])
-        except Exception:
-            pass
-    return 0
+    max_id = 0
+    try:
+        for d in db["hospital_roomservicedescription"].find({}, {"description_id": 1}):
+            try:
+                did = int(d.get("description_id", 0))
+                if did > max_id:
+                    max_id = did
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 def _resolve_seed_room_kit(db):
-    latest = db["hospital_roomkititems"].find_one(sort=[("kit_id", -1)], projection={"kit_id": 1})
-    if latest and latest.get("kit_id") is not None:
-        try:
-            return int(latest["kit_id"])
-        except Exception:
-            pass
-    return 0
+    max_id = 0
+    try:
+        for k in db["hospital_roomkititems"].find({}, {"kit_id": 1}):
+            try:
+                kid = int(k.get("kit_id", 0))
+                if kid > max_id:
+                    max_id = kid
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return max_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +476,7 @@ def peek_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, d
     """
     Read-only preview of the next integer sequence (current seq + 1) for counter_name
     WITHOUT incrementing or mutating the 'counters' collection.
+    If the counter is missing or behind actual data, aligns it to the maximum existing sequence.
     """
     should_close = False
     if db_instance is not None:
@@ -376,10 +488,26 @@ def peek_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, d
     try:
         counters = db["counters"]
         existing = counters.find_one({"_id": counter_name})
-        if existing is not None and "seq" in existing:
-            return int(existing["seq"]) + 1
-        seed = _resolve_initial_seed(db, counter_name, seed_resolver, default_seed)
-        return int(seed) + 1
+        cur_seq = int(existing["seq"]) if existing and "seq" in existing else None
+
+        if seed_resolver and callable(seed_resolver):
+            try:
+                actual_max = seed_resolver(db)
+                if cur_seq is None or actual_max > cur_seq:
+                    cur_seq = actual_max
+                    counters.update_one(
+                        {"_id": counter_name},
+                        {"$set": {"seq": cur_seq}},
+                        upsert=True
+                    )
+            except Exception as e:
+                print(f"[counter_service] Error resolving seed in peek for {counter_name}: {e}")
+
+        if cur_seq is not None:
+            return cur_seq + 1
+
+        seed = default_seed if default_seed > 0 else 0
+        return seed + 1
     finally:
         if should_close:
             try:
@@ -392,6 +520,8 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
     """
     Atomically increments and returns the next integer sequence for counter_name.
     - If the counter doesn't exist in MongoDB, it seeds from seed_resolver(db) or default_seed.
+    - If the counter is behind actual data (e.g. data imported), advances it to actual_max.
+    - NEVER resets or decrements the counter downwards.
     - Uses find_one_and_update with $inc and ReturnDocument.AFTER.
     - If db_instance is provided, it reuses the connection without closing it.
     """
@@ -408,8 +538,6 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
 
         if existing is None:
             seed = _resolve_initial_seed(db, counter_name, seed_resolver, default_seed)
-
-            # Insert document with initial seed
             try:
                 counters.update_one(
                     {"_id": counter_name},
@@ -419,15 +547,15 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
             except Exception:
                 pass
         elif seed_resolver is not None:
-            # Self-healing sync: if database was wiped, cleared, or out-of-sync with counters,
-            # align counter with the true maximum existing sequence in the database.
+            # Self-healing sync: ONLY advance if the database has records HIGHER than the counter seq.
+            # Never decrement or reset if actual_max <= cur_seq.
             try:
                 actual_max = seed_resolver(db)
-                cur_seq = existing.get("seq", 0)
-                if actual_max != cur_seq:
+                cur_seq = int(existing.get("seq", 0))
+                if actual_max > cur_seq:
                     counters.update_one({"_id": counter_name}, {"$set": {"seq": actual_max}})
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[counter_service] Error in self-healing sync for {counter_name}: {e}")
 
         # Atomic increment
         doc = counters.find_one_and_update(
@@ -451,7 +579,7 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
 
 # 1. Admission IP Number
 def peek_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
-    """Read-only preview of next IP number (e.g. 'S026/000001' or 'SD26/000001') without consuming a sequence."""
+    """Read-only preview of next IP number (e.g. 'S026/008225' or 'SD26/000001') without consuming a sequence."""
     p = prefix or _current_admission_prefix(is_daycare=is_daycare)
     counter_name = f"admission_ip_{p}"
     seq = peek_next_sequence_value(
@@ -463,7 +591,7 @@ def peek_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
 
 
 def get_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
-    """Returns next sequential IP number, e.g. 'S026/000001' or 'SD26/000001'."""
+    """Returns next sequential IP number, e.g. 'S026/008225' or 'SD26/000001'."""
     p = prefix or _current_admission_prefix(is_daycare=is_daycare)
     counter_name = f"admission_ip_{p}"
     seq = get_next_sequence_value(
@@ -476,7 +604,7 @@ def get_next_admission_ip(prefix=None, db_instance=None, is_daycare=False):
 
 # 2. IP Advance & Refund Bill Numbers
 def get_next_advance_bill_no(fy=None):
-    """Returns next sequential IP Advance bill number, e.g. '2627028226'."""
+    """Returns next sequential IP Advance bill number, e.g. '2627003004'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"ip_advance_bill_{year_prefix}"
     seq = get_next_sequence_value(
@@ -487,7 +615,7 @@ def get_next_advance_bill_no(fy=None):
 
 
 def get_next_advance_refund_bill_no(fy=None):
-    """Returns next sequential IP Advance Refund bill number, e.g. '2627000003'."""
+    """Returns next sequential IP Advance Refund bill number, e.g. '2627000004'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"ip_refund_bill_{year_prefix}"
     seq = get_next_sequence_value(
@@ -499,7 +627,7 @@ def get_next_advance_refund_bill_no(fy=None):
 
 # 3. Discharge Billing Bill Number
 def get_next_discharge_bill_no(fy=None):
-    """Returns next sequential Discharge bill number, e.g. '2627005691'."""
+    """Returns next sequential Discharge bill number, e.g. '2627008125'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"discharge_bill_{year_prefix}"
     seq = get_next_sequence_value(
@@ -519,7 +647,7 @@ def get_next_pharmacy_item_id():
 
 
 def get_next_vendor_id():
-    """Returns next vendor_id as string, e.g. '836'."""
+    """Returns next vendor_id as string, e.g. '838'."""
     val = get_next_sequence_value(
         "inventory_vendor_id",
         seed_resolver=_resolve_seed_vendor
@@ -544,7 +672,7 @@ def get_next_chemical_composition_id():
 
 
 def get_next_grn_draft_number(fy=None):
-    """Returns next sequential GRN draft number, e.g. 'DRAFT/2627/001448'."""
+    """Returns next sequential GRN draft number, e.g. 'DRAFT/2627/02043'."""
     year_prefix = fy or _current_fin_year_prefix()
     counter_name = f"inventory_grn_draft_{year_prefix}"
     seq = get_next_sequence_value(
