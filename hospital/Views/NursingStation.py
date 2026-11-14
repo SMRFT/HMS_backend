@@ -8,7 +8,7 @@ import os
 
 import re
 
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 
 from ..models import Admission, PharmacyBilling, PharmacyItem, PharmacyStock, WardReturnDetails
 
@@ -40,7 +40,7 @@ from rest_framework.decorators import api_view
 
 from rest_framework.response import Response
 
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 
 import pytz
 
@@ -118,9 +118,11 @@ def get_admission_list(request):
 
                 item["id"] = item["_id"]
 
-            if item.get("uhid") and not item.get("patient_details"):
-
-                uhid_set.add(item.get("uhid"))
+            uhid_val = item.get("uhid")
+            p_det = item.get("patient_details") or {}
+            has_pdet_name = bool((p_det.get("firstName") or p_det.get("first_name") or p_det.get("patient_name") or p_det.get("name") or "").strip())
+            if uhid_val and not has_pdet_name:
+                uhid_set.add(uhid_val)
 
             for doctor_field in ["admittingDoctor", "consultingDoctor"]:
 
@@ -166,7 +168,7 @@ def get_admission_list(request):
 
                 room_no_set.add(str(room_no).strip())
 
-        # Phase 2: Batch fetch patient details
+        # Phase 2: Batch fetch patient details (from hospital_patient, falling back to hospital_billing & hospital_investbilling)
 
         patient_map = {}
 
@@ -177,6 +179,50 @@ def get_admission_list(request):
             for p in pts:
 
                 patient_map[p.get("uhid")] = serialize_doc(p)
+
+            # Find UHIDs still missing a name
+            missing_uhids = [
+                u for u in uhid_set
+                if not (patient_map.get(u, {}).get("firstName") or patient_map.get(u, {}).get("first_name") or patient_map.get(u, {}).get("name") or patient_map.get(u, {}).get("patient_name"))
+            ]
+
+            if missing_uhids:
+                # Fallback 1: hospital_billing
+                billing_pts = list(mongo_db.hospital_billing.find(
+                    {"uhid": {"$in": missing_uhids}},
+                    {"uhid": 1, "patient_name": 1, "salutation": 1, "gender": 1, "mobile_phone": 1, "age": 1, "created_date": 1}
+                ).sort("created_date", -1))
+                for b in billing_pts:
+                    u = b.get("uhid")
+                    p_name = (b.get("patient_name") or "").strip()
+                    if u and u not in patient_map and p_name:
+                        patient_map[u] = {
+                            "firstName": p_name,
+                            "lastName": "",
+                            "salutation": b.get("salutation", ""),
+                            "gender": b.get("gender", ""),
+                            "age": b.get("age", ""),
+                            "mobilePhone": b.get("mobile_phone", ""),
+                        }
+
+                # Fallback 2: hospital_investbilling
+                still_missing = [u for u in missing_uhids if u not in patient_map]
+                if still_missing:
+                    inv_pts = list(mongo_db.hospital_investbilling.find(
+                        {"uhid": {"$in": still_missing}},
+                        {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1, "salutation": 1, "age": 1, "gender": 1, "created_date": 1}
+                    ).sort("created_date", -1))
+                    for inv in inv_pts:
+                        u = inv.get("uhid")
+                        inv_name = (inv.get("firstName") or inv.get("patient_name") or "").strip()
+                        if u and u not in patient_map and inv_name:
+                            patient_map[u] = {
+                                "firstName": inv_name,
+                                "lastName": (inv.get("lastName") or "").strip(),
+                                "salutation": inv.get("salutation", ""),
+                                "gender": inv.get("gender", ""),
+                                "age": inv.get("age", ""),
+                            }
 
         # Phase 3: Batch fetch doctor names
 
@@ -236,27 +282,30 @@ def get_admission_list(request):
 
         for item in data:
 
-            p_details = item.get("patient_details", {})
-
-            if not p_details and item.get("uhid"):
-
-                p_details = patient_map.get(item.get("uhid"), {})
-
-                if p_details:
-
+            p_details = item.get("patient_details") or {}
+            uhid_val = item.get("uhid")
+            has_pdet_name = bool((p_details.get("firstName") or p_details.get("first_name") or p_details.get("patient_name") or p_details.get("name") or "").strip())
+            if uhid_val and not has_pdet_name:
+                mapped_p = patient_map.get(uhid_val, {})
+                if mapped_p:
+                    p_details = mapped_p
                     item["patient_details"] = p_details
 
+            # Resolve full patient name with proper salutation and fallbacks
+            resolved_name = ""
             if p_details:
+                sal = (p_details.get("salutation") or "").strip()
+                fname = (p_details.get("firstName") or p_details.get("first_name") or p_details.get("patient_name") or p_details.get("name") or "").strip()
+                lname = (p_details.get("lastName") or p_details.get("last_name") or "").strip()
+                resolved_name = f"{sal} {fname} {lname}".strip() or fname
 
-                fname = p_details.get("firstName", "")
+            if not resolved_name:
+                resolved_name = (item.get("patient_name") or item.get("patientName") or "").strip()
 
-                lname = p_details.get("lastName", "")
+            if not resolved_name and (uhid_val or item.get("ipNumber")):
+                resolved_name = f"Patient ({uhid_val or item.get('ipNumber')})"
 
-                item["patient_name"] = f"{fname} {lname}".strip()
-
-            else:
-
-                item["patient_name"] = ""
+            item["patient_name"] = resolved_name
 
             for doctor_field in ["admittingDoctor", "consultingDoctor"]:
 
