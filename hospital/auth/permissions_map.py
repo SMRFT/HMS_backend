@@ -429,6 +429,7 @@ PAGE_MAPPING = DynamicPageMapping({
     '/_b_a_c_k_e_n_d/HMS/summaries/create/': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/check-summary-exists(?:/[^/]+)+/$': 'HMS-P-SUM',                  
     r'^/_b_a_c_k_e_n_d/HMS/check-summary-exists/.*$': 'HMS-P-SUM',                  
+    r'^/_b_a_c_k_e_n_d/HMS/preliminary-approve-summary(?:/[^/]+)+/$': 'HMS-P-SUMPA',                  
     r'^/_b_a_c_k_e_n_d/HMS/approve-summary(?:/[^/]+)+/$': 'HMS-P-SUMA',                  
     r'^/_b_a_c_k_e_n_d/HMS/delete-summary(?:/[^/]+)+/$': 'HMS-P-SUMD',                  
     r'^/_b_a_c_k_e_n_d/HMS/get-editsummary(?:/[^/]+)+/$': 'HMS-P-SUM',                  
