@@ -449,7 +449,7 @@ def cash_counter_shiftdetails(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
 
         # 1. ENFORCE: Profile must have an assigned cash counter
         if not emp_cashcounter or not str(emp_cashcounter).strip():
@@ -1487,7 +1487,7 @@ def get_active_shift(request):
             search_query = {"employeeId": str(employee_id).strip()}
             
         profile_data = profile_col.find_one(search_query)
-        emp_cashcounter = (profile_data.get("assigned_counter") or profile_data.get("cashcounter")) if profile_data else None
+        emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
 
         if not emp_cashcounter or not str(emp_cashcounter).strip():
             return Response({
@@ -3564,7 +3564,14 @@ def get_shift_summary_report(request):
             "outlet_code": 1, "SelectedOutlet": 1, "hospital_code": 1, "branch_code": 1
         }
 
-        cursor = col_shifts.find(query, projection).sort([("date", -1), ("StartingTime", -1)])
+        sort_by = data.get("sort_by") or "shiftno"
+        sort_dir = -1 if str(data.get("sort_order", "desc")).lower() == "desc" else 1
+
+        if sort_by == "shiftno":
+            cursor = col_shifts.find(query, projection).sort([("shiftno", sort_dir), ("date", sort_dir), ("StartingTime", sort_dir)])
+        else:
+            cursor = col_shifts.find(query, projection).sort([(sort_by, sort_dir), ("shiftno", sort_dir)])
+
         if limit_val > 0:
             cursor = cursor.limit(limit_val)
         shifts = list(cursor)

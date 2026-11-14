@@ -15,6 +15,7 @@ load_dotenv(override=True)
 
 from datetime import datetime
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from pyauth.auth import HasRoleAndDataPermission
 
 
@@ -111,7 +112,7 @@ def get_active_doctor_profiles(global_db, projection):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 def doctor_list_from_diagnostics(request):
     """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with resolved Department and Designation names"""
     try:

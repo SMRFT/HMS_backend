@@ -909,21 +909,47 @@ def send_ot_reschedule_whatsapp_to_doctors(schedule):
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def ot_staffs(request):
-    """Get list of OT staff from backend_diagnostics_profile where department is DEPT021"""
+    """Get list of ACTIVE OT staff (DEPT021 / DEPT027) from backend_diagnostics_profile,
+    filtered by is_active=True in backend_diagnostics_user"""
     try:
         global_db = client[os.getenv('GLOBAL_DB_NAME', 'Global')]
         diagnostics_collection = global_db['backend_diagnostics_profile']
-        
+        user_collection = global_db['backend_diagnostics_user']
+
+        OT_DEPARTMENTS = ["DEPT021", "DEPT027"]
+
+        # 1. Active employee IDs from the user collection
+        active_ids = [
+            str(u["employeeId"]).strip()
+            for u in user_collection.find(
+                {"is_active": True},
+                {"employeeId": 1, "_id": 0},
+            )
+            if u.get("employeeId") is not None
+        ]
+
+        if not active_ids:
+            return Response([], status=200)
+
+        # 2. OT staff from the profile collection, restricted to active IDs
         staffs = list(diagnostics_collection.find(
-            {"$or": [{"department": "DEPT021"}, {"departmentCode": "DEPT021"}]},
+            {
+                "$and": [
+                    {"$or": [
+                        {"department": {"$in": OT_DEPARTMENTS}},
+                        {"departmentCode": {"$in": OT_DEPARTMENTS}},
+                    ]},
+                    {"employeeId": {"$in": active_ids}},
+                ]
+            },
             {"employeeId": 1, "employeeName": 1, "_id": 0}
         ))
-        
+
         return Response(staffs, status=200)
     except Exception as e:
         return Response({"error": str(e)}, status=500)
 
-
+        
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def list_diagnosis(request):
@@ -1142,6 +1168,7 @@ def save_ot_medicine_ward_request(request):
             }
 
             # Ensure required/default fields exist
+            cleaned.setdefault("dispatched_qty", med.get("dispatched_qty", None))
             cleaned.setdefault("remark", "")
             cleaned.setdefault("dose", "")
             cleaned.setdefault("doseUnit", "")
@@ -1184,7 +1211,7 @@ def save_ot_medicine_ward_request(request):
 
             net_amount=total_amount,
 
-            billing_mode="WARD REQUEST",
+            billing_mode="OT REQUEST",
             billing_status="Pending",
             payment_mode="Credit",
 
@@ -1239,7 +1266,8 @@ def get_ot_medicine_ward_requests(request):
 
         query_params = {
             "uhid": uhid,
-            "is_ward_request": True
+            "is_ward_request": True,
+            "billing_mode": "OT REQUEST",
         }
 
         if ip_number:

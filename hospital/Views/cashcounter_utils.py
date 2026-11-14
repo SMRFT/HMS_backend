@@ -22,7 +22,8 @@ def get_shift_summary_report(request):
         if shiftno:
             queryset = queryset.filter(shiftno=shiftno)
 
-        shifts = queryset.order_by("-date", "-StartingTime")
+        sort_order_dir = "-" if str(data.get("sort_order", "desc")).lower() == "desc" else ""
+        shifts = queryset.order_by(f"{sort_order_dir}shiftno", f"{sort_order_dir}date", f"{sort_order_dir}StartingTime")
         
         # Fetch cashier names
         cashier_ids = list(set([s.CashierID for s in shifts]))

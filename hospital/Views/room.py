@@ -5,6 +5,7 @@ from pymongo import MongoClient
 import os
 import re
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from pyauth.auth import HasRoleAndDataPermission
 from django.views.decorators.csrf import csrf_exempt
 import json
@@ -602,7 +603,7 @@ def nursingstation_view(request, pk=None):
 # ROOM SERVICE DESCRIPTION
 # --------------------------------------------------
 @api_view(["GET", "POST", "PUT", "DELETE"])
-@permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 @csrf_exempt
 def room_service_description_view(request, pk=None):
 
@@ -615,45 +616,59 @@ def room_service_description_view(request, pk=None):
     hospital_code = (
         request.data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
+        request.query_params.get("hospital_code") or
         "system"
     )
 
     branch_code = (
         request.data.get("auth-branch-code") or
         request.headers.get("Branch-Code") or
+        request.query_params.get("branch_code") or
         "system"
     )
 
 
     # ── GET ─────────────────────────────────────────
     if request.method == "GET":
+        client, db = _get_hms_db()
+        col = db["hospital_roomservicedescription"]
 
         if pk:
-            try:
-                roomservicedescription = RoomServiceDescription.objects.get(
-                    description_id=pk,
-                    hospital_code=hospital_code,
-                    branch_code=branch_code
-                )
-                if not roomservicedescription.is_active:
-                    return Response({"error": "RoomServiceDescription not found"}, status=404)
-            except RoomServiceDescription.DoesNotExist:
+            q_get = {"is_active": {"$ne": False}}
+            if str(pk).isdigit():
+                q_get["description_id"] = int(pk)
+            else:
+                q_get["$or"] = [{"description_id": pk}, {"_id": str(pk)}]
+            if hospital_code and hospital_code != "system":
+                q_get["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                q_get["branch_code"] = branch_code
+            doc = col.find_one(q_get)
+            if not doc:
                 return Response({"error": "RoomServiceDescription not found"}, status=404)
-
-            serializer = RoomServiceDescriptionSerializer(roomservicedescription)
-            return Response(serializer.data)
-
+            doc["_id"] = str(doc["_id"])
+            doc["description"] = doc.get("description_name")
+            return Response(doc)
 
         # list
-        all_description = RoomServiceDescription.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ).order_by("description_id")
+        q_filter = {"is_active": {"$ne": False}}
+        if hospital_code and hospital_code != "system":
+            q_filter["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            q_filter["branch_code"] = branch_code
 
-        descriptions = [b for b in all_description if b.is_active]
+        search = (request.query_params.get("search") or request.GET.get("search") or "").strip()
+        if search:
+            q_filter["description_name"] = re.compile(re.escape(search), re.IGNORECASE)
 
-        serializer = RoomServiceDescriptionSerializer(descriptions, many=True)
-        return Response(serializer.data)
+        cursor = col.find(q_filter).sort("description_id", 1)
+        items = []
+        for d in cursor:
+            d["_id"] = str(d["_id"])
+            d["description"] = d.get("description_name")
+            items.append(d)
+
+        return Response(items)
 
 
     # ── POST ─────────────────────────────────────────
@@ -742,7 +757,7 @@ def room_service_description_view(request, pk=None):
 # ROOM KIT ITEMS
 # --------------------------------------------------
 @api_view(["GET", "POST", "PUT", "DELETE"])
-@permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 @csrf_exempt
 def room_kititems_view(request, pk=None):
 
@@ -755,45 +770,57 @@ def room_kititems_view(request, pk=None):
     hospital_code = (
         request.data.get("auth-hospital-code") or
         request.headers.get("auth-hospital-code") or
+        request.query_params.get("hospital_code") or
         "system"
     )
 
     branch_code = (
         request.data.get("auth-branch-code") or
         request.headers.get("Branch-Code") or
+        request.query_params.get("branch_code") or
         "system"
     )
 
 
     # ── GET ─────────────────────────────────────────
     if request.method == "GET":
+        client, db = _get_hms_db()
+        col = db["hospital_roomkititems"]
 
         if pk:
-            try:
-                roomkititems = RoomKitItems.objects.get(
-                    kit_id=pk,
-                    hospital_code=hospital_code,
-                    branch_code=branch_code
-                )
-                if not roomkititems.is_active:
-                    return Response({"error": "RoomKitItems not found"}, status=404)
-            except RoomKitItems.DoesNotExist:
+            q_get = {"is_active": {"$ne": False}}
+            if str(pk).isdigit():
+                q_get["kit_id"] = int(pk)
+            else:
+                q_get["$or"] = [{"kit_id": pk}, {"_id": str(pk)}]
+            if hospital_code and hospital_code != "system":
+                q_get["hospital_code"] = hospital_code
+            if branch_code and branch_code != "system":
+                q_get["branch_code"] = branch_code
+            doc = col.find_one(q_get)
+            if not doc:
                 return Response({"error": "RoomKitItems not found"}, status=404)
-
-            serializer = RoomKitItemsSerializer(roomkititems)
-            return Response(serializer.data)
-
+            doc["_id"] = str(doc["_id"])
+            return Response(doc)
 
         # list
-        all_roomkititems = RoomKitItems.objects.filter(
-            hospital_code=hospital_code,
-            branch_code=branch_code
-        ).order_by("kit_id")
+        q_filter = {"is_active": {"$ne": False}}
+        if hospital_code and hospital_code != "system":
+            q_filter["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            q_filter["branch_code"] = branch_code
 
-        roomkititems = [b for b in all_roomkititems if b.is_active]
+        search = (request.query_params.get("search") or request.GET.get("search") or "").strip()
+        if search:
+            q_filter["kit_name"] = re.compile(re.escape(search), re.IGNORECASE)
 
-        serializer = RoomKitItemsSerializer(roomkititems, many=True)
-        return Response(serializer.data)
+        cursor = col.find(q_filter).sort("kit_id", 1)
+        items = []
+        for d in cursor:
+            d["_id"] = str(d["_id"])
+            items.append(d)
+
+        return Response(items)
 
 
     # ── POST ─────────────────────────────────────────

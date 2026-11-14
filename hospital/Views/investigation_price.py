@@ -5,6 +5,7 @@ from rest_framework import status
 from pymongo import MongoClient
 from datetime import datetime
 import os
+import re
 import logging
 import json
 
@@ -55,9 +56,10 @@ def get_investigation_prices(request):
 
         search = request.query_params.get('search', '').strip()
         if search:
+            escaped_search = re.escape(search)
             query['$or'] = [
-                {'BillType':   {'$regex': search, '$options': 'i'}},
-                {'billTypeNo': {'$regex': search, '$options': 'i'}},
+                {'BillType':   {'$regex': escaped_search, '$options': 'i'}},
+                {'billTypeNo': {'$regex': escaped_search, '$options': 'i'}},
             ]
 
         records = [

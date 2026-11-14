@@ -1101,7 +1101,6 @@ def save_lab_ward_request(request):
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
         prefix_key = f"{financial_year}/{bill_type_val}"
-        prefix = f"{prefix_key}/"
         counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
             {"_id": prefix_key},
@@ -1110,7 +1109,7 @@ def save_lab_ward_request(request):
             return_document=ReturnDocument.AFTER
         )
         next_number = counter["seq"]
-        invest_bill_no = f"{prefix}{next_number:06d}"
+        invest_bill_no = f"{financial_year}{bill_type_val}{next_number:06d}"
 
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
@@ -1676,7 +1675,11 @@ def get_medicine_ward_requests(request):
 
                     "doseunit": itm.get("doseunit", ""),
 
+                    "doseUnit": itm.get("doseUnit", itm.get("doseunit", "")),
+
                     "route": itm.get("route", ""),
+
+                    "remark": itm.get("remark", ""),
 
                     "price": itm.get("price", itm.get("mrp", 0)),
 
@@ -1987,6 +1990,11 @@ def update_medicine_ward_request(request):
                         audit_entry["new_dosage"] = new_dosage
 
                         current["dosage"] = new_dosage
+
+                if "dispatched_qty" in incoming:
+                    current["dispatched_qty"] = incoming.get("dispatched_qty")
+                elif "dispatched_qty" not in current:
+                    current["dispatched_qty"] = None
 
             if audit_entry:
 
@@ -2757,7 +2765,6 @@ def save_radiology_ward_request(request):
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
         prefix_key = f"{financial_year}/{bill_type_val}"
-        prefix = f"{prefix_key}/"
         counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
             {"_id": prefix_key},
@@ -2766,7 +2773,7 @@ def save_radiology_ward_request(request):
             return_document=ReturnDocument.AFTER
         )
         next_number = counter["seq"]
-        invest_bill_no = f"{prefix}{next_number:06d}"
+        invest_bill_no = f"{financial_year}{bill_type_val}{next_number:06d}"
 
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
@@ -4029,32 +4036,27 @@ def approve_ward_return(request):
         try:
 
             last_records = WardReturnDetails.objects.filter(
-
                 ward_return_bill_no__startswith=financial_year
-
             ).values_list("ward_return_bill_no", flat=True)
 
             for b in last_records:
-
                 try:
-
-                    lp = str(b).split("/")[-1]
-
+                    b_str = str(b or "").strip()
+                    if "/" in b_str:
+                        lp = b_str.split("/")[-1]
+                    elif b_str.startswith(financial_year):
+                        lp = b_str[len(financial_year):]
+                    else:
+                        lp = b_str
                     if lp.isdigit():
-
                         max_no = max(max_no, int(lp))
-
                 except Exception:
-
                     pass
-
         except Exception:
-
             pass
 
         new_no = max_no + 1
-
-        ward_return_bill_no = f"{financial_year}/{new_no:06d}"
+        ward_return_bill_no = f"{financial_year}{new_no:06d}"
 
         processed_at = now_dt.isoformat()
 
@@ -5420,4 +5422,5 @@ def get_nursing_station_pharmacy_stock(request):
     finally:
         if client:
             client.close()
-
+
+

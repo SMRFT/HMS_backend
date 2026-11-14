@@ -74,12 +74,13 @@ from .Views.AccountsReport import (
     bill_wise_report,
     accounting_reports,
     purchase_gst_report,
+    op_pharmacy_sales_report,
     cashcounter_rollover_service,
 )
 from .Views.Stores import stores
 from .Views.Assets import assets
 from .Views.Insurance import insurance
-from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report
+from .Views.Reports import roomoccupencyreport, marketing_reports, salesreturnreport, insurance_credit_report, drug_purchase_reports
 from .Views.INPatientcare import ip_patient_analysis
 from .Views.Complaints import complaints
 from .Views.QRScan import qrscan
@@ -105,6 +106,7 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
+    path('ip-advance-refunds/', admission.ip_advance_refunds_list, name='ip_advance_refunds_list'),
     path('admission-mlc-doc/<path:filename>/', admission.get_mlc_doc, name='admission_mlc_doc'),
     path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
     path('today-registered-patients/', admission.today_registered_patients, name='today_registered_patients'),
@@ -272,6 +274,7 @@ urlpatterns = [
 
     # Discharge URLs
     path("search-discharge-patient/", discharge.search_discharge_patient, name="search-discharge-patient"),
+    path("discharge-bill-medicines/", discharge.get_discharge_bill_medicines, name="discharge-bill-medicines"),
     path("discharge-billing/requests/", discharge.get_discharge_requests, name="discharge-requests"),
     path("discharge-billing/signatories/", discharge.get_discharge_signatories, name="discharge-signatories"),
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
@@ -483,6 +486,29 @@ urlpatterns = [
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),
     path('PreDayRoomOccupancyReport/', roomoccupencyreport.previous_day_room_occupancy_view, name='pre_day_room_occupancy_report'),
     path('insurance-credit-report/', insurance_credit_report.insurance_credit_report_view, name='insurance_credit_report'),
+    path('InsuranceReportsDashboard/', insurance_credit_report.insurance_credit_report_view, name='insurance_reports_dashboard'),
+    path('insurance-reports-dashboard/', insurance_credit_report.insurance_credit_report_view, name='insurance_reports_dashboard_kebab'),
+    path('insurance-reports/', insurance_credit_report.insurance_credit_report_view, name='insurance_reports'),
+
+    path('DrugPurchaseReportsDashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard'),
+    path('drug-purchase-reports-dashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard_kebab'),
+    path('drug-purchase-reports/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports'),
+
+    # Separate Drug Purchase Reports APIs (like Stores Reports)
+    path('drug-supplier-grn-report/', drug_purchase_reports.drug_supplier_grn_report_view, name='drug_supplier_grn_report'),
+    path('drug-purchase-analysis-report/', drug_purchase_reports.drug_purchase_analysis_report_view, name='drug_purchase_analysis_report'),
+    path('drug-supplier-wise-report/', drug_purchase_reports.drug_supplier_wise_report_view, name='drug_supplier_wise_report'),
+    path('drug-previous-day-stock-report/', drug_purchase_reports.drug_previous_day_stock_report_view, name='drug_previous_day_stock_report'),
+    path('drug-short-expiry-report/', drug_purchase_reports.drug_short_expiry_report_view, name='drug_short_expiry_report'),
+    path('drug-purchase-return-report/', drug_purchase_reports.drug_purchase_return_report_view, name='drug_purchase_return_report'),
+    path('drug-non-moving-items-report/', drug_purchase_reports.drug_non_moving_items_report_view, name='drug_non_moving_items_report'),
+    path('drug-reorder-level-report/', drug_purchase_reports.drug_reorder_level_report_view, name='drug_reorder_level_report'),
+    path('drug-rack-classification-report/', drug_purchase_reports.drug_rack_classification_report_view, name='drug_rack_classification_report'),
+    path('drug-grn-general-report/', drug_purchase_reports.drug_grn_general_report_view, name='drug_grn_general_report'),
+    path('drug-abc-ved-report/', drug_purchase_reports.drug_abc_ved_report_view, name='drug_abc_ved_report'),
+    path('drug-department-indent-report/', drug_purchase_reports.drug_department_indent_report_view, name='drug_department_indent_report'),
+    path('drug-intent-approval-report/', drug_purchase_reports.drug_intent_approval_report_view, name='drug_intent_approval_report'),
+    path('drug-opening-stock-report/', drug_purchase_reports.drug_opening_stock_report_view, name='drug_opening_stock_report'),
     path('ip-patient-analysis/', ip_patient_analysis.ip_patient_analysis_view, name='ip_patient_analysis'),
     path('SalesReturnReport/', salesreturnreport.sales_return_report_view, name='sales_return_report'),
     path('marketing-area-zipcode-report/', marketing_reports.marketing_area_zipcode_report, name='marketing_area_zipcode_report'),
@@ -701,6 +727,7 @@ urlpatterns = [
     path('ip-advance-report/', accounting_reports.patient_advance_details_report, name='ip_advance_report'),
     path('discount-bills-report/', accounting_reports.discount_bills_report, name='discount_bills_report'),
     path('purchase-gst-report/', purchase_gst_report.purchase_gst_report_api, name='purchase_gst_report'),
+    path('op-pharmacy-sales-report/', op_pharmacy_sales_report.op_pharmacy_sales_report_api, name='op_pharmacy_sales_report'),
 
     # Sales Return URLs
     path("salesreturn_get_patientdetails/", salesreturn.salesreturn_get_patientdetails, name="salesreturn_get_patientdetails"),

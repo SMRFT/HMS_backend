@@ -273,6 +273,7 @@ def patientCreateView(request):
 
             billing = Billing.objects.create(
                 patient=patient,
+                uhid=patient.uhid,
                 registration_fee=registration_fee,
                 consulting_fee=consulting_fee,
                 total_fees=total_fees,
@@ -288,6 +289,21 @@ def patientCreateView(request):
                 shiftno=request.data.get('shiftno'),
                 bill_type=bill_type
             )
+
+            # Ensure uhid is saved directly on MongoDB document as well
+            if patient and patient.uhid and billing and billing.bill_number:
+                try:
+                    from pymongo import MongoClient
+                    mongo_host = os.getenv("GLOBAL_DB_HOST")
+                    if mongo_host:
+                        m_client = MongoClient(mongo_host, serverSelectionTimeoutMS=2000)
+                        m_client["HMS"]["hospital_billing"].update_one(
+                            {"bill_number": billing.bill_number},
+                            {"$set": {"uhid": patient.uhid}}
+                        )
+                        m_client.close()
+                except Exception as m_err:
+                    print("Error ensuring uhid on hospital_billing document:", m_err)
 
             return Response({
                 "message": "Patient registered successfully.",
@@ -803,11 +819,13 @@ def patient_visit_list(request):
 
         bills = Billing.objects.filter(bill_filter).select_related('patient').order_by('-billed_date')
         
-        # Build lookup map for employee IDs (doctors and edit history users)
+        # Build lookup map for employee IDs (doctors, creators, and edit history users)
         all_emp_ids = set()
         for b in bills:
             if b.doctor_id:
                 all_emp_ids.add(str(b.doctor_id).strip())
+            if b.created_by:
+                all_emp_ids.add(str(b.created_by).strip())
             for h in (b.edit_history or []):
                 if h.get('user'):
                     all_emp_ids.add(str(h.get('user')).strip())
@@ -948,6 +966,8 @@ def patient_visit_list(request):
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
                 "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else '',
+                "created_by": str(bill.created_by or ''),
+                "preparedBy": emp_map.get(str(bill.created_by).strip()) or str(bill.created_by or 'Staff'),
                 "editHistory": formatted_history,
                 "refunds": refund_data,
                 "totalRefunded": str(total_refunded)

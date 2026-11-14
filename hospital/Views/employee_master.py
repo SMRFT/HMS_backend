@@ -140,8 +140,8 @@ def format_employee_record(emp, dept_map, desig_map, counter_map, doctor_ids):
     additional_roles = emp.get('additionalRoles') or []
     has_hms = 'HMS-R-V' in additional_roles
 
-    cid = str(emp.get('cashcounter') or emp.get('assigned_counter') or '').strip()
-    cname = emp.get('assigned_counter_name') or counter_map.get(cid, cid)
+    cid = str(emp.get('cashcounter') or '').strip()
+    cname = counter_map.get(cid, cid)
 
     # Doctor flag
     is_doctor = (
@@ -310,6 +310,7 @@ def employee_master_detail(request, employee_id):
             "lastmodified_by": user_id,
             "lastmodified_date": datetime.utcnow()
         }
+        unset_fields = {}
         push_fields = {}
         pull_fields = {}
 
@@ -324,13 +325,12 @@ def employee_master_detail(request, employee_id):
                 current_roles = [r for r in current_roles if r != "HMS-R-V"]
             set_fields["additionalRoles"] = current_roles
 
-        # 2. Cash Counter
+        # 2. Cash Counter - use and save only cashcounter, do not save assigned_counter
         if "cashcounter" in data or "assigned_counter" in data:
             cid = str(data.get("cashcounter") or data.get("assigned_counter") or "").strip()
-            cname = counter_map.get(cid, "")
             set_fields["cashcounter"] = cid
-            set_fields["assigned_counter"] = cid
-            set_fields["assigned_counter_name"] = cname
+            unset_fields["assigned_counter"] = ""
+            unset_fields["assigned_counter_name"] = ""
 
         # 3. Demographics
         first_name = (data.get("firstName") or "").strip()
@@ -429,6 +429,8 @@ def employee_master_detail(request, employee_id):
             set_fields["familyDetails"] = current_family
 
         update_doc = {"$set": set_fields}
+        if unset_fields:
+            update_doc["$unset"] = unset_fields
         profile_collection.update_one({"employeeId": str(employee_id)}, update_doc)
 
         # Re-fetch updated

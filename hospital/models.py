@@ -1,6 +1,6 @@
 from djongo import models
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 import re
 import json as _json
 from django.utils import timezone
@@ -270,6 +270,7 @@ class CustomerType(AuditModel):
 
 class Billing(AuditModel):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
+    uhid = models.CharField(max_length=50, blank=True, null=True)
     registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     consulting_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_fees = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -286,6 +287,8 @@ class Billing(AuditModel):
     edit_history = models.JSONField(default=list, blank=True)
 
     def save(self, *args, **kwargs):
+        if not self.uhid and self.patient:
+            self.uhid = getattr(self.patient, 'uhid', '')
 
         if not self.bill_number:
 
@@ -304,26 +307,40 @@ class Billing(AuditModel):
 
             fy_prefix = f"{start_year:02d}{end_year:02d}"
 
-            pattern = f"{fy_prefix}/"
-
-            # Find last bill number
-            last_bill = Billing.objects.filter(
-                bill_number__startswith=pattern
-            ).order_by('-bill_number').first()
-
-            if last_bill and last_bill.bill_number:
+            # Find all existing bill numbers under this financial year (with or without '/')
+            max_num = 0
+            try:
+                existing_bills = list(Billing.objects.filter(
+                    bill_number__startswith=fy_prefix
+                ).values_list('bill_number', flat=True))
+            except Exception:
                 try:
-                    last_number = int(
-                        last_bill.bill_number.split('/')[-1]
+                    from pymongo import MongoClient
+                    import os
+                    m_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"), serverSelectionTimeoutMS=2000)
+                    m_docs = m_client["HMS"]["hospital_billing"].find(
+                        {"bill_number": {"$regex": f"^{fy_prefix}"}},
+                        {"bill_number": 1}
                     )
-                except (ValueError, IndexError):
-                    last_number = 0
-            else:
-                last_number = 0
+                    existing_bills = [d.get("bill_number") for d in m_docs if d.get("bill_number")]
+                    m_client.close()
+                except Exception:
+                    existing_bills = []
 
-            next_number = last_number + 1
+            for bn in existing_bills:
+                b_str = str(bn or "").strip()
+                if "/" in b_str:
+                    seq_part = b_str.split('/')[-1]
+                elif b_str.startswith(fy_prefix):
+                    seq_part = b_str[len(fy_prefix):]
+                else:
+                    seq_part = b_str
+                if seq_part.isdigit():
+                    max_num = max(max_num, int(seq_part))
 
-            self.bill_number = f"{fy_prefix}/{next_number:06d}"
+            next_number = max_num + 1
+
+            self.bill_number = f"{fy_prefix}{next_number:06d}"
 
         super().save(*args, **kwargs)
 
@@ -459,9 +476,14 @@ class StockTransfer(AuditModel):
     remarks = models.TextField(blank=False, default="")
     approved_by = models.CharField(max_length=100, blank=True, default="")
     approved_date = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.CharField(max_length=100, blank=True, default="")
+    rejected_date = models.DateTimeField(null=True, blank=True)
+    rejected_reason = models.TextField(blank=True, default="")
+    source_deducted = models.BooleanField(default=False)
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
+        ("Verified", "Verified"),
         ("Rejected", "Rejected"),
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
@@ -1016,6 +1038,7 @@ class Admission(AuditModel):
     # ── Core boolean flags ────────────────────────────────────────────────────
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
+    is_day_care         = models.BooleanField(default=False)
  
     class Meta:
         ordering = ['-admissionDateTime']
