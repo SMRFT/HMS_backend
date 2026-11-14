@@ -447,13 +447,15 @@ def get_user_permissions(request):
 
         user_profile = diag_collection.find_one(
             emp_query,
-            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "hms_outlets": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "hms_pages": 1, "allowed_pages": 1, "hms_outlets": 1, "page_outlets": 1, "_id": 0}
         )
         
         # 1. Fetch data from user profile
         roles = []
         hms_pages = []
         allowed_pages = None
+        hms_outlets = []
+        page_outlets = {}
         
         if user_profile:
             p_role = user_profile.get("primaryRole")
@@ -461,6 +463,7 @@ def get_user_permissions(request):
             hms_pages = user_profile.get("hms_pages", [])
             allowed_pages = user_profile.get("allowed_pages")
             hms_outlets = user_profile.get("hms_outlets", [])
+            page_outlets = user_profile.get("page_outlets", {})
             
             if p_role:
                 roles.append(p_role)
@@ -479,7 +482,8 @@ def get_user_permissions(request):
             "allowed_pages": combined_permissions,
             "roles": list(set(roles)),
             "hms_pages": list(set(hms_pages)) if isinstance(hms_pages, list) else [],
-            "hms_outlets": list(set(hms_outlets)) if isinstance(hms_outlets, list) else []
+            "hms_outlets": list(set(hms_outlets)) if isinstance(hms_outlets, list) else [],
+            "page_outlets": page_outlets if isinstance(page_outlets, dict) else {}
         }, status=200)
 
     except Exception as e:
@@ -508,8 +512,13 @@ def update_user_permissions(request):
         diag_collection = global_db['backend_diagnostics_profile']
 
         update_fields = {
-            "allowed_pages": allowed_pages
+            "allowed_pages": allowed_pages,
+            "lastmodified_date": datetime.now()
         }
+
+        modified_by = request.data.get('modified_by') or request.data.get('lastmodified_by')
+        if modified_by:
+            update_fields["lastmodified_by"] = str(modified_by)
 
         hms_pages = request.data.get('hms_pages')
         if isinstance(hms_pages, list):
@@ -518,6 +527,10 @@ def update_user_permissions(request):
         hms_outlets = request.data.get('hms_outlets')
         if isinstance(hms_outlets, list):
             update_fields["hms_outlets"] = hms_outlets
+
+        page_outlets = request.data.get('page_outlets')
+        if isinstance(page_outlets, dict):
+            update_fields["page_outlets"] = page_outlets
 
         query_ids = [employee_id, str(employee_id)]
         try:
@@ -1153,7 +1166,7 @@ def get_sidebar_mapping(request):
 
         user_profile = diag_collection.find_one(
             emp_query,
-            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "hms_pages": 1, "_id": 0}
+            {"primaryRole": 1, "additionalRoles": 1, "allowed_pages": 1, "hms_pages": 1, "page_outlets": 1, "_id": 0}
         )
 
         roles = []
@@ -1163,6 +1176,7 @@ def get_sidebar_mapping(request):
             roles.extend(user_profile.get("additionalRoles", []))
 
         hms_pages = set(user_profile.get("hms_pages") or []) if user_profile else set()
+        user_page_outlets = user_profile.get("page_outlets", {}) if user_profile else {}
 
         # 🔹 Extra permissions (optional)
         extra_permissions = []
@@ -1210,15 +1224,31 @@ def get_sidebar_mapping(request):
             allowed_pages = []
 
             for page in group.get('pages', []):
-                # 🔹 Outlet Filter
-                page_outlet = page.get('outlet_code')
+                # 🔹 Outlet Filter (Supports both multi-outlet list and legacy single outlet string)
+                raw_outlets = page.get('outlet_codes')
+                if isinstance(raw_outlets, list) and len(raw_outlets) > 0:
+                    page_outlets = [str(o).strip() for o in raw_outlets if o]
+                elif page.get('outlet_code'):
+                    page_outlets = [str(page.get('outlet_code')).strip()]
+                else:
+                    page_outlets = []
+
                 request_outlet = request.headers.get('Outlet-Code')
                 
-                # If page restricted to specific outlet, skip if doesn't match
-                if page_outlet and page_outlet != request_outlet:
-                    continue
+                # If page restricted to specific outlet(s), skip if doesn't match
+                if page_outlets and 'GLOBAL' not in page_outlets and request_outlet:
+                    if request_outlet not in page_outlets:
+                        continue
 
                 p_id = page.get('page_id')
+
+                # 🔹 User-specific per-page outlet permission check
+                if not is_super_admin and request_outlet and p_id is not None and isinstance(user_page_outlets, dict):
+                    user_allowed_outlets = user_page_outlets.get(str(p_id)) or user_page_outlets.get(p_id)
+                    if isinstance(user_allowed_outlets, list) and len(user_allowed_outlets) > 0:
+                        if 'GLOBAL' not in user_allowed_outlets and request_outlet not in user_allowed_outlets:
+                            continue
+
                 page_perms = page.get('permissions', [])
                 
                 if isinstance(page_perms, dict):
