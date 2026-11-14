@@ -230,13 +230,22 @@ def enrich_items_with_medicine_name(items, hospital_code, branch_code):
         qty = _int(item.get("transferred_out_quantity", item.get("transfer_quantity", 0)))
         stock_info = stock_map.get(stock_id, {})
 
+        direct_name = str(item.get("item_name") or "").strip()
+        item_name = direct_name or item_map.get(item_id, f"Item #{item_id}")
+
+        direct_sp = item.get("Selling_Price") or item.get("selling_price")
+        sp = float(_dec(direct_sp)) if direct_sp is not None and str(direct_sp) != "" else stock_info.get("selling_price", 0)
+
+        direct_exp = item.get("expiry_date")
+        exp_date = direct_exp if direct_exp else stock_info.get("expiry_date")
+
         enriched.append({
             "stock_id": stock_id,
             "item_id": item_id,
-            "item_name": item_map.get(item_id, f"Item #{item_id}"),
+            "item_name": item_name,
             "batch_number": item.get("batch_number", stock_info.get("batch_number", "")),
-            "expiry_date": stock_info.get("expiry_date"),
-            "Selling_Price": stock_info.get("selling_price", 0),
+            "expiry_date": exp_date,
+            "Selling_Price": sp,
             "transferred_out_quantity": qty,
         })
 
