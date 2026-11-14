@@ -2313,37 +2313,9 @@ def search_discharge_patient(request):
                         "source":         "hospital_investbilling",
                     })
 
-        # ── 2. hospital_patientdietorder ──────────────────────────────────────
-        diet_q = get_query(
-            ["inpatient_number", "ipNumber", "ip_number"],
-            {"status": "Delivered"}
-        )
-        if diet_q:
-            for doc in db["hospital_patientdietorder"].find(diet_q):
-                tot_price = _to_float(doc.get("total_price"))
-                if tot_price == 0:
-                    tot_price = _to_float(doc.get("diet_price")) + _to_float(doc.get("extra_items_price"))
-                
-                meal_time  = doc.get("meal_time", "")
-                item_label = f"Diet Food ({meal_time})" if meal_time else "Diet Food"
-
-                invest_items.append({
-                    "invest_bill_no": str(doc.get("_id")),
-                    "bill_object_id": str(doc.get("_id")),
-                    "itemName":       "Diet Food",
-                    "price":          tot_price,
-                    "rate":           str(tot_price),
-                    "quantity":       1,
-                    "discount":       0,
-                    "amount":         tot_price,
-                    "billTypeNo":     "DIS01",
-                    "bill_type":      2,
-                    "test_id":        None,
-                    "doctor":         _resolve_employee_name(str(doc.get("ordered_by") or "").strip()) if doc.get("ordered_by") else "",
-                    "payment_status": doc.get("status", ""),
-                    "package_name":   item_label,
-                    "source":         "hospital_patientdietorder",
-                })
+        # ── 2. hospital_patientdietorder (EXCLUDED) ───────────────────────────
+        # Note: Diet food collection is excluded from discharge billing because
+        # diet charges are already included in room charges.
 
         # ── 3. hospital_laundrywardrequest ────────────────────────────────────
         laundry_q = get_query(
