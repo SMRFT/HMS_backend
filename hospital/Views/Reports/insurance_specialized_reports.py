@@ -92,6 +92,9 @@ def build_specialized_insurance_report(request, report_key):
         end_date_str = request.GET.get('end_date')
         company_filter = request.GET.get('company_code', 'all').strip()
         search_query = request.GET.get('search', '').strip().lower()
+        uhid_filter = (request.GET.get('uhid') or request.GET.get('op_number') or '').strip()
+        ip_number_filter = (request.GET.get('ip_number') or request.GET.get('ipnumber') or '').strip()
+        outlet_filter = request.GET.get('outlet_code', 'all').strip()
 
         now = datetime.now()
         dt_start = datetime.strptime(start_date_str[:10], "%Y-%m-%d") if start_date_str else (now - timedelta(days=90))
@@ -169,6 +172,10 @@ def build_specialized_insurance_report(request, report_key):
         records = []
         columns = []
         summary = {}
+        patient_info = {}
+        grouped_data = {}
+        bills = []
+        bill_particulars = []
         report_title = "Insurance Report"
 
         # Mock generator helpers for hospital domain fields
@@ -499,7 +506,106 @@ def build_specialized_insurance_report(request, report_key):
             })
 
         # Check for report keys:
-        if key in ['insurance_bills_status', 'insurancebillsstatus']:
+        if key in ['patient_wise_pharmacy_ip_bill', 'pharmacy_ip_bill_detailed', 'patientwisepharmacyipbilldetailed', 'patient_wise_pharmacy_ip_bill_detailed', 'patientwisepharmacyipbill']:
+            report_title = "PATIENT WISE PHARMACY IP BILL DETAILED"
+            pat_name = "GURUSAMY.P"
+            op_no = uhid_filter or "S025/009530"
+            ip_no = ip_number_filter or "S025/007412"
+            doc_name = "DR. PRABHAKARAN MS. ORTHO"
+            room_no = "SICU - 02 / SICU"
+
+            if uhid_filter:
+                found_p = next((p for p in patient_pool if p.get('uhid') == uhid_filter), None)
+                if not found_p:
+                    found_p = hms_db['hospital_patient'].find_one({"uhid": uhid_filter})
+                if found_p:
+                    pat_name = f"{found_p.get('firstName', '')} {found_p.get('lastName', '')}".strip() or pat_name
+                    doc_name = found_p.get('doctorName') or doc_name
+                found_adm = hms_db['hospital_admission'].find_one({"uhid": uhid_filter})
+                if found_adm:
+                    ip_no = found_adm.get('ipNumber') or ip_no
+                    room_no = found_adm.get('roomNumber') or room_no
+
+            patient_info = {
+                "patient_name": pat_name,
+                "op_number": op_no,
+                "ip_number": ip_no,
+                "doctor_name": doc_name,
+                "room_no": room_no,
+                "dl_no": "649/M3/20 & 649A/M3/21",
+                "tin": "33932782724",
+                "gstin": "33AAACS5352E1ZZ",
+                "cin": "U85110TZ2020PLC034639",
+                "phone": "0427-2706666",
+                "fax": "0427-2311891"
+            }
+
+            columns = [
+                {"key": "sl_no", "label": "Sl.No", "width": "50px"},
+                {"key": "bill_date", "label": "Bill Date", "width": "95px"},
+                {"key": "bill_no", "label": "Bill No", "width": "120px"},
+                {"key": "qty", "label": "Qty", "width": "50px", "align": "right"},
+                {"key": "particulars", "label": "Particulars", "width": "220px"},
+                {"key": "batch", "label": "Batch", "width": "90px"},
+                {"key": "expiry", "label": "Expiry", "width": "80px"},
+                {"key": "amount", "label": "Amount", "width": "90px", "align": "right"},
+                {"key": "hsn", "label": "HSN", "width": "80px"},
+                {"key": "cgst_pct", "label": "CGST %", "width": "65px", "align": "right"},
+                {"key": "cgst", "label": "CGST", "width": "75px", "align": "right"},
+                {"key": "sgst_pct", "label": "SGST %", "width": "65px", "align": "right"},
+                {"key": "sgst", "label": "SGST", "width": "75px", "align": "right"},
+                {"key": "taxable_amt", "label": "Taxable Amt", "width": "100px", "align": "right"}
+            ]
+
+            bills = [
+                {
+                    "bill_no": "PH262700984",
+                    "bill_date": "02/11/2026",
+                    "items": [
+                        {"sl_no": 1, "bill_date": "02/11/2026", "bill_no": "PH262700984", "qty": 2, "particulars": "INJ CEFTUM 1.5GM", "batch": "CFT2401", "expiry": "04/2027", "amount": 840.00, "hsn": "300420", "cgst_pct": 6.0, "cgst": 45.00, "sgst_pct": 6.0, "sgst": 45.00, "taxable_amt": 750.00},
+                        {"sl_no": 2, "bill_date": "02/11/2026", "bill_no": "PH262700984", "qty": 2, "particulars": "INJ PANTOCID 40MG", "batch": "PAN8812", "expiry": "09/2027", "amount": 130.00, "hsn": "300490", "cgst_pct": 6.0, "cgst": 6.96, "sgst_pct": 6.0, "sgst": 6.96, "taxable_amt": 116.08},
+                        {"sl_no": 3, "bill_date": "02/11/2026", "bill_no": "PH262700984", "qty": 10, "particulars": "TAB PARACETAMOL 650MG", "batch": "PCM9012", "expiry": "11/2027", "amount": 25.00, "hsn": "300490", "cgst_pct": 6.0, "cgst": 1.34, "sgst_pct": 6.0, "sgst": 1.34, "taxable_amt": 22.32},
+                        {"sl_no": 4, "bill_date": "02/11/2026", "bill_no": "PH262700984", "qty": 4, "particulars": "IV NORMAL SALINE 500ML", "batch": "NS4412", "expiry": "01/2028", "amount": 220.00, "hsn": "300490", "cgst_pct": 6.0, "cgst": 11.78, "sgst_pct": 6.0, "sgst": 11.78, "taxable_amt": 196.44}
+                    ],
+                    "tax_summary": [
+                        {"tax_slab": "12%", "taxable_value": 1084.84, "cgst": 65.08, "sgst": 65.08, "total_tax": 130.16}
+                    ],
+                    "bill_total": 1215.00,
+                    "bill_net": 1215.00
+                },
+                {
+                    "bill_no": "PH262701045",
+                    "bill_date": "04/11/2026",
+                    "items": [
+                        {"sl_no": 1, "bill_date": "04/11/2026", "bill_no": "PH262701045", "qty": 3, "particulars": "INJ MEROPENEM 1GM", "batch": "MER1920", "expiry": "03/2027", "amount": 3750.00, "hsn": "300420", "cgst_pct": 6.0, "cgst": 200.89, "sgst_pct": 6.0, "sgst": 200.89, "taxable_amt": 3348.22},
+                        {"sl_no": 2, "bill_date": "04/11/2026", "bill_no": "PH262701045", "qty": 2, "particulars": "INJ TRAMADOL 100MG", "batch": "TRM7721", "expiry": "06/2027", "amount": 90.00, "hsn": "300490", "cgst_pct": 6.0, "cgst": 4.82, "sgst_pct": 6.0, "sgst": 4.82, "taxable_amt": 80.36},
+                        {"sl_no": 3, "bill_date": "04/11/2026", "bill_no": "PH262701045", "qty": 5, "particulars": "DISPO VAN SYRINGE 10ML", "batch": "SYR012", "expiry": "12/2028", "amount": 90.00, "hsn": "901831", "cgst_pct": 6.0, "cgst": 4.82, "sgst_pct": 6.0, "sgst": 4.82, "taxable_amt": 80.36}
+                    ],
+                    "tax_summary": [
+                        {"tax_slab": "12%", "taxable_value": 3508.94, "cgst": 210.53, "sgst": 210.53, "total_tax": 421.06}
+                    ],
+                    "bill_total": 3930.00,
+                    "bill_net": 3930.00
+                }
+            ]
+
+            records = []
+            for b in bills:
+                records.extend(b['items'])
+
+            summary = {
+                "total_bills": len(bills),
+                "total_items": len(records),
+                "gross_amount": 5145.00,
+                "cgst_total": 275.61,
+                "sgst_total": 275.61,
+                "total_tax": 551.22,
+                "round_off": 0.00,
+                "net_total_amount": 5145.00
+            }
+            grouped_data = {"bills": bills}
+
+        elif key in ['insurance_bills_status', 'insurancebillsstatus']:
             report_title = "Insurance Bills Status"
             columns = [
                 {"key": "bill_date", "label": "Bill date"},
@@ -532,6 +638,7 @@ def build_specialized_insurance_report(request, report_key):
             all_pool.sort(key=lambda x: (x.get('company_name', ''), x.get('bill_date', '')))
 
             sno = 1
+            grouped_data = {}
             for row in all_pool:
                 if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
                     continue
@@ -543,6 +650,11 @@ def build_specialized_insurance_report(request, report_key):
                 tot_settled += r['settled_amount']
                 tot_disallowed += r['disallowed_amount']
                 records.append(r)
+                
+                c = r.get('company_name') or 'OTHER'
+                if c not in grouped_data:
+                    grouped_data[c] = []
+                grouped_data[c].append(r)
                 sno += 1
 
             summary = {

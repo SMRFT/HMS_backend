@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import (
-    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, 
+    ItemMaster, Department, Group, Category, GroupType, Rack, Shelf, storesGRN, storesIntent, cathlabIntent,
     GeneralStoreVendor, VendingMachineSale, StoresPurchaseOrder, StoresPurchaseReturn, StoresIndentReturn,
     Stores_LabApprovedItem, Stores_LabUsedQtyDetail, ItemOpeningStockLog, StoresIntentDepartmentApproval
 )
@@ -337,6 +337,48 @@ class StoresGRNSerializer(serializers.ModelSerializer):
         else:
             representation['department_code'] = ''
             representation['department_name'] = ''
+                    
+        return representation
+
+
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
                     
         return representation
 
@@ -777,9 +819,92 @@ class StoresIntentSerializer(serializers.ModelSerializer):
         return representation
 
 
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
+        return representation
+
+
 
 from rest_framework import serializers
 from .models import Stores_LabApprovedItem, Stores_LabUsedQtyDetail
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
+        return representation
+
 
 class Stores_LabApprovedItemSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
@@ -835,6 +960,48 @@ class Stores_LabUsedQtyDetailSerializer(serializers.ModelSerializer):
         return representation
 
 
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
+        return representation
+
+
 class GeneralStoreVendorSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
 
@@ -885,6 +1052,48 @@ class StoresPurchaseOrderSerializer(serializers.ModelSerializer):
         return representation
 
 
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
+        return representation
+
+
 class StoresPurchaseReturnSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
 
@@ -920,6 +1129,48 @@ class StoresPurchaseReturnSerializer(serializers.ModelSerializer):
         return representation
 
 
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
+        return representation
+
+
 class StoresIndentReturnSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
 
@@ -952,6 +1203,48 @@ class StoresIndentReturnSerializer(serializers.ModelSerializer):
                     representation['items'] = []
         elif val is None:
             representation['items'] = []
+        return representation
+
+
+
+class CathLabIntentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = cathlabIntent
+        fields = '__all__'
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        import json
+        import ast
+        from collections import OrderedDict
+
+        for field in ['items']:
+            val = getattr(instance, field, None)
+            if isinstance(val, list):
+                clean_list = []
+                for item in val:
+                    if isinstance(item, (dict, OrderedDict)):
+                        clean_list.append(dict(item))
+                    else:
+                        clean_list.append(item)
+                representation[field] = clean_list
+            elif isinstance(val, str):
+                try:
+                    representation[field] = json.loads(val)
+                except:
+                    try:
+                        representation[field] = ast.literal_eval(val)
+                    except:
+                        representation[field] = []
+            elif val is None:
+                representation[field] = []
+            else:
+                try:
+                    representation[field] = list(val)
+                except:
+                    representation[field] = []
+                    
         return representation
 
 

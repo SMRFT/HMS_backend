@@ -189,6 +189,28 @@ class storesIntent(AuditModel):
         return f"{self.intent_id} - {self.date}"    
 
 
+class cathlabIntent(AuditModel):
+    intent_id = models.CharField(max_length=50, primary_key=True)
+    ipnumber = models.CharField(max_length=50, null=True, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    date = models.DateField()
+    items = djongo_models.JSONField(default=list, blank=True)
+    department = models.CharField(max_length=50, default='DEPT027', null=True, blank=True)
+    is_approved = models.BooleanField(default=False)
+    is_billed = models.BooleanField(default=False)
+    is_hod_approved = models.BooleanField(default=True)
+    hod_status = models.CharField(max_length=50, default='Approved', null=True, blank=True)
+    hod_approved_by = models.CharField(max_length=100, null=True, blank=True)
+    hod_approved_date = models.DateTimeField(null=True, blank=True)
+    hod_remarks = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "hospital_cathlabintent"
+
+    def __str__(self):
+        return f"{self.intent_id} - {self.ipnumber or ''}"    
+
+
 class StoresIntentDepartmentApproval(AuditModel):
     employee_id = models.CharField(max_length=100, unique=True)
     departments = models.JSONField(default=list, blank=True)
