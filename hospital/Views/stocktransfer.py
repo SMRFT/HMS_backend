@@ -472,24 +472,37 @@ def stock_transfer_view(request, pk=None):
         if ref_number:
             filter_q["transfer_ref_number"] = ref_number
 
+        and_clauses = []
         if is_drug_purchase:
-            filter_q["$or"] = [
-                {"to_outlet": {"$in": ["", None, "OLET006"]}},
-                {"outlet_code": {"$in": ["", None, "OLET006"]}}
-            ]
-        else:
-            if outlet_code:
-                filter_q["$or"] = [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
+            and_clauses.append({
+                "$or": [
+                    {"to_outlet": {"$in": ["", None, "OLET006"]}},
+                    {"outlet_code": {"$in": ["", None, "OLET006"]}}
+                ]
+            })
+        elif outlet_code:
+            and_clauses.append({
+                "$or": [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
+            })
 
         search = request.GET.get("search", "").strip()
         if search:
             reg = {"$regex": re.escape(search), "$options": "i"}
-            filter_q["$or"] = [
-                {"transfer_ref_number": reg},
-                {"is_verified": reg},
-                {"remarks": reg},
-                {"outlet_code": reg}
-            ]
+            and_clauses.append({
+                "$or": [
+                    {"transfer_ref_number": reg},
+                    {"is_verified": reg},
+                    {"remarks": reg},
+                    {"outlet_code": reg},
+                    {"to_outlet": reg},
+                ]
+            })
+
+        if and_clauses:
+            if len(and_clauses) == 1:
+                filter_q.update(and_clauses[0])
+            else:
+                filter_q["$and"] = and_clauses
 
         filter_q = apply_date_filter(filter_q, request, "created_date")
 
@@ -625,6 +638,7 @@ def stock_transfer_view(request, pk=None):
             "remarks":             remarks,          # ← NEW
             "hospital_code":       hospital_code,
             "branch_code":         branch_code,
+            "source_deducted":     True,
         }
 
         serializer = StockTransferSerializer(data=transfer_payload)
@@ -635,7 +649,32 @@ def stock_transfer_view(request, pk=None):
                 created_date      = timezone.now(),
                 lastmodified_by   = user_id,
                 lastmodified_date = timezone.now(),
+                source_deducted   = True,
             )
+
+            # ── Deduct transferred_out_quantity from source pharmacy stock ────────
+            client, hms_db = get_hms_db()
+            for itm in processed_items:
+                s_id = _int(itm.get("stock_id", 0))
+                q    = _int(itm.get("transferred_out_quantity", 0))
+                if s_id and q > 0:
+                    src_obj = PharmacyStock.objects.filter(stock_id=s_id).first()
+                    curr_out = _int(getattr(src_obj, "transferred_out_quantity", 0)) if src_obj else 0
+                    new_out  = curr_out + q
+                    PharmacyStock.objects.filter(stock_id=s_id).update(
+                        transferred_out_quantity = new_out,
+                        lastmodified_by          = user_id,
+                        lastmodified_date        = timezone.now(),
+                    )
+                    if hms_db is not None:
+                        hms_db["hospital_pharmacystock"].update_one(
+                            {"stock_id": s_id},
+                            {"$set": {
+                                "transferred_out_quantity": new_out,
+                                "lastmodified_by": str(user_id),
+                                "lastmodified_date": timezone.now(),
+                            }}
+                        )
 
             response_data = StockTransferSerializer(saved).data
             response_data["from_outlet"] = response_data.get("outlet_code", "")
@@ -720,10 +759,10 @@ def stock_transfer_action_view(request):
 
     current_status = str(getattr(obj, "is_verified", ""))
 
-    # ── APPROVE ───────────────────────────────────────────────────────────────
-    if action == "approve":
+    # ── APPROVE / VERIFY ──────────────────────────────────────────────────────
+    if action in ("approve", "verify"):
 
-        if current_status == "Approved":
+        if current_status in ("Approved", "Verified"):
             return Response({"success": False, "error": "Transfer is already Approved"}, status=400)
         if current_status == "Rejected":
             return Response({"success": False, "error": "Rejected transfers cannot be approved"}, status=403)
@@ -735,23 +774,28 @@ def stock_transfer_action_view(request):
         is_dept_transfer = bool(
             transfer_to_outlet and (
                 transfer_to_outlet.startswith("DPT") or
-                hms_db["hospital_stocktransfer_department"].find_one({"department_id": transfer_to_outlet})
+                (hms_db is not None and hms_db["hospital_stocktransfer_department"].find_one({"department_id": transfer_to_outlet}))
             )
         )
 
-        # Permission: Drug Purchase can approve any; real outlet can only approve if they are the recipient
-        # For department transfers, originating / issuing outlet can also approve
-        is_recipient = (outlet_code == transfer_to_outlet) or (is_drug_purchase and transfer_to_outlet in ("", "OLET006"))
+        # Permission: Drug Purchase can verify any; real outlet can only verify if they are the recipient
+        # For department transfers, originating / issuing outlet can also verify
+        norm_outlet = str(outlet_code or "").strip().upper()
+        norm_to     = str(transfer_to_outlet or "").strip().upper()
+        norm_from   = str(from_outlet or "").strip().upper()
+
+        is_recipient = (norm_outlet == norm_to) or (is_drug_purchase and norm_to in ("", "OLET006")) or not norm_outlet
         if not is_drug_purchase and not is_recipient:
-            if not (is_dept_transfer and (outlet_code == from_outlet or not outlet_code)):
+            if not (is_dept_transfer and (norm_outlet == norm_from or not norm_outlet)):
                 return Response(
-                    {"success": False, "error": "Only the receiving outlet or issuing pharmacy can approve this transfer"},
+                    {"success": False, "error": "Only the receiving outlet or issuing pharmacy can verify this transfer"},
                     status=403,
                 )
         transfer_items = getattr(obj, "items", []) or []
         parsed_items   = parse_transfer_items(transfer_items)
         all_stocks     = list(PharmacyStock.objects.all())
         errors         = []
+        source_deducted = getattr(obj, "source_deducted", False)
 
         for idx, item in enumerate(parsed_items):
             if isinstance(item, OrderedDict):
@@ -793,70 +837,88 @@ def stock_transfer_action_view(request):
                 )
                 continue
 
-            available = (
-                _int(getattr(source, "total_stock",               0))
-                - _int(getattr(source, "sold_quantity",           0))
-                - _int(getattr(source, "transferred_out_quantity", 0))
-                - _int(getattr(source, "grn_return_quantity",      0))
-                - _int(getattr(source, "blocked_quantity",         0))
-                + _int(getattr(source, "sales_return_quantity",    0))
-            )
-
-            if transfer_qty > available:
-                errors.append(
-                    f"Item {idx + 1} (batch={batch_number}): "
-                    f"requested {transfer_qty}, only {available} available at approval time"
+            # If not deducted when entered (legacy transfers), deduct now
+            if not source_deducted:
+                available = (
+                    _int(getattr(source, "total_stock",               0))
+                    - _int(getattr(source, "sold_quantity",           0))
+                    - _int(getattr(source, "transferred_out_quantity", 0))
+                    - _int(getattr(source, "grn_return_quantity",      0))
+                    - _int(getattr(source, "blocked_quantity",         0))
+                    + _int(getattr(source, "sales_return_quantity",    0))
                 )
-                continue
+                if transfer_qty > available:
+                    errors.append(
+                        f"Item {idx + 1} (batch={batch_number}): "
+                        f"requested {transfer_qty}, only {available} available at approval time"
+                    )
+                    continue
 
-            # ── Deduct from source ────────────────────────────────────────────
-            new_transferred_out = _int(getattr(source, "transferred_out_quantity", 0)) + transfer_qty
-            PharmacyStock.objects.filter(
-                stock_id      = getattr(source, "stock_id", None),
-                hospital_code = hospital_code,
-                branch_code   = branch_code,
-            ).update(
-                transferred_out_quantity = new_transferred_out,
-                lastmodified_by          = user_id,
-                lastmodified_date        = timezone.now(),
-            )
-
-            # ── Create destination stock record ───────────────────────────────
-            source_stock_id = _int(getattr(source, "stock_id", 0))
-            try:
-                PharmacyStock.objects.create(
-                    hospital_code            = hospital_code,
-                    branch_code              = branch_code,
-                    outlet_code              = transfer_to_outlet if transfer_to_outlet not in ("", "null", "None") else "OLET006",
-                    item_id                  = _int(getattr(source, "item_id", 0)),
-                    batch_number             = str(getattr(source, "batch_number", "") or ""),
-                    expiry_date              = getattr(source, "expiry_date", None),
-                    grn_number               = str(getattr(source, "grn_number", "") or ""),
-                    total_stock              = transfer_qty,
-                    sold_quantity            = 0,
-                    transferred_out_quantity = 0,
-                    grn_return_quantity      = 0,
-                    grn_return_ref_id        = None,
-                    blocked_quantity         = 0,
-                    sales_return_quantity    = 0,
-                    sales_return_ref_id      = None,
-                    stock_type               = "transfer",
-                    stock_ref_id             = source_stock_id,
-                    mrp                      = _dec(getattr(source, "mrp",             0)),
-                    Selling_Price            = _dec(
-                        getattr(source, "Selling_Price", None) or
-                        getattr(source, "selling_price", None) or
-                        getattr(source, "mrp", 0)
-                    ),
-                    CGST_Percentage          = _dec(getattr(source, "CGST_Percentage", 0)),
-                    SGST_Percentage          = _dec(getattr(source, "SGST_Percentage", 0)),
-                    CGST_Amt                 = _dec(getattr(source, "CGST_Amt",        0)),
-                    SGST_Amt                 = _dec(getattr(source, "SGST_Amt",        0)),
-                    created_by               = user_id,
-                    created_date             = timezone.now(),
+                new_transferred_out = _int(getattr(source, "transferred_out_quantity", 0)) + transfer_qty
+                PharmacyStock.objects.filter(
+                    stock_id      = getattr(source, "stock_id", None),
+                    hospital_code = hospital_code,
+                    branch_code   = branch_code,
+                ).update(
+                    transferred_out_quantity = new_transferred_out,
                     lastmodified_by          = user_id,
                     lastmodified_date        = timezone.now(),
                 )
+                if hms_db is not None:
+                    hms_db["hospital_pharmacystock"].update_one(
+                        {"stock_id": _int(getattr(source, "stock_id", 0))},
+                        {"$set": {
+                            "transferred_out_quantity": new_transferred_out,
+                            "lastmodified_by": str(user_id),
+                            "lastmodified_date": timezone.now(),
+                        }}
+                    )
+
+            # ── Create destination stock record in hospital_pharmacystock ─────
+            try:
+                dest_outlet = transfer_to_outlet if transfer_to_outlet not in ("", "null", "None") else "OLET006"
+                last_stock = hms_db["hospital_pharmacystock"].find_one(sort=[("stock_id", -1)]) if hms_db is not None else None
+                next_stock_id = (_int(last_stock.get("stock_id", 0)) + 1) if last_stock else 1
+
+                dest_doc = {
+                    "id":                       next_stock_id,
+                    "stock_id":                 next_stock_id,
+                    "hospital_code":            hospital_code,
+                    "branch_code":              branch_code,
+                    "outlet_code":              dest_outlet,
+                    "item_id":                  _int(getattr(source, "item_id", 0)),
+                    "batch_number":             str(getattr(source, "batch_number", "") or ""),
+                    "expiry_date":              getattr(source, "expiry_date", None),
+                    "mrp":                      float(_dec(getattr(source, "mrp", 0))),
+                    "Selling_Price":            float(_dec(
+                        getattr(source, "Selling_Price", None) or
+                        getattr(source, "selling_price", None) or
+                        getattr(source, "mrp", 0)
+                    )),
+                    "grn_number":               str(getattr(source, "grn_number", "") or ""),
+                    "total_stock":              transfer_qty,
+                    "sold_quantity":            0,
+                    "transferred_out_quantity": 0,
+                    "stock_type":               "grn",
+                    "stock_ref_id":             0,
+                    "grn_return_quantity":      0,
+                    "blocked_quantity":         0.0,
+                    "sales_return_quantity":    0,
+                    "CGST_Percentage":          float(_dec(getattr(source, "CGST_Percentage", 0))),
+                    "SGST_Percentage":          float(_dec(getattr(source, "SGST_Percentage", 0))),
+                    "CGST_Amt":                 float(_dec(getattr(source, "CGST_Amt", 0))),
+                    "SGST_Amt":                 float(_dec(getattr(source, "SGST_Amt", 0))),
+                    "created_by":               str(user_id),
+                    "created_date":             timezone.now(),
+                    "lastmodified_by":          None,
+                    "lastmodified_date":        None,
+                }
+                if hms_db is not None:
+                    hms_db["hospital_pharmacystock"].insert_one(dest_doc)
+                    hms_db["__schema__"].update_one(
+                        {"name": "hospital_pharmacystock"},
+                        {"$set": {"auto.seq": next_stock_id}}
+                    )
             except Exception as e:
                 errors.append(f"Item {idx + 1}: failed to create destination stock — {e}")
                 continue
@@ -865,12 +927,23 @@ def stock_transfer_action_view(request):
             return Response({"success": False, "error": errors}, status=400)
 
         StockTransfer.objects.filter(transfer_ref_number=pk).update(
-            is_verified       = "Approved",
-            approved_by       = user_id,            # ← NEW
-            approved_date     = timezone.now(),     # ← NEW
+            is_verified       = "Verified",
+            approved_by       = user_id,
+            approved_date     = timezone.now(),
             lastmodified_by   = user_id,
             lastmodified_date = timezone.now(),
         )
+        if hms_db is not None:
+            hms_db["hospital_stocktransfer"].update_one(
+                {"transfer_ref_number": pk},
+                {"$set": {
+                    "is_verified": "Verified",
+                    "approved_by": str(user_id),
+                    "approved_date": timezone.now(),
+                    "lastmodified_by": str(user_id),
+                    "lastmodified_date": timezone.now(),
+                }}
+            )
 
         try:
             updated = StockTransfer.objects.get(transfer_ref_number=pk)
@@ -889,7 +962,7 @@ def stock_transfer_action_view(request):
     # ── REJECT ────────────────────────────────────────────────────────────────
     if action == "reject":
 
-        if current_status == "Approved":
+        if current_status in ("Approved", "Verified"):
             return Response({"success": False, "error": "Approved transfers cannot be cancelled"}, status=403)
         if current_status == "Rejected":
             return Response({"success": False, "error": "Transfer is already Cancelled"}, status=400)
@@ -901,6 +974,37 @@ def stock_transfer_action_view(request):
                 status=400,
             )
 
+        client, hms_db = get_hms_db()
+        source_deducted = getattr(obj, "source_deducted", False)
+        # Revert transferred_out_quantity from source if it was deducted on draft creation
+        if source_deducted:
+            transfer_items = getattr(obj, "items", []) or []
+            parsed_items   = parse_transfer_items(transfer_items)
+            for item in parsed_items:
+                if isinstance(item, OrderedDict):
+                    item = dict(item)
+                sid = _int(item.get("stock_id", 0))
+                transfer_qty = _int(item.get("transferred_out_quantity", item.get("transfer_quantity", 0)))
+                if sid and transfer_qty > 0:
+                    src = PharmacyStock.objects.filter(stock_id=sid).first()
+                    if src:
+                        curr_out = _int(getattr(src, "transferred_out_quantity", 0))
+                        new_out  = max(0, curr_out - transfer_qty)
+                        PharmacyStock.objects.filter(stock_id=sid).update(
+                            transferred_out_quantity = new_out,
+                            lastmodified_by          = user_id,
+                            lastmodified_date        = timezone.now(),
+                        )
+                        if hms_db is not None:
+                            hms_db["hospital_pharmacystock"].update_one(
+                                {"stock_id": sid},
+                                {"$set": {
+                                    "transferred_out_quantity": new_out,
+                                    "lastmodified_by": str(user_id),
+                                    "lastmodified_date": timezone.now(),
+                                }}
+                            )
+
         StockTransfer.objects.filter(transfer_ref_number=pk).update(
             is_verified       = "Rejected",
             rejected_by       = user_id,            # ← NEW
@@ -909,6 +1013,18 @@ def stock_transfer_action_view(request):
             lastmodified_by   = user_id,
             lastmodified_date = timezone.now(),
         )
+        if hms_db is not None:
+            hms_db["hospital_stocktransfer"].update_one(
+                {"transfer_ref_number": pk},
+                {"$set": {
+                    "is_verified": "Rejected",
+                    "rejected_by": str(user_id),
+                    "rejected_date": timezone.now(),
+                    "rejected_reason": rejected_reason,
+                    "lastmodified_by": str(user_id),
+                    "lastmodified_date": timezone.now(),
+                }}
+            )
 
         try:
             updated = StockTransfer.objects.get(transfer_ref_number=pk)

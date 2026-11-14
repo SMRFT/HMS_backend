@@ -5,6 +5,7 @@ from rest_framework import status
 from pymongo import MongoClient
 from datetime import datetime
 import os
+import re
 import logging
 
 logger = logging.getLogger(__name__)
@@ -58,9 +59,11 @@ def get_bill_types(request):
         # 🔍 Search filter
         search = request.query_params.get('search', '').strip()
         if search:
+            escaped_search = re.escape(search)
+            pat = re.compile(escaped_search, re.IGNORECASE)
             query['$or'] = [
-                {'bill_name':  {'$regex': search, '$options': 'i'}},
-                {'billTypeNo': {'$regex': search, '$options': 'i'}},
+                {'bill_name':  pat},
+                {'billTypeNo': pat},
             ]
 
         records = [

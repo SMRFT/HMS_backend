@@ -32,8 +32,11 @@ def make_json_serializable(obj):
         return [make_json_serializable(v) for v in obj]
     if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
         return str(obj)
-    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
-        return float(obj)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ in ('Decimal', 'Decimal128'):
+        try:
+            return float(obj.to_decimal()) if hasattr(obj, 'to_decimal') else float(obj)
+        except Exception:
+            return float(str(obj))
     return obj
 
 

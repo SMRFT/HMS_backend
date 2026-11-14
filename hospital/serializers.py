@@ -205,6 +205,8 @@ class NursingStationSerializer(serializers.ModelSerializer):
         ]
        
 class RoomServiceDescriptionSerializer(serializers.ModelSerializer):
+    description = serializers.CharField(source="description_name", read_only=True)
+
     class Meta:
         model = RoomServiceDescription
         fields = "__all__"

@@ -4,6 +4,10 @@ import re
 import mimetypes
 import gridfs
 from bson.objectid import ObjectId
+try:
+    from bson.decimal128 import Decimal128
+except ImportError:
+    Decimal128 = None
 from pymongo import MongoClient
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -17,6 +21,7 @@ from django.views.decorators.csrf import csrf_exempt
 from pyauth.auth import HasRoleAndDataPermission
 from ..models import Admission, Room, Patient, InsuranceProvider, RoomBooking, IpAdvance_Refund
 from ..serializers import AdmissionSerializer
+from .discharge import _resolve_employee_name
 import traceback
 import json
 import ast
@@ -104,8 +109,11 @@ def _normalize_ist_timestamps(obj):
         return [_normalize_ist_timestamps(v) for v in obj]
     if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
         return str(obj)
-    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
-        return float(obj)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ in ('Decimal', 'Decimal128'):
+        try:
+            return float(obj.to_decimal()) if hasattr(obj, 'to_decimal') else float(obj)
+        except Exception:
+            return float(str(obj))
     return obj
 
 
@@ -122,9 +130,27 @@ def make_json_serializable(obj):
         return [make_json_serializable(v) for v in obj]
     if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
         return str(obj)
-    if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
-        return float(obj)
+    if hasattr(obj, '__class__') and obj.__class__.__name__ in ('Decimal', 'Decimal128'):
+        try:
+            return float(obj.to_decimal()) if hasattr(obj, 'to_decimal') else float(obj)
+        except Exception:
+            return float(str(obj))
     return obj
+
+
+class MongoDjangoJSONEncoder(DjangoJSONEncoder):
+    """DjangoJSONEncoder extended with BSON ObjectId and Decimal128 handling."""
+    def default(self, obj):
+        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal128':
+            try:
+                return float(obj.to_decimal()) if hasattr(obj, 'to_decimal') else float(obj)
+            except Exception:
+                return float(str(obj))
+        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'ObjectId':
+            return str(obj)
+        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Decimal':
+            return float(obj)
+        return super().default(obj)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -450,6 +476,8 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
         "is_cancelled":       getattr(adm, "is_cancelled", False),
         "cancelled_by":       getattr(adm, "cancelled_by", None),
         "cancelled_Reason":   getattr(adm, "cancelled_Reason", None),
+        "is_day_care":        bool(getattr(adm, "is_day_care", False)),
+        "ward_status":        getattr(adm, "ward_status", None),
     }
     if extra_fields and isinstance(extra_fields, dict):
         sync_extra.update(extra_fields)
@@ -544,11 +572,11 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         adm_data["relationship"]         = pt.get("relationship") or adm_data.get("attender_relationship") or ""
         adm_data["aadhaar"]              = pt.get("aadhaar") or pt.get("aadhaar_number") or pt.get("aadhar") or pt.get("national_id") or ""
         if not adm_data.get("customerType") and not adm_data.get("customer_type"):
-            c_type = str(pt.get("customer_type") or pt.get("customerType") or "General")
+            c_type = str(pt.get("customer_type") or pt.get("customerType") or "GENERAL").strip().upper()
             adm_data["customerType"]     = c_type
             adm_data["customer_type"]    = c_type
         else:
-            c_type = adm_data.get("customerType") or adm_data.get("customer_type")
+            c_type = str(adm_data.get("customerType") or adm_data.get("customer_type") or "GENERAL").strip().upper()
             adm_data["customerType"]     = c_type
             adm_data["customer_type"]    = c_type
         adm_data["insuranceCompanyName"] = ins_name
@@ -575,13 +603,13 @@ def _get_current_room(adm):
 # ─────────────────────────────────────────────────────────────────────────────
 # Next IP Generator & Helper
 # ─────────────────────────────────────────────────────────────────────────────
-def _compute_next_ip_number(hms_db=None):
+def _compute_next_ip_number(hms_db=None, is_daycare=False):
     """
-    Computes the next sequential IP number (e.g. S026/001692) for the current financial year
-    using the centralized atomic MongoDB counter service.
+    Computes the next sequential IP number (e.g. S026/000001 or SD26/000001 for daycare/chemo/dialysis)
+    for the current financial year using the centralized atomic MongoDB counter service.
     """
     from ..counter_service import get_next_admission_ip
-    return get_next_admission_ip(db_instance=hms_db)
+    return get_next_admission_ip(db_instance=hms_db, is_daycare=is_daycare)
 
 
 @api_view(['GET'])
@@ -592,8 +620,10 @@ def get_next_ip_number(request):
         from ..counter_service import peek_next_admission_ip
         client, hms_db = _get_hms_db()
         try:
+            room_val = request.GET.get("roomNo") or request.GET.get("room_no") or request.GET.get("room") or ""
+            is_daycare = any(k in str(room_val).strip().upper() for k in ["DAYCARE", "DAY CARE", "CHEMO", "DIALYSIS"])
             # Read-only preview: do NOT increment the counter when opening the form
-            next_ip = peek_next_admission_ip(db_instance=hms_db)
+            next_ip = peek_next_admission_ip(db_instance=hms_db, is_daycare=is_daycare)
         finally:
             if client:
                 client.close()
@@ -889,14 +919,17 @@ def op_patient_detail_by_uhid(request, uhid):
             dob = patient.get("dob") or patient.get("dateOfBirth")
             calc_age, calc_age_type = _calc_age_and_type_from_dob(dob)
 
-            company_code = (patient.get('company_code') or "").strip()
-            company_name = None
-            if company_code:
+            company_code = (patient.get('company_code') or patient.get('insuranceProviderCode') or "").strip()
+            company_name = (patient.get('insuranceCompanyName') or patient.get('company_name') or "").strip() or None
+            if company_code and not company_name:
                 insurance = hms_db["hospital_insuranceprovider"].find_one({"company_code": company_code})
                 if insurance:
                     company_name = insurance.get("company_name")
 
-            cust_type = str(patient.get('customer_type') or patient.get('customerType') or "General")
+            raw_cust = patient.get('customer_type') or patient.get('customerType') or "GENERAL"
+            cust_type = str(raw_cust).strip().upper()
+            raw_ins = patient.get('insurance_type') or patient.get('insuranceType') or cust_type
+            insur_type = str(raw_ins).strip().upper()
 
             data = {
                 "id": str(patient.get("_id") or patient.get("pk") or patient.get("id") or ""),
@@ -920,6 +953,8 @@ def op_patient_detail_by_uhid(request, uhid):
                 "blood_group": patient.get("blood_group") or "",
                 "customer_type": cust_type,
                 "customerType": cust_type,
+                "insurance_type": insur_type,
+                "insuranceType": insur_type,
                 "company_code": company_code,
                 "company_name": company_name,
                 "insuranceCompanyName": company_name,
@@ -1232,15 +1267,18 @@ def admission_view(request):
             }]
 
             # Extract customer type and insurance
-            customer_type = str(data.get("customer_type") or data.get("customerType") or "General").strip() or "General"
+            customer_type = str(data.get("customer_type") or data.get("customerType") or "GENERAL").strip().upper() or "GENERAL"
             company_code = str(data.get("company_code") or data.get("insuranceProviderCode") or "").strip()
             insurance_company = str(data.get("insurance_company") or data.get("insuranceCompanyName") or "").strip()
-            if customer_type == "Insurance" and company_code and not insurance_company:
-                try:
-                    prov = InsuranceProvider.objects.get(company_code=company_code)
-                    insurance_company = prov.company_name
-                except Exception:
-                    insurance_company = company_code
+            if customer_type == "INSURANCE":
+                if not company_code and not insurance_company:
+                    return JsonResponse({"error": "Insurance Company is required for Insurance customer type"}, status=400)
+                if company_code and not insurance_company:
+                    try:
+                        prov = InsuranceProvider.objects.get(company_code=company_code)
+                        insurance_company = prov.company_name
+                    except Exception:
+                        insurance_company = company_code
 
             # Extract age & age_type (from request or calculated from Patient DOB)
             age_val = data.get("age")
@@ -1293,8 +1331,23 @@ def admission_view(request):
             attender_relationship = str(data.get("attender_relationship") or data.get("attenderRelationship") or data.get("relationship") or "").strip() or None
             attender_phone = str(data.get("attender_phone") or data.get("attenderPhone") or "").strip() or None
 
+            # Room type check for Daycare / Chemo / Dialysis series
+            room_no_str = str(data.get("roomNo") or "").strip().upper()
+            is_daycare_series = any(k in room_no_str for k in ["DAYCARE", "DAY CARE", "CHEMO", "DIALYSIS"])
+
             # Assign sequential IP number only right before creating the admission record
-            ip_number = _compute_next_ip_number()
+            _ip_client, _ip_db = _get_hms_db()
+            try:
+                ip_number = _compute_next_ip_number(hms_db=_ip_db, is_daycare=is_daycare_series)
+            finally:
+                if _ip_client:
+                    _ip_client.close()
+
+            # Daycare Insurance check:
+            # If Customer Type is Insurance, and room selected is DAYCARE/CHEMO/DIALYSIS, store is_day_care : true and ward_status as "Sent for billing"
+            is_insurance_cust = customer_type.strip().lower() == "insurance"
+            is_day_care = is_insurance_cust and is_daycare_series
+            initial_ward_status = "Sent for billing" if is_day_care else None
 
             adm = Admission.objects.create(
                 uhid=uhid, ipNumber=ip_number, admissionDateTime=admission_dt,
@@ -1311,7 +1364,8 @@ def admission_view(request):
                 reasonForAdmission=data.get('reasonForAdmission'),
                 is_cancelled=False, cancelled_by=None, cancelled_Reason=None,
                 edit_history=[],
-                ward_status=None,
+                is_day_care=is_day_care,
+                ward_status=initial_ward_status,
                 is_discharged=False, is_admitted=True,
                 created_by=employee_id, created_date=_now_ist(),
                 lastmodified_by=employee_id, lastmodified_date=_now_ist(),
@@ -1335,6 +1389,8 @@ def admission_view(request):
                 "is_cancelled": False,
                 "cancelled_by": None,
                 "cancelled_Reason": None,
+                "is_day_care": is_day_care,
+                "ward_status": initial_ward_status,
                 "is_discharged": False,
                 "is_admitted": True,
             })
@@ -1353,7 +1409,8 @@ def admission_view(request):
                 "room_details": room_details, "roomShitingDetails": [], "advance_payments": [],
                 "is_cancelled": False, "cancelled_by": None, "cancelled_Reason": None,
                 "edit_history": [],
-                "ward_status": None,
+                "is_day_care": is_day_care,
+                "ward_status": initial_ward_status,
                 "is_admitted": True, "is_discharged": False,
                 "ipserial_number": adm.ipserial_number,
             }
@@ -1476,6 +1533,7 @@ def admission_detail(request, ipNumber):
                 'cancelled_by':     getattr(adm, "cancelled_by",         None),
                 'cancelled_Reason': getattr(adm, "cancelled_Reason",     None),
                 'edit_history':     _normalize_ist_timestamps(_safe_list(getattr(adm, "edit_history", []))),
+                'is_day_care':      bool(getattr(adm, "is_day_care",     False)),
                 'ward_status':      getattr(adm, "ward_status",          ""),
                 # ────────────────────────────────────────────────────────────
                 'is_admitted':       bool(adm.is_admitted),
@@ -1572,20 +1630,24 @@ def admission_detail(request, ipNumber):
                     adm.packageName = str(val) if val else ""
 
                 if 'customer_type' in data or 'customerType' in data:
-                    c_type = str(get_val(data.get('customer_type')) or get_val(data.get('customerType')) or 'General')
+                    c_type = str(get_val(data.get('customer_type')) or get_val(data.get('customerType')) or 'GENERAL').strip().upper()
                     adm.customer_type = c_type
                 if 'company_code' in data or 'insuranceProviderCode' in data:
-                    c_code = str(get_val(data.get('company_code')) or get_val(data.get('insuranceProviderCode')) or '')
+                    c_code = str(get_val(data.get('company_code')) or get_val(data.get('insuranceProviderCode')) or '').strip()
                     adm.company_code = c_code
                 if 'insurance_company' in data or 'insuranceCompanyName' in data:
-                    i_comp = str(get_val(data.get('insurance_company')) or get_val(data.get('insuranceCompanyName')) or '')
+                    i_comp = str(get_val(data.get('insurance_company')) or get_val(data.get('insuranceCompanyName')) or '').strip()
                     adm.insurance_company = i_comp
-                elif adm.customer_type == "Insurance" and adm.company_code:
+                elif str(getattr(adm, "customer_type", "") or "").strip().upper() == "INSURANCE" and getattr(adm, "company_code", ""):
                     try:
                         prov = InsuranceProvider.objects.get(company_code=adm.company_code)
                         adm.insurance_company = prov.company_name
                     except Exception:
                         pass
+
+                if str(getattr(adm, "customer_type", "") or "").strip().upper() == "INSURANCE":
+                    if not getattr(adm, "company_code", "") and not getattr(adm, "insurance_company", ""):
+                        return JsonResponse({"error": "Insurance Company is required for Insurance customer type"}, status=400)
 
                 if 'age' in data:
                     age_v = get_val(data.get('age'))
@@ -1641,6 +1703,17 @@ def admission_detail(request, ipNumber):
                             }]
                             adm.roomNo = new_room_no
                             adm.bedNo  = new_bed_no
+
+                # Daycare Insurance check on edit
+                curr_room_str = str(new_room_no or (rd[0].get("roomNo") if rd and isinstance(rd[0], dict) else "")).strip().upper()
+                is_ins_cust = str(getattr(adm, "customer_type", "") or "").strip().lower() == "insurance"
+                is_dc_room = curr_room_str in ["DAYCARE", "DAY CARE"] or "DAYCARE" in curr_room_str
+                if is_ins_cust and is_dc_room:
+                    adm.is_day_care = True
+                    if not getattr(adm, "ward_status", None) or getattr(adm, "ward_status", None) in ["", "Admitted"]:
+                        adm.ward_status = "Sent for billing"
+                elif 'is_day_care' in data:
+                    adm.is_day_care = get_val(data.get('is_day_care')) in [True, "true", "True", "1", 1]
 
                 # Append to edit_history array (single source of truth)
                 edit_history = _safe_list(getattr(adm, "edit_history", []))
@@ -1710,17 +1783,19 @@ def _max_sequence_for_prefix(bill_numbers, prefix):
 
 def _generate_advance_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
     """
-    Continuous, FY-scoped bill number across admissions for IP Advances (e.g. 2627/028226)
+    Continuous, FY-scoped bill number across admissions for IP Advances (e.g. 2627028226)
     using the centralized atomic MongoDB counter service.
     """
     from ..counter_service import get_next_advance_bill_no
-    return get_next_advance_bill_no()
+    val = get_next_advance_bill_no()
+    return str(val).replace("/", "") if val else val
 
 
 def _generate_refund_bill_no(hospital_code=None, branch_code=None, outlet_code=None):
-    """Separate, independent FY-scoped sequence for refund bill numbers using atomic counter."""
+    """Separate, independent FY-scoped sequence for refund bill numbers using atomic counter (e.g. 2627000003)."""
     from ..counter_service import get_next_advance_refund_bill_no
-    return get_next_advance_refund_bill_no()
+    val = get_next_advance_refund_bill_no()
+    return str(val).replace("/", "") if val else val
 
 
 def _update_advance_payments(ip_number, hospital_code, branch_code, outlet_code,
@@ -1784,12 +1859,18 @@ def admission_advance(request, ipNumber=None):
         employee_id   = request.data.get('auth-user-id')       or request.headers.get('auth-user-id')       or "system"
         hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or "system"
         branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or "system"
-        outlet_code   = request.data.get('auth-outlet-code')
+        outlet_code   = (
+            request.data.get('auth-outlet-code')
+            or request.headers.get('Outlet-Code')
+            or request.headers.get('outlet-code')
+            or request.GET.get('outlet_code')
+            or ""
+        ).strip()
         now_iso = _now_ist_iso()
 
         # ── GET ───────────────────────────────────────────────────────────────
         if request.method == 'GET':
-            ip_number = request.GET.get("ip_number", "").strip()
+            ip_number = (ipNumber or request.GET.get("ip_number", "") or request.GET.get("ipNumber", "")).strip()
             uhid      = request.GET.get("uhid",      "").strip()
             from_date = request.GET.get("from_date", "").strip()
             to_date   = request.GET.get("to_date",   "").strip()
@@ -1797,20 +1878,27 @@ def admission_advance(request, ipNumber=None):
             if not ip_number and not uhid and not (from_date and to_date):
                 return JsonResponse({'success': False, 'error': 'Provide ip_number/uhid or date range'}, status=400)
 
-            q = {
-                "is_cancelled": {"$ne": True},
-            }
-            if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
-            if branch_code and branch_code != "system": q["branch_code"] = branch_code
-            if outlet_code and outlet_code != "system": q["outlet_code"] = outlet_code
+            and_clauses = [
+                {"is_cancelled": {"$ne": True}}
+            ]
+            if hospital_code and hospital_code != "system":
+                and_clauses.append({"hospital_code": hospital_code})
+            if branch_code and branch_code != "system":
+                and_clauses.append({"branch_code": branch_code})
+            if outlet_code and outlet_code.lower() not in ("system", "all"):
+                and_clauses.append({
+                    "$or": [
+                        {"outlet_code": outlet_code},
+                        {"advance_payments.outlet_code": outlet_code}
+                    ]
+                })
 
             if ip_number:
-                q["ipNumber"] = ip_number
+                and_clauses.append({"ipNumber": ip_number})
             if uhid:
-                q["uhid"] = uhid
+                and_clauses.append({"uhid": uhid})
                 if not ip_number and not (from_date and to_date):
-                    q["is_admitted"] = True
-                    q["is_discharged"] = {"$ne": True}
+                    and_clauses.append({"is_admitted": True, "is_discharged": {"$ne": True}})
 
             from_dt = None
             to_dt = None
@@ -1820,23 +1908,27 @@ def admission_advance(request, ipNumber=None):
                     to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
                     from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
                     to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
-                    q["$or"] = [
-                        {"advance_payments.date": {"$gte": from_date, "$lte": to_date}},
-                        {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                        {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
-                        {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                        {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
-                    ]
+                    and_clauses.append({
+                        "$or": [
+                            {"advance_payments.date": {"$gte": from_date, "$lte": to_date}},
+                            {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                            {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                            {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                            {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                        ]
+                    })
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
             else:
-                q["advance_payments.0"] = {"$exists": True}
+                and_clauses.append({"advance_payments.0": {"$exists": True}})
+
+            q = {"$and": and_clauses} if len(and_clauses) > 1 else and_clauses[0]
 
             client, hms_db = _get_hms_db()
             try:
                 admissions = list(hms_db["hospital_admission"].find(
                     q,
-                    {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "room_details": 1, "roomShitingDetails": 1, "roomNo": 1}
+                    {"ipNumber": 1, "uhid": 1, "outlet_code": 1, "advance_payments": 1, "room_details": 1, "roomShitingDetails": 1, "roomNo": 1}
                 ))
                 if not admissions:
                     return JsonResponse({'success': True, 'data': [], 'count': 0})
@@ -1870,14 +1962,33 @@ def admission_advance(request, ipNumber=None):
                     if isinstance(p.get("payment_details"), dict):
                         payment_mode = p["payment_details"].get("method", "")
                     paid_date = _to_ist_iso(p.get("paid_datetime")) or ""
+                    p_outlet = str(p.get("outlet_code") or adm.get("outlet_code") or "").strip()
+                    if outlet_code and outlet_code.lower() not in ("system", "all"):
+                        if p_outlet and p_outlet != outlet_code:
+                            continue
                     p["ip_number"]    = adm.get("ipNumber")
                     p["uhid"]         = adm.get("uhid")
                     p["room"]         = room_str
                     p["patient_name"] = patient_map.get(patient_key, "")
                     p["payment_mode"] = payment_mode
                     p["paid_date"]    = paid_date
+                    p["outlet_code"]  = p_outlet
+                    creator_id        = p.get("created_by") or ""
+                    p["created_by_name"] = _resolve_employee_name(creator_id)
+                    if p.get("bill_no"):
+                        p["bill_no"] = str(p["bill_no"]).replace("/", "")
+                    if p.get("bill_number"):
+                        p["bill_number"] = str(p["bill_number"]).replace("/", "")
                     if not isinstance(p.get("refund_details"), list):
                         p["refund_details"] = []
+                    else:
+                        for rd in p["refund_details"]:
+                            if isinstance(rd, dict):
+                                if rd.get("refund_bill_no"):
+                                    rd["refund_bill_no"] = str(rd["refund_bill_no"]).replace("/", "")
+                                rd_creator = rd.get("refunded_by") or rd.get("created_by") or ""
+                                rd["refunded_by_name"] = _resolve_employee_name(rd_creator)
+                                rd["created_by_name"]  = rd["refunded_by_name"]
                     advance_payments.append(_normalize_ist_timestamps(p))
 
             if from_date and to_date:
@@ -1905,7 +2016,7 @@ def admission_advance(request, ipNumber=None):
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
 
-            return JsonResponse({'success': True, 'data': make_json_serializable(advance_payments)}, encoder=DjangoJSONEncoder)
+            return JsonResponse({'success': True, 'data': make_json_serializable(advance_payments)}, encoder=MongoDjangoJSONEncoder)
 
         # ── Find admission for POST / PUT ─────────────────────────────────────
         target_ip = str(ipNumber or request.data.get('ipNumber') or request.data.get('ip_number') or '').strip()
@@ -1985,12 +2096,16 @@ def admission_advance(request, ipNumber=None):
             bill_type, bill_type_no = _bill_type_fields(request.data)
 
             adv_bill_no = _generate_advance_bill_no(hospital_code, branch_code, outlet_code)
+            creator_name = _resolve_employee_name(employee_id)
+            cur_r = _get_current_room(adm.__dict__ if hasattr(adm, '__dict__') else adm)
+            room_str = cur_r.get("roomNo") or getattr(adm, "roomNo", "") or ""
             new_entry = {
                 "advance_id":       f"ADV{len(ap) + 1}",
                 "bill_no":          adv_bill_no,
                 "bill_number":      adv_bill_no,
                 "bill_type":        bill_type,
                 "billTypeNo":       bill_type_no,
+                "outlet_code":      outlet_code or getattr(adm, "outlet_code", "") or "",
                 "date":             request.data.get('date', now_iso[:10]),
                 "bill_date":        now_iso,
                 "advance_amount":   adv_amt,
@@ -1999,13 +2114,18 @@ def admission_advance(request, ipNumber=None):
                 "is_advanceActive": True,
                 "status":           "Pending",
                 "created_by":       employee_id,
+                "created_by_name":  creator_name,
                 "created_date":     now_iso,
                 "is_refund":        False,
                 "refund_details":   [],
+                "patient_name":     getattr(adm, "patient_name", "") or "",
+                "uhid":             str(adm.uhid),
+                "ip_number":        str(adm.ipNumber),
+                "room":             room_str,
             }
             ap.append(new_entry)
             _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
-            return JsonResponse({'success': True, 'data': make_json_serializable(new_entry)}, status=201, encoder=DjangoJSONEncoder)
+            return JsonResponse({'success': True, 'data': make_json_serializable(new_entry)}, status=201, encoder=MongoDjangoJSONEncoder)
 
         # ── PUT ───────────────────────────────────────────────────────────────
         elif request.method == 'PUT':
@@ -2030,7 +2150,7 @@ def admission_advance(request, ipNumber=None):
                 entry['cancelled_by']     = employee_id
                 entry['cancelled_date']   = now_iso
                 _update_advance_payments(ipNumber, hospital_code, branch_code, outlet_code, ap, employee_id, admission_id=adm.pk)
-                return JsonResponse({'success': True, 'data': make_json_serializable(entry)}, encoder=DjangoJSONEncoder)
+                return JsonResponse({'success': True, 'data': make_json_serializable(entry)}, encoder=MongoDjangoJSONEncoder)
 
             # ── refund — full amount only, single refund record, status -> Refunded ──
             elif action == 'refund':
@@ -2063,13 +2183,16 @@ def admission_advance(request, ipNumber=None):
                     refund_bill_type_no = str(entry.get('billTypeNo') or "AD01")
 
                 refund_bill_no = _generate_refund_bill_no(hospital_code, branch_code, outlet_code)
+                if refund_bill_no:
+                    refund_bill_no = str(refund_bill_no).replace('/', '')
 
                 # 1) Persist refund record in its table
+                orig_adv_bno = str(entry.get('bill_no') or entry.get('bill_number') or '').replace('/', '')
                 refund_row = IpAdvance_Refund.objects.create(
                     refund_bill_no=refund_bill_no,
                     refund_date=timezone.now(),
                     refund_amount=refund_amount,
-                    bill_no=str(entry.get('bill_no') or entry.get('bill_number') or ''),
+                    bill_no=orig_adv_bno,
                     ip_number=str(ipNumber),
                     uhid=str(adm.uhid),
                     advance_amount=advance_total,
@@ -2087,12 +2210,18 @@ def admission_advance(request, ipNumber=None):
                 )
 
                 # 2) Lightweight copy on advance entry
+                creator_name = _resolve_employee_name(employee_id)
+                cur_r = _get_current_room(adm.__dict__ if hasattr(adm, '__dict__') else adm)
+                room_str = cur_r.get("roomNo") or getattr(adm, "roomNo", "") or ""
                 refund_record = {
                     "refund_id":        str(refund_row.pk),
                     "refund_bill_no":   refund_bill_no,
                     "refunded_amount":  f"{refund_amount:.2f}",
                     "refunded_date":    now_iso,
                     "refunded_by":      employee_id,
+                    "refunded_by_name": creator_name,
+                    "created_by":       employee_id,
+                    "created_by_name":  creator_name,
                     "payment_mode":     request.data.get('payment_mode', 'Cash'),
                     "remarks":          request.data.get('remarks', ''),
                     "bill_type":        refund_bill_type,
@@ -2109,11 +2238,19 @@ def admission_advance(request, ipNumber=None):
                 return JsonResponse({
                     'success': True,
                     'data': make_json_serializable({
-                        'advance_entry':  entry,
-                        'refund_record':  refund_record,
-                        'refund_bill_no': refund_bill_no,
+                        'advance_entry':    entry,
+                        'refund_record':    refund_record,
+                        'refund_bill_no':   refund_bill_no,
+                        'created_by':       employee_id,
+                        'created_by_name':  creator_name,
+                        'refunded_by':      employee_id,
+                        'refunded_by_name': creator_name,
+                        'patient_name':     getattr(adm, "patient_name", "") or "",
+                        'uhid':             str(adm.uhid),
+                        'ip_number':        str(adm.ipNumber),
+                        'room':             room_str,
                     }),
-                }, encoder=DjangoJSONEncoder)
+                }, encoder=MongoDjangoJSONEncoder)
 
             # ── edit (only while Pending) ──────────────────────────────────
             else:
@@ -2159,8 +2296,107 @@ def admission_advance(request, ipNumber=None):
                 return JsonResponse({
                     'success': True,
                     'data': make_json_serializable({'original': entry, 'new_entry': new_entry}),
-                }, encoder=DjangoJSONEncoder)
+                }, encoder=MongoDjangoJSONEncoder)
 
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def ip_advance_refunds_list(request):
+    """
+    Returns list of IP Advance refunds with patient name, room, and full refund details.
+    """
+    try:
+        hospital_code = request.data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or request.GET.get("hospital_code") or "system"
+        branch_code   = request.data.get("auth-branch-code")   or request.headers.get("Branch-Code")        or request.GET.get("branch_code") or "system"
+        outlet_code   = (
+            request.data.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("outlet-code")
+            or request.GET.get("outlet_code")
+            or ""
+        ).strip()
+        from_date     = request.GET.get("from_date", "").strip()
+        to_date       = request.GET.get("to_date",   "").strip()
+
+        client, hms_db = _get_hms_db()
+        q = {}
+        if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":     q["branch_code"]   = branch_code
+        if outlet_code and outlet_code.lower() not in ("system", "all"):
+            q["outlet_code"] = outlet_code
+
+        if from_date and to_date:
+            try:
+                from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+                to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
+                from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
+                q["$or"] = [
+                    {"refund_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                    {"refund_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                    {"created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                    {"created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                ]
+            except Exception:
+                pass
+
+        refund_docs = list(hms_db["hospital_ipadvance_refund"].find(q).sort("refund_date", -1))
+
+        uhids = list(set([str(r.get("uhid")).strip() for r in refund_docs if r.get("uhid")]))
+        patient_map = {}
+        if uhids:
+            for p in hms_db["hospital_patient"].find({"uhid": {"$in": uhids}}, {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1, "patientname": 1, "name": 1}):
+                u = str(p.get("uhid") or "").strip().upper()
+                name = " ".join(filter(None, [p.get("salutation"), p.get("firstName"), p.get("lastName")])).strip()
+                if not name:
+                    name = p.get("patientname") or p.get("name") or ""
+                if name:
+                    patient_map[u] = name
+
+            missing = [u for u in uhids if u.upper() not in patient_map]
+            if missing:
+                for p in hms_db["hospital_patientregistration"].find({"uhid": {"$in": missing}}, {"uhid": 1, "patientname": 1, "name": 1}):
+                    u = str(p.get("uhid") or "").strip().upper()
+                    name = p.get("patientname") or p.get("name") or ""
+                    if name:
+                        patient_map[u] = name
+
+        adm_map = {}
+        ip_numbers = list(set([str(r.get("ip_number")) for r in refund_docs if r.get("ip_number")]))
+        if ip_numbers:
+            for a in hms_db["hospital_admission"].find({"ipNumber": {"$in": ip_numbers}}, {"ipNumber": 1, "roomNo": 1, "room_details": 1, "patient_name": 1, "patientName": 1}):
+                ip = str(a.get("ipNumber") or "").strip()
+                cur_r = _get_current_room(a)
+                adm_map[ip] = {
+                    "room": cur_r.get("roomNo") or a.get("roomNo") or "",
+                    "patient_name": a.get("patient_name") or a.get("patientName") or ""
+                }
+
+        res_list = []
+        for r in refund_docs:
+            r_dict = _normalize_ist_timestamps(r)
+            u = str(r_dict.get("uhid") or "").strip().upper()
+            ip = str(r_dict.get("ip_number") or "").strip()
+            adm_info = adm_map.get(ip, {})
+            r_dict["patient_name"] = patient_map.get(u) or adm_info.get("patient_name") or ""
+            r_dict["room"]         = adm_info.get("room") or ""
+            if r_dict.get("refund_bill_no"):
+                r_dict["refund_bill_no"] = str(r_dict["refund_bill_no"]).replace("/", "")
+            if r_dict.get("bill_no"):
+                r_dict["bill_no"] = str(r_dict["bill_no"]).replace("/", "")
+            ref_creator = r_dict.get("created_by") or r_dict.get("refunded_by") or ""
+            r_dict["created_by_name"]  = _resolve_employee_name(ref_creator)
+            r_dict["refunded_by_name"] = r_dict["created_by_name"]
+            res_list.append(r_dict)
+
+        if client:
+            client.close()
+
+        return JsonResponse({'success': True, 'data': make_json_serializable(res_list)}, encoder=MongoDjangoJSONEncoder)
     except Exception as e:
         traceback.print_exc()
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

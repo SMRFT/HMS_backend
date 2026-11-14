@@ -459,9 +459,14 @@ class StockTransfer(AuditModel):
     remarks = models.TextField(blank=False, default="")
     approved_by = models.CharField(max_length=100, blank=True, default="")
     approved_date = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.CharField(max_length=100, blank=True, default="")
+    rejected_date = models.DateTimeField(null=True, blank=True)
+    rejected_reason = models.TextField(blank=True, default="")
+    source_deducted = models.BooleanField(default=False)
     IS_VERIFIED_CHOICES = [
         ("Draft",    "Draft"),
         ("Approved", "Approved"),
+        ("Verified", "Verified"),
         ("Rejected", "Rejected"),
     ]
     is_verified = models.CharField(max_length=20, choices=IS_VERIFIED_CHOICES, default="Draft")
@@ -1016,6 +1021,7 @@ class Admission(AuditModel):
     # ── Core boolean flags ────────────────────────────────────────────────────
     is_discharged       = models.BooleanField(default=False)
     is_admitted         = models.BooleanField(default=True)
+    is_day_care         = models.BooleanField(default=False)
  
     class Meta:
         ordering = ['-admissionDateTime']

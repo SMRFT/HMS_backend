@@ -106,6 +106,7 @@ urlpatterns = [
     path('admission-detail/<path:ipNumber>/', admission.admission_detail, name='admission_detail'),
     path('admission-advance/', admission.admission_advance, name='admission_advance_list'),
     path('admission-advance/<path:ipNumber>/', admission.admission_advance, name='admission_advance_detail'),
+    path('ip-advance-refunds/', admission.ip_advance_refunds_list, name='ip_advance_refunds_list'),
     path('admission-mlc-doc/<path:filename>/', admission.get_mlc_doc, name='admission_mlc_doc'),
     path('admission-mlc-doc/<path:filename>', admission.get_mlc_doc, name='admission_mlc_doc_noslash'),
     path('today-registered-patients/', admission.today_registered_patients, name='today_registered_patients'),
@@ -273,6 +274,7 @@ urlpatterns = [
 
     # Discharge URLs
     path("search-discharge-patient/", discharge.search_discharge_patient, name="search-discharge-patient"),
+    path("discharge-bill-medicines/", discharge.get_discharge_bill_medicines, name="discharge-bill-medicines"),
     path("discharge-billing/requests/", discharge.get_discharge_requests, name="discharge-requests"),
     path("discharge-billing/signatories/", discharge.get_discharge_signatories, name="discharge-signatories"),
     path("discharge-billing/", discharge.discharge_billing_list_create, name="discharge-billing-list-create"),
