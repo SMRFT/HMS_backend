@@ -750,6 +750,8 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/sales-tax-register/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/stock-report-ip-op/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/SalesReturnReport/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/admission-vs-discharge-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/AdmissionVsDischargeReport/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/patient-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
