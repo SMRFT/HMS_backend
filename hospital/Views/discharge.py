@@ -959,6 +959,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
                 "room_no":        current_room,
                 "company":        doc.get("company_name") or company_name_p or str(raw_comp),
                 "company_code":   str(raw_comp),
+                "customer_type":  doc.get("customer_type") or (adm.get("customer_type") if adm else "") or ("INSURANCE" if doc.get("is_insurance_bill") else "GENERAL"),
             }
 
     created_by_val = doc.get("created_by")
@@ -1010,6 +1011,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "id_card_number":        doc.get("id_card_number") or "",
         "insurance_bill_number": (str(doc.get("insurance_bill_number")).replace("/", "") if doc.get("insurance_bill_number") else ""),
         "company_name":          doc.get("company_name") or "",
+        "customer_type":         doc.get("customer_type") or (adm.get("customer_type") if adm else "") or ("INSURANCE" if doc.get("is_insurance_bill") else "GENERAL"),
         "payment_method":        doc.get("payment_method") or "Cash",
         "created_by":             created_by_val,
         "created_by_name":        created_by_name,
@@ -2311,37 +2313,9 @@ def search_discharge_patient(request):
                         "source":         "hospital_investbilling",
                     })
 
-        # ── 2. hospital_patientdietorder ──────────────────────────────────────
-        diet_q = get_query(
-            ["inpatient_number", "ipNumber", "ip_number"],
-            {"status": "Delivered"}
-        )
-        if diet_q:
-            for doc in db["hospital_patientdietorder"].find(diet_q):
-                tot_price = _to_float(doc.get("total_price"))
-                if tot_price == 0:
-                    tot_price = _to_float(doc.get("diet_price")) + _to_float(doc.get("extra_items_price"))
-                
-                meal_time  = doc.get("meal_time", "")
-                item_label = f"Diet Food ({meal_time})" if meal_time else "Diet Food"
-
-                invest_items.append({
-                    "invest_bill_no": str(doc.get("_id")),
-                    "bill_object_id": str(doc.get("_id")),
-                    "itemName":       "Diet Food",
-                    "price":          tot_price,
-                    "rate":           str(tot_price),
-                    "quantity":       1,
-                    "discount":       0,
-                    "amount":         tot_price,
-                    "billTypeNo":     "DIS01",
-                    "bill_type":      2,
-                    "test_id":        None,
-                    "doctor":         _resolve_employee_name(str(doc.get("ordered_by") or "").strip()) if doc.get("ordered_by") else "",
-                    "payment_status": doc.get("status", ""),
-                    "package_name":   item_label,
-                    "source":         "hospital_patientdietorder",
-                })
+        # ── 2. hospital_patientdietorder (EXCLUDED) ───────────────────────────
+        # Note: Diet food collection is excluded from discharge billing because
+        # diet charges are already included in room charges.
 
         # ── 3. hospital_laundrywardrequest ────────────────────────────────────
         laundry_q = get_query(
@@ -3143,6 +3117,8 @@ def discharge_billing_list_create(request):
         from_f   = request.GET.get("from_date")
         to_f     = request.GET.get("to_date")
         search_f = request.GET.get("search") or request.GET.get("q")
+        customer_type_f = request.GET.get("customer_type")
+        insurance_type_f = request.GET.get("insurance_type") or request.GET.get("company_name")
 
         q = {}
         if status_f:
@@ -3153,6 +3129,21 @@ def discharge_billing_list_create(request):
             q["uhid"] = str(uhid_f).strip()
         if ip_f:
             q["ip_number"] = str(ip_f).strip()
+
+        if customer_type_f and str(customer_type_f).upper() != "ALL":
+            ct = str(customer_type_f).strip().upper()
+            if ct == "INSURANCE":
+                q["$or"] = [{"is_insurance_bill": True}, {"customer_type": {"$regex": "INSURANCE", "$options": "i"}}]
+            elif ct == "GENERAL":
+                q["is_insurance_bill"] = {"$ne": True}
+            else:
+                q["customer_type"] = {"$regex": ct, "$options": "i"}
+
+        if insurance_type_f and str(insurance_type_f).upper() != "ALL":
+            if insurance_type_f == "NON_INSURANCE":
+                q["is_insurance_bill"] = {"$ne": True}
+            else:
+                q["company_name"] = {"$regex": re.escape(str(insurance_type_f).strip()), "$options": "i"}
 
         if from_f or to_f:
             date_filter = {}
