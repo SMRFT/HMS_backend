@@ -25,7 +25,7 @@ _json_fields.JSONField.from_db_value = _safe_from_db_value
 from pymongo import MongoClient
 
 try:
-    from bson import Decimal128
+    from bson import Decimal128, ObjectId
     _HAS_DECIMAL128 = True
 except ImportError:
     _HAS_DECIMAL128 = False
@@ -1728,6 +1728,69 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
             except Exception:
                 pass
 
+        # ── 6. Update Cathlab Intent (hospital_cathlabintent) ─────────────────
+        # Criteria: matching IP Number / uhid, is_approved: True, is_billed != True
+        # Update: is_billed -> True
+        cathlab_ip_filter = []
+        if ip_number:
+            raw_ip = str(ip_number).strip()
+            clean_ip = raw_ip.replace("/", "")
+            cathlab_ip_filter.extend([
+                {"ipnumber": raw_ip},
+                {"ipnumber": clean_ip},
+                {"ipnumber": {"$regex": f"^{re.escape(clean_ip)}$", "$options": "i"}},
+                {"ip_number": raw_ip},
+                {"ip_number": clean_ip},
+                {"ipNumber": raw_ip},
+                {"ipNumber": clean_ip},
+            ])
+        if uhid:
+            cathlab_ip_filter.append({"uhid": str(uhid).strip()})
+
+        if cathlab_ip_filter:
+            cathlab_match = {
+                "$and": [
+                    {"$or": cathlab_ip_filter},
+                    {"is_approved": True},
+                    {"is_billed": {"$ne": True}},
+                ]
+            }
+            db["hospital_cathlabintent"].update_many(
+                cathlab_match,
+                {"$set": {
+                    "is_billed": True,
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+
+        # Also update by bill_object_id if discharge items reference specific cathlab intent records
+        if ip_number:
+            try:
+                disch_doc = db["hospital_dischargebilling"].find_one({
+                    "ip_number": str(ip_number),
+                    "status": "Billed",
+                    "is_cancelled": {"$ne": True}
+                }, sort=[("bill_date", -1)])
+                if disch_doc:
+                    for itm in disch_doc.get("items") or []:
+                        if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                            obj_id_str = itm.get("bill_object_id")
+                            if obj_id_str:
+                                try:
+                                    db["hospital_cathlabintent"].update_one(
+                                        {"_id": ObjectId(obj_id_str)},
+                                        {"$set": {
+                                            "is_billed": True,
+                                            "lastmodified_by": user_str,
+                                            "lastmodified_date": now_dt,
+                                        }}
+                                    )
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
     except Exception as e:
         import traceback
         print(f"Error in _finalize_discharge for IP {ip_number}: {e}")
@@ -2585,6 +2648,78 @@ def search_discharge_patient(request):
 
         patient_info["implant_amount"] = round(total_implant_amt, 2)
 
+        # ── 7b. hospital_cathlabintent (Approved Cathlab Intent Items) ─────────
+        # Criteria: matching IP Number / uhid, is_approved: True, is_billed != True, is_active != False
+        cathlab_ip_filter = []
+        if effective_ip:
+            raw_ip = str(effective_ip).strip()
+            clean_ip = raw_ip.replace("/", "")
+            cathlab_ip_filter.extend([
+                {"ipnumber": raw_ip},
+                {"ipnumber": clean_ip},
+                {"ipnumber": {"$regex": f"^{re.escape(clean_ip)}$", "$options": "i"}},
+                {"ip_number": raw_ip},
+                {"ip_number": clean_ip},
+                {"ipNumber": raw_ip},
+                {"ipNumber": clean_ip},
+            ])
+        if effective_uhid:
+            cathlab_ip_filter.append({"uhid": str(effective_uhid).strip()})
+
+        if cathlab_ip_filter:
+            cathlab_q = {
+                "$and": [
+                    {"$or": cathlab_ip_filter},
+                    {"is_approved": True},
+                    {"is_billed": {"$ne": True}},
+                    {"is_active": {"$ne": False}},
+                ]
+            }
+            try:
+                for cath_doc in db["hospital_cathlabintent"].find(cathlab_q):
+                    intent_id = str(cath_doc.get("intent_id") or "CATHLAB")
+                    raw_cath_items = cath_doc.get("items", [])
+                    if isinstance(raw_cath_items, str):
+                        try:
+                            raw_cath_items = _json.loads(raw_cath_items)
+                        except Exception:
+                            raw_cath_items = []
+
+                    for c_item in (raw_cath_items if isinstance(raw_cath_items, list) else []):
+                        if not isinstance(c_item, dict):
+                            continue
+                        c_status = str(c_item.get("status") or "").strip().lower()
+                        if c_status and c_status not in ("approved", "completed", "pending"):
+                            continue
+
+                        item_name = str(c_item.get("name") or c_item.get("itemName") or "Cathlab Item").strip()
+                        qty = _to_float(c_item.get("approved_quantity") or c_item.get("quantity") or 1)
+                        if qty <= 0:
+                            qty = 1
+                        price = _to_float(c_item.get("mrp") or c_item.get("rate") or c_item.get("price") or 0)
+                        amt = round(price * qty, 2)
+
+                        invest_items.append({
+                            "invest_bill_no": intent_id,
+                            "bill_object_id": str(cath_doc.get("_id")),
+                            "itemName":       item_name,
+                            "price":          price,
+                            "rate":           str(price),
+                            "quantity":       qty,
+                            "discount":       0,
+                            "amount":         amt,
+                            "billTypeNo":     "DIS01",
+                            "bill_type":      2,
+                            "test_id":        c_item.get("item_id"),
+                            "batch":          c_item.get("batch") or "",
+                            "doctor":         "",
+                            "payment_status": "Pending",
+                            "package_name":   "",
+                            "source":         "hospital_cathlabintent",
+                        })
+            except Exception as e:
+                print(f"Error fetching cathlab intent items: {e}")
+
         # ── 8. hospital_billing (Consultation OPD) ───────────────────────────
         if effective_uhid:
             try:
@@ -3308,6 +3443,19 @@ def cancel_discharge_billing(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
+        # Revert cathlab intent is_billed if bill items had cathlab intent
+        for itm in billing.items or []:
+            if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                obj_id_str = itm.get("bill_object_id")
+                if obj_id_str:
+                    try:
+                        _, c_db = get_hms_db()
+                        c_db["hospital_cathlabintent"].update_one(
+                            {"_id": ObjectId(obj_id_str)},
+                            {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
+                        )
+                    except Exception:
+                        pass
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3362,6 +3510,19 @@ def convert_bill_to_insurance(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
+        # Revert cathlab intent is_billed if bill items had cathlab intent
+        for itm in billing.items or []:
+            if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                obj_id_str = itm.get("bill_object_id")
+                if obj_id_str:
+                    try:
+                        _, c_db = get_hms_db()
+                        c_db["hospital_cathlabintent"].update_one(
+                            {"_id": ObjectId(obj_id_str)},
+                            {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
+                        )
+                    except Exception:
+                        pass
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
