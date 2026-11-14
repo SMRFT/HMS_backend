@@ -531,10 +531,15 @@ def _resolve_department_name(dept_code):
         pass
     return code_str
 
+_doctor_dept_cache = {}
+_insurance_manager_cache = None
+
 def _resolve_doctor_and_department(doc_id):
     if not doc_id:
         return "", ""
     doc_str = str(doc_id).strip()
+    if doc_str in _doctor_dept_cache:
+        return _doctor_dept_cache[doc_str]
     try:
         client, _ = get_hms_db()
         g_db = client["Global"]
@@ -543,10 +548,13 @@ def _resolve_doctor_and_department(doc_id):
             doc_name = (profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or "").strip()
             dept_code = profile.get("department") or ""
             dept_name = _resolve_department_name(dept_code) if dept_code else ""
+            _doctor_dept_cache[doc_str] = (doc_name, dept_name)
             return doc_name, dept_name
     except Exception:
         pass
-    return _resolve_employee_name(doc_id), ""
+    res = (_resolve_employee_name(doc_id), "")
+    _doctor_dept_cache[doc_str] = res
+    return res
 
 def _resolve_employee_name(emp_id):
     if not emp_id:
@@ -635,6 +643,9 @@ def _resolve_insurance_manager():
     department: 'DEPT017', designation: 'DESIG027' in profile.
     Get and display name in the right side of the page with GENERAL INSURANCE MANAGER.
     """
+    global _insurance_manager_cache
+    if _insurance_manager_cache is not None:
+        return _insurance_manager_cache
     try:
         client, _ = get_hms_db()
         db = client["Global"]
@@ -658,17 +669,19 @@ def _resolve_insurance_manager():
         if profile:
             name = (profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or "").strip()
             if name:
-                return {
+                _insurance_manager_cache = {
                     "name": name.upper(),
                     "designation": "GENERAL INSURANCE MANAGER"
                 }
+                return _insurance_manager_cache
     except Exception as e:
         logger.error(f"Error resolving insurance manager: {e}")
 
-    return {
+    _insurance_manager_cache = {
         "name": "",
         "designation": "GENERAL INSURANCE MANAGER"
     }
+    return _insurance_manager_cache
 
 
 def _batch_resolve_employees(emp_ids):
@@ -700,8 +713,13 @@ def _batch_resolve_employees(emp_ids):
                 _employee_name_cache[eid] = name
                 _employee_name_cache[f"DR.{eid}"] = name
                 _employee_name_cache[f"DR. {eid}"] = name
+        for m in missing:
+            if str(m) not in _employee_name_cache:
+                _employee_name_cache[str(m)] = str(m)
     except Exception:
-        pass
+        for m in missing:
+            if str(m) not in _employee_name_cache:
+                _employee_name_cache[str(m)] = str(m)
 
 
 def _resolve_items_doctor_names(items):
@@ -874,10 +892,10 @@ def _extract_adm_room_and_date(adm):
     return adm_str, current_room
 
 
-def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
+def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_map=None, dept_map=None, desig_map=None, mgr_info=None):
     """
     Ultra-fast in-memory serializer for DischargeBilling raw MongoDB document.
-    Uses pre-fetched patient_map and adm_map for zero additional database queries.
+    Uses pre-fetched lookup maps for zero additional database queries.
     """
     discharge_id = doc.get("discharge_id") or doc.get("id")
     uhid = str(doc.get("uhid") or "").strip()
@@ -908,11 +926,15 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
             adm_str, current_room = _extract_adm_room_and_date(adm)
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
-            doc_name, dept_name = _resolve_doctor_and_department(doc_id)
-            if not doc_name:
-                doc_name = _resolve_employee_name(doc_id) if doc_id else ""
-            if not dept_name and adm:
-                dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
+            if emp_map and doc_id in emp_map:
+                doc_name = emp_map[doc_id]
+                dept_name = dept_map.get(doc_id, "") if dept_map else ""
+            else:
+                doc_name, dept_name = _resolve_doctor_and_department(doc_id)
+                if not doc_name:
+                    doc_name = _resolve_employee_name(doc_id) if doc_id else ""
+                if not dept_name and adm:
+                    dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
             disch_dt = adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None
             disch_str = ""
@@ -929,14 +951,17 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
             raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
             company_name_p = ""
             if raw_comp:
-                try:
-                    _, db_conn = get_hms_db()
-                    ins_doc = db_conn["hospital_insuranceprovider"].find_one({
-                        "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
-                    })
-                    company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
-                except Exception:
-                    company_name_p = str(raw_comp)
+                if ins_map and str(raw_comp) in ins_map:
+                    company_name_p = ins_map[str(raw_comp)]
+                else:
+                    try:
+                        _, db_conn = get_hms_db()
+                        ins_doc = db_conn["hospital_insuranceprovider"].find_one({
+                            "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
+                        })
+                        company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
+                    except Exception:
+                        company_name_p = str(raw_comp)
 
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
@@ -963,11 +988,23 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
             }
 
     created_by_val = doc.get("created_by")
-    created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
-    created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
-    mgr = _resolve_insurance_manager()
-    manager_name = mgr.get("name", "")
-    manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
+    if emp_map and str(created_by_val) in emp_map:
+        created_by_name = emp_map[str(created_by_val)]
+    else:
+        created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
+
+    if desig_map and str(created_by_val) in desig_map:
+        created_by_designation = desig_map[str(created_by_val)]
+    else:
+        created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
+
+    if mgr_info:
+        manager_name = mgr_info.get("name", "")
+        manager_designation = mgr_info.get("designation", "GENERAL INSURANCE MANAGER")
+    else:
+        mgr = _resolve_insurance_manager()
+        manager_name = mgr.get("name", "")
+        manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
 
     bd = doc.get("bill_date")
     if isinstance(bd, _datetime):
@@ -977,6 +1014,29 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         bd_str = bd.isoformat()
     else:
         bd_str = str(bd) if bd else None
+
+    raw_items = _parse_items(doc.get("items"))
+    if emp_map:
+        formatted_items = []
+        for it in (raw_items or []):
+            if isinstance(it, dict):
+                it_copy = dict(it)
+                d_val = str(it.get("doctor") or it.get("doctor_name") or "").strip()
+                if d_val:
+                    cid = re.sub(r'^(dr[.\s]*)+', '', d_val, flags=re.IGNORECASE).strip()
+                    if cid in emp_map:
+                        it_copy["doctor"] = emp_map[cid]
+                        it_copy["doctor_name"] = emp_map[cid]
+                elif it.get("surgeon_id"):
+                    s_val = str(it.get("surgeon_id")).strip()
+                    if s_val in emp_map:
+                        it_copy["doctor"] = emp_map[s_val]
+                        it_copy["doctor_name"] = emp_map[s_val]
+                formatted_items.append(it_copy)
+            else:
+                formatted_items.append(it)
+    else:
+        formatted_items = _resolve_items_doctor_names(raw_items)
 
     return {
         "id":                discharge_id,
@@ -989,7 +1049,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None):
         "billTypeNo":        str(doc.get("billTypeNo") or "DIS01"),
         "bill_type":         doc.get("bill_type") if doc.get("bill_type") is not None else 2,
         "bill_date":         bd_str,
-        "items":             _resolve_items_doctor_names(_parse_items(doc.get("items"))),
+        "items":             formatted_items,
         "total_amount":      _to_float(doc.get("total_amount")),
         "advance_amount":    _to_float(doc.get("advance_amount")),
         "sales_return":      _to_float(doc.get("sales_return")),
@@ -3133,11 +3193,14 @@ def discharge_billing_list_create(request):
         if customer_type_f and str(customer_type_f).upper() != "ALL":
             ct = str(customer_type_f).strip().upper()
             if ct == "INSURANCE":
-                q["$or"] = [{"is_insurance_bill": True}, {"customer_type": {"$regex": "INSURANCE", "$options": "i"}}]
+                q["is_insurance_bill"] = True
             elif ct == "GENERAL":
                 q["is_insurance_bill"] = {"$ne": True}
             else:
-                q["customer_type"] = {"$regex": ct, "$options": "i"}
+                q["$or"] = [
+                    {"customer_type": {"$regex": re.escape(ct), "$options": "i"}},
+                    {"company_name": {"$regex": re.escape(ct), "$options": "i"}}
+                ]
 
         if insurance_type_f and str(insurance_type_f).upper() != "ALL":
             if insurance_type_f == "NON_INSURANCE":
@@ -3209,7 +3272,7 @@ def discharge_billing_list_create(request):
                 "data": []
             })
 
-        # Batch prefetch Patients, Admissions, and Employees to eliminate N+1 queries!
+        # Ultra-fast Batch prefetch: Patients, Admissions, Insurance Companies, and Employees!
         uhids = list({str(b.get("uhid")).strip() for b in raw_bills if b.get("uhid")})
         ip_numbers = list({str(b.get("ip_number")).strip() for b in raw_bills if b.get("ip_number")})
 
@@ -3220,15 +3283,63 @@ def discharge_billing_list_create(request):
         adm_map = {str(a.get("ipNumber")).strip(): a for a in adm_docs if a.get("ipNumber")}
 
         emp_ids = set()
+        raw_comps = set()
         for b in raw_bills:
             if b.get("created_by"):
                 emp_ids.add(str(b.get("created_by")).strip())
+            if b.get("company_name"):
+                raw_comps.add(str(b.get("company_name")).strip())
+            for it in (b.get("items") or []):
+                if isinstance(it, dict):
+                    d = str(it.get("doctor") or it.get("doctor_name") or "").strip()
+                    if d:
+                        c = re.sub(r'^(dr[.\s]*)+', '', d, flags=re.IGNORECASE).strip()
+                        if c.isdigit() or (c.startswith("5") and len(c) == 5):
+                            emp_ids.add(c)
         for a in adm_docs:
             if a.get("admittingDoctor"):
                 emp_ids.add(str(a.get("admittingDoctor")).strip())
-        _batch_resolve_employees(list(emp_ids))
+            c = a.get("company_code") or a.get("insurance_company")
+            if c:
+                raw_comps.add(str(c).strip())
 
-        results = [_format_raw_bill_doc(b, patient_map, adm_map) for b in raw_bills]
+        # Single batch fetch for ALL insurance providers
+        ins_map = {}
+        if raw_comps:
+            ins_docs = list(db["hospital_insuranceprovider"].find({
+                "$or": [{"company_code": {"$in": list(raw_comps)}}, {"company_name": {"$in": list(raw_comps)}}]
+            }))
+            for idoc in ins_docs:
+                c_code = str(idoc.get("company_code") or "").strip()
+                c_name = str(idoc.get("company_name") or "").strip()
+                if c_code: ins_map[c_code] = c_name or c_code
+                if c_name: ins_map[c_name] = c_name
+
+        # Single batch fetch for ALL employee profiles
+        emp_map = {}
+        desig_map = {}
+        dept_map = {}
+        if emp_ids:
+            g_db = client["Global"]
+            profiles = list(g_db["backend_diagnostics_profile"].find(
+                {"employeeId": {"$in": list(emp_ids)}},
+                {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1, "designation": 1, "department": 1}
+            ))
+            for p in profiles:
+                eid = str(p.get("employeeId") or "").strip()
+                ename = (p.get("employeeName") or f"{p.get('firstName', '')} {p.get('lastName', '')}").strip()
+                edesig = (p.get("designation") or "").strip()
+                edept = (p.get("department") or "").strip()
+                if eid:
+                    emp_map[eid] = ename
+                    emp_map[f"DR.{eid}"] = ename
+                    emp_map[f"DR. {eid}"] = ename
+                    desig_map[eid] = edesig
+                    dept_map[eid] = edept
+
+        mgr_info = _resolve_insurance_manager()
+
+        results = [_format_raw_bill_doc(b, patient_map, adm_map, ins_map, emp_map, dept_map, desig_map, mgr_info) for b in raw_bills]
 
         return Response({
             "success": True,
