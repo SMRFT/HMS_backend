@@ -3386,6 +3386,333 @@ from ..serializers import PatientSerializer
 from pyauth.auth import HasRoleAndDataPermission
 
 
+def _get_param_from_core_test(core_test, device_id, test_code=None, param_index=None):
+    """
+    Match a parameter definition from core_testdetails.
+    Supports both dict (device_id-keyed) and list formats.
+    """
+    if not core_test:
+        return None
+    core_parameters = core_test.get('parameters', {})
+    params_list = []
+    if isinstance(core_parameters, dict):
+        if device_id and device_id != 'N/A' and device_id in core_parameters:
+            params_list = core_parameters[device_id]
+        elif core_parameters:
+            params_list = list(core_parameters.values())[0]
+    elif isinstance(core_parameters, list):
+        params_list = core_parameters
+    if not isinstance(params_list, list):
+        return None
+    if param_index is not None and 0 <= param_index < len(params_list):
+        return params_list[param_index]
+    if test_code:
+        for p in params_list:
+            if isinstance(p, dict) and p.get('test_code') == test_code:
+                return p
+    return None
+
+
+def fetch_patient_diagnostic_lab_results(uhid, ip_number=None, client=None):
+    """
+    Retrieve diagnostic test results for a patient from Diagnostics.core_testvalue & core_mbtestvalue
+    joining with core_hmsbarcode and core_testdetails (same as Discharge Summary).
+    Retrieves all tests performed for this UHID across all historical dates.
+    """
+    if not uhid and not ip_number:
+        return {'testdetails': [], 'auto_blood_investigations': {}}
+
+    local_client = None
+    if client is None:
+        local_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        client = local_client
+
+    try:
+        diag_db = client['Diagnostics']
+        hms_db = client['HMS']
+        core_hmsbarcode = diag_db['core_hmsbarcode']
+        core_testvalue = diag_db['core_testvalue']
+        core_mbtestvalue = diag_db['core_mbtestvalue']
+        core_testdetails = diag_db['core_testdetails']
+
+        barcode_docs = []
+        seen_barcodes = set()
+
+        # Query candidates for UHID & IP Number
+        candidates = []
+        if uhid:
+            u_clean = str(uhid).strip()
+            if u_clean:
+                candidates.append(u_clean)
+                if '/' in u_clean:
+                    suffix = u_clean.split('/')[-1]
+                    if suffix and suffix != u_clean:
+                        candidates.append(suffix)
+
+        for cand in candidates:
+            for b in core_hmsbarcode.find({'patient_id': cand}).sort('created_date', -1):
+                bc = b.get('barcode')
+                if bc and bc not in seen_barcodes:
+                    seen_barcodes.add(bc)
+                    barcode_docs.append(b)
+
+        if ip_number:
+            ip_clean = str(ip_number).strip()
+            if ip_clean:
+                for b in core_hmsbarcode.find({'ipnumber': ip_clean}).sort('created_date', -1):
+                    bc = b.get('barcode')
+                    if bc and bc not in seen_barcodes:
+                        seen_barcodes.add(bc)
+                        barcode_docs.append(b)
+
+        # Also check hospital_investbilling for any linked investigation bills
+        try:
+            invest_q = []
+            if uhid:
+                invest_q.append({'uhid': str(uhid).strip()})
+            if ip_number:
+                invest_q.append({'ipNumber': str(ip_number).strip()})
+            if invest_q:
+                invest_bills = list(hms_db['hospital_investbilling'].find(
+                    {'$or': invest_q},
+                    {'investBillNo': 1, 'billNumber': 1, '_id': 0}
+                ))
+                b_nos = [b.get('investBillNo') or b.get('billNumber') for b in invest_bills if b.get('investBillNo') or b.get('billNumber')]
+                for b_no in b_nos:
+                    for b in core_hmsbarcode.find({'billnumber': b_no}).sort('created_date', -1):
+                        bc = b.get('barcode')
+                        if bc and bc not in seen_barcodes:
+                            seen_barcodes.add(bc)
+                            barcode_docs.append(b)
+        except Exception:
+            pass
+
+        results = []
+        auto_blood = {}
+        hb_val = ''
+        wbc_val = ''
+        plt_val = ''
+        urea_val = ''
+        creat_val = ''
+
+        for b_doc in barcode_docs:
+            bc = b_doc.get('barcode')
+            if not bc:
+                continue
+            bc_created = b_doc.get('created_date') or b_doc.get('date')
+            formatted_date = ''
+            if hasattr(bc_created, 'strftime'):
+                formatted_date = bc_created.strftime('%d/%m/%Y %I:%M %p')
+            elif bc_created:
+                formatted_date = str(bc_created)
+
+            # 1. Standard tests (core_testvalue)
+            for tv in core_testvalue.find({'barcode': bc}):
+                raw = tv.get('testdetails', '[]')
+                details = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                if not isinstance(details, list):
+                    continue
+
+                for test in details:
+                    test_id = test.get('test_id')
+                    device_id = test.get('device_id', 'N/A')
+                    parameters = test.get('parameters', [])
+                    approve_by = test.get('approve_by', '')
+                    approve_time = test.get('approve_time') or formatted_date
+                    verified_by = test.get('verified_by', '')
+                    dispatch_time = test.get('dispatch_time', '')
+                    comment = test.get('comment', '')
+                    remarks = test.get('remarks', '')
+                    is_approved = bool(test.get('approve') is True)
+
+                    core_test = core_testdetails.find_one({'test_id': test_id}) if test_id else None
+                    testname = (core_test.get('test_name') if core_test else None) or test.get('testname') or 'Diagnostic Test'
+                    department = (core_test.get('department') if core_test else None) or test.get('department') or 'Diagnostics'
+                    specimen_type = (core_test.get('specimen_type') if core_test else None) or test.get('specimen_type') or ''
+                    nabl = bool(core_test.get('NABL', False)) if core_test else False
+
+                    parsed_params = []
+                    if parameters and len(parameters) > 0 and core_test:
+                        for p_idx, p_val in enumerate(parameters):
+                            t_code = p_val.get('test_code')
+                            val = p_val.get('value', '')
+                            p_def = _get_param_from_core_test(core_test, device_id, test_code=t_code, param_index=p_idx)
+                            if p_def:
+                                p_name = p_def.get('test_name') or p_val.get('name') or t_code or ''
+                                p_unit = p_def.get('unit', '') or ''
+                                p_ref = p_def.get('reference_range', '') or ''
+                                p_method = p_def.get('method', '') or ''
+                                p_com = p_val.get('comment', '') or ''
+                            else:
+                                p_name = p_val.get('name') or t_code or 'Parameter'
+                                p_unit = p_val.get('unit', '') or ''
+                                p_ref = p_val.get('reference_range', '') or ''
+                                p_method = p_val.get('method', '') or ''
+                                p_com = p_val.get('comment', '') or ''
+
+                            val_str = str(val) if val is not None else ''
+                            parsed_params.append({
+                                'name': p_name,
+                                'test_code': t_code or '',
+                                'value': val_str,
+                                'unit': p_unit,
+                                'reference_range': p_ref,
+                                'method': p_method,
+                                'comment': p_com
+                            })
+
+                            # Check for blood investigation matching
+                            p_lower = p_name.lower()
+                            t_code_lower = str(t_code or '').lower()
+                            if not hb_val and ('haemoglobin' in p_lower or 'hemoglobin' in p_lower or t_code_lower == 'hgb' or p_lower == 'hb'):
+                                hb_val = f'{val_str} {p_unit}'.strip()
+                            if not wbc_val and ('wbc' in p_lower or 'total wbc' in p_lower):
+                                wbc_val = f'{val_str} {p_unit}'.strip()
+                            if not plt_val and ('platelet' in p_lower or 'plt' in t_code_lower):
+                                plt_val = f'{val_str} {p_unit}'.strip()
+                            if not urea_val and ('urea' in p_lower or 'bun' in p_lower):
+                                urea_val = f'{val_str} {p_unit}'.strip()
+                            if not creat_val and ('creatinine' in p_lower or 'creat' in p_lower):
+                                creat_val = f'{val_str} {p_unit}'.strip()
+
+                    elif parameters and len(parameters) > 0:
+                        for p_val in parameters:
+                            val_str = str(p_val.get('value', '')) if p_val.get('value') is not None else ''
+                            p_name = p_val.get('name') or p_val.get('test_code') or 'Parameter'
+                            p_unit = p_val.get('unit', '') or ''
+                            parsed_params.append({
+                                'name': p_name,
+                                'test_code': p_val.get('test_code', '') or '',
+                                'value': val_str,
+                                'unit': p_unit,
+                                'reference_range': p_val.get('reference_range', '') or '',
+                                'method': p_val.get('method', '') or '',
+                                'comment': p_val.get('comment', '') or ''
+                            })
+                            p_lower = p_name.lower()
+                            if not hb_val and ('haemoglobin' in p_lower or 'hemoglobin' in p_lower or p_lower == 'hb'):
+                                hb_val = f'{val_str} {p_unit}'.strip()
+                            if not urea_val and 'urea' in p_lower:
+                                urea_val = f'{val_str} {p_unit}'.strip()
+                            if not creat_val and 'creatinine' in p_lower:
+                                creat_val = f'{val_str} {p_unit}'.strip()
+
+                    elif test.get('value') is not None and str(test.get('value')).strip() != '':
+                        val_str = str(test.get('value')).strip()
+                        t_code = test.get('test_code')
+                        p_def = _get_param_from_core_test(core_test, device_id, test_code=t_code, param_index=0) if core_test else None
+                        param_name = (p_def.get('test_name') if p_def else None) or testname
+                        unit = (p_def.get('unit') if p_def else None) or (core_test.get('unit') if core_test else '') or ''
+                        ref_range = (p_def.get('reference_range') if p_def else None) or (core_test.get('reference_range') if core_test else '') or ''
+                        method = (p_def.get('method') if p_def else None) or (core_test.get('method') if core_test else '') or ''
+                        parsed_params.append({
+                            'name': param_name,
+                            'test_code': t_code or '',
+                            'value': val_str,
+                            'unit': unit,
+                            'reference_range': ref_range,
+                            'method': method,
+                            'comment': test.get('comment', '') or ''
+                        })
+                        t_lower = testname.lower()
+                        if 'hiv' in t_lower and 'HIV' not in auto_blood:
+                            auto_blood['HIV'] = val_str
+                        if ('hbsag' in t_lower or 'hepatitis b' in t_lower) and 'HBsAg' not in auto_blood:
+                            auto_blood['HBsAg'] = val_str
+                        if ('hcv' in t_lower or 'anti hcv' in t_lower) and 'ANTI HCV' not in auto_blood:
+                            auto_blood['ANTI HCV'] = val_str
+
+                    # Check test name level viral markers
+                    t_lower = testname.lower()
+                    if 'hiv' in t_lower and 'HIV' not in auto_blood:
+                        p_res = parsed_params[0]['value'] if parsed_params else 'Non-Reactive'
+                        auto_blood['HIV'] = p_res
+                    if ('hbsag' in t_lower or 'hepatitis b' in t_lower) and 'HBsAg' not in auto_blood:
+                        p_res = parsed_params[0]['value'] if parsed_params else 'Non-Reactive'
+                        auto_blood['HBsAg'] = p_res
+                    if ('hcv' in t_lower or 'anti hcv' in t_lower) and 'ANTI HCV' not in auto_blood:
+                        p_res = parsed_params[0]['value'] if parsed_params else 'Non-Reactive'
+                        auto_blood['ANTI HCV'] = p_res
+
+                    results.append({
+                        'barcode': bc,
+                        'test_id': test_id,
+                        'testname': testname,
+                        'department': department,
+                        'specimen_type': specimen_type,
+                        'date': formatted_date,
+                        'test_date': str(approve_time or formatted_date),
+                        'approve_time': str(approve_time or ''),
+                        'approve_by': approve_by,
+                        'verified_by': verified_by,
+                        'is_approved': is_approved,
+                        'NABL': nabl,
+                        'comment': comment,
+                        'remarks': remarks,
+                        'parameters': parsed_params,
+                        'is_microbiology': False
+                    })
+
+            # 2. Microbiology tests (core_mbtestvalue)
+            for mb in core_mbtestvalue.find({'barcode': bc}):
+                raw = mb.get('testdetails', '[]')
+                details = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                if not isinstance(details, list):
+                    continue
+                for test in details:
+                    test_id = test.get('test_id')
+                    core_test = core_testdetails.find_one({'test_id': test_id}) if test_id else None
+                    testname = (core_test.get('test_name') if core_test else None) or test.get('testname') or 'Microbiology Test'
+                    department = (core_test.get('department') if core_test else None) or 'Microbiology'
+                    results.append({
+                        'barcode': bc,
+                        'test_id': test_id,
+                        'testname': testname,
+                        'department': department,
+                        'specimen_type': test.get('specimen_type', 'Specimen'),
+                        'date': formatted_date,
+                        'test_date': str(test.get('approve_time') or formatted_date),
+                        'approve_time': str(test.get('approve_time') or ''),
+                        'approve_by': test.get('approve_by', ''),
+                        'verified_by': test.get('verified_by', ''),
+                        'is_approved': bool(test.get('approve') is True),
+                        'comment': test.get('comment', ''),
+                        'remarks': test.get('remarks', ''),
+                        'parameters': test.get('parameters', []),
+                        'is_microbiology': True
+                    })
+
+        # Set compound blood values
+        if hb_val:
+            auto_blood['HB'] = hb_val
+        if urea_val and creat_val:
+            auto_blood['UREA/CREATININE'] = f'Urea: {urea_val}, Creatinine: {creat_val}'
+        elif urea_val:
+            auto_blood['UREA/CREATININE'] = f'Urea: {urea_val}'
+        elif creat_val:
+            auto_blood['UREA/CREATININE'] = f'Creatinine: {creat_val}'
+
+        if hb_val or wbc_val or plt_val:
+            cbc_parts = []
+            if hb_val: cbc_parts.append(f'Hb: {hb_val}')
+            if wbc_val: cbc_parts.append(f'TC: {wbc_val}')
+            if plt_val: cbc_parts.append(f'PLT: {plt_val}')
+            auto_blood['CBC'] = ', '.join(cbc_parts)
+
+        # Sort with most recent tests first
+        results.sort(key=lambda x: str(x.get('test_date') or x.get('date') or ''), reverse=True)
+
+        return {'testdetails': results, 'auto_blood_investigations': auto_blood}
+
+    except Exception as e:
+        print(f"Error fetching diagnostic lab results: {e}")
+        return {'testdetails': [], 'auto_blood_investigations': {}}
+
+    finally:
+        if local_client:
+            local_client.close()
+
+
 @api_view(['GET'])
 # @permission_classes([HasRoleAndDataPermission])
 def dialysis_patient_details(request):
@@ -3548,6 +3875,72 @@ def dialysis_patient_details(request):
             })
 
         patient["billing"] = billing_list
+
+        p_uhid = patient.get("uhid")
+        p_ip = patient.get("ip_number")
+
+        # -----------------------------------------------------
+        # ADMISSION STATUS (hospital_admission)
+        # -----------------------------------------------------
+        admission_collection = hms_db["hospital_admission"]
+        is_admitted = False
+        adm_ip = ""
+        adm_insurance = ""
+        try:
+            if p_uhid:
+                adm_doc = admission_collection.find_one({"uhid": p_uhid, "is_admitted": True})
+                if not adm_doc:
+                    adm_doc = admission_collection.find_one({"uhid": p_uhid}, sort=[("_id", -1)])
+                if adm_doc:
+                    is_admitted = bool(adm_doc.get("is_admitted", False))
+                    adm_ip = adm_doc.get("ipNumber") or adm_doc.get("ip_number") or ""
+                    adm_ins_raw = adm_doc.get("insurance_company") or adm_doc.get("company_name") or ""
+                    adm_comp_code = adm_doc.get("company_code") or ""
+                    if not adm_ins_raw and adm_comp_code:
+                        comp_lookup = insurance_collection.find_one({"company_code": adm_comp_code})
+                        if comp_lookup:
+                            adm_ins_raw = comp_lookup.get("company_name") or adm_comp_code
+                        else:
+                            adm_ins_raw = adm_comp_code
+                    if not adm_ins_raw and str(adm_doc.get("customer_type", "")).lower() == "insurance":
+                        adm_ins_raw = "INSURANCE"
+                    adm_insurance = adm_ins_raw or ""
+        except Exception as e:
+            print(f"Error checking admission status for {p_uhid}: {e}")
+
+        patient["is_admitted"] = is_admitted
+        patient["admission_status"] = "ADMITTED" if is_admitted else "NOT ADMITTED"
+        if adm_ip and not patient.get("ip_number"):
+            patient["ip_number"] = adm_ip
+        if adm_insurance:
+            patient["insurance_company"] = adm_insurance
+            patient["insurance"] = adm_insurance
+            if not patient.get("company_name"):
+                patient["company_name"] = adm_insurance
+        else:
+            patient["insurance_company"] = patient.get("company_name") or patient.get("insurance") or ""
+
+        # -----------------------------------------------------
+        # DIAGNOSTIC LAB REPORTS / INVESTIGATIONS (Diagnostics DB)
+        # -----------------------------------------------------
+        include_lab = (len(patient_data) <= 2) or (request.GET.get('include_lab') == 'true')
+        if include_lab:
+            try:
+                diag_res = fetch_patient_diagnostic_lab_results(p_uhid, p_ip, client=client)
+                patient["lab_reports"] = diag_res.get("testdetails", [])
+                patient["testdetails"] = diag_res.get("testdetails", [])
+                patient["auto_blood_investigations"] = diag_res.get("auto_blood_investigations", {})
+            except Exception as e:
+                print(f"Error attaching lab results for patient {p_uhid}: {e}")
+                patient["lab_reports"] = []
+                patient["testdetails"] = []
+                patient["auto_blood_investigations"] = {}
+        else:
+            patient["lab_reports"] = []
+            patient["testdetails"] = []
+            patient["auto_blood_investigations"] = {}
+
+    client.close()
 
     # Check if this patient already has a dialysis discharge summary saved today
     today = timezone.localdate()
@@ -3887,13 +4280,26 @@ def Print_dialysis_dischargesummary(request):
 
     # ─── SERIALIZE & RETURN ───────────────────────────────────
     serializer = DialysisDischargeSummarySerializer(queryset, many=True)
+    summary_data = serializer.data
+
+    try:
+        diag_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        for rec in summary_data:
+            rec_uhid = rec.get("uhid")
+            if rec_uhid:
+                rec_diag = fetch_patient_diagnostic_lab_results(rec_uhid, client=diag_client)
+                rec["lab_reports"] = rec_diag.get("testdetails", [])
+                rec["testdetails"] = rec_diag.get("testdetails", [])
+        diag_client.close()
+    except Exception as e:
+        print(f"Error enriching dialysis summary print with lab results: {e}")
 
     return Response(
         {
             "status":  "success",
             "message": "Records fetched successfully.",
             "count":   queryset.count(),
-            "data":    serializer.data,
+            "data":    summary_data,
         },
         status=status.HTTP_200_OK,
     )
