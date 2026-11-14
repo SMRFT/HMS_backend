@@ -2971,18 +2971,44 @@ def dialysis_patient_details(request):
     uhid      = request.GET.get('uhid')
     ip_number = request.GET.get('ip_number')
     mobile    = request.GET.get('mobile')
+    name      = request.GET.get('name')
 
     # =========================================================
     # STEP 1 : FILTER PATIENT
     # =========================================================
+    patients = Patient.objects.none()
+
     if uhid:
-        patients = Patient.objects.filter(
-            Q(uhid__iexact=uhid) |
-            Q(uhid__iendswith=f'/{uhid}')
-        )
+        clean_uhid = str(uhid).strip()
+        if clean_uhid:
+            uhid_cond = (
+                Q(uhid__iexact=clean_uhid) |
+                Q(uhid__iendswith=clean_uhid) |
+                Q(uhid__iendswith=f'/{clean_uhid}') |
+                Q(uhid__icontains=clean_uhid)
+            )
+
+            if '/' in clean_uhid:
+                parts = clean_uhid.split('/', 1)
+                prefix, num_part = parts[0].strip(), parts[1].strip()
+                if num_part.isdigit():
+                    padded_num = num_part.zfill(6)
+                    if prefix:
+                        uhid_cond |= Q(uhid__iexact=f'{prefix}/{padded_num}')
+                    else:
+                        uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+            elif clean_uhid.isdigit():
+                padded_num = clean_uhid.zfill(6)
+                uhid_cond |= Q(uhid__iendswith=f'/{padded_num}')
+                if len(clean_uhid) == 10:
+                    uhid_cond |= (Q(mobilePhone__icontains=clean_uhid) | Q(mobilePhone__iendswith=clean_uhid))
+
+            patients = Patient.objects.filter(uhid_cond)
 
     elif ip_number:
-        patients = Patient.objects.filter(ip_number=ip_number)
+        clean_ip = str(ip_number).strip()
+        if clean_ip:
+            patients = Patient.objects.filter(ip_number=clean_ip)
 
     elif mobile:
         mobile_str = str(mobile).strip()
@@ -3006,11 +3032,29 @@ def dialysis_patient_details(request):
             )
         patients = Patient.objects.filter(mobile_q)
 
+    elif name:
+        name_str = str(name).strip()
+        if name_str:
+            clean_digits = re.sub(r'\D', '', name_str)
+            name_q = Q(firstName__icontains=name_str) | Q(lastName__icontains=name_str)
+            if clean_digits:
+                name_q |= Q(mobilePhone__icontains=clean_digits)
+            patients = Patient.objects.filter(name_q)
+
     else:
-        return Response({
-            "success": False,
-            "message": "Please provide uhid, ip_number, or mobile."
-        }, status=status.HTTP_400_BAD_REQUEST)
+        patients = Patient.objects.all()
+
+    # Apply name filter if supplied alongside uhid/ip/mobile
+    if name and uhid:
+        name_str = str(name).strip()
+        if name_str:
+            clean_digits = re.sub(r'\D', '', name_str)
+            name_q = Q(firstName__icontains=name_str) | Q(lastName__icontains=name_str)
+            if clean_digits:
+                name_q |= Q(mobilePhone__icontains=clean_digits)
+            patients = patients.filter(name_q)
+
+    patients = patients.order_by('-id')[:50]
 
     # =========================================================
     # STEP 2 : MONGODB CONNECTION

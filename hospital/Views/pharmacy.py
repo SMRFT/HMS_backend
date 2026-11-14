@@ -531,14 +531,32 @@ def sanitize_medicines(medicines):
 
         # item_name is intentionally NOT stored: item_id is the source of truth,
         # and item_name is resolved on read / UI comparison
+        disc_val = float(med.get("discount_value", 0) or med.get("discount_percent", 0) or med.get("discount", 0) or 0)
+        disc_type = str(med.get("discount_type") or "percent").strip()
+        disc_amt = float(med.get("discount_amount", 0) or 0)
+        qty_val = int(med.get("qty", 0) or med.get("quantity", 0))
+        price_val = float(med.get("price", 0) or med.get("mrp", 0))
+        calc_price = float(med.get("calculated_price", 0) or (qty_val * price_val))
+
+        if disc_amt == 0 and disc_val > 0:
+            gross = float(qty_val * price_val)
+            disc_amt = disc_val if disc_type == "amount" else (gross * disc_val / 100.0)
+
         clean_item = {
             "item_id": item_id_val,
             "batch_number": bn_val,
-            "qty": int(med.get("qty", 0) or med.get("quantity", 0)),
-            "price": float(med.get("price", 0) or med.get("mrp", 0)),
-            "calculated_price": float(med.get("calculated_price", 0)),
+            "qty": qty_val,
+            "price": price_val,
+            "calculated_price": calc_price,
+            "discount_type": disc_type,
+            "discount_value": disc_val,
+            "discount_percent": disc_val if disc_type == "percent" else 0.0,
+            "discount_amount": round(disc_amt, 2),
+            "discount": disc_val,
             "edit_history": med.get("edit_history") or []
         }
+        if med.get("total") is not None:
+            clean_item["total"] = float(med.get("total"))
         if med_is_consumable:
             clean_item["is_consumable_items"] = True
 
@@ -806,6 +824,8 @@ def save_pharmacy_bill(request):
         "age":                      int(data.get("age", 0) or 0),
         "room_no":                  data.get("room_no"),
         "total_amount":             float(data.get("total_amount", 0)),
+        "total_item_discount":      float(data.get("total_item_discount", 0) or 0),
+        "discount_amount":          float(data.get("discount_amount", 0) or data.get("total_item_discount", 0) or data.get("overall_discount_amount", 0) or 0),
         "overall_discount_type":    data.get("overall_discount_type"),
         "overall_discount_value":   float(data.get("overall_discount_value", 0)),
         "overall_discount_amount":  float(data.get("overall_discount_amount", 0)),
@@ -926,6 +946,9 @@ def save_pharmacy_bill(request):
             "doctor_name":     doc_name,
             "created_by":      emp_id,
             "created_by_name": emp_name,
+            "billed_id":       update_data.get("billed_id") or record.get("billed_id") or employee_id,
+            "billed_name":     emp_name,
+            "employee_name":   emp_name,
             "employee_name":   emp_name,
         })
 
@@ -999,6 +1022,8 @@ def save_pharmacy_bill(request):
                 "doctor_name":     doc_name,
                 "created_by":      employee_id,
                 "created_by_name": emp_name,
+                "billed_id":       employee_id,
+                "billed_name":     emp_name,
                 "employee_name":   emp_name,
             })
 
@@ -1032,6 +1057,8 @@ def save_pharmacy_bill(request):
                 "doctor_name":     doc_name,
                 "created_by":      employee_id,
                 "created_by_name": emp_name,
+                "billed_id":       employee_id,
+                "billed_name":     emp_name,
                 "employee_name":   emp_name,
             })
 
@@ -1275,6 +1302,8 @@ def save_oppharmacy_estimate(request):
         "doctor_id": resolve_doctor_id(data.get("doctor_id")),
         "room_no": data.get("room_no"),
         "total_amount": float(data.get("total_amount", 0)),
+        "total_item_discount": float(data.get("total_item_discount", 0) or 0),
+        "discount_amount": float(data.get("discount_amount", 0) or data.get("total_item_discount", 0) or data.get("overall_discount_amount", 0) or 0),
         "overall_discount_type": data.get("overall_discount_type"),
         "overall_discount_value": float(data.get("overall_discount_value", 0)),
         "overall_discount_amount": float(data.get("overall_discount_amount", 0)),
@@ -2783,13 +2812,49 @@ def pharmacy_medicinechart(request):
                 if not isinstance(item, dict) or item.get("is_deleted"):
                     continue
 
+                # 1. Total requested quantity & already dispatched quantity
+                orig_qty = float(item.get("qty") or item.get("quantity") or 0)
+                disp_qty = float(item.get("dispatched_qty", 0) or 0)
+                pending_qty = max(0.0, orig_qty - disp_qty)
+
+                # 2. Fully dispatched items should NOT be displayed again
+                if orig_qty > 0 and pending_qty <= 0:
+                    continue
+
                 stock_info = resolve_medicine_stock_details(item, items_stock_data)
+
+                clean_orig = int(orig_qty) if orig_qty.is_integer() else orig_qty
+                clean_disp = int(disp_qty) if disp_qty.is_integer() else disp_qty
+                clean_pending = int(pending_qty) if pending_qty.is_integer() else pending_qty
+
                 mapped_items.append({
                     **item,
-                    **stock_info
+                    **stock_info,
+                    "qty": clean_pending,
+                    "quantity": clean_pending,
+                    "requested_qty": clean_orig,
+                    "dispatched_qty": clean_disp,
+                    "pending_qty": clean_pending,
                 })
 
+            # If all items in this bill are fully dispatched, do not display the bill in pending chart
+            if not mapped_items:
+                if bill.get("billing_status") in ["Pending", "Processing"]:
+                    try:
+                        from bson import ObjectId
+                        o_id = bill.get("_id")
+                        if o_id:
+                            m_filter = {"_id": ObjectId(str(o_id))} if ObjectId.is_valid(str(o_id)) else {"_id": o_id}
+                            pharmacy_billing_collection.update_one(
+                                m_filter,
+                                {"$set": {"billing_status": "Billed", "is_dispatched": True}}
+                            )
+                    except Exception:
+                        pass
+                continue
+
             bill["medicine_items"] = mapped_items
+            bill["medicine_particulars"] = mapped_items
             final_data.append(bill)
 
         return Response(
@@ -3198,8 +3263,8 @@ def substitute_medicine(request):
                 substitute_item_clean = {k: v for k, v in substitute_item.items() if k != "item_name"}
                 substitute_item_clean["edit_history"] = med_edit_history
                 # Carry forward prescription details (dosage, noOfDays, dose, doseunit, instruction, etc.)
-                for field in ["dosage", "noOfDays", "no_of_days", "dose", "doseunit", "doseUnit", "instruction", "route", "remark"]:
-                    if med.get(field) and not substitute_item_clean.get(field):
+                for field in ["dosage", "noOfDays", "no_of_days", "dose", "doseunit", "doseUnit", "instruction", "route", "remark", "dispatched_qty"]:
+                    if med.get(field) is not None and substitute_item_clean.get(field) is None:
                         substitute_item_clean[field] = med.get(field)
                 updated_medicines.append(substitute_item_clean)   # ← substitute replaces original
             else:
@@ -3499,28 +3564,115 @@ def finalize_bill(request):
                     )
 
         # =====================================================
+        # ✅ DISPATCH TRACKING & RETRY GUARD (For Ward Requests)
+        # =====================================================
+        now_ts = datetime.utcnow()
+        is_ward = bool(bill.get("is_ward_request"))
+        orig_particulars = bill.get("medicine_particulars", [])
+
+        # Build lookup of actual items billed in this transaction
+        billed_items_map = {}
+        for med in medicines_to_use:
+            if not isinstance(med, dict) or med.get("is_deleted"):
+                continue
+            m_iid = med.get("item_id")
+            m_qty = float(med.get("qty") or med.get("quantity") or 0)
+            if m_iid is not None and m_qty > 0:
+                billed_items_map[str(m_iid)] = m_qty
+                try:
+                    billed_items_map[int(m_iid)] = m_qty
+                except Exception:
+                    pass
+
+        # Idempotency / Retry Guard:
+        # Check if identical dispatch occurred in the last 10 seconds on this bill
+        recent_history = bill.get("dispatch_history") or []
+        if is_ward and recent_history:
+            last_disp = recent_history[-1]
+            try:
+                last_time = datetime.fromisoformat(last_disp.get("timestamp", ""))
+                sec_diff = (now_ts - last_time).total_seconds()
+                if 0 <= sec_diff <= 10:
+                    billed_now = sorted([
+                        (str(m.get("item_id")), float(m.get("qty") or m.get("quantity") or 0))
+                        for m in medicines_to_use if float(m.get("qty") or m.get("quantity") or 0) > 0
+                    ])
+                    billed_prev = sorted([
+                        (str(x.get("item_id")), float(x.get("qty") or 0))
+                        for x in last_disp.get("items", []) if float(x.get("qty") or 0) > 0
+                    ])
+                    if billed_now == billed_prev:
+                        doc_id = bill.get("doctor_id") or data.get("doctor_id")
+                        doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
+                        if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
+                            doc_name = f"Dr. {doc_name}"
+                        elif doc_name == "Unknown":
+                            doc_name = ""
+                        return Response({
+                            "status": "success",
+                            "message": f"Bill #{last_disp.get('bill_no')} already finalized",
+                            "bill_no": last_disp.get("bill_no"),
+                            "Bill_id": last_disp.get("billed_Bill_id"),
+                            "bill_date": to_utc_iso(now_ts),
+                            "doctor_id": doc_id,
+                            "doctor_name": doc_name,
+                        }, status=status.HTTP_200_OK)
+            except Exception:
+                pass
+
+        # Calculate pending quantity and cumulative dispatched quantity
+        all_items_fully_dispatched = True
+        updated_orig_meds = []
+        has_prior_dispatches = bool(bill.get("dispatch_history")) or any(float(m.get("dispatched_qty", 0) or 0) > 0 for m in orig_particulars)
+
+        if is_ward:
+            for orig_m in orig_particulars:
+                if not isinstance(orig_m, dict):
+                    continue
+                m_iid = orig_m.get("item_id")
+                orig_req_qty = float(orig_m.get("qty") or orig_m.get("quantity") or 0)
+                prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
+
+                # Actual quantity entered and billed right now
+                billed_qty = float(billed_items_map.get(m_iid) or billed_items_map.get(str(m_iid)) or 0)
+
+                # Ensure dispatched quantities never exceed requested quantity
+                new_disp = min(orig_req_qty, prev_disp + billed_qty)
+                pending_qty = max(0.0, orig_req_qty - new_disp)
+
+                if pending_qty > 0:
+                    all_items_fully_dispatched = False
+
+                u_item = dict(orig_m)
+                u_item["qty"] = orig_req_qty            # DO NOT overwrite original requested qty!
+                u_item["quantity"] = orig_req_qty       # Belt-and-braces
+                u_item["dispatched_qty"] = new_disp     # Actual cumulative dispatched quantity
+                u_item["pending_qty"] = pending_qty     # Remaining quantity
+                updated_orig_meds.append(u_item)
+
+        is_partial_or_subsequent = is_ward and (not all_items_fully_dispatched or has_prior_dispatches)
+
+        # =====================================================
         # ✅ GENERATE BILL NO
         # =====================================================
-        if not bill.get("bill_no"):
-
-            fy          = get_financial_year()
+        fy = get_financial_year()
+        if is_partial_or_subsequent or not bill.get("bill_no"):
             new_bill_no = get_next_pharmacy_bill_no(
                 outlet_code=bill_outlet,
                 fy=fy,
                 db_instance=mongo_db
             )
-            bill_date   = datetime.utcnow()
-
-            bill_collection.update_one(
-                {"_id": bill["_id"]},
-                {
-                    "$set": {
-                        "bill_no":   new_bill_no,
-                        "bill_date": bill_date,
+            bill_date = datetime.utcnow()
+            if not is_partial_or_subsequent:
+                bill_collection.update_one(
+                    {"_id": bill["_id"]},
+                    {
+                        "$set": {
+                            "bill_no":   new_bill_no,
+                            "bill_date": bill_date,
+                        }
                     }
-                }
-            )
-
+                )
         else:
             new_bill_no = bill.get("bill_no")
             bill_date   = bill.get("bill_date")
@@ -3535,7 +3687,6 @@ def finalize_bill(request):
         }
 
         medicine_history = []
-        now_ts = datetime.utcnow()
 
         for med in medicines_to_use:
 
@@ -3740,23 +3891,137 @@ def finalize_bill(request):
         elif raw_final_pm:
             set_payload["payment_mode"] = "Credit" if str(raw_final_pm).strip().lower() == "credit" else "Cash"
 
-        bill_collection.update_one(
-            {"_id": bill["_id"]},
-            {
-                "$set": set_payload,
-            }
-        )
+        if is_partial_or_subsequent:
+            # 1. Determine unique next_Bill_id for this new billed transaction
+            last_doc = bill_collection.find_one({}, sort=[("Bill_id", -1)], projection={"Bill_id": 1})
+            next_Bill_id = (int(last_doc["Bill_id"]) + 1) if (last_doc and "Bill_id" in last_doc and last_doc["Bill_id"] is not None) else 1
+            while bill_collection.find_one({"Bill_id": next_Bill_id}):
+                next_Bill_id += 1
 
-        try:
-            PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
-                billing_status="Billed",
-                billed_id=employee_id,
-                payment_mode=set_payload.get("payment_mode", "Cash"),
-                total_amount=set_payload.get("total_amount", float(bill.get("total_amount", 0))),
-                net_amount=set_payload.get("net_amount", float(bill.get("net_amount", 0)))
+            # Only items billed in this transaction (with qty > 0)
+            billed_invoice_meds = [
+                m for m in medicine_history
+                if float(m.get("quantity") or m.get("qty") or 0) > 0
+            ]
+            for bm in billed_invoice_meds:
+                bm["dispatched_qty"] = float(bm.get("quantity") or bm.get("qty") or 0)
+
+            billed_doc = {
+                "Bill_id":                  next_Bill_id,
+                "bill_no":                  new_bill_no,
+                "bill_date":                bill_date,
+                "created_date":             now_ts,
+                "billing_status":           "Billed",
+                "billing_mode":             bill.get("billing_mode") or "WARD REQUEST",
+                "payment_mode":             set_payload.get("payment_mode", "Cash"),
+                "is_ward_request":          True,
+                "source_ward_request_id":   bill.get("Bill_id"),
+                "is_dispatched":            True,
+                "hospital_code":            hospital_code,
+                "branch_code":              branch_code,
+                "outlet_code":              bill_outlet,
+                "uhid":                     bill.get("uhid"),
+                "patientname":              bill.get("patientname") or bill.get("patient_name"),
+                "patient_name":             bill.get("patientname") or bill.get("patient_name"),
+                "inpatient_number":         bill.get("inpatient_number"),
+                "room_no":                  bill.get("room_no") or bill.get("ward_name"),
+                "doctor_id":                bill.get("doctor_id") or data.get("doctor_id"),
+                "billed_id":                employee_id,
+                "created_by":               employee_id,
+                "total_amount":             total_amount_to_use,
+                "net_amount":               float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use),
+                "overall_discount_type":    frontend_overall_discount_type,
+                "overall_discount_value":   float(frontend_overall_discount_value or 0),
+                "overall_discount_amount":  float(frontend_overall_discount_amount or 0),
+                "medicine_particulars":     billed_invoice_meds,
+                "patient_details":          bill.get("patient_details"),
+                "customer_type":            bill.get("customer_type"),
+                "is_insurance":             is_insurance_patient,
+                "insurance_company":        bill.get("insurance_company"),
+            }
+            bill_collection.insert_one(billed_doc)
+
+            try:
+                PharmacyBilling.objects.create(
+                    Bill_id=next_Bill_id,
+                    bill_no=new_bill_no,
+                    bill_date=bill_date,
+                    uhid=bill.get("uhid"),
+                    inpatient_number=bill.get("inpatient_number"),
+                    patientname=bill.get("patientname") or bill.get("patient_name"),
+                    billing_status="Billed",
+                    billing_mode=bill.get("billing_mode") or "WARD REQUEST",
+                    payment_mode=set_payload.get("payment_mode", "Cash"),
+                    total_amount=total_amount_to_use,
+                    net_amount=float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use),
+                    doctor_id=bill.get("doctor_id") or data.get("doctor_id"),
+                    room_no=bill.get("room_no") or bill.get("ward_name"),
+                    is_ward_request=True,
+                    medicine_particulars=billed_invoice_meds,
+                )
+            except Exception as pe:
+                print("Warning: PharmacyBilling create error:", pe)
+
+            # 2. Update master ward request: preserve requested qty, update dispatched_qty & pending_qty
+            dispatch_log = {
+                "bill_no":        new_bill_no,
+                "billed_Bill_id": next_Bill_id,
+                "timestamp":      now_ts.isoformat(),
+                "billed_by":      employee_id,
+                "items": [
+                    {
+                        "item_id": int(m.get("item_id")),
+                        "qty": float(m.get("qty") or m.get("quantity") or 0)
+                    }
+                    for m in medicines_to_use
+                    if float(m.get("qty") or m.get("quantity") or 0) > 0
+                ]
+            }
+
+            update_req = {
+                "medicine_particulars": updated_orig_meds,
+                "lastmodified_date":    now_ts,
+                "lastmodified_by":      employee_id,
+            }
+            if all_items_fully_dispatched:
+                update_req["billing_status"] = "Billed"
+                update_req["is_dispatched"]  = True
+            else:
+                update_req["billing_status"] = "Pending"
+                update_req["is_dispatched"]  = False
+
+            bill_collection.update_one(
+                {"_id": bill["_id"]},
+                {
+                    "$set": update_req,
+                    "$push": {"dispatch_history": dispatch_log}
+                }
             )
-        except Exception:
-            pass
+
+            final_returned_bill_id = next_Bill_id
+
+        else:
+            if is_ward:
+                set_payload["medicine_particulars"] = updated_orig_meds
+            bill_collection.update_one(
+                {"_id": bill["_id"]},
+                {
+                    "$set": set_payload,
+                }
+            )
+
+            try:
+                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
+                    billing_status="Billed",
+                    billed_id=employee_id,
+                    payment_mode=set_payload.get("payment_mode", "Cash"),
+                    total_amount=set_payload.get("total_amount", float(bill.get("total_amount", 0))),
+                    net_amount=set_payload.get("net_amount", float(bill.get("net_amount", 0)))
+                )
+            except Exception:
+                pass
+
+            final_returned_bill_id = bill.get("Bill_id")
 
         # Resolve doctor name and employee name
         doc_id = bill.get("doctor_id") or data.get("doctor_id")
@@ -3782,6 +4047,8 @@ def finalize_bill(request):
 
             "bill_no":         new_bill_no,
 
+            "Bill_id":         final_returned_bill_id,
+
             "bill_date":       to_utc_iso(bill_date),
 
             "doctor_id":       doc_id,
@@ -3791,6 +4058,10 @@ def finalize_bill(request):
             "created_by":      emp_id,
 
             "created_by_name": emp_name,
+
+            "billed_id":       employee_id,
+
+            "billed_name":     emp_name,
 
             "employee_name":   emp_name,
 
@@ -4423,12 +4694,14 @@ def pharmacy_view_bills(request):
     bills = list(bills_qs[:limit])
 
     # =========================================================
-    # ✅ Patient Mapping (fast values() lookup)
+    # ✅ Patient Mapping (fast values() lookup) & Insurance Resolution
     # =========================================================
     uhids = list(set([bill.uhid for bill in bills if bill.uhid]))
     patient_map = {}
+    patient_insurance_map = {}
+    admission_map = {}
     if uhids:
-        patients = Patient.objects.filter(uhid__in=uhids).values("uhid", "salutation", "firstName", "lastName")
+        patients = Patient.objects.filter(uhid__in=uhids).values("uhid", "salutation", "firstName", "lastName", "customer_type", "company_code")
         for p in patients:
             sal = (p.get("salutation") or "").strip()
             fn  = (p.get("firstName") or "").strip()
@@ -4437,6 +4710,24 @@ def pharmacy_view_bills(request):
                 ln = ""
             full_name = f"{sal} {fn} {ln}".strip()
             patient_map[p["uhid"]] = " ".join(full_name.split())
+
+            c_code = p.get("company_code") or ""
+            ins_name = get_insurance_company_name(uhid=p["uhid"], company_code=c_code)
+            if not ins_name and str(p.get("customer_type") or "").upper() == "INSURANCE":
+                ins_name = "INSURANCE"
+            patient_insurance_map[p["uhid"]] = ins_name
+
+        try:
+            admissions = list(mongo_db["hospital_admission"].find(
+                {"uhid": {"$in": uhids}},
+                {"uhid": 1, "is_admitted": 1, "customer_type": 1, "company_code": 1, "insurance_company": 1, "room_details": 1, "ipNumber": 1, "inpatient_number": 1}
+            ).sort("created_date", -1))
+            for adm in admissions:
+                u = adm.get("uhid")
+                if u not in admission_map or adm.get("is_admitted"):
+                    admission_map[u] = adm
+        except Exception:
+            pass
 
     # =========================================================
     # ✅ Doctor Mapping
@@ -4459,29 +4750,48 @@ def pharmacy_view_bills(request):
     all_bill_ids = [b.Bill_id for b in bills]
     mongo_bill_map = {}
     if all_bill_ids:
+        bill_nos = [b.bill_no for b in bills if b.bill_no]
+        search_bids = []
+        for bid in all_bill_ids:
+            search_bids.append(bid)
+            if str(bid).isdigit():
+                search_bids.append(int(bid))
+                search_bids.append(str(bid))
+
+        mongo_q = {
+            "$or": [
+                {"Bill_id": {"$in": search_bids}},
+                {"bill_no": {"$in": bill_nos}}
+            ]
+        }
         mongo_bills_cursor = oppharmacy_collection.find(
-            {
-                "Bill_id": {"$in": all_bill_ids},
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-            },
+            mongo_q,
             {
                 "Bill_id": 1,
+                "bill_no": 1,
                 "billed_id": 1,
                 "created_by": 1,
                 "cashier_id": 1,
                 "medicine_particulars": 1,
+                "payment_mode": 1,
+                "billing_mode": 1,
+                "outlet_code": 1,
+                "payment_details": 1,
             }
         )
         for mb in mongo_bills_cursor:
-            mongo_bill_map[mb["Bill_id"]] = mb
+            if mb.get("Bill_id") is not None:
+                mongo_bill_map[mb["Bill_id"]] = mb
+                mongo_bill_map[str(mb["Bill_id"])] = mb
+            if mb.get("bill_no"):
+                mongo_bill_map[str(mb["bill_no"])] = mb
 
     all_emp_ids = set()
     for bill in bills:
-        mb = mongo_bill_map.get(bill.Bill_id, {})
-        b_id = str(getattr(bill, "billed_id", None) or mb.get("billed_id") or "").strip()
-        c_id = str(getattr(bill, "created_by", None) or mb.get("created_by") or "").strip()
-        cs_id = str(getattr(bill, "cashier_id", None) or mb.get("cashier_id") or "").strip()
+        mb = mongo_bill_map.get(bill.Bill_id) or mongo_bill_map.get(str(bill.Bill_id)) or mongo_bill_map.get(str(bill.bill_no)) or {}
+        b_id = str(mb.get("billed_id") or getattr(bill, "billed_id", None) or "").strip()
+        c_id = str(mb.get("created_by") or getattr(bill, "created_by", None) or "").strip()
+        cs_id = str(mb.get("cashier_id") or getattr(bill, "cashier_id", None) or "").strip()
         if b_id:
             all_emp_ids.add(b_id)
         if c_id:
@@ -4569,19 +4879,59 @@ def pharmacy_view_bills(request):
         serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
         serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type) if bill.bill_type is not None else 0, "")
 
-        mb = mongo_bill_map.get(bill.Bill_id, {})
-        billed_id_val = str(getattr(bill, "billed_id", None) or mb.get("billed_id") or "").strip()
-        created_val   = str(getattr(bill, "created_by", None) or mb.get("created_by") or "").strip()
-        cashier_val   = str(getattr(bill, "cashier_id", None) or mb.get("cashier_id") or "").strip()
+        mb = mongo_bill_map.get(bill.Bill_id) or mongo_bill_map.get(str(bill.Bill_id)) or mongo_bill_map.get(str(bill.bill_no)) or {}
+        billed_id_val = str(mb.get("billed_id") or getattr(bill, "billed_id", None) or "").strip()
+        created_val   = str(mb.get("created_by") or getattr(bill, "created_by", None) or "").strip()
+        cashier_val   = str(mb.get("cashier_id") or getattr(bill, "cashier_id", None) or "").strip()
 
-        # Target user to display in Username column of View Bills tab:
-        # Billed ID (who billed it) -> created_by -> cashier_id
-        target_user_id = billed_id_val or created_val or cashier_val
-        matched_user   = employee_map.get(target_user_id) or target_user_id
+        # Prioritize billed_id (who actually billed it in Pharmacy)
+        billed_display_name = ""
+        if billed_id_val:
+            billed_display_name = employee_map.get(billed_id_val) or get_employee_name_by_id(billed_id_val)
+            if billed_display_name == "Unknown":
+                billed_display_name = billed_id_val
+
+        # Fallback to cashier_id or created_by only if billed_id is absent
+        if not billed_display_name:
+            target_user_id = cashier_val or created_val
+            if target_user_id:
+                billed_display_name = employee_map.get(target_user_id) or get_employee_name_by_id(target_user_id)
+                if billed_display_name == "Unknown":
+                    billed_display_name = target_user_id
 
         serialized["billed_id"]       = billed_id_val or None
-        serialized["employee_name"]   = matched_user
-        serialized["created_by_name"] = employee_map.get(created_val) or created_val
+        serialized["billed_name"]     = billed_display_name
+        serialized["employee_name"]   = billed_display_name
+        serialized["prepared_by"]     = billed_display_name
+        serialized["created_by_name"] = employee_map.get(created_val) or (get_employee_name_by_id(created_val) if created_val else "") or created_val
+
+        # Ensure accurate payment_mode, billing_mode, outlet_code from MongoDB document
+        if mb.get("payment_mode"):
+            serialized["payment_mode"] = mb.get("payment_mode")
+        if mb.get("billing_mode"):
+            serialized["billing_mode"] = mb.get("billing_mode")
+        if mb.get("outlet_code"):
+            serialized["outlet_code"] = mb.get("outlet_code")
+        if mb.get("payment_details") and not serialized.get("payment_details"):
+            serialized["payment_details"] = mb.get("payment_details")
+
+        # Resolve insurance details
+        adm_doc = admission_map.get(bill.uhid) or {}
+        adm_ins = adm_doc.get("insurance_company") or get_insurance_company_name(uhid=bill.uhid, company_code=adm_doc.get("company_code"))
+        if not adm_ins and str(adm_doc.get("customer_type") or "").upper() == "INSURANCE":
+            adm_ins = "INSURANCE"
+        final_insurance = adm_ins or patient_insurance_map.get(bill.uhid) or ""
+        serialized["insurance_name"] = final_insurance
+        serialized["insurance_company"] = final_insurance
+
+        # Fallback inpatient_number and room_no from active admission if missing on bill
+        if not serialized.get("inpatient_number") and (adm_doc.get("ipNumber") or adm_doc.get("inpatient_number")):
+            serialized["inpatient_number"] = adm_doc.get("ipNumber") or adm_doc.get("inpatient_number")
+        if not serialized.get("room_no") and adm_doc.get("room_details"):
+            rooms = adm_doc.get("room_details") or []
+            active_r = next((r for r in rooms if r.get("is_roomActive")), rooms[0] if rooms else None)
+            if active_r:
+                serialized["room_no"] = " | ".join(filter(None, [active_r.get("ward"), active_r.get("room_no") or active_r.get("room")]))
 
         medicine_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
         updated_items = []
@@ -4598,6 +4948,16 @@ def pharmacy_view_bills(request):
             it["item_name"]     = raw_name
             it["medicine_name"] = raw_name
 
+            # Resolve HSN
+            if not it.get("hsn_code"):
+                it["hsn_code"] = stock_info.get("hsn_code") or stock_info.get("hsn") or ""
+
+            # Resolve Batch & Expiry
+            if not it.get("batch_number") and stock_info.get("batch_number"):
+                it["batch_number"] = stock_info.get("batch_number")
+            if not it.get("expiry_date") and stock_info.get("expiry_date"):
+                it["expiry_date"] = stock_info.get("expiry_date")
+
             cgst_pct = to_num(it.get("CGST_Percentage", 0))
             sgst_pct = to_num(it.get("SGST_Percentage", 0))
             if cgst_pct == 0.0 and stock_info.get("CGST_Percentage"):
@@ -4608,22 +4968,48 @@ def pharmacy_view_bills(request):
             it["SGST_Percentage"] = sgst_pct
 
             price_val = to_num(it.get("price", 0))
+            if price_val == 0.0:
+                price_val = to_num(it.get("mrp", 0)) or to_num(stock_info.get("Selling_Price", 0)) or to_num(stock_info.get("mrp", 0))
+
             qty_val   = to_num(it.get("qty", 0) or it.get("quantity", 0))
-            calc_val  = to_num(it.get("calculated_price", 0)) or (price_val * qty_val)
+            calc_val  = to_num(it.get("calculated_price", 0))
+            if calc_val == 0.0 and price_val > 0 and qty_val > 0:
+                calc_val = round(price_val * qty_val, 2)
 
             cgst_amt_val = to_num(it.get("CGST_Amt", 0))
             sgst_amt_val = to_num(it.get("SGST_Amt", 0))
-            if cgst_amt_val == 0.0 and cgst_pct > 0:
-                cgst_amt_val = round((calc_val * cgst_pct) / 100.0, 2)
-            if sgst_amt_val == 0.0 and sgst_pct > 0:
-                sgst_amt_val = round((calc_val * sgst_pct) / 100.0, 2)
 
+            # Reverse GST Calculation: Product Value = calc_val / (1 + GST% / 100)
+            total_gst_pct = cgst_pct + sgst_pct
+            product_val = round(calc_val / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_val
+            disc_val = to_num(it.get("discount_value", it.get("discount_percent", it.get("discount", 0))))
+            disc_amt = to_num(it.get("discount_amount", 0))
+            if disc_amt == 0.0 and disc_val > 0:
+                disc_amt = round(product_val * (disc_val / 100.0), 4)
+            taxable_val = max(0.0, product_val - disc_amt)
+
+            if cgst_amt_val == 0.0 and cgst_pct > 0 and taxable_val > 0:
+                cgst_amt_val = round((taxable_val * cgst_pct) / 100.0, 2)
+            if sgst_amt_val == 0.0 and sgst_pct > 0 and taxable_val > 0:
+                sgst_amt_val = round((taxable_val * sgst_pct) / 100.0, 2)
+
+            it["product_value"]    = product_val
+            it["taxable_value"]    = taxable_val
+            it["discount_amount"]  = disc_amt
             it["CGST_Amt"]         = cgst_amt_val
             it["SGST_Amt"]         = sgst_amt_val
             it["price"]            = price_val
+            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(stock_info.get("mrp", 0)) or price_val
             it["calculated_price"] = calc_val
             it["edit_history"]     = it.get("edit_history", [])
             updated_items.append(it)
+
+        # Recalculate bill total if 0
+        items_total = sum(to_num(it.get("calculated_price", 0)) for it in updated_items)
+        if to_num(serialized.get("total_amount", 0)) == 0.0 and items_total > 0:
+            serialized["total_amount"] = round(items_total, 2)
+        if to_num(serialized.get("net_amount", 0)) == 0.0 and items_total > 0:
+            serialized["net_amount"] = round(items_total, 2)
 
         serialized["medicine_particulars"] = updated_items
         data.append(serialized)
@@ -5127,6 +5513,101 @@ def get_doctor_prescriptions(request):
 
 from hospital.Views.dbcollection import clean_patient_name
 
+# Indian Standard Timezone (Asia/Kolkata)
+_KOLKATA_TZ = pytz.timezone("Asia/Kolkata")
+
+def _format_ist_datetime(val):
+    """
+    Convert UTC or naive datetime stored in MongoDB to IST (Asia/Kolkata)
+    and format as DD/MM/YYYY hh:mm:ss AM/PM (e.g. 13/11/2026 08:40:16 AM).
+    """
+    if not val:
+        return "—"
+    d_obj = None
+    if isinstance(val, datetime):
+        d_obj = val
+    elif isinstance(val, date):
+        return val.strftime("%d/%m/%Y")
+    elif isinstance(val, str):
+        val_str = val.strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", val_str):
+            try:
+                return datetime.strptime(val_str, "%Y-%m-%d").strftime("%d/%m/%Y")
+            except Exception:
+                return val_str
+        try:
+            d_obj = parse_datetime(val_str)
+        except Exception:
+            pass
+        if not d_obj:
+            try:
+                d_obj = datetime.fromisoformat(val_str.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if not d_obj:
+            return val_str[:19]
+
+    if d_obj:
+        try:
+            if d_obj.tzinfo is None:
+                d_obj = pytz.utc.localize(d_obj)
+            d_obj_ist = d_obj.astimezone(_KOLKATA_TZ)
+            return d_obj_ist.strftime("%d/%m/%Y %I:%M:%S %p")
+        except Exception:
+            return str(d_obj)[:19]
+
+    return str(val)[:19]
+
+def _get_ist_date_str(val):
+    """Extract YYYY-MM-DD in Asia/Kolkata timezone from datetime or string."""
+    if not val:
+        return ""
+    d_obj = None
+    if isinstance(val, datetime):
+        d_obj = val
+    elif isinstance(val, date):
+        return val.strftime("%Y-%m-%d")
+    elif isinstance(val, str):
+        val_str = val.strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", val_str):
+            return val_str[:10]
+        try:
+            d_obj = parse_datetime(val_str)
+        except Exception:
+            pass
+        if not d_obj:
+            try:
+                d_obj = datetime.fromisoformat(val_str.replace("Z", "+00:00"))
+            except Exception:
+                pass
+    if d_obj:
+        try:
+            if d_obj.tzinfo is None:
+                d_obj = pytz.utc.localize(d_obj)
+            return d_obj.astimezone(_KOLKATA_TZ).strftime("%Y-%m-%d")
+        except Exception:
+            return str(d_obj)[:10]
+    return str(val)[:10]
+
+def _extract_best_bill_dt(doc):
+    """
+    Pick the most specific timestamp available in the bill doc.
+    Prefers a datetime with non-zero time component over date-only strings.
+    """
+    cd = doc.get("created_date")
+    bd = doc.get("bill_date")
+    if isinstance(bd, datetime) and (bd.hour != 0 or bd.minute != 0 or bd.second != 0):
+        return bd
+    if isinstance(cd, datetime):
+        return cd
+    if isinstance(bd, datetime):
+        return bd
+    if isinstance(bd, str) and ("T" in bd or ":" in bd):
+        return bd
+    if isinstance(cd, str) and ("T" in cd or ":" in cd):
+        return cd
+    return bd or cd
+
 @api_view(["POST", "GET"])
 @permission_classes([HasRoleAndDataPermission])
 def PharmacyBillanalysis(request):
@@ -5193,8 +5674,7 @@ def PharmacyBillanalysis(request):
         pi_col    = hms_db["hospital_pharmacyitem"]
 
         # Date handling (Default to today in IST if not provided)
-        kolkata_tz = pytz.timezone("Asia/Kolkata")
-        today_str = datetime.now(kolkata_tz).strftime("%Y-%m-%d")
+        today_str = datetime.now(_KOLKATA_TZ).strftime("%Y-%m-%d")
 
         if not from_date_str:
             from_date_str = today_str
@@ -5206,13 +5686,17 @@ def PharmacyBillanalysis(request):
 
         if from_date_str.lower() != "all":
             try:
-                from_dt = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+                from_dt_local = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+                from_dt_utc = _KOLKATA_TZ.localize(from_dt_local).astimezone(pytz.utc).replace(tzinfo=None)
+                from_dt = min(from_dt_utc, from_dt_local)
             except Exception:
                 pass
 
         if to_date_str.lower() != "all":
             try:
-                to_dt = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                to_dt_local = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                to_dt_utc = _KOLKATA_TZ.localize(to_dt_local).astimezone(pytz.utc).replace(tzinfo=None)
+                to_dt = max(to_dt_utc, to_dt_local)
             except Exception:
                 pass
 
@@ -5353,7 +5837,7 @@ def PharmacyBillanalysis(request):
                         pass
                     sales_returns_map[b_no].append({
                         "return_bill_no": sr.get("return_bill_no", "—"),
-                        "return_date": sr.get("return_bill_date") or sr.get("created_date"),
+                        "return_date": _format_ist_datetime(sr.get("return_bill_date") or sr.get("created_date")),
                         "return_amount": ret_amt,
                         "payment_type": sr.get("PaymentType") or "Cash",
                         "status": sr.get("status") or "Approved",
@@ -5375,7 +5859,7 @@ def PharmacyBillanalysis(request):
                         pass
                     ward_returns_map[b_no].append({
                         "ward_return_bill_no": wr.get("ward_return_bill_no", "—"),
-                        "ward_return_date": wr.get("ward_return_bill_date") or wr.get("created_date"),
+                        "ward_return_date": _format_ist_datetime(wr.get("ward_return_bill_date") or wr.get("created_date")),
                         "return_amount": ret_amt,
                         "inpatient_number": wr.get("inpatient_number", ""),
                         "status": wr.get("status") or "Approved",
@@ -5403,7 +5887,7 @@ def PharmacyBillanalysis(request):
                         "collected_amount": c_amt,
                         "counter_code": cc.get("counter_code"),
                         "shift_no": cc.get("shift_no"),
-                        "created_date": cc.get("created_date"),
+                        "created_date": _format_ist_datetime(cc.get("created_date")),
                     })
 
         # 6. Batch fetch Bill Types map
@@ -5464,7 +5948,8 @@ def PharmacyBillanalysis(request):
         for b in raw_bills:
             b_no = b.get("bill_no", "—")
             u = b.get("uhid", "")
-            ip_num = b.get("inpatient_number", "")
+            raw_ip = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
+            ip_num = "" if (not raw_ip or raw_ip == "—" or raw_ip.lower() == "none" or raw_ip.upper().startswith("OP")) else raw_ip
 
             # Bill Type Lookup
             bt_num = b.get("bill_type")
@@ -5578,21 +6063,18 @@ def PharmacyBillanalysis(request):
                 elif status_filter == "ip return" and not has_ip_return:
                     continue
 
-            # Format Date & Time: "DD/MM/YYYY HH:MM:SS" (e.g. 21/10/2026 08:23:46)
-            b_date = b.get("bill_date") or b.get("created_date")
-            date_time_str = "—"
-            if b_date:
-                try:
-                    if hasattr(b_date, "strftime"):
-                        date_time_str = b_date.strftime("%d/%m/%Y %H:%M:%S")
-                    else:
-                        d_obj = parse_datetime(str(b_date))
-                        if d_obj:
-                            date_time_str = d_obj.strftime("%d/%m/%Y %H:%M:%S")
-                        else:
-                            date_time_str = str(b_date)[:19]
-                except Exception:
-                    date_time_str = str(b_date)[:19]
+            # Extract best timestamp and filter strictly by IST date
+            b_date = _extract_best_bill_dt(b)
+            if from_date_str.lower() != "all" or to_date_str.lower() != "all":
+                b_ist_date = _get_ist_date_str(b_date)
+                if b_ist_date:
+                    if from_date_str.lower() != "all" and b_ist_date < from_date_str:
+                        continue
+                    if to_date_str.lower() != "all" and b_ist_date > to_date_str:
+                        continue
+
+            # Format Date & Time in IST (Asia/Kolkata): "DD/MM/YYYY hh:mm:ss AM/PM"
+            date_time_str = _format_ist_datetime(b_date)
 
             # Accumulate totals
             tot_gross += gross
@@ -5835,8 +6317,7 @@ def PharmacyItemPatientAnalysis(request):
         ps_col  = hms_db["hospital_pharmacystock"]
 
         # Date handling (Default to today in Asia/Kolkata if not provided)
-        kolkata_tz = pytz.timezone("Asia/Kolkata")
-        today_str = datetime.now(kolkata_tz).strftime("%Y-%m-%d")
+        today_str = datetime.now(_KOLKATA_TZ).strftime("%Y-%m-%d")
 
         if not from_date_str:
             from_date_str = today_str
@@ -5848,13 +6329,17 @@ def PharmacyItemPatientAnalysis(request):
 
         if from_date_str.lower() != "all":
             try:
-                from_dt = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+                from_dt_local = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
+                from_dt_utc = _KOLKATA_TZ.localize(from_dt_local).astimezone(pytz.utc).replace(tzinfo=None)
+                from_dt = min(from_dt_utc, from_dt_local)
             except Exception:
                 pass
 
         if to_date_str.lower() != "all":
             try:
-                to_dt = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                to_dt_local = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                to_dt_utc = _KOLKATA_TZ.localize(to_dt_local).astimezone(pytz.utc).replace(tzinfo=None)
+                to_dt = max(to_dt_utc, to_dt_local)
             except Exception:
                 pass
 
@@ -5981,23 +6466,21 @@ def PharmacyItemPatientAnalysis(request):
         for b in raw_bills:
             b_no = str(b.get("bill_no") or b.get("bill_number") or b.get("Bill_id") or "—").strip()
             u = str(b.get("uhid") or "").strip()
-            ip_num = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
+            raw_ip = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
+            ip_num = "" if (not raw_ip or raw_ip == "—" or raw_ip.lower() == "none" or raw_ip.upper().startswith("OP")) else raw_ip
 
-            # Format Date & Time: "DD/MM/YYYY HH:MM:SS"
-            b_date = b.get("bill_date") or b.get("created_date")
-            date_time_str = "—"
-            if b_date:
-                try:
-                    if hasattr(b_date, "strftime"):
-                        date_time_str = b_date.strftime("%d/%m/%Y %H:%M:%S")
-                    else:
-                        d_obj = parse_datetime(str(b_date))
-                        if d_obj:
-                            date_time_str = d_obj.strftime("%d/%m/%Y %H:%M:%S")
-                        else:
-                            date_time_str = str(b_date)[:19]
-                except Exception:
-                    date_time_str = str(b_date)[:19]
+            # Extract best timestamp and filter strictly by IST date
+            b_date = _extract_best_bill_dt(b)
+            if from_date_str.lower() != "all" or to_date_str.lower() != "all":
+                b_ist_date = _get_ist_date_str(b_date)
+                if b_ist_date:
+                    if from_date_str.lower() != "all" and b_ist_date < from_date_str:
+                        continue
+                    if to_date_str.lower() != "all" and b_ist_date > to_date_str:
+                        continue
+
+            # Format Date & Time in IST (Asia/Kolkata): "DD/MM/YYYY hh:mm:ss AM/PM"
+            date_time_str = _format_ist_datetime(b_date)
 
             med_list = b.get("medicine_particulars") or []
             for m in med_list:
@@ -6040,14 +6523,14 @@ def PharmacyItemPatientAnalysis(request):
                 items_acc[item_key]["total_quantity"] += qty
                 if u and u != "—":
                     items_acc[item_key]["uhids"].add(u)
-                if ip_num and ip_num != "—":
+                if ip_num:
                     items_acc[item_key]["ip_numbers"].add(ip_num)
                 if b_no and b_no != "—":
                     items_acc[item_key]["bills"].add(b_no)
 
                 items_acc[item_key]["purchases"].append({
                     "uhid": u or "—",
-                    "inpatient_number": ip_num or "—",
+                    "inpatient_number": ip_num,
                     "bill_number": b_no,
                     "bill_date": date_time_str,
                     "purchased_quantity": qty,

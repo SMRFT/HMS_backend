@@ -129,28 +129,91 @@ def _resolve_seed_discharge_bill(db, fy):
     return 0
 
 
-def _resolve_seed_pharmacy_bill(db, outlet_code, fy):
-    """Finds maximum bill_no sequence for an outlet under financial year fy."""
+def _resolve_seed_pharmacy_bill(db, outlet_code, fy, outlet_suffix="01"):
+    """Finds maximum bill_no sequence for an outlet under financial year fy and outlet suffix."""
     clean_outlet = str(outlet_code or "").strip()
-    match_q = {"bill_no": {"$regex": f"^{fy}/"}}
-    if clean_outlet and clean_outlet != "DEFAULT":
-        match_q["outlet_code"] = clean_outlet
-
-    latest_bills = list(db["hospital_pharmacybilling"].find(
-        match_q,
-        projection={"bill_no": 1}
-    ).sort("bill_no", -1).limit(10))
-
+    prefix = f"{fy}{outlet_suffix}"
     max_no = 0
-    for b in latest_bills:
-        bn = str(b.get("bill_no") or "").strip()
-        if "/" in bn:
-            try:
-                num = int(bn.split("/")[-1])
-                if num > max_no:
-                    max_no = num
-            except Exception:
-                pass
+
+    try:
+        match_q = {"bill_no": {"$regex": f"^{prefix}"}}
+        if clean_outlet and clean_outlet != "DEFAULT":
+            match_q["outlet_code"] = clean_outlet
+
+        latest_bills = list(db["hospital_pharmacybilling"].find(
+            match_q,
+            projection={"bill_no": 1}
+        ).sort("bill_no", -1).limit(20))
+
+        for b in latest_bills:
+            bn = str(b.get("bill_no") or "").strip()
+            if bn.startswith(prefix):
+                seq_str = bn[len(prefix):]
+                if seq_str.isdigit():
+                    num = int(seq_str)
+                    if num > max_no:
+                        max_no = num
+    except Exception:
+        pass
+
+    try:
+        from hospital.models import PharmacyBilling
+        sql_bills = list(PharmacyBilling.objects.filter(bill_no__startswith=prefix).order_by('-bill_no')[:20])
+        for b in sql_bills:
+            bn = str(b.bill_no or "").strip()
+            if bn.startswith(prefix):
+                seq_str = bn[len(prefix):]
+                if seq_str.isdigit():
+                    num = int(seq_str)
+                    if num > max_no:
+                        max_no = num
+    except Exception:
+        pass
+
+    return max_no
+
+
+def _resolve_seed_sales_return_bill(db, outlet_code, fy, outlet_suffix="01"):
+    """Finds maximum return_bill_no sequence for an outlet under financial year fy and outlet suffix."""
+    clean_outlet = str(outlet_code or "").strip()
+    prefix = f"{fy}{outlet_suffix}"
+    max_no = 0
+
+    try:
+        match_q = {"return_bill_no": {"$regex": f"^{prefix}"}}
+        if clean_outlet and clean_outlet != "DEFAULT":
+            match_q["outlet_code"] = clean_outlet
+
+        latest_returns = list(db["hospital_salesreturn"].find(
+            match_q,
+            projection={"return_bill_no": 1}
+        ).sort("return_bill_no", -1).limit(20))
+
+        for b in latest_returns:
+            bn = str(b.get("return_bill_no") or "").strip()
+            if bn.startswith(prefix):
+                seq_str = bn[len(prefix):]
+                if seq_str.isdigit():
+                    num = int(seq_str)
+                    if num > max_no:
+                        max_no = num
+    except Exception:
+        pass
+
+    try:
+        from hospital.models import SalesReturn
+        sql_returns = list(SalesReturn.objects.filter(return_bill_no__startswith=prefix).order_by('-return_bill_no')[:20])
+        for b in sql_returns:
+            bn = str(b.return_bill_no or "").strip()
+            if bn.startswith(prefix):
+                seq_str = bn[len(prefix):]
+                if seq_str.isdigit():
+                    num = int(seq_str)
+                    if num > max_no:
+                        max_no = num
+    except Exception:
+        pass
+
     return max_no
 
 
@@ -504,17 +567,62 @@ def get_next_room_kit_id():
 # 6. Pharmacy Billing Bill Number (Outlet-Wise)
 def get_next_pharmacy_bill_no(outlet_code=None, fy=None, db_instance=None):
     """
-    Returns next sequential, outlet-wise Pharmacy bill number, e.g. '2627/000012'.
+    Returns next sequential, outlet-wise Pharmacy bill number:
+    e.g. '262702000001' for OLET002, '262701000001' for OLET001.
+    Formula: {FY}{outlet_code_2digits}{6-digit auto-increment}.
     Database-backed and atomic via MongoDB 'counters' collection.
     Independent series maintained per outlet_code.
     """
     clean_outlet = str(outlet_code or "DEFAULT").strip()
     year_prefix = fy or _current_fin_year_prefix()
-    counter_name = f"pharmacy_bill_{clean_outlet}_{year_prefix}"
+
+    # Extract 2-digit outlet suffix (e.g. OLET002 -> 02, OLET001 -> 01)
+    digits = re.findall(r'\d+', clean_outlet)
+    if digits:
+        try:
+            outlet_suffix = f"{int(digits[-1]):02d}"
+        except Exception:
+            outlet_suffix = "01"
+    else:
+        outlet_suffix = "01"
+
+    counter_name = f"pharmacy_bill_{clean_outlet}_{year_prefix}_{outlet_suffix}"
 
     seq = get_next_sequence_value(
         counter_name,
-        seed_resolver=lambda db: _resolve_seed_pharmacy_bill(db, clean_outlet, year_prefix),
+        seed_resolver=lambda db: _resolve_seed_pharmacy_bill(db, clean_outlet, year_prefix, outlet_suffix),
         db_instance=db_instance
     )
-    return f"{year_prefix}/{seq:06d}"
+    return f"{year_prefix}{outlet_suffix}{seq:06d}"
+
+
+# 7. Sales Return Bill Number (Outlet-Wise)
+def get_next_sales_return_bill_no(outlet_code=None, fy=None, db_instance=None):
+    """
+    Returns next sequential, outlet-wise Sales Return bill number:
+    e.g. '262702000001' for OLET002, '262701000001' for OLET001.
+    Formula: {FY}{outlet_code_2digits}{6-digit auto-increment}.
+    Database-backed and atomic via MongoDB 'counters' collection.
+    Independent series maintained per outlet_code.
+    """
+    clean_outlet = str(outlet_code or "DEFAULT").strip()
+    year_prefix = fy or _current_fin_year_prefix()
+
+    # Extract 2-digit outlet suffix (e.g. OLET002 -> 02, OLET001 -> 01)
+    digits = re.findall(r'\d+', clean_outlet)
+    if digits:
+        try:
+            outlet_suffix = f"{int(digits[-1]):02d}"
+        except Exception:
+            outlet_suffix = "01"
+    else:
+        outlet_suffix = "01"
+
+    counter_name = f"sales_return_bill_{clean_outlet}_{year_prefix}_{outlet_suffix}"
+
+    seq = get_next_sequence_value(
+        counter_name,
+        seed_resolver=lambda db: _resolve_seed_sales_return_bill(db, clean_outlet, year_prefix, outlet_suffix),
+        db_instance=db_instance
+    )
+    return f"{year_prefix}{outlet_suffix}{seq:06d}"

@@ -958,30 +958,33 @@ def OP_salesreturn_billdetails(request):
             cleaned_particulars.append(item)
  
         # =========================
-        # ✅ GENERATE RETURN BILL NO
-        # Uses financial year prefix + auto-increment
-        # Each submission always gets a fresh unique bill number
+        # ✅ GENERATE RETURN BILL NO (OUTLET-WISE)
+        # Format: {FY}{outlet_2digits}{6-digit auto-increment}
+        # e.g. OLET002 -> 262702000001, OLET001 -> 262701000001
         # =========================
-        now            = timezone.now()
-        current_year   = now.year % 100
-        next_year      = (now.year + 1) % 100
-        financial_year = f"{current_year:02d}{next_year:02d}"
- 
-        last_records = SalesReturn.objects.filter(
-            return_bill_no__startswith=financial_year
-        ).values_list("return_bill_no", flat=True)
- 
-        max_no = 0
-        for bill in last_records:
+        resolved_outlet = (
+            outlet_code
+            or data.get("outlet_code")
+            or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
+        )
+        if not resolved_outlet and bill_no:
             try:
-                last_part = str(bill).split("/")[-1]
-                if last_part.isdigit():
-                    max_no = max(max_no, int(last_part))
+                client_temp = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                orig_b = client_temp["HMS"]["hospital_pharmacybilling"].find_one({"bill_no": bill_no}, {"outlet_code": 1})
+                if orig_b and orig_b.get("outlet_code"):
+                    resolved_outlet = orig_b.get("outlet_code")
+                client_temp.close()
             except Exception:
-                continue
- 
-        new_no         = max_no + 1
-        return_bill_no = f"{financial_year}/{new_no:06d}"
+                pass
+
+        if not resolved_outlet:
+            resolved_outlet = "OLET002"
+
+        outlet_code = resolved_outlet
+
+        from ..counter_service import get_next_sales_return_bill_no
+        return_bill_no = get_next_sales_return_bill_no(outlet_code=resolved_outlet)
  
         # =========================
         # ✅ MONGO — UPDATE STOCK + PUSH NEW edit_history ENTRY
