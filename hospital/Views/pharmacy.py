@@ -392,9 +392,9 @@ def get_pharmacy_stock(request):
                     "total_stock": 1,
                     "mrp": {
                         "$cond": [
-                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
-                            "$Selling_Price",
-                            {"$ifNull": ["$mrp", 0]}
+                            {"$gt": [{"$ifNull": ["$mrp", 0]}, 0]},
+                            "$mrp",
+                            {"$ifNull": ["$Selling_Price", 0]}
                         ]
                     },
                     "Selling_Price": {
@@ -733,14 +733,16 @@ def build_edit_history(old_meds, new_meds, employee_id):
                 "edited_by": employee_id
             })
 
-        new_item = {k: v for k, v in new.items() if k != "item_name"}
+        new_item = {k: v for k, v in new.items() if k != "item_name" and k != "quantity"}
+        new_item["qty"] = new_qty
         new_item["edit_history"] = history
         updated.append(new_item)
 
     # Process additions (in new but not in old)
     for new in unmatched_new:
         new_qty = _get_qty(new)
-        new_item = {k: v for k, v in new.items() if k != "item_name"}
+        new_item = {k: v for k, v in new.items() if k != "item_name" and k != "quantity"}
+        new_item["qty"] = new_qty
         new_item.setdefault("edit_history", [])
         new_item["edit_history"].append({
             "action": "medicine_added",
@@ -754,7 +756,8 @@ def build_edit_history(old_meds, new_meds, employee_id):
     # Process deletions (in old but not in new)
     for old in unmatched_old:
         old_qty = _get_qty(old)
-        old_item = {k: v for k, v in old.items() if k != "item_name"}
+        old_item = {k: v for k, v in old.items() if k != "item_name" and k != "quantity"}
+        old_item["qty"] = old_qty
         old_item.setdefault("edit_history", [])
         old_item["is_deleted"] = True
         old_item["edit_history"].append({
@@ -2831,7 +2834,6 @@ def pharmacy_medicinechart(request):
                     **item,
                     **stock_info,
                     "qty": clean_pending,
-                    "quantity": clean_pending,
                     "requested_qty": clean_orig,
                     "dispatched_qty": clean_disp,
                     "pending_qty": clean_pending,
@@ -3644,8 +3646,9 @@ def finalize_bill(request):
                     all_items_fully_dispatched = False
 
                 u_item = dict(orig_m)
-                u_item["qty"] = orig_req_qty            # DO NOT overwrite original requested qty!
-                u_item["quantity"] = orig_req_qty       # Belt-and-braces
+                u_item["qty"] = orig_req_qty            # Keep field qty as qty
+                if "quantity" in u_item:
+                    del u_item["quantity"]
                 u_item["dispatched_qty"] = new_disp     # Actual cumulative dispatched quantity
                 u_item["pending_qty"] = pending_qty     # Remaining quantity
                 updated_orig_meds.append(u_item)
@@ -3774,7 +3777,7 @@ def finalize_bill(request):
             med_entry = {
                 "item_id":          item_id,
                 "batch_number":     bn_val,
-                "quantity":         qty,
+                "qty":              qty,
                 "price":            price,
                 "calculated_price": calculated_price,
                 "discount":         med.get("discount", 0),
@@ -4515,16 +4518,16 @@ def pharmacy_view_bills(request):
     # ✅ MongoDB Connections
     # =========================================================
     client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-
     global_db = client["Global"]
     profile_collection = global_db["backend_diagnostics_profile"]
 
     hms_db = client["HMS"]
-    billtype_collection          = hms_db["hospital_billtype"]
-    pharmacy_item_collection     = hms_db["hospital_pharmacyitem"]
-    pharmacy_stock_collection    = hms_db["hospital_pharmacystock"]
-    oppharmacy_collection        = hms_db["hospital_pharmacybilling"]
-    # ✅ Sales returns are read from oppharmacy_collection (edit_history) — NOT hospital_salesreturn
+    billtype_collection      = hms_db["hospital_billtype"]
+    pharmacy_item_collection = hms_db["hospital_pharmacyitem"]
+    oppharmacy_collection    = hms_db["hospital_pharmacybilling"]
+    patient_collection       = hms_db["hospital_patient"]
+    admission_collection     = hms_db["hospital_admission"]
+    insurance_collection     = hms_db["hospital_insuranceprovider"]
 
     # =========================================================
     # ✅ Employee Profile
@@ -4539,7 +4542,7 @@ def pharmacy_view_bills(request):
                 ]
             }
         }
-    except:
+    except Exception:
         search_query = {"employeeId": str(employee_id)}
 
     employee_profile = profile_collection.find_one(
@@ -4580,7 +4583,7 @@ def pharmacy_view_bills(request):
         matched_outlet = request_outlet
 
     # =========================================================
-    # ✅ Get All Bill Types
+    # ✅ Get All Bill Types (Bulk 1 query)
     # =========================================================
     billtype_cursor = billtype_collection.find(
         {
@@ -4589,7 +4592,8 @@ def pharmacy_view_bills(request):
         },
         {
             "bill_type": 1,
-            "bill_name": 1
+            "bill_name": 1,
+            "_id": 0
         }
     )
 
@@ -4597,10 +4601,14 @@ def pharmacy_view_bills(request):
     allowed_bill_types = []
 
     for bt in billtype_cursor:
-        bill_type = bt.get("bill_type")
-        if bill_type is not None:
-            allowed_bill_types.append(int(bill_type))
-            billtype_map[int(bill_type)] = bt.get("bill_name", "")
+        bt_val = bt.get("bill_type")
+        if bt_val is not None:
+            try:
+                bt_int = int(bt_val)
+                allowed_bill_types.append(bt_int)
+                billtype_map[bt_int] = bt.get("bill_name", "")
+            except (ValueError, TypeError):
+                pass
 
     # =========================================================
     # ✅ Query Parameters: Date, Search, Bill Type, Limit
@@ -4621,214 +4629,214 @@ def pharmacy_view_bills(request):
     to_dt   = None
     if from_date_str:
         try:
-            from django.utils.timezone import make_aware
-            from_dt = make_aware(datetime.strptime(from_date_str.strip(), "%Y-%m-%d"))
+            from_dt = datetime.strptime(from_date_str.strip(), "%Y-%m-%d")
         except Exception:
-            try:
-                from_dt = datetime.strptime(from_date_str.strip(), "%Y-%m-%d")
-            except Exception:
-                pass
+            pass
 
     if to_date_str:
         try:
-            from django.utils.timezone import make_aware
-            to_dt = make_aware(datetime.strptime(to_date_str.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59))
+            to_dt = datetime.strptime(to_date_str.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
         except Exception:
-            try:
-                to_dt = datetime.strptime(to_date_str.strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            except Exception:
-                pass
+            pass
 
     # =========================================================
-    # ✅ Django Bills Query
+    # ✅ Direct High-Speed MongoDB Bill Query
     # =========================================================
-    bill_filters = {
-        "billing_status__in": ["Billed", "Paid", "Processing", "deleted"],
+    bill_q = {
         "hospital_code": hospital_code,
-        "branch_code": branch_code,
+        "branch_code":   branch_code,
+        "billing_status": {"$in": ["Billed", "Paid", "Processing", "deleted"]}
     }
+
     if isinstance(matched_outlet, (list, tuple)):
-        bill_filters["outlet_code__in"] = list(matched_outlet)
-    else:
-        bill_filters["outlet_code"] = matched_outlet
+        bill_q["outlet_code"] = {"$in": list(matched_outlet)}
+    elif matched_outlet:
+        bill_q["outlet_code"] = matched_outlet
 
     if bill_type_param and bill_type_param != "ALL":
         try:
-            bill_filters["bill_type"] = int(bill_type_param)
+            bill_q["bill_type"] = int(bill_type_param)
         except (ValueError, TypeError):
-            bill_filters["bill_type__in"] = allowed_bill_types
-    else:
-        bill_filters["bill_type__in"] = allowed_bill_types
+            if allowed_bill_types:
+                bill_q["bill_type"] = {"$in": allowed_bill_types}
+    elif allowed_bill_types:
+        bill_q["bill_type"] = {"$in": allowed_bill_types}
 
     if from_dt and to_dt:
-        bill_filters["bill_date__range"] = (from_dt, to_dt)
+        bill_q["$or"] = [
+            {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
+            {"bill_date": {"$gte": from_date_str.strip(), "$lte": to_date_str.strip() + "T23:59:59.999999"}}
+        ]
     elif from_dt:
-        bill_filters["bill_date__gte"] = from_dt
+        bill_q["$or"] = [
+            {"bill_date": {"$gte": from_dt}},
+            {"bill_date": {"$gte": from_date_str.strip()}}
+        ]
     elif to_dt:
-        bill_filters["bill_date__lte"] = to_dt
+        bill_q["$or"] = [
+            {"bill_date": {"$lte": to_dt}},
+            {"bill_date": {"$lte": to_date_str.strip() + "T23:59:59.999999"}}
+        ]
 
-    extra_filter = None
     if search_value:
+        sv = re.escape(search_value)
         if search_by == "bill_no":
-            bill_filters["bill_no__icontains"] = search_value
+            bill_q["bill_no"] = {"$regex": sv, "$options": "i"}
         elif search_by == "uhid":
-            bill_filters["uhid__icontains"] = search_value
+            bill_q["uhid"] = {"$regex": sv, "$options": "i"}
         elif search_by == "patient_name":
-            matching_uhids = list(
-                Patient.objects.filter(
-                    Q(firstName__icontains=search_value) | Q(lastName__icontains=search_value)
-                ).values_list("uhid", flat=True)[:300]
-            )
-            if matching_uhids:
-                extra_filter = Q(patientname__icontains=search_value) | Q(uhid__in=matching_uhids)
+            p_uhids = [
+                p["uhid"] for p in patient_collection.find(
+                    {"$or": [
+                        {"firstName": {"$regex": sv, "$options": "i"}},
+                        {"lastName": {"$regex": sv, "$options": "i"}}
+                    ]},
+                    {"uhid": 1, "_id": 0}
+                ).limit(300)
+            ]
+            if p_uhids:
+                bill_q["$or"] = [
+                    {"patientname": {"$regex": sv, "$options": "i"}},
+                    {"uhid": {"$in": p_uhids}}
+                ]
             else:
-                bill_filters["patientname__icontains"] = search_value
+                bill_q["patientname"] = {"$regex": sv, "$options": "i"}
         else:
-            bill_filters["bill_no__icontains"] = search_value
+            bill_q["bill_no"] = {"$regex": sv, "$options": "i"}
 
-    bills_qs = PharmacyBilling.objects.filter(**bill_filters)
-    if extra_filter:
-        bills_qs = bills_qs.filter(extra_filter)
-    bills_qs = bills_qs.order_by("-bill_date")
-
-    bills = list(bills_qs[:limit])
+    # Fetch bills directly via PyMongo
+    bills = list(oppharmacy_collection.find(bill_q).sort("bill_date", -1).limit(limit))
 
     # =========================================================
-    # ✅ Patient Mapping (fast values() lookup) & Insurance Resolution
+    # ✅ Collect IDs for Instant In-Memory Bulk Joins
     # =========================================================
-    uhids = list(set([bill.uhid for bill in bills if bill.uhid]))
-    patient_map = {}
-    patient_insurance_map = {}
-    admission_map = {}
+    uhids      = set()
+    doctor_ids = set()
+    emp_ids    = set()
+    item_ids   = set()
+
+    for b in bills:
+        u = b.get("uhid")
+        if u:
+            uhids.add(str(u).strip())
+        doc_id = b.get("doctor_id")
+        if doc_id:
+            doctor_ids.add(str(doc_id).strip())
+        for fld in ["billed_id", "created_by", "cashier_id"]:
+            val = b.get(fld)
+            if val:
+                emp_ids.add(str(val).strip())
+        for it in (b.get("medicine_particulars") or []):
+            if isinstance(it, dict) and it.get("item_id"):
+                item_ids.add(it["item_id"])
+
+    # =========================================================
+    # ✅ Bulk Join 1: Patients & Insurance Codes (1 query)
+    # =========================================================
+    patient_map     = {}
+    patient_ins_map = {}
+    all_comp_codes  = set()
+
     if uhids:
-        patients = Patient.objects.filter(uhid__in=uhids).values("uhid", "salutation", "firstName", "lastName", "customer_type", "company_code")
-        for p in patients:
+        for p in patient_collection.find(
+            {"uhid": {"$in": list(uhids)}},
+            {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1, "company_code": 1, "customer_type": 1, "_id": 0}
+        ):
             sal = (p.get("salutation") or "").strip()
             fn  = (p.get("firstName") or "").strip()
             ln  = (p.get("lastName") or "").strip()
             if ln.lower() == fn.lower():
                 ln = ""
-            full_name = f"{sal} {fn} {ln}".strip()
-            patient_map[p["uhid"]] = " ".join(full_name.split())
-
-            c_code = p.get("company_code") or ""
-            ins_name = get_insurance_company_name(uhid=p["uhid"], company_code=c_code)
-            if not ins_name and str(p.get("customer_type") or "").upper() == "INSURANCE":
-                ins_name = "INSURANCE"
-            patient_insurance_map[p["uhid"]] = ins_name
-
-        try:
-            admissions = list(mongo_db["hospital_admission"].find(
-                {"uhid": {"$in": uhids}},
-                {"uhid": 1, "is_admitted": 1, "customer_type": 1, "company_code": 1, "insurance_company": 1, "room_details": 1, "ipNumber": 1, "inpatient_number": 1}
-            ).sort("created_date", -1))
-            for adm in admissions:
-                u = adm.get("uhid")
-                if u not in admission_map or adm.get("is_admitted"):
-                    admission_map[u] = adm
-        except Exception:
-            pass
+            full_n = " ".join(f"{sal} {fn} {ln}".split())
+            patient_map[p["uhid"]] = full_n
+            cc = (p.get("company_code") or "").strip()
+            if cc:
+                patient_ins_map[p["uhid"]] = cc
+                all_comp_codes.add(cc)
+            elif str(p.get("customer_type") or "").upper() == "INSURANCE":
+                patient_ins_map[p["uhid"]] = "INSURANCE"
 
     # =========================================================
-    # ✅ Doctor Mapping
+    # ✅ Bulk Join 2: Admissions (1 query)
     # =========================================================
-    doctor_ids = list(set([str(bill.doctor_id).strip() for bill in bills if bill.doctor_id]))
-    doctor_map = {}
-    if doctor_ids:
-        doctor_cursor = profile_collection.find(
-            {"employeeId": {"$in": doctor_ids}},
-            {"employeeId": 1, "employeeName": 1}
-        )
-        doctor_map = {
-            str(doc["employeeId"]): doc.get("employeeName", "")
-            for doc in doctor_cursor
-        }
-
-    # =========================================================
-    # ✅ Employee / Creator / Billed Mapping
-    # =========================================================
-    all_bill_ids = [b.Bill_id for b in bills]
-    mongo_bill_map = {}
-    if all_bill_ids:
-        bill_nos = [b.bill_no for b in bills if b.bill_no]
-        search_bids = []
-        for bid in all_bill_ids:
-            search_bids.append(bid)
-            if str(bid).isdigit():
-                search_bids.append(int(bid))
-                search_bids.append(str(bid))
-
-        mongo_q = {
-            "$or": [
-                {"Bill_id": {"$in": search_bids}},
-                {"bill_no": {"$in": bill_nos}}
-            ]
-        }
-        mongo_bills_cursor = oppharmacy_collection.find(
-            mongo_q,
-            {
-                "Bill_id": 1,
-                "bill_no": 1,
-                "billed_id": 1,
-                "created_by": 1,
-                "cashier_id": 1,
-                "medicine_particulars": 1,
-                "payment_mode": 1,
-                "billing_mode": 1,
-                "outlet_code": 1,
-                "payment_details": 1,
-            }
-        )
-        for mb in mongo_bills_cursor:
-            if mb.get("Bill_id") is not None:
-                mongo_bill_map[mb["Bill_id"]] = mb
-                mongo_bill_map[str(mb["Bill_id"])] = mb
-            if mb.get("bill_no"):
-                mongo_bill_map[str(mb["bill_no"])] = mb
-
-    all_emp_ids = set()
-    for bill in bills:
-        mb = mongo_bill_map.get(bill.Bill_id) or mongo_bill_map.get(str(bill.Bill_id)) or mongo_bill_map.get(str(bill.bill_no)) or {}
-        b_id = str(mb.get("billed_id") or getattr(bill, "billed_id", None) or "").strip()
-        c_id = str(mb.get("created_by") or getattr(bill, "created_by", None) or "").strip()
-        cs_id = str(mb.get("cashier_id") or getattr(bill, "cashier_id", None) or "").strip()
-        if b_id:
-            all_emp_ids.add(b_id)
-        if c_id:
-            all_emp_ids.add(c_id)
-        if cs_id:
-            all_emp_ids.add(cs_id)
-
-    employee_map = {}
-    if all_emp_ids:
-        search_ids = []
-        for cid in all_emp_ids:
-            search_ids.append(cid)
-            if cid.isdigit():
-                search_ids.append(int(cid))
-
-        creator_cursor = profile_collection.find(
-            {"employeeId": {"$in": search_ids}},
-            {"employeeId": 1, "employeeName": 1}
-        )
-        for doc in creator_cursor:
-            emp_n = doc.get("employeeName", "")
-            if emp_n:
-                employee_map[str(doc["employeeId"])] = emp_n
-
-        for cid in all_emp_ids:
-            if str(cid) not in employee_map:
-                resolved = get_employee_name_by_id(cid)
-                if resolved and resolved != "Unknown":
-                    employee_map[str(cid)] = resolved
+    admission_map = {}
+    if uhids:
+        for adm in admission_collection.find(
+            {"uhid": {"$in": list(uhids)}},
+            {"uhid": 1, "is_admitted": 1, "customer_type": 1, "company_code": 1, "insurance_company": 1, "room_details": 1, "ipNumber": 1, "inpatient_number": 1, "created_date": 1, "_id": 0}
+        ).sort("created_date", -1):
+            u = adm.get("uhid")
+            if u not in admission_map or adm.get("is_admitted"):
+                admission_map[u] = adm
+            cc = (adm.get("company_code") or "").strip()
+            if cc:
+                all_comp_codes.add(cc)
 
     # =========================================================
-    # ✅ Fallback for bills missing medicine_particulars in Django
+    # ✅ Bulk Join 3: Insurance Providers (1 query)
     # =========================================================
-    mongo_map = {b_id: mb.get("medicine_particulars", []) for b_id, mb in mongo_bill_map.items()}
+    insurance_name_map = {}
+    if all_comp_codes:
+        for ins in insurance_collection.find(
+            {"company_code": {"$in": list(all_comp_codes)}},
+            {"company_code": 1, "company_name": 1, "_id": 0}
+        ):
+            cc = str(ins.get("company_code") or "").strip()
+            nm = (ins.get("company_name") or "").strip()
+            if cc and nm:
+                insurance_name_map[cc] = nm
+                insurance_name_map[cc.upper()] = nm
+                insurance_name_map[cc.lower()] = nm
 
     # =========================================================
-    # ✅ Fast Float Conversion Helper
+    # ✅ Bulk Join 4: Profiles (Doctors & Employees in 1 query)
+    # =========================================================
+    all_pids    = list(doctor_ids | emp_ids)
+    profile_map = {}
+    if all_pids:
+        search_pids = []
+        for pid in all_pids:
+            search_pids.append(pid)
+            if pid.isdigit():
+                search_pids.append(int(pid))
+        for prof in profile_collection.find(
+            {"employeeId": {"$in": search_pids}},
+            {"employeeId": 1, "employeeName": 1, "_id": 0}
+        ):
+            eid_str = str(prof.get("employeeId"))
+            ename   = prof.get("employeeName", "")
+            if ename:
+                profile_map[eid_str] = ename
+                try:
+                    profile_map[str(int(eid_str))] = ename
+                except (ValueError, TypeError):
+                    pass
+
+    # =========================================================
+    # ✅ Bulk Join 5: Pharmacy Items (1 query)
+    # =========================================================
+    item_map = {}
+    if item_ids:
+        search_iids = []
+        for iid in item_ids:
+            search_iids.append(iid)
+            if str(iid).isdigit():
+                search_iids.append(int(iid))
+                search_iids.append(str(iid))
+        for itm in pharmacy_item_collection.find(
+            {"item_id": {"$in": search_iids}},
+            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "mrp": 1, "Selling_Price": 1, "_id": 0}
+        ):
+            raw_id = itm.get("item_id")
+            item_map[raw_id] = itm
+            item_map[str(raw_id)] = itm
+            try:
+                item_map[int(raw_id)] = itm
+            except (ValueError, TypeError):
+                pass
+
+    # =========================================================
+    # ✅ Helpers for serialization
     # =========================================================
     def to_num(val):
         if val is None:
@@ -4842,144 +4850,124 @@ def pharmacy_view_bills(request):
         except (ValueError, TypeError):
             return 0.0
 
-    # Bulk fetch Pharmacy items & stock info via common optimized function in dbcollection.py
-    all_item_ids = set()
-    for bill in bills:
-        m_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
-        for it in m_list:
-            if isinstance(it, dict) and it.get("item_id"):
-                all_item_ids.add(it.get("item_id"))
-
-    items_stock_data = get_pharmacy_items_with_stock(
-        hospital_code=hospital_code,
-        branch_code=branch_code,
-        outlet_code=matched_outlet[0] if isinstance(matched_outlet, (list, tuple)) and matched_outlet else matched_outlet,
-        item_ids=list(all_item_ids)
-    ) if all_item_ids else {"items": {}, "stock_by_item": {}, "stock_by_batch": {}}
+    def serialize_val(val):
+        if isinstance(val, (datetime, date)):
+            return val.isoformat()
+        if isinstance(val, (Decimal, Decimal128)):
+            return float(val)
+        if hasattr(val, '__str__') and type(val).__name__ == 'ObjectId':
+            return str(val)
+        return val
 
     # =========================================================
-    # ✅ Build Bills Data (Fast direct serialization)
+    # ✅ Build Bills Data (Fast direct in-memory serialization)
     # =========================================================
     data = []
 
-    for bill in bills:
-        # Direct field dictionary (100x faster than DRF ModelSerializer in a loop)
+    for b in bills:
         serialized = {}
-        for f in bill._meta.fields:
-            val = getattr(bill, f.name)
-            if isinstance(val, (datetime, date)):
-                serialized[f.name] = val.isoformat()
-            elif isinstance(val, (Decimal, Decimal128)):
-                serialized[f.name] = float(val)
+        for k, v in b.items():
+            if k == "_id":
+                serialized["_id"] = str(v)
             else:
-                serialized[f.name] = val
+                serialized[k] = serialize_val(v)
 
-        p_name = patient_map.get(bill.uhid, "") or getattr(bill, "patientname", "") or ""
-        serialized["patient_name"]   = p_name
-        serialized["doctor_name"]    = doctor_map.get(str(bill.doctor_id), "")
-        serialized["bill_type_name"] = billtype_map.get(int(bill.bill_type) if bill.bill_type is not None else 0, "")
+        u = b.get("uhid") or ""
+        p_name = patient_map.get(u) or b.get("patientname") or ""
+        serialized["patient_name"] = p_name
+        serialized["patientname"]  = p_name
 
-        mb = mongo_bill_map.get(bill.Bill_id) or mongo_bill_map.get(str(bill.Bill_id)) or mongo_bill_map.get(str(bill.bill_no)) or {}
-        billed_id_val = str(mb.get("billed_id") or getattr(bill, "billed_id", None) or "").strip()
-        created_val   = str(mb.get("created_by") or getattr(bill, "created_by", None) or "").strip()
-        cashier_val   = str(mb.get("cashier_id") or getattr(bill, "cashier_id", None) or "").strip()
+        # Doctor
+        doc_id_val = str(b.get("doctor_id") or "").strip()
+        serialized["doctor_name"] = profile_map.get(doc_id_val, "")
 
-        # Prioritize billed_id (who actually billed it in Pharmacy)
-        billed_display_name = ""
-        if billed_id_val:
-            billed_display_name = employee_map.get(billed_id_val) or get_employee_name_by_id(billed_id_val)
-            if billed_display_name == "Unknown":
-                billed_display_name = billed_id_val
+        # Bill type name
+        bt_val = b.get("bill_type")
+        serialized["bill_type_name"] = billtype_map.get(int(bt_val) if bt_val is not None else 0, "")
 
-        # Fallback to cashier_id or created_by only if billed_id is absent
-        if not billed_display_name:
-            target_user_id = cashier_val or created_val
-            if target_user_id:
-                billed_display_name = employee_map.get(target_user_id) or get_employee_name_by_id(target_user_id)
-                if billed_display_name == "Unknown":
-                    billed_display_name = target_user_id
+        # Billed / Employee name
+        billed_id_val = str(b.get("billed_id") or "").strip()
+        created_val   = str(b.get("created_by") or "").strip()
+        cashier_val   = str(b.get("cashier_id") or "").strip()
 
+        billed_display = (
+            profile_map.get(billed_id_val) or
+            profile_map.get(cashier_val) or
+            profile_map.get(created_val) or
+            billed_id_val or
+            created_val
+        )
         serialized["billed_id"]       = billed_id_val or None
-        serialized["billed_name"]     = billed_display_name
-        serialized["employee_name"]   = billed_display_name
-        serialized["prepared_by"]     = billed_display_name
-        serialized["created_by_name"] = employee_map.get(created_val) or (get_employee_name_by_id(created_val) if created_val else "") or created_val
+        serialized["billed_name"]     = billed_display
+        serialized["employee_name"]   = billed_display
+        serialized["prepared_by"]     = billed_display
+        serialized["created_by_name"] = profile_map.get(created_val, created_val)
 
-        # Ensure accurate payment_mode, billing_mode, outlet_code from MongoDB document
-        if mb.get("payment_mode"):
-            serialized["payment_mode"] = mb.get("payment_mode")
-        if mb.get("billing_mode"):
-            serialized["billing_mode"] = mb.get("billing_mode")
-        if mb.get("outlet_code"):
-            serialized["outlet_code"] = mb.get("outlet_code")
-        if mb.get("payment_details") and not serialized.get("payment_details"):
-            serialized["payment_details"] = mb.get("payment_details")
-
-        # Resolve insurance details
-        adm_doc = admission_map.get(bill.uhid) or {}
-        adm_ins = adm_doc.get("insurance_company") or get_insurance_company_name(uhid=bill.uhid, company_code=adm_doc.get("company_code"))
+        # Admission & Insurance
+        adm_doc = admission_map.get(u) or {}
+        adm_ins = adm_doc.get("insurance_company")
+        if not adm_ins and adm_doc.get("company_code"):
+            adm_ins = insurance_name_map.get(str(adm_doc.get("company_code")).strip(), "")
         if not adm_ins and str(adm_doc.get("customer_type") or "").upper() == "INSURANCE":
             adm_ins = "INSURANCE"
-        final_insurance = adm_ins or patient_insurance_map.get(bill.uhid) or ""
-        serialized["insurance_name"] = final_insurance
-        serialized["insurance_company"] = final_insurance
 
-        # Fallback inpatient_number and room_no from active admission if missing on bill
+        pat_ins = ""
+        pat_cc = patient_ins_map.get(u)
+        if pat_cc:
+            pat_ins = insurance_name_map.get(pat_cc, pat_cc if pat_cc == "INSURANCE" else "")
+
+        final_ins = adm_ins or pat_ins or ""
+        serialized["insurance_name"]    = final_ins
+        serialized["insurance_company"] = final_ins
+
         if not serialized.get("inpatient_number") and (adm_doc.get("ipNumber") or adm_doc.get("inpatient_number")):
             serialized["inpatient_number"] = adm_doc.get("ipNumber") or adm_doc.get("inpatient_number")
+
         if not serialized.get("room_no") and adm_doc.get("room_details"):
             rooms = adm_doc.get("room_details") or []
             active_r = next((r for r in rooms if r.get("is_roomActive")), rooms[0] if rooms else None)
             if active_r:
                 serialized["room_no"] = " | ".join(filter(None, [active_r.get("ward"), active_r.get("room_no") or active_r.get("room")]))
 
-        medicine_list = bill.medicine_particulars or mongo_map.get(bill.Bill_id, []) or []
+        # Line items
         updated_items = []
-
-        for item in medicine_list:
+        for item in (b.get("medicine_particulars") or []):
+            if not isinstance(item, dict):
+                continue
             it = dict(item)
             item_id_val = it.get("item_id")
-            stock_info = resolve_medicine_stock_details(it, items_stock_data) if (items_stock_data and item_id_val) else {}
+            master_item = item_map.get(item_id_val, {})
 
             raw_name = (it.get("item_name") or it.get("medicine_name") or it.get("name") or "").strip()
             if not raw_name:
-                raw_name = (stock_info.get("item_name") or "").strip()
-
+                raw_name = (master_item.get("item_name") or "").strip()
             it["item_name"]     = raw_name
             it["medicine_name"] = raw_name
 
-            # Resolve HSN
             if not it.get("hsn_code"):
-                it["hsn_code"] = stock_info.get("hsn_code") or stock_info.get("hsn") or ""
-
-            # Resolve Batch & Expiry
-            if not it.get("batch_number") and stock_info.get("batch_number"):
-                it["batch_number"] = stock_info.get("batch_number")
-            if not it.get("expiry_date") and stock_info.get("expiry_date"):
-                it["expiry_date"] = stock_info.get("expiry_date")
+                it["hsn_code"] = master_item.get("hsn_code") or master_item.get("hsn") or ""
 
             cgst_pct = to_num(it.get("CGST_Percentage", 0))
             sgst_pct = to_num(it.get("SGST_Percentage", 0))
-            if cgst_pct == 0.0 and stock_info.get("CGST_Percentage"):
-                cgst_pct = to_num(stock_info.get("CGST_Percentage"))
-            if sgst_pct == 0.0 and stock_info.get("SGST_Percentage"):
-                sgst_pct = to_num(stock_info.get("SGST_Percentage"))
+            if cgst_pct == 0.0 and master_item.get("CGST_Percentage"):
+                cgst_pct = to_num(master_item.get("CGST_Percentage"))
+            if sgst_pct == 0.0 and master_item.get("SGST_Percentage"):
+                sgst_pct = to_num(master_item.get("SGST_Percentage"))
             it["CGST_Percentage"] = cgst_pct
             it["SGST_Percentage"] = sgst_pct
 
             price_val = to_num(it.get("price", 0))
             if price_val == 0.0:
-                price_val = to_num(it.get("mrp", 0)) or to_num(stock_info.get("Selling_Price", 0)) or to_num(stock_info.get("mrp", 0))
+                price_val = to_num(it.get("mrp", 0)) or to_num(master_item.get("Selling_Price", 0)) or to_num(master_item.get("mrp", 0))
 
-            qty_val   = to_num(it.get("qty", 0) or it.get("quantity", 0))
-            calc_val  = to_num(it.get("calculated_price", 0))
+            qty_val  = to_num(it.get("qty", 0) or it.get("quantity", 0))
+            calc_val = to_num(it.get("calculated_price", 0))
             if calc_val == 0.0 and price_val > 0 and qty_val > 0:
                 calc_val = round(price_val * qty_val, 2)
 
             cgst_amt_val = to_num(it.get("CGST_Amt", 0))
             sgst_amt_val = to_num(it.get("SGST_Amt", 0))
 
-            # Reverse GST Calculation: Product Value = calc_val / (1 + GST% / 100)
             total_gst_pct = cgst_pct + sgst_pct
             product_val = round(calc_val / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_val
             disc_val = to_num(it.get("discount_value", it.get("discount_percent", it.get("discount", 0))))
@@ -4999,7 +4987,7 @@ def pharmacy_view_bills(request):
             it["CGST_Amt"]         = cgst_amt_val
             it["SGST_Amt"]         = sgst_amt_val
             it["price"]            = price_val
-            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(stock_info.get("mrp", 0)) or price_val
+            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(master_item.get("mrp", 0)) or price_val
             it["calculated_price"] = calc_val
             it["edit_history"]     = it.get("edit_history", [])
             updated_items.append(it)
@@ -5011,18 +4999,23 @@ def pharmacy_view_bills(request):
         if to_num(serialized.get("net_amount", 0)) == 0.0 and items_total > 0:
             serialized["net_amount"] = round(items_total, 2)
 
+        # Auto-confirm Paid if payment mode is Cash, Card, UPI, etc.
+        pay_mode_lower = str(serialized.get("payment_mode") or b.get("payment_mode") or "").strip().lower()
+        if any(m in pay_mode_lower for m in ["cash", "card", "upi", "cheque", "netbanking", "online"]):
+            if str(serialized.get("billing_status") or "").lower() in ["", "billed"]:
+                serialized["billing_status"] = "Paid"
+
         serialized["medicine_particulars"] = updated_items
         data.append(serialized)
 
     # =========================================================
-    # ✅ Final Response  (no sales_returns key — embedded in edit_history)
+    # ✅ Final Response
     # =========================================================
     return Response({
         "employee_id":   employee_id,
         "employee_name": emp_name,
         "data":          data,
     }, status=status.HTTP_200_OK)
-
 
 
 

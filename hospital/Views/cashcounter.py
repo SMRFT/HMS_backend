@@ -5174,6 +5174,7 @@ def OPPharmacy_pending_bills(request):
         date_str = request.GET.get("date") or data.get("date")
         from_date_str = request.GET.get("from_date") or data.get("from_date")
         to_date_str = request.GET.get("to_date") or data.get("to_date")
+        req_status = (request.GET.get("status") or (data.get("status") if isinstance(data, dict) else "") or request.GET.get("type") or "").strip().lower()
 
         from_dt = None
         to_dt = None
@@ -5196,8 +5197,10 @@ def OPPharmacy_pending_bills(request):
         now_ist = datetime.now(ist)
         today_date_ist = now_ist.date()
 
-        today_start_ist = ist.localize(datetime(now_ist.year, now_ist.month, now_ist.day, 0, 0, 0))
-        today_end_ist = ist.localize(datetime(now_ist.year, now_ist.month, now_ist.day, 23, 59, 59, 999999))
+        today_start_local = datetime.combine(today_date_ist, datetime.min.time())
+        today_end_local = datetime.combine(today_date_ist, datetime.max.time())
+        today_start_ist = ist.localize(today_start_local)
+        today_end_ist = ist.localize(today_end_local)
         today_start_utc = today_start_ist.astimezone(pytz.utc).replace(tzinfo=None)
         today_end_utc = today_end_ist.astimezone(pytz.utc).replace(tzinfo=None)
 
@@ -5235,18 +5238,47 @@ def OPPharmacy_pending_bills(request):
                     {"created_date": {"$gte": from_dt, "$lte": to_dt}},
                 ]}
             ]
+        elif req_status == "pending":
+            # 🎯 Pending Bills: Current date alone in Indian Time
+            mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
+            mongo_filter["$or"] = [
+                {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"bill_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
+                {"created_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
+            ]
+        elif req_status == "unpaid":
+            # 🎯 Unpaid Bills: Prior dates before today
+            mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
+            mongo_filter["$or"] = [
+                {"bill_date": {"$lt": today_start_local}},
+                {"created_date": {"$lt": today_start_local}},
+            ]
+        elif req_status in ["received", "paid"]:
+            # 🎯 Received Bills: Current date paid bills
+            mongo_filter["billing_status"] = "Paid"
+            mongo_filter["$or"] = [
+                {"paid_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"paid_datetime": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                {"paid_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
+                {"paid_datetime": {"$gte": today_start_utc, "$lte": today_end_utc}},
+            ]
         else:
-            # 🎯 Unpaid cash bills (current date + older past dates) + Paid cash bills (current date paid_date or bill_date)
+            # 🎯 Unpaid cash bills + Paid cash bills (current date)
             mongo_filter["$and"] = [
                 {"$or": [
                     {"billing_status": {"$in": ["Billed", "Processing", "Pending"]}},
                     {
                         "billing_status": "Paid",
                         "$or": [
+                            {"paid_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                            {"paid_datetime": {"$gte": today_start_local, "$lte": today_end_local}},
+                            {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
+                            {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
                             {"paid_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
                             {"paid_datetime": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                            {"bill_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                            {"created_date": {"$gte": today_start_utc, "$lte": today_end_utc}}
                         ]
                     }
                 ]}
@@ -5417,35 +5449,40 @@ def OPPharmacy_pending_bills(request):
             is_unpaid_status = b_status in ["Billed", "Processing", "Pending"]
             is_paid_status = (b_status == "Paid")
 
-            # 🎯 Evaluate date against current date (Asia/Kolkata):
-            # For paid bills, evaluate using paid_date (as requested: "received also display based on the today paid_date")
+            # 🎯 Evaluate date against current date strictly in Indian Standard Time (IST):
+            # For paid bills, evaluate using paid_date
             if is_paid_status:
                 raw_bdate = bill.get("paid_date") or bill.get("paid_datetime") or bill.get("lastmodified_date") or bill.get("bill_date") or bill.get("created_date")
             else:
                 raw_bdate = bill.get("bill_date") or bill.get("created_date")
 
-            is_today = False
+            import re
+            b_date_obj = None
+            ist_date_str = "-"
+            ist_time_str = "-"
             if raw_bdate:
-                if isinstance(raw_bdate, str):
-                    try:
-                        clean_str = raw_bdate.replace("Z", "+00:00")
-                        dt = datetime.fromisoformat(clean_str)
-                        if dt.tzinfo is None:
-                            dt_ist = pytz.utc.localize(dt).astimezone(ist)
-                        else:
-                            dt_ist = dt.astimezone(ist)
-                        is_today = (dt_ist.date() == today_date_ist)
-                    except Exception:
-                        pass
-                elif isinstance(raw_bdate, datetime):
-                    if raw_bdate.tzinfo is None:
-                        dt_ist = pytz.utc.localize(raw_bdate).astimezone(ist)
-                    else:
-                        dt_ist = raw_bdate.astimezone(ist)
-                    is_today = (dt_ist.date() == today_date_ist)
-                elif isinstance(raw_bdate, date):
-                    is_today = (raw_bdate == today_date_ist)
+                if isinstance(raw_bdate, (datetime, date)):
+                    y, m, d = raw_bdate.year, raw_bdate.month, raw_bdate.day
+                    hour = getattr(raw_bdate, "hour", 0)
+                    minute = getattr(raw_bdate, "minute", 0)
+                    b_date_obj = date(y, m, d)
+                    ist_date_str = f"{d:02d}/{m:02d}/{y:04d}"
+                    ist_time_str = f"{hour:02d}:{minute:02d}"
+                else:
+                    s_val = str(raw_bdate).strip()
+                    m_match = re.match(r"^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})", s_val)
+                    if m_match:
+                        y, m, d, hour, minute = [int(x) for x in m_match.groups()]
+                        b_date_obj = date(y, m, d)
+                        ist_date_str = f"{d:02d}/{m:02d}/{y:04d}"
+                        ist_time_str = f"{hour:02d}:{minute:02d}"
 
+            is_today = bool(b_date_obj and b_date_obj == today_date_ist)
+
+            serialized["ist_date"] = ist_date_str
+            serialized["ist_time"] = ist_time_str
+            serialized["display_date"] = ist_date_str
+            serialized["display_time"] = ist_time_str
             serialized["is_current_date"] = is_today
             serialized["is_pending"] = bool(is_unpaid_status and is_today)
             serialized["is_unpaid"] = bool(is_unpaid_status and not is_today)
