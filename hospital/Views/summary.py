@@ -1525,51 +1525,45 @@ def get_printsummary(request, ip_no):
         summary['prepared_by_sign'] = _sign_for(summary.get('preliminary_approved_by'))
         summary['approved_by_sign'] = _sign_for(summary.get('approved_by'))
 
-        # ── STEP 3: Get barcode strictly requiring ipnumber == decoded_ip_no ──
-        barcode_record = None
-
-        # 1. Fetch investBillNo(s) for this specific ipNumber from hospital_investbilling
+               # ── STEP 3: collect ALL barcodes for this IP (every bill) ─────────────
         investbilling_collection = hms_db['hospital_investbilling']
         invest_bills = list(investbilling_collection.find(
             {'ipNumber': decoded_ip_no, 'is_active': True},
             {'investBillNo': 1, '_id': 0}
-        ).sort("created_date", -1))
-
+        ))
         bill_numbers = [b['investBillNo'] for b in invest_bills if b.get('investBillNo')]
 
-        # 2. In core_hmsbarcode, MUST match ipnumber == decoded_ip_no AND billnumber in this IP's invest bills
-        if bill_numbers and decoded_ip_no:
-            barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
-                {
-                    "ipnumber": decoded_ip_no,
-                    "billnumber": {"$in": bill_numbers}
-                },
-                sort=[("created_date", -1)]
-            )
+        barcode_records = []
+        if bill_numbers:
+            barcode_records = list(diagnostics_db['core_hmsbarcode'].find(
+                {"ipnumber": decoded_ip_no, "billnumber": {"$in": bill_numbers}}
+            ).sort("created_date", 1))
 
-        # 3. If not matched with billnumber, check core_hmsbarcode strictly with ipnumber == decoded_ip_no
-        if not barcode_record and decoded_ip_no:
-            barcode_record = diagnostics_db['core_hmsbarcode'].find_one(
-                {"ipnumber": decoded_ip_no},
-                sort=[("created_date", -1)]
-            )
+        # fallback: any barcode registered against this IP number
+        if not barcode_records:
+            barcode_records = list(diagnostics_db['core_hmsbarcode'].find(
+                {"ipnumber": decoded_ip_no}
+            ).sort("created_date", 1))
 
-        # If core_hmsbarcode does not have matching ipnumber, DO NOT fall back to anything
-        if not barcode_record:
+        barcodes = []
+        for br in barcode_records:
+            bc = br.get('barcode')
+            if bc and bc not in barcodes:
+                barcodes.append(bc)
+
+        if not barcodes:
             client.close()
             return JsonResponse(serialize_mongo(summary), safe=False)
 
-        barcode                 = barcode_record.get('barcode')
-        summary['barcode']      = barcode
-        summary['investBillNo'] = barcode_record.get('billnumber')
+        latest = barcode_records[-1]
+        summary['barcode']       = latest.get('barcode')
+        summary['barcodes']      = barcodes
+        summary['investBillNo']  = latest.get('billnumber')
+        summary['investBillNos'] = list({br.get('billnumber') for br in barcode_records if br.get('billnumber')})
 
-        if not barcode:
-            client.close()
-            return JsonResponse(serialize_mongo(summary), safe=False)
-
-        # ── STEP 4: Fetch standard test result documents from core_testvalue ──
+        # ── STEP 4: standard test results for ALL barcodes ────────────────────
         test_value_records = list(
-            diagnostics_db['core_testvalue'].find({"barcode": barcode})
+            diagnostics_db['core_testvalue'].find({"barcode": {"$in": barcodes}})
         )
 
         # ── Helper: get parameter definition from core_testdetails ────────────
@@ -1738,7 +1732,7 @@ def get_printsummary(request, ip_no):
 
         # ── STEP 6: Fetch MICROBIOLOGY tests from core_mbtestvalue (MongoDB) ────
         mb_testvalue_collection = diagnostics_db['core_mbtestvalue']
-        mb_test_value_records   = list(mb_testvalue_collection.find({"barcode": barcode}))
+        mb_test_value_records = list(mb_testvalue_collection.find({"barcode": {"$in": barcodes}}))
 
         for mb_record in mb_test_value_records:
             try:
