@@ -252,23 +252,58 @@ def get_admission_list(request):
 
                     doc_name_map[emp_name.strip()] = emp_name
 
-        # Phase 4: Batch fetch room details
+        # Phase 4: Batch fetch room details & build flexible resolver
+        import re
 
-        room_map = {}
+        all_rooms = list(room_collection.find(
+            {},
+            {"_id": 0, "room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+        ))
 
-        if room_no_set:
+        def _clean_key(s):
+            return re.sub(r'[^A-Z0-9]', '', str(s or '').upper())
 
-            rooms = list(room_collection.find(
+        def _extract_num(s):
+            nums = re.findall(r'\d+', str(s or ''))
+            return int(nums[-1]) if nums else None
 
-                {"room_number": {"$in": list(room_no_set)}},
+        exact_room_map = {}
+        clean_room_map = {}
+        num_room_map = {}
 
-                {"_id": 0, "room_number": 1, "room_category": 1, "block": 1, "nursing_station": 1}
+        for r in all_rooms:
+            r_num = str(r.get("room_number") or "").strip()
+            exact_room_map[r_num] = r
+            clean_room_map[_clean_key(r_num)] = r
+            n = _extract_num(r_num)
+            if n is not None and n not in num_room_map:
+                num_room_map[n] = r
 
-            ))
+        room_aliases = {
+            "DAYCAR": clean_room_map.get("DAYCARE"),
+            "DLS": clean_room_map.get("DIALYSIS") or clean_room_map.get("DYLS132"),
+            "CHEMO": clean_room_map.get("CHEMO"),
+            "MICU": clean_room_map.get("MICU"),
+            "NICU": clean_room_map.get("NICU"),
+            "SICU": clean_room_map.get("SICU"),
+            "POW": clean_room_map.get("POW"),
+        }
 
-            for r in rooms:
-
-                room_map[str(r.get("room_number")).strip()] = r
+        def resolve_room(adm_room):
+            if not adm_room:
+                return None
+            s = str(adm_room).strip()
+            if s in exact_room_map:
+                return exact_room_map[s]
+            ck = _clean_key(s)
+            if ck in clean_room_map:
+                return clean_room_map[ck]
+            if ck in room_aliases and room_aliases[ck]:
+                return room_aliases[ck]
+            n = _extract_num(s)
+            if n is not None and n in num_room_map:
+                return num_room_map[n]
+            return None
 
         # Phase 5: Fetch master mappings for block, category, ward IDs
 
@@ -276,7 +311,7 @@ def get_admission_list(request):
 
         cat_map = {c.get("category_name"): str(c.get("room_category_id")) for c in mongo_db.hospital_roomcategory.find({}, {"category_name": 1, "room_category_id": 1}) if c.get("category_name")}
 
-        ward_map = {w.get("ward_name"): str(w.get("_id")) for w in mongo_db.hospital_Wards.find({}, {"ward_name": 1, "_id": 1}) if w.get("ward_name")}
+        ward_map = {w.get("ward_name"): str(w.get("ward_id") or w.get("_id")) for w in mongo_db.hospital_nursingstation.find({}, {"ward_name": 1, "ward_id": 1}) if w.get("ward_name")}
 
         # Phase 6: Populate item fields without nested queries
 
@@ -320,41 +355,27 @@ def get_admission_list(request):
                         item[doctor_field] = doc_name_map[s_id]
 
             room_no = str(item.get("roomNo") or "").strip()
-
-            if room_no and room_no in room_map:
-
-                r = room_map[room_no]
-
-                r_cat = r.get("room_category")
-
-                b_name = r.get("block")
-
-                s_name = r.get("nursing_station")
-
+            r = resolve_room(room_no)
+            if r:
+                r_cat = r.get("room_category") or item.get("room_category")
+                b_name = r.get("block") or item.get("block")
+                s_name = r.get("nursing_station") or item.get("nursing_station")
+                item["canonical_room_no"] = r.get("room_number")
                 item["room_category"] = r_cat
-
                 item["block"] = b_name
-
                 item["nursing_station"] = s_name
 
                 if b_name and b_name in block_map:
-
                     item["block_id"] = block_map[b_name]
 
                 if r_cat and r_cat in cat_map:
-
                     item["room_category_id"] = cat_map[r_cat]
 
                 if s_name and s_name in ward_map:
-
                     item["nursing_station_id"] = ward_map[s_name]
-
             else:
-
                 item["room_category"] = item.get("room_category")
-
                 item["block"] = item.get("block")
-
                 item["nursing_station"] = item.get("nursing_station")
 
         # Phase 7: Batch compute pending request flags for admitted patients
@@ -578,7 +599,7 @@ def get_location_mapping(request):
 
         cats_map = {c.get("category_name"): str(c.get("room_category_id")) for c in mongo_db["hospital_roomcategory"].find({}, {"category_name": 1, "room_category_id": 1}) if c.get("category_name")}
 
-        wards_map = {w.get("ward_name"): str(w.get("_id")) for w in mongo_db["hospital_Wards"].find({}, {"ward_name": 1}) if w.get("ward_name")}
+        wards_map = {w.get("ward_name"): str(w.get("ward_id") or w.get("_id")) for w in mongo_db["hospital_nursingstation"].find({}, {"ward_name": 1, "ward_id": 1}) if w.get("ward_name")}
 
         enriched = []
 
