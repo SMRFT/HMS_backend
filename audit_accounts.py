@@ -1,4 +1,4 @@
- import os, sys
+import os, sys
 sys.path.append('d:/SMRFT/Projects/HMS/HMS_backend')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shanmugahospital_backend.settings')
 from dotenv import load_dotenv
