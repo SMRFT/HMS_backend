@@ -67,7 +67,8 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/patient-visit-list/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-pending-qr-registrations/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-providers/.+$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/process-registration-refund/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/update-registration-visit/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/referred-patients-report/?(\?.*)?$': 'HMS-P-AIN',
@@ -80,16 +81,20 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports/?(\?.*)?$': 'HMS-P-FOR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-claims/?(\?.*)?$': 'HMS-P-ICD',
 
-    
-
-    
-
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-visits/?(\?.*)?$': 'HMS-P-ICD',
-    
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-members/?(\?.*)?$': 'HMS-P-ICD',
-    r'^/_b_a_c_k_e_n_d/HMS/insurance-search-patient/?(\?.*)?$': 'HMS-P-ICD',
+    # ==================== INSURANCE CLAIMS & MEMBERS ====================
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-claims?/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-claims?/.+$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-claim-patient-details/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-admission-details/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-visits/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-visits/.+$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-members/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-members/.+$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-dependents/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-dependents/.+$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-search-patient/?(\?.*)?$': 'HMS-P-ICD',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-search-member/?(\?.*)?$': 'HMS-P-ICD',
 
     # ==================== WARD REQUEST ====================
     r'^/_b_a_c_k_e_n_d/HMS/wardrequest/?(\?.*)?$': 'HMS-P-WR',
@@ -327,6 +332,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-rack-classification/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-rack-update/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-opening-stock-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-master-stock-report/?(\?.*)?$': 'HMS-API-IT',
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',

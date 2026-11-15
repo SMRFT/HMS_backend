@@ -3658,6 +3658,179 @@ def stores_previous_day_stock_report(request):
 
 
 # ==============================================================================
+# Stores Item Master Stock Listing Report (Stock, MRP, Sales Value, Purchase Value)
+# ==============================================================================
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_item_master_stock_report(request):
+    """
+    Returns Stores Item Master stock listing formatted matching the hospital stock report:
+    S.no, Item Name, Department, Stock, MRP, Sales Value, Purchase Value.
+    """
+    search_query = (request.query_params.get('search') or request.GET.get('search') or '').strip()
+    dept_filter = request.query_params.get('department') or request.GET.get('department')
+    cat_filter = request.query_params.get('category') or request.GET.get('category')
+    group_filter = request.query_params.get('group') or request.GET.get('group')
+    stock_filter = (request.query_params.get('stock_filter') or request.GET.get('stock_filter') or 'in_stock').strip().lower()
+
+    try:
+        from ..dbcollection import hms_db, department_collection
+        import re
+
+        mongo_q = {"is_active": True}
+
+        if search_query:
+            escaped = re.escape(search_query)
+            mongo_q["$or"] = [
+                {"itemName": {"$regex": escaped, "$options": "i"}},
+                {"item_id": {"$regex": escaped, "$options": "i"}},
+                {"hsn": {"$regex": escaped, "$options": "i"}},
+                {"barcode": {"$regex": escaped, "$options": "i"}}
+            ]
+
+        if dept_filter:
+            dept_str = str(dept_filter).strip()
+            target_d = dept_str.lower()
+            dept_candidates = {dept_str}
+            try:
+                for d_doc in department_collection.find({"is_active": True}):
+                    d_code = str(d_doc.get('department_code') or '').strip().lower()
+                    d_name = str(d_doc.get('department_name') or '').strip().lower()
+                    d_id = str(d_doc.get('department_id') or '').strip().lower()
+                    if target_d in (d_code, d_name, d_id):
+                        for k in ('department_code', 'department_name', 'department_id'):
+                            if d_doc.get(k):
+                                dept_candidates.add(str(d_doc[k]))
+                        break
+            except Exception:
+                pass
+            mongo_q["department"] = {"$in": list(dept_candidates)}
+
+        if cat_filter:
+            cat_str = str(cat_filter).strip()
+            cat_candidates = [cat_str]
+            cat_obj = Category.objects.filter(Q(category_id=cat_str) | Q(category_name__iexact=cat_str)).first()
+            if cat_obj:
+                if cat_obj.category_id: cat_candidates.append(str(cat_obj.category_id))
+                if cat_obj.category_name: cat_candidates.append(str(cat_obj.category_name))
+            mongo_q["category"] = {"$in": list(set(cat_candidates))}
+
+        if group_filter:
+            grp_str = str(group_filter).strip()
+            grp_candidates = [grp_str]
+            grp_obj = Group.objects.filter(Q(group_id=grp_str) | Q(group_name__iexact=grp_str)).first()
+            if grp_obj:
+                if grp_obj.group_id: grp_candidates.append(str(grp_obj.group_id))
+                if grp_obj.group_name: grp_candidates.append(str(grp_obj.group_name))
+            mongo_q["group"] = {"$in": list(set(grp_candidates))}
+
+        if stock_filter == 'in_stock':
+            mongo_q["total_quantity"] = {"$gt": 0}
+        elif stock_filter == 'zero_stock':
+            mongo_q["$or"] = [
+                {"total_quantity": {"$lte": 0}},
+                {"total_quantity": None},
+                {"total_quantity": {"$exists": False}}
+            ]
+
+        # Fast lookup of latest MRP and Purchase Rate from GRNs
+        grn_pipeline = [
+            {'$match': {'is_active': True, 'items': {'$exists': True, '$ne': []}}},
+            {'$unwind': '$items'},
+            {'$project': {
+                'item_id': {'$ifNull': ['$items.item_id', {'$ifNull': ['$items.id', '$items.itemId']}]},
+                'mrp': '$items.mrp',
+                'unitPrice': {'$ifNull': ['$items.unitPrice', '$items.unitCost']}
+            }},
+            {'$match': {'item_id': {'$ne': None}}},
+            {'$group': {
+                '_id': '$item_id',
+                'mrp': {'$last': '$mrp'},
+                'price': {'$last': '$unitPrice'}
+            }}
+        ]
+        grn_prices = {doc['_id']: doc for doc in hms_db['hospital_storesgrn'].aggregate(grn_pipeline)}
+
+        cat_map, dept_map, group_map, _, _ = get_lookup_maps()
+
+        item_projection = {
+            'item_id': 1, 'itemName': 1, 'department': 1, 'category': 1, 'group': 1,
+            'hsn': 1, 'total_quantity': 1, 'approved_quantity': 1, 'unit_price': 1,
+            'mrp': 1, 'rack_no': 1, 'shelf_no': 1
+        }
+
+        col = hms_db['hospital_itemmaster']
+        raw_items = list(col.find(mongo_q, item_projection))
+        raw_items.sort(key=lambda x: (x.get('itemName') or '').lower())
+
+        records = []
+        tot_stock_units = 0.0
+        tot_sales_value = 0.0
+        tot_purchase_value = 0.0
+
+        for idx, it in enumerate(raw_items):
+            iid = str(it.get('item_id') or it.get('_id') or '')
+            price_info = grn_prices.get(iid, {})
+
+            stock_val = safe_float(it.get('total_quantity'))
+            raw_mrp = it.get('mrp') or price_info.get('mrp') or it.get('unit_price') or 0
+            raw_price = it.get('unit_price') or price_info.get('price') or 0
+
+            mrp = safe_float(raw_mrp)
+            purch_rate = safe_float(raw_price)
+
+            sales_val = round(stock_val * mrp, 2)
+            purch_val = round(stock_val * purch_rate, 2)
+
+            tot_stock_units += stock_val
+            tot_sales_value += sales_val
+            tot_purchase_value += purch_val
+
+            dept_raw = it.get('department') or ''
+            dept_display = dept_map.get(dept_raw, dept_raw) or '—'
+
+            cat_raw = it.get('category') or ''
+            cat_display = cat_map.get(cat_raw, cat_raw) or '—'
+
+            grp_raw = it.get('group') or ''
+            grp_display = group_map.get(grp_raw, grp_raw) or '—'
+
+            records.append({
+                'sl_no': idx + 1,
+                'item_id': iid,
+                'item_name': it.get('itemName') or '—',
+                'department': dept_display,
+                'department_code': dept_raw,
+                'category': cat_display,
+                'group': grp_display,
+                'hsn': it.get('hsn') or '—',
+                'rack_no': it.get('rack_no') or '',
+                'shelf_no': it.get('shelf_no') or '',
+                'stock': int(stock_val) if stock_val.is_integer() else round(stock_val, 2),
+                'mrp': round(mrp, 2),
+                'purchase_rate': round(purch_rate, 2),
+                'sales_value': sales_val,
+                'purchase_value': purch_val
+            })
+
+        return Response({
+            "success": True,
+            "summary": {
+                "total_items": len(records),
+                "total_stock_units": round(tot_stock_units, 2),
+                "total_sales_value": round(tot_sales_value, 2),
+                "total_purchase_value": round(tot_purchase_value, 2)
+            },
+            "data": records
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print(f"Error in stores_item_master_stock_report: {e}")
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ==============================================================================
 # 5. Supplier Wise List & Purchase Report
 # ==============================================================================
 
