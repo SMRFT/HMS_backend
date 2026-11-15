@@ -1439,8 +1439,9 @@ def admission_view(request):
             # Daycare Insurance check:
             # If Customer Type is Insurance, and room selected is DAYCARE/CHEMO/DIALYSIS, store is_day_care : true and ward_status as "Sent for billing"
             is_insurance_cust = customer_type.strip().lower() == "insurance"
-            is_day_care = is_insurance_cust and is_daycare_series
-            initial_ward_status = "Sent for billing" if is_day_care else None
+            is_day_care_flag = str(data.get("is_day_care") or "").strip().lower() in ["true", "1"]
+            is_day_care = (is_insurance_cust and is_daycare_series) or is_day_care_flag
+            initial_ward_status = "Sent for billing" if is_day_care else (data.get("ward_status") or None)
 
             adm = Admission.objects.create(
                 uhid=uhid, ipNumber=ip_number, admissionDateTime=admission_dt,
@@ -1800,8 +1801,9 @@ def admission_detail(request, ipNumber):
                 # Daycare Insurance check on edit
                 curr_room_str = str(new_room_no or (rd[0].get("roomNo") if rd and isinstance(rd[0], dict) else "")).strip().upper()
                 is_ins_cust = str(getattr(adm, "customer_type", "") or "").strip().lower() == "insurance"
-                is_dc_room = curr_room_str in ["DAYCARE", "DAY CARE"] or "DAYCARE" in curr_room_str
-                if is_ins_cust and is_dc_room:
+                is_dc_room = any(k in curr_room_str for k in ["DAYCARE", "DAY CARE", "CHEMO", "DIALYSIS"])
+                is_dc_flag = str(data.get("is_day_care") or "").strip().lower() in ["true", "1"]
+                if (is_ins_cust and is_dc_room) or is_dc_flag:
                     adm.is_day_care = True
                     if not getattr(adm, "ward_status", None) or getattr(adm, "ward_status", None) in ["", "Admitted"]:
                         adm.ward_status = "Sent for billing"
