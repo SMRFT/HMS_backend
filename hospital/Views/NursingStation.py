@@ -1559,14 +1559,21 @@ def get_medicine_ward_requests(request):
             return Response({"success": False, "error": "UHID is required"}, status=400)
 
         # Build query
-        query_params = {"uhid": uhid, "is_ward_request": True}
+        query_params = {
+            "uhid": uhid,
+            "is_deleted": {"$ne": True},
+        }
 
         if ip_number and str(ip_number).strip() not in ["-", "null", "undefined", ""]:
             clean_ip = str(ip_number).strip()
             query_params["$or"] = [
                 {"inpatient_number": clean_ip},
                 {"ipNumber": clean_ip},
+                {"admission_mrn": clean_ip},
+                {"is_ward_request": True},
             ]
+        else:
+            query_params["is_ward_request"] = True
 
         if outlet_code:
             query_params["outlet_code"] = outlet_code
