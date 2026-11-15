@@ -696,8 +696,7 @@ PAGE_MAPPING = DynamicPageMapping({
          '/_b_a_c_k_e_n_d/HMS/convert_to_bill/': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/finalize_bill/': 'HMS-P-PFB',
          r'^/_b_a_c_k_e_n_d/HMS/searchby_ip/?(\?.*)?$': 'HMS-P-PSIP',
-         '/_b_a_c_k_e_n_d/HMS/ipadvance_bills/': ['HMS-P-CCC', 'HMS-P-CCIPAB'],
-         r'^/_b_a_c_k_e_n_d/HMS/ipadvance_bills/?(\?.*)?$': ['HMS-P-CCC', 'HMS-P-CCIPAB'],
+          r'^/_b_a_c_k_e_n_d/HMS/ipadvance_bills/?(\?.*)?$': 'HMS-P-CCIPAB',
           r'/_b_a_c_k_e_n_d/HMS/pharmacy_view_bills/?(\?.*)?$': 'HMS-P-PHVSB',
           r'/_b_a_c_k_e_n_d/HMS/PharmacyBillanalysis/?(\?.*)?$': 'HMS-P-PHVSB',
 
