@@ -6,7 +6,7 @@ from pymongo import MongoClient
 from django.utils.timezone import now
 from rest_framework.parsers import MultiPartParser, FormParser
 from bson import Decimal128, ObjectId
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 import re
@@ -63,6 +63,26 @@ def _int(value, default=0):
         return int(_dec(value, str(default)))
     except Exception:
         return default
+
+
+def _to_mongo_datetime(val):
+    """Ensure date/datetime object is safe for PyMongo BSON encoding (datetime.datetime or None)."""
+    if val in (None, "", "None"):
+        return None
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
+    if isinstance(val, str) and val.strip():
+        s = val.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d")
+            except Exception:
+                return None
+    return None
 
 
 # ─── Financial year + ref-number ─────────────────────────────────────────────
@@ -839,6 +859,11 @@ def stock_transfer_action_view(request):
         errors         = []
         source_deducted = getattr(obj, "source_deducted", False)
 
+        curr_stock_id = 0
+        if hms_db is not None:
+            last_stock = hms_db["hospital_pharmacystock"].find_one(sort=[("id", -1)], projection={"id": 1, "stock_id": 1})
+            curr_stock_id = _int(last_stock.get("stock_id", last_stock.get("id", 0))) if last_stock else 0
+
         for idx, item in enumerate(parsed_items):
             if isinstance(item, OrderedDict):
                 item = dict(item)
@@ -919,8 +944,11 @@ def stock_transfer_action_view(request):
             # ── Create destination stock record in hospital_pharmacystock ─────
             try:
                 dest_outlet = transfer_to_outlet if transfer_to_outlet not in ("", "null", "None") else "OLET006"
-                last_stock = hms_db["hospital_pharmacystock"].find_one(sort=[("stock_id", -1)]) if hms_db is not None else None
-                next_stock_id = (_int(last_stock.get("stock_id", 0)) + 1) if last_stock else 1
+                curr_stock_id += 1
+                next_stock_id = curr_stock_id
+
+                # Ensure expiry_date is a valid datetime.datetime for PyMongo BSON encoding
+                clean_exp = _to_mongo_datetime(getattr(source, "expiry_date", None))
 
                 dest_doc = {
                     "id":                       next_stock_id,
@@ -930,7 +958,7 @@ def stock_transfer_action_view(request):
                     "outlet_code":              dest_outlet,
                     "item_id":                  _int(getattr(source, "item_id", 0)),
                     "batch_number":             str(getattr(source, "batch_number", "") or ""),
-                    "expiry_date":              getattr(source, "expiry_date", None),
+                    "expiry_date":              clean_exp,
                     "mrp":                      float(_dec(getattr(source, "mrp", 0))),
                     "Selling_Price":            float(_dec(
                         getattr(source, "Selling_Price", None) or
@@ -957,16 +985,18 @@ def stock_transfer_action_view(request):
                 }
                 if hms_db is not None:
                     hms_db["hospital_pharmacystock"].insert_one(dest_doc)
-                    hms_db["__schema__"].update_one(
-                        {"name": "hospital_pharmacystock"},
-                        {"$set": {"auto.seq": next_stock_id}}
-                    )
             except Exception as e:
                 errors.append(f"Item {idx + 1}: failed to create destination stock — {e}")
                 continue
 
         if errors:
             return Response({"success": False, "error": errors}, status=400)
+
+        if hms_db is not None and curr_stock_id:
+            hms_db["__schema__"].update_one(
+                {"name": "hospital_pharmacystock"},
+                {"$set": {"auto.seq": curr_stock_id}}
+            )
 
         StockTransfer.objects.filter(transfer_ref_number=pk).update(
             is_verified       = "Verified",

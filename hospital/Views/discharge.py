@@ -242,23 +242,9 @@ def _financial_year():
 
 
 def generate_estimate_number():
-    """EST/YYMM/000001 — resets each calendar month (sub-millisecond indexed query)."""
-    today  = _date.today()
-    prefix = f"EST/{str(today.year)[2:]}{str(today.month).zfill(2)}/"
-    seq = 1
-    try:
-        _, db = get_hms_db()
-        latest = db["hospital_dischargebilling"].find_one(
-            {"estimate_number": {"$regex": f"^{re.escape(prefix)}"}},
-            projection={"estimate_number": 1},
-            sort=[("estimate_number", -1)]
-        )
-        if latest and latest.get("estimate_number"):
-            seq_str = str(latest["estimate_number"]).split("/")[-1]
-            seq = int(seq_str) + 1
-    except Exception:
-        seq = 1
-    return f"{prefix}{str(seq).zfill(6)}"
+    """Continuous sequential estimate number via atomic counter service (e.g. EST/2627/000001)."""
+    from ..counter_service import get_next_discharge_estimate_no
+    return get_next_discharge_estimate_no()
 
 
 def generate_bill_number():
@@ -2067,23 +2053,28 @@ def search_discharge_patient(request):
     guardian_val = patient_doc.get("guardian_name") or patient_doc.get("spouse_name") or patient_doc.get("father_name") or patient_doc.get("emergency_contact") or ""
     guardian_type_val = patient_doc.get("guardian_type") or ("W/o" if str(patient_doc.get("gender", "")).lower() == "female" and patient_doc.get("spouse_name") else "S/o")
 
-    # Resolve full insurance company name
-    raw_company = admission_doc.get("company_code") or patient_doc.get("company_code") or admission_doc.get("insurance_company") or patient_doc.get("company_name") or ""
+    cust_type = str(admission_doc.get("customer_type") or patient_doc.get("customer_type") or admission_doc.get("patient_type") or "").strip()
+    is_insurance = "INSURANCE" in cust_type.upper()
+
+    # Resolve full insurance company name only if insurance patient
+    raw_company = ""
     company_name = ""
-    if raw_company:
-        try:
-            ins_doc = db["hospital_insuranceprovider"].find_one({
-                "$or": [
-                    {"company_code": str(raw_company)},
-                    {"company_name": str(raw_company)},
-                ]
-            })
-            if ins_doc and ins_doc.get("company_name"):
-                company_name = ins_doc.get("company_name")
-            else:
+    if is_insurance:
+        raw_company = admission_doc.get("company_code") or patient_doc.get("company_code") or admission_doc.get("insurance_company") or patient_doc.get("company_name") or ""
+        if raw_company:
+            try:
+                ins_doc = db["hospital_insuranceprovider"].find_one({
+                    "$or": [
+                        {"company_code": str(raw_company)},
+                        {"company_name": str(raw_company)},
+                    ]
+                })
+                if ins_doc and ins_doc.get("company_name"):
+                    company_name = ins_doc.get("company_name")
+                else:
+                    company_name = str(raw_company)
+            except Exception:
                 company_name = str(raw_company)
-        except Exception:
-            company_name = str(raw_company)
 
     patient_info = {
         "uhid":                 patient_doc.get("uhid"),
@@ -2095,11 +2086,11 @@ def search_discharge_patient(request):
         "ipNumber":             admission_doc.get("ipNumber"),
         "admission_date":       adm_str,
         "discharge_date":       disch_str,
-        "patient_type":         admission_doc.get("customer_type") or patient_doc.get("customer_type") or admission_doc.get("patient_type", ""),
-        "customer_type":        admission_doc.get("customer_type") or patient_doc.get("customer_type") or "",
-        "insurance_company":    admission_doc.get("insurance_company") or "",
-        "company":              company_name,
-        "company_code":         raw_company,
+        "patient_type":         cust_type,
+        "customer_type":        cust_type,
+        "insurance_company":    company_name if is_insurance else "",
+        "company":              company_name if is_insurance else "",
+        "company_code":         raw_company if is_insurance else "",
         "room_no":              current_room,
         "bed_no":               current_bed,
         "room_category":        current_room_cat,
@@ -2116,18 +2107,26 @@ def search_discharge_patient(request):
         "father_name":          patient_doc.get("father_name") or "",
         "ward_status":          ward_status,
         "is_ready_for_billing": ward_status == "Sent for billing",
+        "is_insurance":         is_insurance,
     }
 
-    # Resolve Claim No (referral_number) and ID Card No (card_no) from hospital_insurancemember
-    ins_info = _resolve_insurance_member_details(
-        uhid=patient_doc.get("uhid") or uhid,
-        patient_name=f"{patient_doc.get('firstName', '')} {patient_doc.get('lastName', '')}".strip()
-    )
-    patient_info["claim_number"]    = ins_info["claim_number"]
-    patient_info["id_card_number"]  = ins_info["id_card_number"]
-    patient_info["card_no"]         = ins_info["card_no"]
-    patient_info["referral_number"] = ins_info["referral_number"]
-    patient_info["member_number"]   = ins_info["member_number"]
+    # Resolve Claim No (referral_number) and ID Card No (card_no) only if insurance patient
+    if is_insurance:
+        ins_info = _resolve_insurance_member_details(
+            uhid=patient_doc.get("uhid") or uhid,
+            patient_name=f"{patient_doc.get('firstName', '')} {patient_doc.get('lastName', '')}".strip()
+        )
+        patient_info["claim_number"]    = ins_info.get("claim_number") or ""
+        patient_info["id_card_number"]  = ins_info.get("id_card_number") or ""
+        patient_info["card_no"]         = ins_info.get("card_no") or ""
+        patient_info["referral_number"] = ins_info.get("referral_number") or ""
+        patient_info["member_number"]   = ins_info.get("member_number") or ""
+    else:
+        patient_info["claim_number"]    = ""
+        patient_info["id_card_number"]  = ""
+        patient_info["card_no"]         = ""
+        patient_info["referral_number"] = ""
+        patient_info["member_number"]   = ""
 
     effective_ip   = ip_number or admission_doc.get("ipNumber")
     effective_uhid = patient_doc.get("uhid") or uhid
@@ -2195,14 +2194,22 @@ def search_discharge_patient(request):
             room_doc_map = {str(rd.get("room_number")).strip(): rd for rd in room_docs_cursor if rd.get("room_number")}
             room_doc_lower_map = {k.lower(): v for k, v in room_doc_map.items()}
 
-            for stay in room_stays:
+            for idx, stay in enumerate(room_stays):
                 r_no = stay["room_no"]
                 s_dt = stay["start_dt"] or adm_start_dt
                 e_dt = stay["end_dt"] or now_dt
+                is_last_stay = (idx == len(room_stays) - 1)
 
-                days_diff = (e_dt.date() - s_dt.date()).days
-                stay_days = max(1, days_diff)
+                days_diff = max(0, (e_dt.date() - s_dt.date()).days)
+                if is_last_stay:
+                    stay_days = max(1, days_diff) if accumulated_days == 0 else days_diff
+                else:
+                    stay_days = days_diff
+
                 accumulated_days += stay_days
+
+                if stay_days <= 0:
+                    continue
 
                 room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_lower_map.get(str(r_no).strip().lower())
 
