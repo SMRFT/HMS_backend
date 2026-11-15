@@ -2851,21 +2851,49 @@ def get_discharge_bill_medicines(request):
         uhid = (request.GET.get("uhid") or "").strip()
 
         # 1. If bill_no is given, check if hospital_dischargebilling already has cached pharmacy_medicines
+        b_doc = None
         if bill_no:
-            b_doc = db["hospital_dischargebilling"].find_one({
-                "$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]
-            })
-            if b_doc:
-                if not ip_number:
-                    ip_number = str(b_doc.get("ip_number") or "")
-                if not uhid:
-                    uhid = str(b_doc.get("uhid") or "")
-                meds = b_doc.get("pharmacy_medicines")
-                if isinstance(meds, list) and len(meds) > 0:
-                    if client: client.close()
-                    return JsonResponse({"success": True, "pharmacy_medicines": meds})
+            b_q = {"$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]}
+            if ip_number:
+                b_q["ip_number"] = ip_number
+            elif uhid:
+                b_q["uhid"] = uhid
+            b_doc = db["hospital_dischargebilling"].find_one(b_q, sort=[("created_date", -1), ("discharge_id", -1)])
+            if not b_doc:
+                b_doc = db["hospital_dischargebilling"].find_one(
+                    {"$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]},
+                    sort=[("created_date", -1), ("discharge_id", -1)]
+                )
+
+        if b_doc:
+            if not ip_number:
+                ip_number = str(b_doc.get("ip_number") or "")
+            if not uhid:
+                uhid = str(b_doc.get("uhid") or "")
+
+            med_amt = _to_float(b_doc.get("medicines_amount") or 0)
+            items = b_doc.get("items") or []
+            has_med_item = any(
+                isinstance(it, dict) and (
+                    str(it.get("itemName") or it.get("name") or "").upper().startswith("MEDICINE") or
+                    str(it.get("itemName") or it.get("name") or "").upper().startswith("PHARMACY") or
+                    it.get("billTypeNo") == "PHARM01" or it.get("bill_type") == 13
+                )
+                for it in items
+            )
+            # If the discharge bill explicitly has 0 medicine charges and no medicine line items, do not pull random OP pharmacy bills!
+            if med_amt == 0 and not has_med_item:
+                if client: client.close()
+                return JsonResponse({"success": True, "pharmacy_medicines": []})
+
+            meds = b_doc.get("pharmacy_medicines")
+            if isinstance(meds, list) and len(meds) > 0:
+                if client: client.close()
+                return JsonResponse({"success": True, "pharmacy_medicines": meds})
 
         # 2. Query hospital_pharmacybilling
+        # Inpatient discharge bills MUST only match pharmacy bills for this IP admission.
+        # Never match loose UHID if ip_number is provided, as UHID would pull unrelated OP counter pharmacy sales!
         or_clauses = []
         if ip_number:
             clean_ip = str(ip_number).strip()
@@ -2874,7 +2902,7 @@ def get_discharge_bill_medicines(request):
                 {"ipNumber": clean_ip},
                 {"ip_number": clean_ip},
             ])
-        if uhid:
+        elif uhid:
             clean_uhid = str(uhid).strip()
             or_clauses.append({"uhid": clean_uhid})
 
@@ -2936,10 +2964,10 @@ def get_discharge_bill_medicines(request):
                         })
 
         # Cache on discharge bill if found
-        if bill_no and pharmacy_medicines:
+        if b_doc and pharmacy_medicines:
             try:
                 db["hospital_dischargebilling"].update_one(
-                    {"$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]},
+                    {"_id": b_doc["_id"]},
                     {"$set": {"pharmacy_medicines": pharmacy_medicines}}
                 )
             except Exception:
