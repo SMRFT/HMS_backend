@@ -62,31 +62,50 @@ def ensure_inventory_indexes(hms_db=None):
     _safe_idx("hospital_vendor", [("created_date", DESCENDING)])
 
     # 2. Pharmacy Item
+    _safe_idx("hospital_pharmacyitem", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("is_active", ASCENDING), ("item_name", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("is_active", ASCENDING), ("item_name", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("is_active", ASCENDING)])
     _safe_idx("hospital_pharmacyitem", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("is_active", ASCENDING), ("item_id", ASCENDING)])
-    _safe_idx("hospital_pharmacyitem", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("item_name", ASCENDING)])
     _safe_idx("hospital_pharmacyitem", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("item_code", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("brand_name", ASCENDING)])
     _safe_idx("hospital_pharmacyitem", [("item_id", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("item_name", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("category", ASCENDING)])
+    _safe_idx("hospital_pharmacyitem", [("chemical_composition", ASCENDING)])
     _safe_idx("hospital_pharmacyitem", [("created_date", DESCENDING)])
 
     # 3. Pharmacy Category
     _safe_idx("hospital_pharmacycategory", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("is_active", ASCENDING), ("category_id", ASCENDING)])
     _safe_idx("hospital_pharmacycategory", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("category_name", ASCENDING)])
+    _safe_idx("hospital_pharmacycategory", [("category_id", ASCENDING)])
+    _safe_idx("hospital_pharmacycategory", [("category_name", ASCENDING)])
 
     # 4. Chemical Composition
     _safe_idx("hospital_chemicalcomposition", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("is_active", ASCENDING), ("composition_id", ASCENDING)])
     _safe_idx("hospital_chemicalcomposition", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("composition_name", ASCENDING)])
+    _safe_idx("hospital_chemicalcomposition", [("composition_id", ASCENDING)])
+    _safe_idx("hospital_chemicalcomposition", [("composition_name", ASCENDING)])
 
     # 5. GRN
     _safe_idx("hospital_grn", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_grn", [("status", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_grn", [("outlet_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_grn", [("grn_number", ASCENDING)])
     _safe_idx("hospital_grn", [("draft_number", ASCENDING)])
     _safe_idx("hospital_grn", [("vendor_id", ASCENDING)])
-    _safe_idx("hospital_grn", [("status", ASCENDING)])
+    _safe_idx("hospital_grn", [("invoice_no", ASCENDING)])
+    _safe_idx("hospital_grn", [("date", DESCENDING)])
+    _safe_idx("hospital_grn", [("items.item_id", ASCENDING)])
+    _safe_idx("hospital_grn", [("items.batch_number", ASCENDING)])
 
     # 6. Pharmacy Stock
     _safe_idx("hospital_pharmacystock", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("outlet_code", ASCENDING), ("item_id", ASCENDING), ("batch_number", ASCENDING)])
+    _safe_idx("hospital_pharmacystock", [("item_id", ASCENDING), ("outlet_code", ASCENDING)])
+    _safe_idx("hospital_pharmacystock", [("item_id", ASCENDING), ("batch_number", ASCENDING)])
     _safe_idx("hospital_pharmacystock", [("item_id", ASCENDING)])
+    _safe_idx("hospital_pharmacystock", [("batch_number", ASCENDING)])
     _safe_idx("hospital_pharmacystock", [("grn_number", ASCENDING)])
+    _safe_idx("hospital_pharmacystock", [("outlet_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_pharmacystock", [("expiry_date", ASCENDING)])
     _safe_idx("hospital_pharmacystock", [("created_date", DESCENDING)])
 
@@ -95,33 +114,84 @@ def ensure_inventory_indexes(hms_db=None):
     _safe_idx("hospital_purchaseorder", [("po_number", ASCENDING)])
     _safe_idx("hospital_purchaseorder", [("vendor_id", ASCENDING)])
     _safe_idx("hospital_purchaseorder", [("status", ASCENDING)])
+    _safe_idx("hospital_purchaseorder", [("items.item_id", ASCENDING)])
 
     # 8. Purchase Requisition
     _safe_idx("hospital_purchaserequisition", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_purchaserequisition", [("pr_number", ASCENDING)])
     _safe_idx("hospital_purchaserequisition", [("status", ASCENDING)])
+    _safe_idx("hospital_purchaserequisition", [("items.item_id", ASCENDING)])
 
     # 9. Medicine Requisition
     _safe_idx("hospital_medicinerequisition", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_medicinerequisition", [("mr_number", ASCENDING)])
     _safe_idx("hospital_medicinerequisition", [("status", ASCENDING)])
+    _safe_idx("hospital_medicinerequisition", [("items.item_id", ASCENDING)])
 
     # 10. Stock Transfer
     _safe_idx("hospital_stocktransfer", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_stocktransfer", [("to_outlet", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_stocktransfer", [("from_outlet", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_stocktransfer", [("transfer_ref_number", ASCENDING)])
     _safe_idx("hospital_stocktransfer", [("to_outlet", ASCENDING)])
+    _safe_idx("hospital_stocktransfer", [("from_outlet", ASCENDING)])
     _safe_idx("hospital_stocktransfer", [("is_verified", ASCENDING)])
+    _safe_idx("hospital_stocktransfer", [("items.item_id", ASCENDING)])
+    _safe_idx("hospital_stocktransfer", [("items.batch_number", ASCENDING)])
+    _safe_idx("hospital_stocktransfer", [("items.stock_id", ASCENDING)])
 
     # 11. Purchase Return
     _safe_idx("hospital_purchasereturn", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_purchasereturn", [("return_number", ASCENDING)])
     _safe_idx("hospital_purchasereturn", [("vendor_name", ASCENDING)])
+    _safe_idx("hospital_purchasereturn", [("vendor_code", ASCENDING)])
+    _safe_idx("hospital_purchasereturn", [("grn_number", ASCENDING)])
     _safe_idx("hospital_purchasereturn", [("status", ASCENDING)])
+    _safe_idx("hospital_purchasereturn", [("items.item_id", ASCENDING)])
+    _safe_idx("hospital_purchasereturn", [("items.batch_number", ASCENDING)])
 
     # 12. Physical Stock Entry
     _safe_idx("hospital_physicalstockentry", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
     _safe_idx("hospital_physicalstockentry", [("entry_id", ASCENDING)])
     _safe_idx("hospital_physicalstockentry", [("status", ASCENDING)])
+    _safe_idx("hospital_physicalstockentry", [("outlet_code", ASCENDING)])
+
+    # 13. Sales Return
+    _safe_idx("hospital_salesreturn", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_salesreturn", [("outlet_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_salesreturn", [("medicine_particulars.item_id", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("medicine_particulars.batch_number", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("return_bill_no", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("bill_no", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("uhid", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("inpatient_number", ASCENDING)])
+    _safe_idx("hospital_salesreturn", [("outlet_code", ASCENDING)])
+
+    # 14. Pharmacy Billing
+    _safe_idx("hospital_pharmacybilling", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("outlet_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("medicine_particulars.item_id", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("medicine_particulars.batch_number", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("bill_no", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("Bill_id", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("uhid", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("inpatient_number", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("ipNumber", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("outlet_code", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("billing_status", ASCENDING)])
+    _safe_idx("hospital_pharmacybilling", [("bill_date", DESCENDING)])
+
+    # 15. Expiry Medicine
+    _safe_idx("hospital_expirymedicine", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_expirymedicine", [("item_id", ASCENDING)])
+    _safe_idx("hospital_expirymedicine", [("batch_number", ASCENDING)])
+    _safe_idx("hospital_expirymedicine", [("outlet_code", ASCENDING)])
+    _safe_idx("hospital_expirymedicine", [("status", ASCENDING)])
+
+    # 16. Pharmacy Notification
+    _safe_idx("hospital_pharmacynotification", [("hospital_code", ASCENDING), ("branch_code", ASCENDING), ("created_date", DESCENDING)])
+    _safe_idx("hospital_pharmacynotification", [("item_id", ASCENDING)])
+    _safe_idx("hospital_pharmacynotification", [("outlet_code", ASCENDING)])
 
     _indexes_ensured = True
 
@@ -373,6 +443,15 @@ def paginate_mongo_query(
     # ── Return all data if unpaginated ───────────────────────────
     if is_unpaginated:
         cursor = coll.find(filter_query, projection).sort(sort_spec)
+        req_params = {}
+        if request is not None:
+            if hasattr(request, "query_params") and request.query_params:
+                req_params = request.query_params
+            elif hasattr(request, "GET") and request.GET:
+                req_params = request.GET
+        if not req_params.get("unlimited") and not req_params.get("export"):
+            cursor = cursor.limit(5000)
+
         docs = clean_docs(list(cursor))
         docs = enrich_employee_names(docs)
         if enrich_fn and callable(enrich_fn):
@@ -393,7 +472,10 @@ def paginate_mongo_query(
 
     # ── Paginated request ────────────────────────────────────────
     limit_num = min(1000, limit_num)
-    total_records = coll.count_documents(filter_query)
+    if not filter_query:
+        total_records = coll.estimated_document_count()
+    else:
+        total_records = coll.count_documents(filter_query)
     total_pages = max(1, (total_records + limit_num - 1) // limit_num) if total_records > 0 else 1
     skip_count = (page_num - 1) * limit_num
 

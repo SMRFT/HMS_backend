@@ -564,7 +564,23 @@ def stock_transfer_view(request, pk=None):
                 status=400,
             )
 
-        all_stocks = list(PharmacyStock.objects.all())
+        from django.db.models import Q
+
+        stock_ids = [int(i.get("stock_id")) for i in raw_items if str(i.get("stock_id", "")).isdigit()]
+        item_ids = [int(i.get("item_id")) for i in raw_items if str(i.get("item_id", "")).isdigit()]
+
+        filter_q = Q()
+        if stock_ids:
+            filter_q |= Q(stock_id__in=stock_ids)
+        if item_ids:
+            filter_q |= Q(item_id__in=item_ids)
+
+        if hospital_code and hospital_code != "system":
+            filter_q &= Q(hospital_code=hospital_code)
+        if branch_code and branch_code != "system":
+            filter_q &= Q(branch_code=branch_code)
+
+        candidate_stocks = list(PharmacyStock.objects.filter(filter_q)) if (stock_ids or item_ids) else []
         errors = []
         processed_items = []
 
@@ -579,9 +595,9 @@ def stock_transfer_view(request, pk=None):
                 errors.append(f"Item {idx + 1}: transfer_quantity must be > 0")
                 continue
 
-            # Find source stock record
+            # Find source stock record from candidates
             source = None
-            for s in all_stocks:
+            for s in candidate_stocks:
                 if (
                     str(getattr(s, "hospital_code", "")) != str(hospital_code)
                     or str(getattr(s, "branch_code",  "")) != str(branch_code)
@@ -800,9 +816,26 @@ def stock_transfer_action_view(request):
                     {"success": False, "error": "Only the receiving outlet or issuing pharmacy can verify this transfer"},
                     status=403,
                 )
+        from django.db.models import Q
+
         transfer_items = getattr(obj, "items", []) or []
         parsed_items   = parse_transfer_items(transfer_items)
-        all_stocks     = list(PharmacyStock.objects.all())
+
+        stock_ids = [int(i.get("stock_id")) for i in parsed_items if str(i.get("stock_id", "")).isdigit()]
+        item_ids = [int(i.get("item_id")) for i in parsed_items if str(i.get("item_id", "")).isdigit()]
+
+        filter_q = Q()
+        if stock_ids:
+            filter_q |= Q(stock_id__in=stock_ids)
+        if item_ids:
+            filter_q |= Q(item_id__in=item_ids)
+
+        if hospital_code and hospital_code != "system":
+            filter_q &= Q(hospital_code=hospital_code)
+        if branch_code and branch_code != "system":
+            filter_q &= Q(branch_code=branch_code)
+
+        candidate_stocks = list(PharmacyStock.objects.filter(filter_q)) if (stock_ids or item_ids) else []
         errors         = []
         source_deducted = getattr(obj, "source_deducted", False)
 
@@ -819,9 +852,9 @@ def stock_transfer_action_view(request):
                 errors.append(f"Item {idx + 1}: invalid transfer quantity")
                 continue
 
-            # Find source stock
+            # Find source stock from candidates
             source = None
-            for s in all_stocks:
+            for s in candidate_stocks:
                 if (
                     str(getattr(s, "hospital_code", "")) != str(hospital_code)
                     or str(getattr(s, "branch_code",  "")) != str(branch_code)
