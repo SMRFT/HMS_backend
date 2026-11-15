@@ -181,6 +181,30 @@ def _resolve_seed_discharge_bill(db, fy):
     return max_seq
 
 
+def _resolve_seed_discharge_estimate(db, fy):
+    """Finds true maximum estimate_number in hospital_dischargebilling for financial year (e.g. EST/2627/000001)."""
+    max_seq = 0
+    try:
+        prefix = f"EST/{fy}/"
+        cursor = db["hospital_dischargebilling"].find(
+            {"estimate_number": {"$regex": f"^{re.escape(prefix)}"}},
+            {"estimate_number": 1}
+        )
+        for doc in cursor:
+            en = str(doc.get("estimate_number") or "").strip()
+            try:
+                parts = en.split("/")
+                if len(parts) >= 3 and parts[1] == fy:
+                    n = int(parts[2])
+                    if n > max_seq:
+                        max_seq = n
+            except (ValueError, TypeError):
+                continue
+    except Exception:
+        pass
+    return max_seq
+
+
 def _resolve_seed_pharmacy_bill(db, outlet_code, fy, outlet_suffix="01"):
     """Finds maximum bill_no sequence for an outlet under financial year fy and outlet suffix."""
     clean_outlet = str(outlet_code or "").strip()
@@ -608,6 +632,17 @@ def get_next_discharge_bill_no(fy=None):
         seed_resolver=lambda db: _resolve_seed_discharge_bill(db, year_prefix)
     )
     return f"{year_prefix}{seq:06d}"
+
+
+def get_next_discharge_estimate_no(fy=None):
+    """Returns next sequential Discharge estimate number, e.g. 'EST/2627/000001'."""
+    year_prefix = fy or _current_fin_year_prefix()
+    counter_name = f"discharge_estimate_{year_prefix}"
+    seq = get_next_sequence_value(
+        counter_name,
+        seed_resolver=lambda db: _resolve_seed_discharge_estimate(db, year_prefix)
+    )
+    return f"EST/{year_prefix}/{seq:06d}"
 
 
 # 4. Inventory Module IDs
