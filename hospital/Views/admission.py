@@ -1146,12 +1146,6 @@ def admission_view(request):
                         ]
                     })
 
-            if and_conditions:
-                if len(and_conditions) == 1:
-                    query.update(and_conditions[0])
-                else:
-                    query["$and"] = and_conditions
-
             # Date Range Filter
             from_date = to_date = None
             if from_date_str:
@@ -1166,12 +1160,36 @@ def admission_view(request):
                     pass
 
             if from_date or to_date:
-                dt_filter = {}
-                if from_date:
-                    dt_filter["$gte"] = IST_TZ.localize(datetime.combine(from_date, dt_time.min)).astimezone(dt_timezone.utc)
-                if to_date:
-                    dt_filter["$lte"] = IST_TZ.localize(datetime.combine(to_date, dt_time.max)).astimezone(dt_timezone.utc)
-                query["admissionDateTime"] = dt_filter
+                date_or = []
+                gte_aware = IST_TZ.localize(datetime.combine(from_date, dt_time.min)).astimezone(dt_timezone.utc) if from_date else None
+                lte_aware = IST_TZ.localize(datetime.combine(to_date, dt_time.max)).astimezone(dt_timezone.utc) if to_date else None
+
+                # 1. Aware UTC
+                c_aware = {}
+                if gte_aware: c_aware["$gte"] = gte_aware
+                if lte_aware: c_aware["$lte"] = lte_aware
+                if c_aware: date_or.append({"admissionDateTime": c_aware})
+
+                # 2. Naive UTC
+                c_naive = {}
+                if gte_aware: c_naive["$gte"] = gte_aware.replace(tzinfo=None)
+                if lte_aware: c_naive["$lte"] = lte_aware.replace(tzinfo=None)
+                if c_naive: date_or.append({"admissionDateTime": c_naive})
+
+                # 3. String representation
+                c_str = {}
+                if from_date_str: c_str["$gte"] = from_date_str
+                if to_date_str:   c_str["$lte"] = to_date_str + "\uffff"
+                if c_str: date_or.append({"admissionDateTime": c_str})
+
+                if date_or:
+                    and_conditions.append({"$or": date_or})
+
+            if and_conditions:
+                if len(and_conditions) == 1:
+                    query.update(and_conditions[0])
+                else:
+                    query["$and"] = and_conditions
 
             client, hms_db = _get_hms_db()
             try:
@@ -1984,13 +2002,17 @@ def admission_advance(request, ipNumber=None):
                     to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
                     from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
                     to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
+                    from_naive  = from_dt_utc.replace(tzinfo=None)
+                    to_naive    = to_dt_utc.replace(tzinfo=None)
                     and_clauses.append({
                         "$or": [
-                            {"advance_payments.date": {"$gte": from_date, "$lte": to_date}},
+                            {"advance_payments.date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
                             {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                            {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                            {"advance_payments.created_date": {"$gte": from_naive, "$lte": to_naive}},
+                            {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
                             {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                            {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                            {"advance_payments.bill_date": {"$gte": from_naive, "$lte": to_naive}},
+                            {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
                         ]
                     })
                 except Exception as e:
@@ -2412,11 +2434,15 @@ def ip_advance_refunds_list(request):
                 to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
                 from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
                 to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
+                from_naive  = from_dt_utc.replace(tzinfo=None)
+                to_naive    = to_dt_utc.replace(tzinfo=None)
                 q["$or"] = [
                     {"refund_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                    {"refund_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                    {"refund_date": {"$gte": from_naive, "$lte": to_naive}},
+                    {"refund_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
                     {"created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                    {"created_date": {"$gte": from_date, "$lte": to_date + "T23:59:59.999999+05:30"}},
+                    {"created_date": {"$gte": from_naive, "$lte": to_naive}},
+                    {"created_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
                 ]
             except Exception:
                 pass
@@ -2455,6 +2481,19 @@ def ip_advance_refunds_list(request):
 
         res_list = []
         for r in refund_docs:
+            if from_date and to_date:
+                r_dt_val = r.get("refund_date") or r.get("created_date")
+                r_ist = _to_ist_dt(r_dt_val)
+                if r_ist:
+                    if not (from_dt <= r_ist.date() <= to_dt):
+                        continue
+                elif isinstance(r_dt_val, str) and len(r_dt_val) >= 10:
+                    try:
+                        rd_part = datetime.strptime(r_dt_val[:10], "%Y-%m-%d").date()
+                        if not (from_dt <= rd_part <= to_dt):
+                            continue
+                    except Exception:
+                        pass
             r_dict = _normalize_ist_timestamps(r)
             u = str(r_dict.get("uhid") or "").strip().upper()
             ip = str(r_dict.get("ip_number") or "").strip()

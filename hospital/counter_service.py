@@ -476,7 +476,7 @@ def peek_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, d
     """
     Read-only preview of the next integer sequence (current seq + 1) for counter_name
     WITHOUT incrementing or mutating the 'counters' collection.
-    If the counter is missing or behind actual data, aligns it to the maximum existing sequence.
+    If the counter document exists, strictly returns current seq + 1 without side-effects.
     """
     should_close = False
     if db_instance is not None:
@@ -488,26 +488,11 @@ def peek_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, d
     try:
         counters = db["counters"]
         existing = counters.find_one({"_id": counter_name})
-        cur_seq = int(existing["seq"]) if existing and "seq" in existing else None
+        if existing is not None and "seq" in existing:
+            return int(existing["seq"]) + 1
 
-        if seed_resolver and callable(seed_resolver):
-            try:
-                actual_max = seed_resolver(db)
-                if cur_seq is None or actual_max > cur_seq:
-                    cur_seq = actual_max
-                    counters.update_one(
-                        {"_id": counter_name},
-                        {"$set": {"seq": cur_seq}},
-                        upsert=True
-                    )
-            except Exception as e:
-                print(f"[counter_service] Error resolving seed in peek for {counter_name}: {e}")
-
-        if cur_seq is not None:
-            return cur_seq + 1
-
-        seed = default_seed if default_seed > 0 else 0
-        return seed + 1
+        seed = _resolve_initial_seed(db, counter_name, seed_resolver, default_seed)
+        return int(seed) + 1
     finally:
         if should_close:
             try:
@@ -520,10 +505,8 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
     """
     Atomically increments and returns the next integer sequence for counter_name.
     - If the counter doesn't exist in MongoDB, it seeds from seed_resolver(db) or default_seed.
-    - If the counter is behind actual data (e.g. data imported), advances it to actual_max.
-    - NEVER resets or decrements the counter downwards.
-    - Uses find_one_and_update with $inc and ReturnDocument.AFTER.
-    - If db_instance is provided, it reuses the connection without closing it.
+    - If the counter already exists, it strictly increments seq by 1 via atomic $inc.
+    - Never overrides or resets the sequence set by administrators or users.
     """
     should_close = False
     if db_instance is not None:
@@ -546,16 +529,6 @@ def get_next_sequence_value(counter_name, seed_resolver=None, default_seed=0, db
                 )
             except Exception:
                 pass
-        elif seed_resolver is not None:
-            # Self-healing sync: ONLY advance if the database has records HIGHER than the counter seq.
-            # Never decrement or reset if actual_max <= cur_seq.
-            try:
-                actual_max = seed_resolver(db)
-                cur_seq = int(existing.get("seq", 0))
-                if actual_max > cur_seq:
-                    counters.update_one({"_id": counter_name}, {"$set": {"seq": actual_max}})
-            except Exception as e:
-                print(f"[counter_service] Error in self-healing sync for {counter_name}: {e}")
 
         # Atomic increment
         doc = counters.find_one_and_update(

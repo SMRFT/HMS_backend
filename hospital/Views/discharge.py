@@ -483,6 +483,9 @@ def _safe_isoformat(dt):
     if dt is None:
         return None
     try:
+        ist = _to_ist_dt(dt)
+        if ist is not None:
+            return ist.isoformat()
         return dt.isoformat()
     except Exception:
         return None
@@ -3223,21 +3226,38 @@ def discharge_billing_list_create(request):
                 q["company_name"] = {"$regex": re.escape(str(insurance_type_f).strip()), "$options": "i"}
 
         if from_f or to_f:
-            date_filter = {}
-            if from_f:
-                try:
-                    from_dt_ist = _datetime.strptime(str(from_f).strip(), "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=_IST_TZ)
-                    date_filter["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc)
-                except Exception:
-                    date_filter["$gte"] = str(from_f).strip()
-            if to_f:
-                try:
-                    to_dt_ist = _datetime.strptime(str(to_f).strip(), "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=_IST_TZ)
-                    date_filter["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc)
-                except Exception:
-                    date_filter["$lte"] = str(to_f).strip()
-            if date_filter:
-                q["bill_date"] = date_filter
+            date_conds = []
+            f_str = str(from_f).strip() if from_f else ""
+            t_str = str(to_f).strip() if to_f else ""
+            from_dt_ist = _datetime.strptime(f_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=_IST_TZ) if f_str else None
+            to_dt_ist = _datetime.strptime(t_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=_IST_TZ) if t_str else None
+
+            # Aware UTC
+            c_aware = {}
+            if from_dt_ist: c_aware["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc)
+            if to_dt_ist:   c_aware["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc)
+            if c_aware: date_conds.append({"bill_date": c_aware})
+
+            # Naive UTC
+            c_naive = {}
+            if from_dt_ist: c_naive["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc).replace(tzinfo=None)
+            if to_dt_ist:   c_naive["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc).replace(tzinfo=None)
+            if c_naive: date_conds.append({"bill_date": c_naive})
+
+            # String representation
+            c_str = {}
+            if f_str: c_str["$gte"] = f_str
+            if t_str: c_str["$lte"] = t_str + "\uffff"
+            if c_str: date_conds.append({"bill_date": c_str})
+
+            if date_conds:
+                if len(date_conds) == 1:
+                    q.update(date_conds[0])
+                else:
+                    if "$or" in q:
+                        q["$and"] = [{"$or": q.pop("$or")}, {"$or": date_conds}]
+                    else:
+                        q["$or"] = date_conds
 
         if search_f:
             s = str(search_f).strip()

@@ -506,8 +506,9 @@ def pharmacy_item_view(request, pk=None):
             search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
             if search:
                 clean_s = re.escape(search)
-                # Anchored prefix: strictly matches items starting with search
-                prefix_reg = {"$regex": f"^{clean_s}", "$options": "i"}
+                clean_u = re.escape(search.upper())
+                # Anchored prefix: strictly matches items starting with search using B-tree index
+                prefix_reg = {"$regex": f"^{clean_u}"}
                 _, db = get_hms_db()
 
                 # Look up matching categories in hospital_pharmacycategory by name
@@ -1325,13 +1326,13 @@ def medicine_tracking(request):
         timeline = []
 
         # ── 1. Pharmacy Stock (Current Batches & Availability) ──────────────
-        stock_or = []
+        id_variants = []
         if item_id:
             if str(item_id).isdigit():
-                stock_or.append({"item_id": int(item_id)})
-            stock_or.append({"item_id": str(item_id)})
-        
-        stock_filter = {"$or": stock_or} if stock_or else {}
+                id_variants.append(int(item_id))
+            id_variants.append(str(item_id))
+
+        stock_filter = {"item_id": {"$in": id_variants}} if id_variants else {}
         if hospital_code and hospital_code != "system":
             stock_filter["hospital_code"] = hospital_code
         if branch_code and branch_code != "system":
@@ -1341,8 +1342,11 @@ def medicine_tracking(request):
             "stock_id": 1, "item_id": 1, "batch_number": 1, "expiry_date": 1,
             "total_stock": 1, "sold_quantity": 1, "transferred_out_quantity": 1,
             "grn_return_quantity": 1, "blocked_quantity": 1, "sales_return_quantity": 1,
-            "outlet_code": 1, "_id": 0
+            "outlet_code": 1, "grn_number": 1, "_id": 0
         }))
+
+        # Collect GRN numbers from stock to allow index scan on GRN
+        stock_grn_numbers = list({str(s.get("grn_number")).strip() for s in stock_docs if s.get("grn_number")})
 
         stock_op = Decimal("0")
         stock_ip = Decimal("0")
@@ -1391,16 +1395,13 @@ def medicine_tracking(request):
             grn_q["outlet_code"] = requested_outlet
 
         grn_search_or = []
-        if item_id:
-            if str(item_id).isdigit():
-                grn_search_or.append({"items.item_id": int(item_id)})
-            grn_search_or.append({"items.item_id": str(item_id)})
-            grn_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
-            grn_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
-        if item_name:
-            grn_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            grn_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            grn_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
+        if id_variants:
+            grn_search_or.append({"items.item_id": {"$in": id_variants}})
+        if stock_grn_numbers:
+            grn_search_or.append({"grn_number": {"$in": stock_grn_numbers}})
+        if not grn_search_or and item_name:
+            grn_search_or.append({"items.item_name": {"$regex": f"^{re.escape(item_name.upper())}"}})
+
         if grn_search_or:
             grn_q["$or"] = grn_search_or
 
@@ -1454,22 +1455,18 @@ def medicine_tracking(request):
         if requested_outlet in ("OLET001", "OLET002"):
             tf_q["$or"] = [{"to_outlet": requested_outlet}, {"from_outlet": requested_outlet}, {"outlet_code": requested_outlet}]
 
-        tf_search_or = []
-        if item_id:
-            if str(item_id).isdigit():
-                tf_search_or.append({"items.item_id": int(item_id)})
-            tf_search_or.append({"items.item_id": str(item_id)})
-            tf_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
-            tf_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
-        if item_name:
-            tf_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            tf_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            tf_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
-        if tf_search_or:
+        if id_variants:
+            item_clause = {"items.item_id": {"$in": id_variants}}
+        elif item_name:
+            item_clause = {"items.item_name": {"$regex": f"^{re.escape(item_name.upper())}"}}
+        else:
+            item_clause = None
+
+        if item_clause:
             if "$or" in tf_q:
-                tf_q["$and"] = [{"$or": tf_q.pop("$or")}, {"$or": tf_search_or}]
+                tf_q["$and"] = [{"$or": tf_q.pop("$or")}, item_clause]
             else:
-                tf_q["$or"] = tf_search_or
+                tf_q.update(item_clause)
 
         tf_docs = list(db.hospital_stocktransfer.find(tf_q, {
             "created_date": 1, "transfer_ref_number": 1, "outlet_code": 1,
@@ -1547,20 +1544,10 @@ def medicine_tracking(request):
         if requested_outlet in ("OLET001", "OLET002"):
             bill_q["outlet_code"] = requested_outlet
 
-        bill_search_or = []
-        if item_id:
-            if str(item_id).isdigit():
-                bill_search_or.append({"medicine_particulars.item_id": int(item_id)})
-            bill_search_or.append({"medicine_particulars.item_id": str(item_id)})
-            bill_search_or.append({"medicine_particulars": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
-            bill_search_or.append({"medicine_particulars": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
-        if item_name:
-            bill_search_or.append({"medicine_particulars.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            bill_search_or.append({"medicine_particulars.particulars": {"$regex": re.escape(item_name), "$options": "i"}})
-            bill_search_or.append({"medicine_particulars.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            bill_search_or.append({"medicine_particulars": {"$regex": re.escape(item_name), "$options": "i"}})
-        if bill_search_or:
-            bill_q["$or"] = bill_search_or
+        if id_variants:
+            bill_q["medicine_particulars.item_id"] = {"$in": id_variants}
+        elif item_name:
+            bill_q["medicine_particulars.item_name"] = {"$regex": f"^{re.escape(item_name.upper())}"}
 
         bill_docs = list(db.hospital_pharmacybilling.find(bill_q, {
             "bill_date": 1, "created_date": 1, "bill_no": 1, "Bill_id": 1,
@@ -1622,20 +1609,10 @@ def medicine_tracking(request):
         if requested_outlet in ("OLET001", "OLET002"):
             sr_q["outlet_code"] = requested_outlet
 
-        sr_search_or = []
-        if item_id:
-            if str(item_id).isdigit():
-                sr_search_or.append({"medicine_particulars.item_id": int(item_id)})
-            sr_search_or.append({"medicine_particulars.item_id": str(item_id)})
-            sr_search_or.append({"medicine_particulars": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
-            sr_search_or.append({"medicine_particulars": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
-        if item_name:
-            sr_search_or.append({"medicine_particulars.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            sr_search_or.append({"medicine_particulars.particulars": {"$regex": re.escape(item_name), "$options": "i"}})
-            sr_search_or.append({"medicine_particulars.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            sr_search_or.append({"medicine_particulars": {"$regex": re.escape(item_name), "$options": "i"}})
-        if sr_search_or:
-            sr_q["$or"] = sr_search_or
+        if id_variants:
+            sr_q["medicine_particulars.item_id"] = {"$in": id_variants}
+        elif item_name:
+            sr_q["medicine_particulars.item_name"] = {"$regex": f"^{re.escape(item_name.upper())}"}
 
         sr_docs = list(db.hospital_salesreturn.find(sr_q, {
             "return_bill_date": 1, "created_date": 1, "return_bill_no": 1,
@@ -1685,19 +1662,10 @@ def medicine_tracking(request):
         if requested_outlet in ("OLET001", "OLET002"):
             pr_q["outlet_code"] = requested_outlet
 
-        pr_search_or = []
-        if item_id:
-            if str(item_id).isdigit():
-                pr_search_or.append({"items.item_id": int(item_id)})
-            pr_search_or.append({"items.item_id": str(item_id)})
-            pr_search_or.append({"items": {"$regex": f'"item_id":\\s*"?{re.escape(str(item_id))}"?'}})
-            pr_search_or.append({"items": {"$regex": f"'item_id':\\s*'?{re.escape(str(item_id))}'?"}})
-        if item_name:
-            pr_search_or.append({"items.medicine_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            pr_search_or.append({"items.item_name": {"$regex": re.escape(item_name), "$options": "i"}})
-            pr_search_or.append({"items": {"$regex": re.escape(item_name), "$options": "i"}})
-        if pr_search_or:
-            pr_q["$or"] = pr_search_or
+        if id_variants:
+            pr_q["items.item_id"] = {"$in": id_variants}
+        elif item_name:
+            pr_q["items.item_name"] = {"$regex": f"^{re.escape(item_name.upper())}"}
 
         pr_docs = list(db.hospital_purchasereturn.find(pr_q, {
             "purchase_return_bill_date": 1, "created_date": 1, "purchase_return_bill_no": 1,
@@ -1739,7 +1707,6 @@ def medicine_tracking(request):
                         "status": pr.get("status", ""),
                         "details": f"Purchase Return — {pr.get('return_remark', '') or 'Returned to vendor'}"
                     })
-
         # Sort timeline by date descending
         def _sort_key(x):
             d = x.get("date") or ""
