@@ -5258,11 +5258,12 @@ def pharmacy_view_bills(request):
         if to_num(serialized.get("net_amount", 0)) == 0.0 and items_total > 0:
             serialized["net_amount"] = round(items_total, 2)
 
-        # Auto-confirm Paid if payment mode is Cash, Card, UPI, etc.
-        pay_mode_lower = str(serialized.get("payment_mode") or b.get("payment_mode") or "").strip().lower()
-        if any(m in pay_mode_lower for m in ["cash", "card", "upi", "cheque", "netbanking", "online"]):
-            if str(serialized.get("billing_status") or "").lower() in ["", "billed"]:
-                serialized["billing_status"] = "Paid"
+        # Preserve actual billing_status from DB (Billed / Paid / etc.)
+        raw_bs = str(b.get("billing_status") or serialized.get("billing_status") or "").strip()
+        if not raw_bs:
+            has_payment = bool(b.get("payment_details") and (b.get("paid_date") or b.get("cashier_id")))
+            raw_bs = "Paid" if has_payment else "Billed"
+        serialized["billing_status"] = raw_bs
 
         serialized["medicine_particulars"] = updated_items
         data.append(serialized)
