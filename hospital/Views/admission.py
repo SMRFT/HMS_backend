@@ -2175,23 +2175,35 @@ def admission_advance(request, ipNumber=None):
             if amount is None or str(amount).strip() == '':
                 return JsonResponse({'success': False, 'error': 'advance_amount is required'}, status=400)
 
-            ip_adv_raw = request.data.get('ip_advance')
-            bill_adv_raw = request.data.get('billing_advance')
-            if ip_adv_raw is None or str(ip_adv_raw).strip() == '' or bill_adv_raw is None or str(bill_adv_raw).strip() == '':
-                return JsonResponse({'success': False, 'error': 'Both ip_advance and billing_advance must be entered'}, status=400)
-
             try:
                 adv_amt = float(amount)
-                ip_adv = float(ip_adv_raw)
-                bill_adv = float(bill_adv_raw)
             except (ValueError, TypeError):
-                return JsonResponse({'success': False, 'error': 'Invalid numeric values for advance amounts'}, status=400)
+                return JsonResponse({'success': False, 'error': 'Invalid numeric value for advance_amount'}, status=400)
 
             if adv_amt <= 0:
                 return JsonResponse({'success': False, 'error': 'advance_amount must be greater than 0'}, status=400)
 
-            if abs((ip_adv + bill_adv) - adv_amt) > 0.01:
-                return JsonResponse({'success': False, 'error': f'Sum of IP Advance (₹{ip_adv:.2f}) and Billing Advance (₹{bill_adv:.2f}) must equal Advance Amount (₹{adv_amt:.2f})'}, status=400)
+            ip_adv_raw = request.data.get('ip_advance')
+            bill_adv_raw = request.data.get('billing_advance')
+            has_ip = ip_adv_raw is not None and str(ip_adv_raw).strip() != ''
+            has_bill = bill_adv_raw is not None and str(bill_adv_raw).strip() != ''
+
+            if has_ip or has_bill:
+                try:
+                    ip_adv = float(ip_adv_raw) if has_ip else 0.0
+                    bill_adv = float(bill_adv_raw) if has_bill else 0.0
+                except (ValueError, TypeError):
+                    return JsonResponse({'success': False, 'error': 'Invalid numeric values for advance split amounts'}, status=400)
+
+                if has_ip and not has_bill:
+                    bill_adv = max(0.0, round(adv_amt - ip_adv, 2))
+                elif has_bill and not has_ip:
+                    ip_adv = max(0.0, round(adv_amt - bill_adv, 2))
+                elif abs((ip_adv + bill_adv) - adv_amt) > 0.01:
+                    return JsonResponse({'success': False, 'error': f'Sum of IP Advance (₹{ip_adv:.2f}) and Billing Advance (₹{bill_adv:.2f}) must equal Advance Amount (₹{adv_amt:.2f})'}, status=400)
+            else:
+                ip_adv = adv_amt
+                bill_adv = 0.0
 
             bill_type, bill_type_no = _bill_type_fields(request.data)
 
