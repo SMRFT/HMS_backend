@@ -9,7 +9,7 @@ from rest_framework import status
 from pymongo import MongoClient  
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
-from datetime import datetime
+from datetime import datetime, timezone as py_timezone, timedelta as py_timedelta
 from django.http import JsonResponse
 from bson import ObjectId
 from rest_framework import status as drf_status
@@ -23,6 +23,21 @@ from bson.json_util import dumps
 import json
 from pymongo import MongoClient, ReturnDocument
 import re
+
+IST = py_timezone(py_timedelta(hours=5, minutes=30))
+
+def _parse_ist_date_bound(date_str, is_end=False):
+    """
+    Convert a YYYY-MM-DD date string (assumed to be in IST) to a UTC naive datetime.
+    If is_end is False: returns the start of the day in IST (00:00:00) converted to UTC.
+    If is_end is True:  returns the end of the day in IST (23:59:59.999999) converted to UTC.
+    """
+    dt = datetime.strptime(str(date_str).strip()[:10], "%Y-%m-%d")
+    if is_end:
+        dt_ist = dt.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=IST)
+    else:
+        dt_ist = dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=IST)
+    return dt_ist.astimezone(py_timezone.utc).replace(tzinfo=None)
 
 
 
@@ -538,8 +553,8 @@ def estimate_billing_list(request):
         outlet_code   = request.data.get('auth-outlet-code')
         hospital_code = request.data.get('auth-hospital-code')
 
-        from_date_str   = request.GET.get('fromDate',     '').strip()
-        to_date_str     = request.GET.get('toDate',       '').strip()
+        from_date_str   = (request.GET.get('fromDate') or request.GET.get('start_date') or '').strip()
+        to_date_str     = (request.GET.get('toDate') or request.GET.get('end_date') or '').strip()
         bill_type_param = request.GET.get('billType',     '').strip()
         doctor_param    = request.GET.get('doctor',       '').strip()
         uhid_param      = request.GET.get('uhid',         '').strip()
@@ -566,20 +581,28 @@ def estimate_billing_list(request):
 
         print("ESTIMATE QUERY:", query)
 
-        # ── Date filter ──────────────────────────────────────────────────────
-        if from_date_str and to_date_str:
+        # ── Date filter (IST-aware) ──────────────────────────────────────────
+        date_q = {}
+        if from_date_str:
             try:
-                start = datetime.strptime(from_date_str, "%Y-%m-%d")
-                end   = datetime.strptime(to_date_str, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, microsecond=999999
-                )
-                query["EstBillDate"] = {"$gte": start, "$lte": end}
+                date_q["$gte"] = _parse_ist_date_bound(from_date_str, is_end=False)
             except ValueError:
                 client.close()
                 return Response(
-                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    {"error": "Invalid fromDate format. Use YYYY-MM-DD."},
                     status=400,
                 )
+        if to_date_str:
+            try:
+                date_q["$lte"] = _parse_ist_date_bound(to_date_str, is_end=True)
+            except ValueError:
+                client.close()
+                return Response(
+                    {"error": "Invalid toDate format. Use YYYY-MM-DD."},
+                    status=400,
+                )
+        if date_q:
+            query["EstBillDate"] = date_q
 
         # ── Bill type filter ─────────────────────────────────────────────────
         if bill_type_param:
@@ -1438,19 +1461,23 @@ def billing_report_view(request):
 
         print("BILLING QUERY:", query)
 
-        # ── Date filter ────────────────────────────────────────
-        start_date = request.GET.get('start_date')
-        end_date   = request.GET.get('end_date')
+        # ── Date filter (IST-aware) ────────────────────────────
+        start_date = (request.GET.get('start_date') or request.GET.get('fromDate') or '').strip()
+        end_date   = (request.GET.get('end_date') or request.GET.get('toDate') or '').strip()
 
-        if start_date and end_date:
+        date_q = {}
+        if start_date:
             try:
-                start = datetime.strptime(start_date, "%Y-%m-%d")
-                end   = datetime.strptime(end_date,   "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, microsecond=999999
-                )
-                query["investBillDate"] = {"$gte": start, "$lte": end}
+                date_q["$gte"] = _parse_ist_date_bound(start_date, is_end=False)
             except ValueError:
-                return JsonResponse({"error": "Invalid date format"}, status=400)
+                return JsonResponse({"error": "Invalid start_date format. Use YYYY-MM-DD."}, status=400)
+        if end_date:
+            try:
+                date_q["$lte"] = _parse_ist_date_bound(end_date, is_end=True)
+            except ValueError:
+                return JsonResponse({"error": "Invalid end_date format. Use YYYY-MM-DD."}, status=400)
+        if date_q:
+            query["investBillDate"] = date_q
 
         # ── Bill type filter ───────────────────────────────────
         bill_type_param = request.GET.get('billType')
@@ -1787,8 +1814,8 @@ def dept_budr_view(request):
                 status=400,
             )
 
-        start_date = request.GET.get('start_date')
-        end_date   = request.GET.get('end_date')
+        start_date = (request.GET.get('start_date') or request.GET.get('fromDate') or '').strip()
+        end_date   = (request.GET.get('end_date') or request.GET.get('toDate') or '').strip()
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
 
@@ -1821,20 +1848,28 @@ def dept_budr_view(request):
             actor_id_field  = "lastmodified_by"
             actor_name_out  = "lastmodified_by_name"
 
-        # ── Date filter ─────────────────────────────
-        if start_date and end_date:
+        # ── Date filter (IST-aware) ─────────────────────────
+        date_q = {}
+        if start_date:
             try:
-                start = datetime.strptime(start_date, "%Y-%m-%d")
-                end   = datetime.strptime(end_date, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, microsecond=999999
-                )
-                query[date_field] = {"$gte": start, "$lte": end}
+                date_q["$gte"] = _parse_ist_date_bound(start_date, is_end=False)
             except ValueError:
                 client.close()
                 return JsonResponse(
-                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    {"error": "Invalid start_date format. Use YYYY-MM-DD."},
                     status=400,
                 )
+        if end_date:
+            try:
+                date_q["$lte"] = _parse_ist_date_bound(end_date, is_end=True)
+            except ValueError:
+                client.close()
+                return JsonResponse(
+                    {"error": "Invalid end_date format. Use YYYY-MM-DD."},
+                    status=400,
+                )
+        if date_q:
+            query[date_field] = date_q
 
         data = list(collection.find(query))
 
