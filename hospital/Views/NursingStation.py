@@ -1026,6 +1026,7 @@ def get_lab_ward_requests(request):
                 
 
                 "wardName": doc.get("wardName", ""),
+                "roomNo": doc.get("roomNo") or doc.get("wardName", ""),
 
                 "doctorName": doc_map.get(str(doc.get("doctor") or "").strip(), doc.get("doctorName") or doc.get("doctor", "")),
                 "doctor": str(doc.get("doctor") or "").strip(),
@@ -1872,6 +1873,8 @@ def get_medicine_ward_requests(request):
                 "billTypeNo": doc.get("bill_type_no", ""),
 
                 "billName": resolved_bill_name,
+                "roomNo": doc.get("room_no") or "",
+                "wardName": doc.get("room_no") or "",
 
                 "reqDate": _req_date,
 
@@ -2197,6 +2200,26 @@ def save_medicine_ward_request(request):
         if raw_r in ["-", "None", "null"]:
             raw_r = ""
         room_no = raw_r
+
+        if not room_no:
+            adm_doc = mongo_db["hospital_admission"].find_one({
+                "$or": [{"uhid": data.get("uhid")}, {"ipNumber": data.get("ipNumber")}],
+                "is_admitted": True,
+                "is_cancelled": {"$ne": True},
+                "is_discharged": {"$ne": True}
+            })
+            if adm_doc:
+                for field in ["roomShiftingDetails", "roomShitingDetails", "room_details"]:
+                    shifting = adm_doc.get(field, [])
+                    if shifting and isinstance(shifting, list):
+                        active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                        if not active_shift and shifting:
+                            active_shift = shifting[-1]
+                        if active_shift and isinstance(active_shift, dict):
+                            found_room = active_shift.get("newRoomNo") or active_shift.get("roomNo") or active_shift.get("roomNumber") or active_shift.get("room_number")
+                            if found_room:
+                                room_no = str(found_room).strip()
+                                break
 
         patient_name = data.get("patient_name", "").strip()
 
@@ -2707,6 +2730,7 @@ def get_radiology_ward_requests(request):
                 "billType": doc.get("billTypeName", ""),
 
                 "wardName": doc.get("wardName", ""),
+                "roomNo": doc.get("roomNo") or doc.get("wardName", ""),
 
                 "doctorName": doc_map.get(str(doc.get("doctor") or "").strip(), doc.get("doctorName") or doc.get("doctor", "")),
                 "doctor": str(doc.get("doctor") or "").strip(),
@@ -3511,7 +3535,8 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     diet_count = len(diet_bills)
     laundry_count = len(laundry_bills)
 
-    pending_total = lab_count + rad_count + pharm_count + implant_count + diet_count + laundry_count
+    # Diet is excluded from billing clearance verification per requirement
+    pending_total = lab_count + rad_count + pharm_count + implant_count + laundry_count
     is_clear = (pending_total == 0)
 
     return {
@@ -3554,10 +3579,11 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                 "items": implant_pending_items,
             },
             "diet": {
-                "name": "Diet Orders",
+                "name": "Diet Orders (Exempt)",
                 "icon": "bi-egg-fried",
-                "is_cleared": diet_count == 0,
-                "pending_count": diet_count,
+                "is_cleared": True,
+                "pending_count": 0,
+                "order_count": diet_count,
                 "bills": diet_bills,
                 "items": diet_pending_items,
             },
