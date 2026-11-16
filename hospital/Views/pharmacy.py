@@ -580,8 +580,86 @@ def sanitize_medicines(medicines):
         else:
             med_is_consumable = bool(med_is_consumable)
 
-        # item_name is intentionally NOT stored: item_id is the source of truth,
-        # and item_name is resolved on read / UI comparison
+        # Resolve item_name, expiry_date, hsn_code
+        item_name_val = str(med.get("item_name") or med.get("name") or med.get("medicine_name") or "").strip()
+        expiry_val = str(med.get("expiry_date") or med.get("expiry") or "").strip()
+        hsn_val = str(med.get("hsn_code") or med.get("hsn") or "").strip()
+
+        # CGST / SGST rates
+        cgst_pct = 0.0
+        for k in ("CGST_Percentage", "cgst_percentage", "cgst_rate", "cgst_pct", "cgst"):
+            if med.get(k) is not None and str(med.get(k)).strip() != "":
+                try:
+                    cgst_pct = float(med.get(k))
+                    break
+                except Exception:
+                    pass
+
+        sgst_pct = 0.0
+        for k in ("SGST_Percentage", "sgst_percentage", "sgst_rate", "sgst_pct", "sgst"):
+            if med.get(k) is not None and str(med.get(k)).strip() != "":
+                try:
+                    sgst_pct = float(med.get(k))
+                    break
+                except Exception:
+                    pass
+
+        # If any of item_name, expiry, hsn, or GST rates are missing, lookup from stock / item collection
+        if not item_name_val or not expiry_val or (cgst_pct == 0.0 and sgst_pct == 0.0) or not hsn_val:
+            try:
+                stk_q = {"item_id": item_id_val}
+                if bn_val:
+                    stk_q["batch_number"] = bn_val
+                stk_doc = stock_collection.find_one(stk_q)
+                if not stk_doc and str(item_id_val).isdigit():
+                    stk_q["item_id"] = int(item_id_val)
+                    stk_doc = stock_collection.find_one(stk_q)
+
+                if stk_doc:
+                    if not item_name_val:
+                        item_name_val = str(stk_doc.get("item_name") or "").strip()
+                    if not expiry_val and stk_doc.get("expiry_date"):
+                        exp_d = stk_doc.get("expiry_date")
+                        if isinstance(exp_d, (datetime, date)):
+                            expiry_val = exp_d.strftime("%Y-%m-%d")
+                        else:
+                            expiry_val = str(exp_d)
+                    if not hsn_val:
+                        hsn_val = str(stk_doc.get("hsn_code") or stk_doc.get("hsn") or "").strip()
+                    if cgst_pct == 0.0 and stk_doc.get("CGST_Percentage") is not None:
+                        try:
+                            cgst_pct = float(stk_doc.get("CGST_Percentage"))
+                        except Exception:
+                            pass
+                    if sgst_pct == 0.0 and stk_doc.get("SGST_Percentage") is not None:
+                        try:
+                            sgst_pct = float(stk_doc.get("SGST_Percentage"))
+                        except Exception:
+                            pass
+
+                # If still missing item_name or hsn or GST, check pharmacy item master
+                if not item_name_val or not hsn_val or (cgst_pct == 0.0 and sgst_pct == 0.0):
+                    itm_master = mongo_db["hospital_pharmacyitem"].find_one({"item_id": item_id_val})
+                    if not itm_master and str(item_id_val).isdigit():
+                        itm_master = mongo_db["hospital_pharmacyitem"].find_one({"item_id": int(item_id_val)})
+                    if itm_master:
+                        if not item_name_val:
+                            item_name_val = str(itm_master.get("item_name") or "").strip()
+                        if not hsn_val:
+                            hsn_val = str(itm_master.get("hsn_code") or itm_master.get("hsn") or "").strip()
+                        if cgst_pct == 0.0 and itm_master.get("CGST_Percentage") is not None:
+                            try:
+                                cgst_pct = float(itm_master.get("CGST_Percentage"))
+                            except Exception:
+                                pass
+                        if sgst_pct == 0.0 and itm_master.get("SGST_Percentage") is not None:
+                            try:
+                                sgst_pct = float(itm_master.get("SGST_Percentage"))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
         raw_dv = med.get("discount_value")
         if raw_dv is not None and str(raw_dv).strip() not in ("", "%"):
             try:
@@ -608,17 +686,53 @@ def sanitize_medicines(medicines):
         calc_price = float(med.get("calculated_price", 0) or (qty_val * price_val))
         mrp_val = float(med.get("mrp", 0) or (calc_price / qty_val if qty_val > 0 else price_val))
 
+        total_gst_pct = cgst_pct + sgst_pct
+        product_val = round(calc_price / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_price
+
         if disc_amt == 0 and disc_val > 0:
-            gross = float(qty_val * price_val)
-            disc_amt = disc_val if disc_type == "amount" else (gross * disc_val / 100.0)
+            disc_amt = disc_val if disc_type == "amount" else (product_val * disc_val / 100.0)
+
+        taxable_val = max(0.0, product_val - disc_amt)
+
+        cgst_amt = 0.0
+        for k in ("CGST_Amt", "cgst_amount", "cgst_amt"):
+            if med.get(k) is not None and str(med.get(k)).strip() != "":
+                try:
+                    cgst_amt = float(med.get(k))
+                    break
+                except Exception:
+                    pass
+
+        sgst_amt = 0.0
+        for k in ("SGST_Amt", "sgst_amount", "sgst_amt"):
+            if med.get(k) is not None and str(med.get(k)).strip() != "":
+                try:
+                    sgst_amt = float(med.get(k))
+                    break
+                except Exception:
+                    pass
+
+        if cgst_amt == 0.0 and cgst_pct > 0 and taxable_val > 0:
+            cgst_amt = round((taxable_val * cgst_pct) / 100.0, 2)
+        if sgst_amt == 0.0 and sgst_pct > 0 and taxable_val > 0:
+            sgst_amt = round((taxable_val * sgst_pct) / 100.0, 2)
 
         clean_item = {
             "item_id": item_id_val,
+            "item_name": item_name_val,
             "batch_number": bn_val,
+            "expiry_date": expiry_val,
+            "hsn_code": hsn_val,
             "qty": qty_val,
             "price": price_val,
             "mrp": mrp_val,
             "calculated_price": calc_price,
+            "product_value": round(product_val, 4),
+            "taxable_value": round(taxable_val, 4),
+            "CGST_Percentage": cgst_pct,
+            "SGST_Percentage": sgst_pct,
+            "CGST_Amt": round(cgst_amt, 2),
+            "SGST_Amt": round(sgst_amt, 2),
             "discount_type": disc_type,
             "discount_value": disc_val,
             "discount_percent": "%" if disc_type == "percent" else str(med.get("discount_percent") or "%"),
@@ -626,6 +740,10 @@ def sanitize_medicines(medicines):
             "discount": disc_val,
             "edit_history": med.get("edit_history") or []
         }
+        if med.get("dosage"):
+            clean_item["dosage"] = med.get("dosage")
+        if med.get("noOfDays") or med.get("no_of_days"):
+            clean_item["noOfDays"] = med.get("noOfDays") or med.get("no_of_days")
         if med.get("total") is not None:
             clean_item["total"] = float(med.get("total"))
         if med_is_consumable:
@@ -883,6 +1001,14 @@ def save_pharmacy_bill(request):
     # COMMON FIELDS
     # --------------------------------------------------
     resolved_doctor_id = resolve_doctor_id(data.get("doctor_id"))
+    doc_name = (data.get("doctor_name") or data.get("doctorName") or "").strip()
+    if not doc_name and resolved_doctor_id:
+        doc_name = get_doctor_name_by_id(resolved_doctor_id)
+    if not resolved_doctor_id and doc_name:
+        resolved_doctor_id = resolve_doctor_id(doc_name) or ""
+
+    round_off_val = float(data.get("round_off", 0) or 0.0)
+
     raw_pm = data.get("payment_mode") or data.get("paymentMode")
     norm_pm = "Credit" if str(raw_pm).strip().lower() == "credit" else ("Cash" if str(raw_pm).strip().lower() == "cash" else None)
     if status == "Billed" and not norm_pm:
@@ -894,6 +1020,7 @@ def save_pharmacy_bill(request):
         "inpatient_number":         data.get("inpatient_number"),
         "bill_type":                data.get("bill_type"),
         "doctor_id":                resolved_doctor_id,
+        "doctor_name":              doc_name,
         # FIX 3: age stored as integer; also returned in every response
         "age":                      int(data.get("age", 0) or 0),
         "room_no":                  data.get("room_no"),
@@ -904,6 +1031,7 @@ def save_pharmacy_bill(request):
         "overall_discount_value":   float(data.get("overall_discount_value", 0)),
         "overall_discount_amount":  float(data.get("overall_discount_amount", 0)),
         "net_amount":               float(data.get("net_amount", 0)),
+        "round_off":                round_off_val,
         "shiftno":                  data.get("shiftno"),
         "payment_mode":             norm_pm,
     }
@@ -1019,7 +1147,15 @@ def save_pharmacy_bill(request):
             pass
 
         doc_id = resolve_doctor_id(data.get("doctor_id") or record.get("doctor_id"))
-        doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
+        doc_name = (data.get("doctor_name") or data.get("doctorName") or record.get("doctor_name") or "").strip()
+        if not doc_name and doc_id:
+            doc_name = get_doctor_name_by_id(doc_id)
+        if not doc_id and doc_name:
+            doc_id = resolve_doctor_id(doc_name) or ""
+        if doc_name:
+            update_data["doctor_name"] = doc_name
+        if doc_id:
+            update_data["doctor_id"] = doc_id
 
         emp_id = employee_id or record.get("created_by")
         emp_name = get_employee_name_by_id(emp_id) if emp_id else ""
@@ -1071,9 +1207,12 @@ def save_pharmacy_bill(request):
         }
 
         # Resolve doctor & cashier names
-        doc_id = resolve_doctor_id(data.get("doctor_id"))
+        doc_id = resolved_doctor_id
+        if not doc_name and doc_id:
+            doc_name = get_doctor_name_by_id(doc_id)
+        if doc_name:
+            record_doc["doctor_name"] = doc_name
         record_doc["doctor_id"] = doc_id
-        doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
 
         emp_name = get_employee_name_by_id(employee_id) if employee_id else ""
         if emp_name == "Unknown":
@@ -5182,6 +5321,46 @@ def pharmacy_view_bills(request):
                 pass
 
     # =========================================================
+    # ✅ Bulk Join 6: Pharmacy Stocks (for batch-specific GST & Expiry)
+    # =========================================================
+    stock_map = {}
+    if item_ids:
+        search_iids = []
+        for iid in item_ids:
+            search_iids.append(iid)
+            if str(iid).isdigit():
+                search_iids.append(int(iid))
+                search_iids.append(str(iid))
+        for st in stock_collection.find(
+            {"item_id": {"$in": search_iids}},
+            {"item_id": 1, "batch_number": 1, "expiry_date": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "CGST_Amt": 1, "SGST_Amt": 1, "hsn_code": 1, "item_name": 1, "mrp": 1, "_id": 0}
+        ):
+            s_iid = st.get("item_id")
+            s_bn = str(st.get("batch_number") or "").strip()
+            stock_map[(s_iid, s_bn)] = st
+            stock_map[(str(s_iid), s_bn)] = st
+            try:
+                stock_map[(int(s_iid), s_bn)] = st
+            except (ValueError, TypeError):
+                pass
+
+    # =========================================================
+    # ✅ Bulk Join 7: Fallback Doctor Names from hospital_billing
+    # =========================================================
+    uhid_doctor_map = {}
+    if uhids:
+        try:
+            for hb in mongo_db["hospital_billing"].find(
+                {"uhid": {"$in": list(uhids)}, "doctorName": {"$exists": True, "$ne": ""}},
+                {"uhid": 1, "doctorName": 1, "doctor_id": 1, "_id": 0}
+            ).sort("billed_date", -1):
+                u_val = hb.get("uhid")
+                if u_val and u_val not in uhid_doctor_map:
+                    uhid_doctor_map[u_val] = (hb.get("doctorName") or "").strip()
+        except Exception:
+            pass
+
+    # =========================================================
     # ✅ Helpers for serialization
     # =========================================================
     def to_num(val):
@@ -5242,6 +5421,8 @@ def pharmacy_view_bills(request):
         doc_display = profile_map.get(doc_id_val, "")
         if not doc_display:
             doc_display = b.get("doctor_name") or (doc_id_val if not doc_id_val.isdigit() else "")
+        if not doc_display and u:
+            doc_display = adm_doc.get("doctor_name") or adm_doc.get("primary_doctor") or uhid_doctor_map.get(u, "")
         serialized["doctor_name"] = doc_display
 
         # Bill type name
@@ -5305,29 +5486,41 @@ def pharmacy_view_bills(request):
                 continue
             it = dict(item)
             item_id_val = it.get("item_id")
+            bn_val = str(it.get("batch_number") or it.get("batch_no") or it.get("batch") or "").strip()
             master_item = item_map.get(item_id_val, {})
+            stock_item = stock_map.get((item_id_val, bn_val), {})
+            if not stock_item and str(item_id_val).isdigit():
+                stock_item = stock_map.get((int(item_id_val), bn_val), {})
 
             raw_name = (it.get("item_name") or it.get("medicine_name") or it.get("name") or "").strip()
             if not raw_name:
-                raw_name = (master_item.get("item_name") or "").strip()
+                raw_name = (stock_item.get("item_name") or master_item.get("item_name") or "").strip()
             it["item_name"]     = raw_name
             it["medicine_name"] = raw_name
 
             if not it.get("hsn_code"):
-                it["hsn_code"] = master_item.get("hsn_code") or master_item.get("hsn") or ""
+                it["hsn_code"] = stock_item.get("hsn_code") or master_item.get("hsn_code") or master_item.get("hsn") or ""
+
+            if not it.get("expiry_date"):
+                exp_val = stock_item.get("expiry_date")
+                if exp_val:
+                    if isinstance(exp_val, (datetime, date)):
+                        it["expiry_date"] = exp_val.strftime("%Y-%m-%d")
+                    else:
+                        it["expiry_date"] = str(exp_val)
 
             cgst_pct = to_num(it.get("CGST_Percentage", 0))
             sgst_pct = to_num(it.get("SGST_Percentage", 0))
-            if cgst_pct == 0.0 and master_item.get("CGST_Percentage"):
-                cgst_pct = to_num(master_item.get("CGST_Percentage"))
-            if sgst_pct == 0.0 and master_item.get("SGST_Percentage"):
-                sgst_pct = to_num(master_item.get("SGST_Percentage"))
+            if cgst_pct == 0.0:
+                cgst_pct = to_num(stock_item.get("CGST_Percentage")) or to_num(master_item.get("CGST_Percentage"))
+            if sgst_pct == 0.0:
+                sgst_pct = to_num(stock_item.get("SGST_Percentage")) or to_num(master_item.get("SGST_Percentage"))
             it["CGST_Percentage"] = cgst_pct
             it["SGST_Percentage"] = sgst_pct
 
             price_val = to_num(it.get("price", 0))
             if price_val == 0.0:
-                price_val = to_num(it.get("mrp", 0)) or to_num(master_item.get("Selling_Price", 0)) or to_num(master_item.get("mrp", 0))
+                price_val = to_num(it.get("mrp", 0)) or to_num(stock_item.get("mrp", 0)) or to_num(master_item.get("Selling_Price", 0)) or to_num(master_item.get("mrp", 0))
 
             qty_val  = to_num(it.get("qty", 0) or it.get("quantity", 0))
             calc_val = to_num(it.get("calculated_price", 0))
@@ -5364,7 +5557,7 @@ def pharmacy_view_bills(request):
             it["CGST_Amt"]         = cgst_amt_val
             it["SGST_Amt"]         = sgst_amt_val
             it["price"]            = price_val
-            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(master_item.get("mrp", 0)) or price_val
+            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(stock_item.get("mrp", 0)) or to_num(master_item.get("mrp", 0)) or price_val
             it["calculated_price"] = calc_val
             it["edit_history"]     = it.get("edit_history", [])
             updated_items.append(it)
