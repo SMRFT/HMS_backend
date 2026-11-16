@@ -293,6 +293,21 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 for p in p_qs:
                     patients_map[p.uhid] = p
 
+            company_codes = list({
+                (adm.company_code or getattr(pt, 'company_code', '') or '').strip()
+                for adm in admissions
+                for pt in [patients_map.get(adm.uhid)]
+                if pt and (adm.company_code or getattr(pt, 'company_code', None))
+            })
+            company_codes = [c for c in company_codes if c]
+            insurance_map = {}
+            if company_codes:
+                try:
+                    for ins in InsuranceProvider.objects.filter(company_code__in=company_codes):
+                        insurance_map[ins.company_code] = ins.company_name
+                except Exception:
+                    pass
+
             results_list = []
             for adm in admissions:
                 pt = patients_map.get(adm.uhid)
@@ -318,6 +333,11 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                     room_no = latest_room.get("roomNo")
                     bed_no = latest_room.get("bedNo")
 
+                comp_code = (adm.company_code or getattr(pt, 'company_code', '') or '').strip()
+                comp_name = insurance_map.get(comp_code, None) if comp_code else None
+                if not comp_name and getattr(adm, 'insurance_company', None):
+                    comp_name = adm.insurance_company
+
                 results_list.append({
                     'ipNumber': adm.ipNumber,
                     'ip_number': adm.ipNumber,
@@ -334,8 +354,9 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                     'city': pt.city,
                     'state': pt.state,
                     'zipcode': pt.zipcode,
-                    'customer_type': pt.customer_type,
-                    'company_code': pt.company_code,
+                    'customer_type': adm.customer_type or getattr(pt, 'customer_type', ''),
+                    'company_code': comp_code,
+                    'company_name': comp_name,
                     'room_no': room_no,
                     'bed_no': bed_no,
                     'admittingDoctor': getattr(adm, 'admittingDoctor', '') or '',
@@ -392,13 +413,16 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        company_code = (getattr(admission, 'company_code', None) or getattr(patient, 'company_code', None) or "").strip()
         company_name = None
-        if patient.company_code:
+        if company_code:
             insurance = InsuranceProvider.objects.filter(
-                company_code=patient.company_code
+                company_code=company_code
             ).first()
             if insurance:
                 company_name = insurance.company_name
+        if not company_name and getattr(admission, 'insurance_company', None):
+            company_name = admission.insurance_company
 
         room_no = None
         bed_no = None
@@ -471,8 +495,8 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             'city': patient.city,
             'state': patient.state,
             'zipcode': patient.zipcode,
-            'customer_type': patient.customer_type,
-            'company_code': patient.company_code,
+            'customer_type': admission.customer_type or patient.customer_type,
+            'company_code': company_code,
             'company_name': company_name,
         }
 
