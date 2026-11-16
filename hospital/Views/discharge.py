@@ -2332,6 +2332,9 @@ def search_discharge_patient(request):
                 except Exception as e:
                     print(f"Error prefetching hospital_lab_nabh_rate: {e}")
 
+            grouped_invest_map = {}
+            grouped_invest_list = []
+
             for bill in db["hospital_investbilling"].find(inv_q):
                 bill_no   = bill.get("investBillNo", "")
                 doc_raw   = str(bill.get("doctor") or "").strip()
@@ -2345,7 +2348,7 @@ def search_discharge_patient(request):
                 for it in (raw_items if isinstance(raw_items, list) else []):
                     matched_n = None
                     item_btn  = str(it.get("billTypeNo", "") or bill.get("billTypeNo", "") or "LAB01").strip().upper()
-                    item_name = it.get("itemName", "")
+                    item_name = str(it.get("itemName", "")).strip()
                     test_id   = it.get("test_id") or it.get("item_id")
                     nabh_code = str(it.get("nabh_code", "") or "").strip()
                     price     = _to_float(it.get("price", 0) or it.get("rate", 0))
@@ -2365,7 +2368,7 @@ def search_discharge_patient(request):
 
                         if matched_n:
                             if matched_n.get("test_name"):
-                                item_name = matched_n.get("test_name")
+                                item_name = str(matched_n.get("test_name")).strip()
                             if matched_n.get("nabh_code"):
                                 nabh_code = str(matched_n.get("nabh_code")).strip()
                             if item_btn == "LAB02" and matched_n.get("nabh_rate") is not None:
@@ -2375,27 +2378,45 @@ def search_discharge_patient(request):
 
                     qty   = int(it.get("quantity", 1) or 1)
                     disc  = _to_float(it.get("discount", 0))
-                    amt   = max(0.0, price * qty - disc)
-                    invest_items.append({
-                        "invest_bill_no": bill_no,
-                        "bill_object_id": str(bill.get("_id")),
-                        "itemName":       item_name,
-                        "price":          price,
-                        "rate":           str(price),
-                        "quantity":       qty,
-                        "discount":       disc,
-                        "amount":         amt,
-                        "billTypeNo":     item_btn,
-                        "bill_type":      bill.get("bill_type", 16),
-                        "test_id":        test_id,
-                        "nabh_code":      nabh_code,
-                        "nabh_rate":      _to_float(matched_n.get("nabh_rate")) if matched_n and matched_n.get("nabh_rate") is not None else None,
-                        "non_nabh_rate":  _to_float(matched_n.get("non_nabh_rate")) if matched_n and matched_n.get("non_nabh_rate") is not None else None,
-                        "doctor":         doctor,
-                        "payment_status": bill.get("paymentStatus", ""),
-                        "package_name":   it.get("packageName", "") or bill.get("packageName", ""),
-                        "source":         "hospital_investbilling",
-                    })
+
+                    # Group duplicate investigation items by itemName and price
+                    g_key = (item_name.upper(), round(price, 2))
+                    if item_name and g_key in grouped_invest_map:
+                        existing = grouped_invest_map[g_key]
+                        existing["quantity"] += qty
+                        existing["discount"] += disc
+                        existing["amount"] = max(0.0, round(existing["price"] * existing["quantity"] - existing["discount"], 2))
+                        if bill_no and bill_no not in str(existing.get("invest_bill_no", "")):
+                            existing["invest_bill_no"] = f"{existing['invest_bill_no']}, {bill_no}".strip(", ")
+                        if not existing.get("doctor") and doctor:
+                            existing["doctor"] = doctor
+                    else:
+                        amt = max(0.0, round(price * qty - disc, 2))
+                        new_inv = {
+                            "invest_bill_no": bill_no,
+                            "bill_object_id": str(bill.get("_id")),
+                            "itemName":       item_name,
+                            "price":          price,
+                            "rate":           str(price),
+                            "quantity":       qty,
+                            "discount":       disc,
+                            "amount":         amt,
+                            "billTypeNo":     item_btn,
+                            "bill_type":      bill.get("bill_type", 16),
+                            "test_id":        test_id,
+                            "nabh_code":      nabh_code,
+                            "nabh_rate":      _to_float(matched_n.get("nabh_rate")) if matched_n and matched_n.get("nabh_rate") is not None else None,
+                            "non_nabh_rate":  _to_float(matched_n.get("non_nabh_rate")) if matched_n and matched_n.get("non_nabh_rate") is not None else None,
+                            "doctor":         doctor,
+                            "payment_status": bill.get("paymentStatus", ""),
+                            "package_name":   it.get("packageName", "") or bill.get("packageName", ""),
+                            "source":         "hospital_investbilling",
+                        }
+                        if item_name:
+                            grouped_invest_map[g_key] = new_inv
+                        grouped_invest_list.append(new_inv)
+
+            invest_items.extend(grouped_invest_list)
 
         # ── 2. hospital_patientdietorder (EXCLUDED) ───────────────────────────
         # Note: Diet food collection is excluded from discharge billing because
