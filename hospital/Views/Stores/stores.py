@@ -1107,6 +1107,10 @@ def stores_grn_list_create(request):
         if department:
             dept_cands = get_department_candidates(department)
             queryset = queryset.filter(department__in=list(dept_cands))
+
+        category = request.query_params.get('category') or request.GET.get('category') or request.query_params.get('purchase_category') or request.GET.get('purchase_category')
+        if category and category != 'ALL':
+            queryset = queryset.filter(purchase_category__iexact=category)
             
         emp_map = get_employee_map_for_grns(queryset)
         dept_map = get_department_map_for_grns(queryset)
@@ -1146,13 +1150,17 @@ def stores_grn_list_create(request):
             if department:
                 dept_cands = get_department_candidates(department)
                 queryset = queryset.filter(department__in=list(dept_cands))
+
+            category = data.get('category') or data.get('purchase_category')
+            if category and category != 'ALL':
+                queryset = queryset.filter(purchase_category__iexact=category)
             
             emp_map = get_employee_map_for_grns(queryset)
             dept_map = get_department_map_for_grns(queryset)
             serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
             return Response(serializer.data)
 
-        # Auto-generate GRN number in format: 2627/00022316
+        # Auto-generate GRN number in format: 2627/000001 (6 digits after /)
         if not data.get('grn_number'):
             fy_str = get_financial_year_string()
             prefix = f"{fy_str}/"
@@ -1161,13 +1169,13 @@ def stores_grn_list_create(request):
                 from ..dbcollection import hms_db
                 col = hms_db['hospital_storesgrn']
                 
-                # Check for highest 8-digit sequence in current FY
-                # Supports both new format ("2627/00022316") and legacy format ("SGRN2627262700022316", "SGRN262700022316")
-                pattern = rf'^(?:{fy_str}/|SGRN{fy_str}{fy_str}|SGRN{fy_str})(\d{{8}})$'
+                # Check for highest 6-digit sequence in current FY
+                # Supports both new format ("2627/000001") and legacy format ("SGRN26272627000001_xx", "SGRN2627000001")
+                pattern = rf'^(?:{fy_str}/|SGRN.*{fy_str})'
                 max_seq = 0
                 for doc in col.find({'grn_number': {'$regex': pattern}}, {'grn_number': 1}):
                     grn_no = str(doc.get('grn_number') or '')
-                    m = re.match(pattern, grn_no)
+                    m = re.search(rf'(?:{fy_str}/|{fy_str})(\d{{6}})(?:_\d+)?$', grn_no)
                     if m:
                         try:
                             seq = int(m.group(1))
@@ -1177,10 +1185,10 @@ def stores_grn_list_create(request):
                             pass
                 
                 new_sequence = max_seq + 1
-                new_grn_number = f"{prefix}{new_sequence:08d}"
+                new_grn_number = f"{prefix}{new_sequence:06d}"
                 while col.find_one({'grn_number': new_grn_number}):
                     new_sequence += 1
-                    new_grn_number = f"{prefix}{new_sequence:08d}"
+                    new_grn_number = f"{prefix}{new_sequence:06d}"
                 
                 data['grn_number'] = new_grn_number
             except Exception:
@@ -1193,7 +1201,7 @@ def stores_grn_list_create(request):
                         new_sequence = 1
                 else:
                     new_sequence = 1
-                data['grn_number'] = f"{prefix}{new_sequence:08d}"
+                data['grn_number'] = f"{prefix}{new_sequence:06d}"
             
         # Initial Payment Status
         if 'payment_status' not in data or not data['payment_status']:

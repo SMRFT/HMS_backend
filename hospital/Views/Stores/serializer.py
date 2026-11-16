@@ -337,7 +337,76 @@ class StoresGRNSerializer(serializers.ModelSerializer):
         else:
             representation['department_code'] = ''
             representation['department_name'] = ''
-                    
+
+        # Ensure invoice_no and invoice_number compatibility
+        inv_no_val = representation.get('invoice_no') or getattr(instance, 'invoice_number', None) or getattr(instance, 'invoice_no', None)
+        if not inv_no_val and hasattr(instance, '_invoice_number'):
+            inv_no_val = instance._invoice_number
+        representation['invoice_no'] = inv_no_val or ''
+        representation['invoice_number'] = inv_no_val or ''
+
+        # Ensure net_invoice_amount, total_amount, and net_amount are always populated accurately
+        net_val = representation.get('net_invoice_amount')
+        try:
+            net_num = float(net_val) if net_val is not None else 0.0
+        except (ValueError, TypeError):
+            net_num = 0.0
+
+        items_list = representation.get('items') or []
+        calc_taxable = 0.0
+        calc_cgst = 0.0
+        calc_sgst = 0.0
+        calc_igst = 0.0
+        calc_disc = 0.0
+        for it in items_list:
+            if isinstance(it, dict):
+                q = float(it.get('quantity') or it.get('qty') or 0.0)
+                p = float(it.get('packing') or it.get('pack') or 1.0) or 1.0
+                rate = float(it.get('unitPrice') or it.get('purchaseRate') or it.get('packingPrice') or it.get('packing_price') or it.get('rate') or 0.0)
+                disc = float(it.get('purchase_discount_amt') or it.get('discountedAmt') or it.get('discount') or 0.0)
+                taxable = float(it.get('item_value') or it.get('itemValue') or it.get('taxableAmt') or ((rate * (q / p)) - disc))
+                cgst_rate = float(it.get('cgst_percent') or it.get('cgstPercent') or (float(it.get('tax') or 0.0) / 2.0 if it.get('tax') else 0.0) or 0.0)
+                sgst_rate = float(it.get('sgst_percent') or it.get('sgstPercent') or (float(it.get('tax') or 0.0) / 2.0 if it.get('tax') else 0.0) or 0.0)
+                igst_rate = float(it.get('igst_percent') or it.get('igstPercent') or 0.0)
+
+                cgst_amt = round((taxable * cgst_rate) / 100.0, 2) if cgst_rate > 0 else float(it.get('cgst_amt') or it.get('cgstAmt') or 0.0)
+                sgst_amt = round((taxable * sgst_rate) / 100.0, 2) if sgst_rate > 0 else float(it.get('sgst_amt') or it.get('sgstAmt') or 0.0)
+                igst_amt = round((taxable * igst_rate) / 100.0, 2) if igst_rate > 0 else float(it.get('igst_amt') or it.get('igstAmt') or it.get('igst') or 0.0)
+
+                calc_taxable += taxable
+                calc_cgst += cgst_amt
+                calc_sgst += sgst_amt
+                calc_igst += igst_amt
+                calc_disc += disc
+
+        calc_gst = calc_cgst + calc_sgst + calc_igst
+        tax_on_free = float(representation.get('tax_on_free_items') or representation.get('tax_on_free') or 0.0)
+        round_amt = float(representation.get('round_amount') or 0.0)
+        tot_amt = calc_taxable + calc_gst + tax_on_free
+
+        if net_num <= 0:
+            calc_net = tot_amt + round_amt
+            if calc_net > 0:
+                net_num = round(calc_net, 2)
+            else:
+                inv_amt = float(getattr(instance, 'invoice_amount', 0) or 0.0)
+                tot_saved = float(representation.get('total_amount') or 0.0)
+                paid_saved = float(representation.get('total_amount_paid') or 0.0)
+                net_num = inv_amt or tot_saved or paid_saved
+
+        representation['net_invoice_amount'] = round(net_num, 2)
+        representation['net_amount'] = round(net_num, 2)
+        if not representation.get('total_amount') or float(representation.get('total_amount') or 0) <= 0:
+            representation['total_amount'] = round(tot_amt or net_num, 2)
+        if not representation.get('taxable_amount') or float(representation.get('taxable_amount') or 0) <= 0:
+            representation['taxable_amount'] = round(calc_taxable, 2)
+        if not representation.get('cgst') or float(representation.get('cgst') or 0) <= 0:
+            representation['cgst'] = round(calc_cgst, 2)
+        if not representation.get('sgst') or float(representation.get('sgst') or 0) <= 0:
+            representation['sgst'] = round(calc_sgst, 2)
+        if not representation.get('igst') or float(representation.get('igst') or 0) <= 0:
+            representation['igst'] = round(calc_igst, 2)
+
         return representation
 
 

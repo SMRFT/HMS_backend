@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
 from django.http import JsonResponse
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import os
 import json as _json
 from pymongo import MongoClient
@@ -117,6 +117,16 @@ def _date_range_query(from_f, to_f, field="created_date"):
         if t_date:
             q.setdefault(field, {})["$lte"] = datetime.combine(t_date, datetime.max.time())
     return q
+
+def _is_card(val):
+    if not val: return False
+    if isinstance(val, dict):
+        val = val.get("method") or val.get("payment_mode") or ""
+    s = str(val).strip().lower()
+    return any(k in s for k in [
+        "card", "credit", "debit", "pos", "swipe", "paytm", "pinelabs",
+        "upi", "electronic", "gpay", "google pay", "phonepe", "online", "netbanking", "qr", "neft", "rtgs"
+    ])
 
 def _card_amount(payment_mode, payment_details):
     """
@@ -388,13 +398,15 @@ def fetch_detailed_billing_data(db, ccc_records):
             d = pharmacy_map[bill_no]
             is_ip = bool(d.get("inpatient_number") or d.get("ip_no") or d.get("admission_id"))
             pd = d.get("payment_details") or {}
-            p_mode = d.get("payment_mode") or d.get("payment_method") or pd.get("method") or "Cash"
+            p_mode = d.get("payment_mode") or d.get("payment_method") or "Cash"
+            if isinstance(pd, dict) and pd.get("method") and _is_card(pd.get("method")):
+                p_mode = str(pd.get("method"))
             pharm_amt = _to_float(d.get("net_amount") or d.get("total_amount"))
             if pharm_amt == 0.0:
                 pharm_amt = _to_float(r.get("collected_amount"))
             gross_val = _to_float(d.get("total_amount") or d.get("gross_amount")) or pharm_amt
             disc_amt = _to_float(d.get("overall_discount_amount") or d.get("discount") or 0.0)
-            is_credit_bill = is_ip or (str(d.get("customer_type") or "").upper() == "INSURANCE")
+            is_credit_bill = (str(d.get("customer_type") or "").upper() == "INSURANCE" and any(k in str(p_mode).lower() for k in ["credit", "scheme", "tpa"])) or any(k in str(p_mode).lower() for k in ["credit", "scheme", "insurance"])
             cash_val, cred_val, bank_val = _split_payment_modes(pharm_amt, p_mode, pd, is_credit_override=is_credit_bill)
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
             scheme_sub = d.get("company_name") or d.get("insurance_company") or ("VISA CARD" if bank_val > 0 else "")
@@ -673,7 +685,8 @@ def get_shift_summary_report(request):
     Delegates to the ultra-fast PyMongo cashcounter.get_shift_summary_report implementation.
     """
     from ..cashcounter import get_shift_summary_report as _fast_shift_report
-    return _fast_shift_report(request)
+    raw_req = getattr(request, '_request', request)
+    return _fast_shift_report(raw_req)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Discharge Bills Report
@@ -970,8 +983,8 @@ def advance_registration_report(request):
     Queries all active admissions directly and matches all advance payment records.
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         outlet_f = request.GET.get("outlet_code") or request.GET.get("outlet")
         is_insurance = request.GET.get("insurance") == "true"
         
@@ -1148,29 +1161,33 @@ def advance_registration_report(request):
                 else:
                     p_name = "Patient"
                 
-                # Payment Mode
+                # Payment Mode & Details
                 p_details = pay.get('payment_details')
-                if isinstance(p_details, dict):
-                    p_mode = p_details.get('method') or p_details.get('payment_mode')
-                else:
-                    p_mode = None
-                if not p_mode:
-                    p_mode = pay.get('payment_mode') or pay.get('mode') or ccc_map.get(bill_no, {}).get('payment_mode') or 'Cash'
+                if isinstance(p_details, str):
+                    try: p_details = _json.loads(p_details)
+                    except: p_details = {}
+                if not isinstance(p_details, dict):
+                    p_details = {}
+
+                p_mode = p_details.get('method') or p_details.get('payment_mode') or pay.get('payment_mode') or pay.get('mode') or ccc_map.get(bill_no, {}).get('payment_mode') or 'Cash'
                 
-                # Amount extraction (handles total_advance_amount, amount, paid_amount, etc.)
+                # Amount extraction (handles total_advance_amount, amount, paid_amount, payment_details Paid_amount, etc.)
                 amt = _to_float(
                     pay.get('total_advance_amount') or 
                     pay.get('amount') or 
                     pay.get('paid_amount') or 
                     pay.get('advance_amount') or 
+                    p_details.get('Paid_amount') or
+                    p_details.get('amount') or
+                    p_details.get('paid_amount') or
                     pay.get('ip_advance_amount') or 
                     pay.get('billing_advance_amount') or 
                     ccc_map.get(bill_no, {}).get('collected_amount')
                 )
                 
-                # Split Cash vs Credit
+                # Split Cash vs Credit (bank/card goes into credit card column for advance registration)
                 cash_amt, cred_amt, bank_amt = _split_payment_modes(amt, p_mode, p_details)
-                credit_col = round(amt - cash_amt, 2)
+                credit_card_amt = round(bank_amt + cred_amt, 2)
                 
                 cid = pay.get('created_by') or pay.get('cashier_id') or ccc_map.get(bill_no, {}).get('created_by') or adm.get('created_by') or ""
                 user_label = cashier_name_map.get(cid) or str(cid).upper() or "STAFF"
@@ -1185,7 +1202,8 @@ def advance_registration_report(request):
                     "gender": getattr(p, "gender", None) or adm.get("gender"),
                     "amount": amt,
                     "cash_amount": cash_amt,
-                    "credit_amount": credit_col,
+                    "credit_amount": credit_card_amt,
+                    "credit_card_amount": credit_card_amt,
                     "bank_amount": bank_amt,
                     "paid_date": _format_dt(paid_dt_val),
                     "date": _format_dt(paid_dt_val)[:10] if paid_dt_val else "",
@@ -1440,7 +1458,10 @@ def credit_card_report(request):
             if isinstance(val, dict):
                 val = val.get("method") or val.get("payment_mode") or ""
             s = str(val).strip().lower()
-            return any(k in s for k in ["card", "credit", "debit", "pos", "swipe", "paytm", "pinelabs"])
+            return any(k in s for k in [
+                "card", "credit", "debit", "pos", "swipe", "paytm", "pinelabs",
+                "upi", "electronic", "gpay", "google pay", "phonepe", "online", "netbanking", "qr", "neft", "rtgs"
+            ])
 
         def _get_card_details(pd, mode_str=""):
             if isinstance(pd, str):
@@ -1450,20 +1471,25 @@ def credit_card_report(request):
             mode_upper = str(mode_str or "").upper()
             c_type = pd.get("card_type") or pd.get("cardType") or pd.get("card_name") or ""
             if not c_type:
-                if "RUPAY" in mode_upper: c_type = "RUPAY CARD"
+                if any(k in mode_upper for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "PAYTM", "BHIM", "QR"]):
+                    c_type = "UPI / ELECTRONIC"
+                elif "RUPAY" in mode_upper: c_type = "RUPAY CARD"
                 elif "VISA" in mode_upper: c_type = "VISA CARD"
                 elif "MASTER" in mode_upper: c_type = "MASTER CARD"
                 elif "AMEX" in mode_upper or "AMERICAN" in mode_upper: c_type = "AMEX CARD"
                 elif "DEBIT" in mode_upper: c_type = "DEBIT CARD"
                 elif "CREDIT" in mode_upper: c_type = "CREDIT CARD"
+                elif "ELECTRONIC" in mode_upper or "ONLINE" in mode_upper: c_type = "ELECTRONIC"
                 else: c_type = "CARD"
             else:
                 c_type = str(c_type).upper()
-                if not ("CARD" in c_type): c_type = f"{c_type} CARD"
+                if not ("CARD" in c_type) and not ("UPI" in c_type) and not ("ELECTRONIC" in c_type):
+                    c_type = f"{c_type} CARD"
 
-            c_num = pd.get("card_number") or pd.get("cardNumber") or pd.get("card_no") or pd.get("pos_machine") or pd.get("machine") or pd.get("pos") or pd.get("transaction_id") or ""
+            c_num = pd.get("card_number") or pd.get("cardNumber") or pd.get("card_no") or pd.get("pos_machine") or pd.get("machine") or pd.get("pos") or pd.get("transaction_id") or pd.get("ref_no") or pd.get("upi_id") or ""
             if not c_num:
-                if "PAYTM" in mode_upper: c_num = "PAYTM"
+                if any(k in mode_upper for k in ["UPI", "GPAY", "PHONEPE", "BHIM", "QR"]): c_num = "UPI"
+                elif "PAYTM" in mode_upper: c_num = "PAYTM"
                 elif "PINE" in mode_upper: c_num = "PINELABS"
                 elif "HDFC" in mode_upper: c_num = "HDFC POS"
                 elif "SBI" in mode_upper: c_num = "SBI POS"
@@ -1491,23 +1517,19 @@ def credit_card_report(request):
 
             b_no = r.get("bill_no")
             if b_no and b_no in seen_bills: continue
-            if b_no: seen_bills.add(b_no)
 
             p_mode = str(r.get("payment_mode") or "").strip()
             pd = r.get("payment_details") or {}
-            
-            card_amt = 0.0
-            if _is_card(p_mode):
-                card_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
-            elif "multiple" in p_mode.lower():
-                breakdown = pd.get("breakdown") or []
-                card_amt = sum(
-                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
-                    for b in breakdown if isinstance(b, dict) and _is_card(b.get("method") or b.get("payment_mode"))
-                )
+
+            # Use cleanly split bank/card amount from enriched_data
+            card_amt = _to_float(r.get("bank"))
+            if card_amt <= 0:
+                _, _, card_amt = _split_payment_modes(r.get("display_amount") or r.get("net_amount"), p_mode, pd)
 
             if card_amt <= 0:
                 continue
+
+            if b_no: seen_bills.add(b_no)
 
             cat_title = r.get("type_name") or r.get("type") or "OTHER"
             c_type, c_num = _get_card_details(pd, p_mode)
@@ -1526,6 +1548,148 @@ def credit_card_report(request):
                 "card_number": c_num,
                 "amount": card_amt,
                 "user": str(r.get("cashier_id") or "STAFF").upper()
+            })
+
+        # -----------------------------------------------------------------
+        # DIRECT FALLBACK: Query hospital_pharmacybilling for OP & IP bills
+        # (Captures all Card & Electronic payments regardless of cash counter handover)
+        # -----------------------------------------------------------------
+        date_strs = []
+        cur_d = from_date
+        while cur_d <= to_date:
+            date_strs.append(cur_d.strftime("%Y-%m-%d"))
+            cur_d += timedelta(days=1)
+
+        pharm_date_clauses = [
+            {"bill_date": {"$gte": from_date, "$lte": to_date}},
+            {"created_date": {"$gte": from_date, "$lte": to_date}}
+        ]
+        for ds in date_strs:
+            pharm_date_clauses.append({"bill_date": {"$regex": f"^{ds}"}})
+            pharm_date_clauses.append({"created_date": {"$regex": f"^{ds}"}})
+
+        pharm_direct_q = {
+            "is_deleted": {"$ne": True},
+            "$or": pharm_date_clauses
+        }
+        if hospital_code: pharm_direct_q["hospital_code"] = hospital_code
+        if branch_code: pharm_direct_q["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            pharm_direct_q["$and"] = [{"$or": [{"outlet_code": outlet_code}, {"outlet": outlet_code}, {"SelectedOutlet": outlet_code}]}]
+
+        direct_pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_direct_q))
+
+        for pb in direct_pharm_docs:
+            b_no = pb.get("bill_no")
+            if not b_no or b_no in seen_bills:
+                continue
+
+            p_mode = str(pb.get("payment_mode") or pb.get("payment_method") or "").strip()
+            pd = pb.get("payment_details") or {}
+            if isinstance(pd, str):
+                try: pd = _json.loads(pd)
+                except: pd = {}
+
+            _, _, card_amt = _split_payment_modes(pb.get("net_amount") or pb.get("total_amount") or pb.get("gross_amount"), p_mode, pd)
+            if card_amt <= 0:
+                continue
+
+            seen_bills.add(b_no)
+
+            is_ip = bool(pb.get("inpatient_number") or pb.get("ip_no") or pb.get("admission_id"))
+            cat_title = "PHARMACY IP BILL (SH)" if is_ip else "PHARMACY OP BILL (SH)"
+            c_type, c_num = _get_card_details(pd, p_mode)
+            b_dt_val = pb.get("bill_date") or pb.get("created_date") or from_date_str
+
+            b_date_str = str(b_dt_val)[:10]
+            cashier_id = pb.get("billed_id") or pb.get("created_by") or pb.get("cashier_id") or ""
+            pat_name = pb.get("patientname") or pb.get("patient_name") or ""
+
+            raw_rows.append({
+                "date_raw": b_dt_val,
+                "date": b_date_str,
+                "category": cat_title,
+                "bill_no": b_no,
+                "uhid": str(pb.get("uhid") or ""),
+                "mr_no": str(pb.get("uhid") or ""),
+                "patient_name": pat_name,
+                "cashier_id": str(cashier_id),
+                "card_type": c_type,
+                "card_number": c_num,
+                "amount": card_amt,
+                "user": str(cashier_id or "STAFF").upper()
+            })
+
+        # -----------------------------------------------------------------
+        # DIRECT FALLBACK: Query hospital_billing for OP Bills (Consultation/Reg/Procedures)
+        # -----------------------------------------------------------------
+        billtype_map = {}
+        try:
+            for bt in db["hospital_billtype"].find({}, {"billTypeNo": 1, "bill_name": 1, "bill_type": 1}):
+                bt_no = str(bt.get("billTypeNo") or "").strip()
+                bt_name = str(bt.get("bill_name") or "").strip()
+                if bt_no and bt_name:
+                    billtype_map[bt_no] = bt_name
+                if bt.get("bill_type") is not None and bt_name:
+                    billtype_map[str(bt.get("bill_type")).strip()] = bt_name
+        except Exception:
+            pass
+
+        bill_direct_q = {
+            "is_cancelled": {"$ne": True},
+            "$or": pharm_date_clauses
+        }
+        if hospital_code: bill_direct_q["hospital_code"] = hospital_code
+        if branch_code: bill_direct_q["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            bill_direct_q["$and"] = [{"$or": [{"outlet_code": outlet_code}, {"outlet": outlet_code}, {"SelectedOutlet": outlet_code}]}]
+
+        direct_bills = list(db["hospital_billing"].find(bill_direct_q, {
+            "bill_number": 1, "bill_no": 1, "uhid": 1, "patient_name": 1, "net_amount": 1,
+            "total_fees": 1, "payment_mode": 1, "payment_method": 1, "payment_details": 1,
+            "bill_date": 1, "created_date": 1, "created_by": 1, "billTypeNo": 1, "bill_type": 1
+        }))
+
+        for hb in direct_bills:
+            b_no = hb.get("bill_number") or hb.get("bill_no")
+            if not b_no or b_no in seen_bills:
+                continue
+
+            p_mode = str(hb.get("payment_mode") or hb.get("payment_method") or "").strip()
+            pd = hb.get("payment_details") or {}
+            if isinstance(pd, str):
+                try: pd = _json.loads(pd)
+                except: pd = {}
+
+            _, _, card_amt = _split_payment_modes(hb.get("net_amount") or hb.get("total_fees"), p_mode, pd)
+            if card_amt <= 0:
+                continue
+
+            seen_bills.add(b_no)
+
+            bt_no = str(hb.get("billTypeNo") or "").strip()
+            bt_name = billtype_map.get(bt_no) or "PROCEDURES BILL (SH)"
+            if "(SH)" not in bt_name:
+                bt_name = f"{bt_name} (SH)"
+
+            c_type, c_num = _get_card_details(pd, p_mode)
+            b_dt_val = hb.get("bill_date") or hb.get("created_date") or from_date_str
+            b_date_str = str(b_dt_val)[:10]
+            cashier_id = hb.get("created_by") or ""
+
+            raw_rows.append({
+                "date_raw": b_dt_val,
+                "date": b_date_str,
+                "category": bt_name,
+                "bill_no": str(b_no),
+                "uhid": str(hb.get("uhid") or ""),
+                "mr_no": str(hb.get("uhid") or ""),
+                "patient_name": str(hb.get("patient_name") or ""),
+                "cashier_id": str(cashier_id),
+                "card_type": c_type,
+                "card_number": c_num,
+                "amount": card_amt,
+                "user": str(cashier_id or "STAFF").upper()
             })
 
         # Fetch Patient Names
@@ -1700,35 +1864,18 @@ def cash_bills_report(request):
 
             b_no = r.get("bill_no")
             if b_no and b_no in seen_bills: continue
-            if b_no: seen_bills.add(b_no)
 
-            p_mode = str(r.get("payment_mode") or "Cash").strip()
-            pd = r.get("payment_details") or {}
-            
-            cash_amt = 0.0
-            is_cash = False
+            # Cleanly split cash amount
+            cash_amt = _to_float(r.get("cash"))
+            if cash_amt <= 0:
+                p_mode = str(r.get("payment_mode") or "Cash").strip()
+                pd = r.get("payment_details") or {}
+                cash_amt, _, _ = _split_payment_modes(r.get("display_amount") or r.get("net_amount"), p_mode, pd)
 
-            if p_mode.lower() == "cash" or not p_mode:
-                is_cash = True
-                cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
-            elif "multiple" in p_mode.lower():
-                breakdown = pd.get("breakdown") or []
-                cash_total = sum(
-                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
-                    for b in breakdown if isinstance(b, dict) and "cash" in str(b.get("method") or b.get("payment_mode") or "").lower()
-                )
-                if cash_total > 0:
-                    is_cash = True
-                    cash_amt = cash_total
-                elif not breakdown:
-                    is_cash = True
-                    cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
-            elif "cash" in p_mode.lower():
-                is_cash = True
-                cash_amt = _to_float(r.get("display_amount") or r.get("net_amount"))
-
-            if not is_cash or cash_amt <= 0:
+            if cash_amt <= 0:
                 continue
+
+            if b_no: seen_bills.add(b_no)
 
             cat_title = r.get("type_name") or r.get("type") or "OTHER"
             b_date_str = str(r.get("bill_date") or from_date_str)[:10]
@@ -2109,28 +2256,10 @@ def date_wise_collection_summary_report(request):
                     else: bill_name = "GENERAL"
                 gross = net
 
-            # Split or single payment calculation for Cash vs Bank
-            breakdown = p_details.get("breakdown") if isinstance(p_details, dict) else None
-            if breakdown and isinstance(breakdown, list):
-                cash_part = sum(
-                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
-                    for b in breakdown if isinstance(b, dict) and "cash" in str(b.get("method") or b.get("payment_mode") or "").lower()
-                )
-                bank_part = sum(
-                    _to_float(b.get("Paid_amount") or b.get("amount") or b.get("paid_amount"))
-                    for b in breakdown if isinstance(b, dict) and "cash" not in str(b.get("method") or b.get("payment_mode") or "").lower()
-                )
-                if cash_part > 0 or bank_part > 0:
-                    cash = cash_part
-                    bank = bank_part
-                else:
-                    cash = net
-            else:
-                method = str((p_details.get("method") if isinstance(p_details, dict) else "") or p_mode or doc.get("payment_mode") or doc.get("payment_method") or "cash").lower().strip()
-                if "cash" in method or method == "":
-                    cash = net
-                else:
-                    bank = net
+            # Standardized split using _split_payment_modes
+            cash, cred_part, bank = _split_payment_modes(net, p_mode, p_details, is_credit_override=(ip_credit > 0))
+            if cred_part > 0 and ip_credit == 0.0:
+                ip_credit = cred_part
 
             key = (d_str, bill_name)
             if key not in summary_map:
@@ -2207,8 +2336,8 @@ def miscellaneous_payment_report(request):
     - receipt_type: 'Receipt' | 'Payment' (omit/'all' = both)
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         account_head_f = request.GET.get("account_head")
         receipt_type_f = request.GET.get("receipt_type")
         outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
@@ -2287,8 +2416,8 @@ def daily_cash_report(request):
     sources tracked inside this HMS application.
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         hospital_code, branch_code = _auth_scope(request)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -2408,8 +2537,8 @@ def debit_bills_report(request):
     of a credit/refund), sourced from Billing.edit_history.
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
@@ -2540,8 +2669,8 @@ def audit_report(request):
     Investigation Billing (hospital_investbilling 'history' array).
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
@@ -2733,8 +2862,8 @@ def sales_tax_register(request):
     - report_type  = 'all' | 'sales' | 'returns' (default: all)
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         patient_type = (request.GET.get("patient_type") or "all").lower()
         report_type = (request.GET.get("report_type") or "all").lower()
         outlet_code = request.GET.get("outlet_code") or request.GET.get("outlet")
@@ -3169,8 +3298,8 @@ def stock_report_ip_op(request):
     an inpatient_number (IP) or not (OP) — i.e. a consumption report.
     """
     try:
-        from_f = request.GET.get("from_date")
-        to_f   = request.GET.get("to_date")
+        from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
+        to_f   = request.GET.get("to_date") or request.GET.get("end_date") or request.GET.get("to")
         f_date = _parse_date(from_f) if from_f else None
         t_date = _parse_date(to_f) if to_f else None
 
