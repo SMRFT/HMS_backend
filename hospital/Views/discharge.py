@@ -439,7 +439,9 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "cancelled_date", None): update_dict["cancelled_date"] = obj.cancelled_date
             if getattr(obj, "cancelled_reason", None): update_dict["cancelled_reason"] = str(obj.cancelled_reason)
             if getattr(obj, "edit_history", None) is not None: update_dict["edit_history"] = obj.edit_history
-            if getattr(obj, "is_insurance_bill", None) is not None: update_dict["is_insurance_bill"] = bool(obj.is_insurance_bill)
+            if getattr(obj, "is_insurance_bill", None) is not None:
+                update_dict["is_insurance_bill"] = bool(obj.is_insurance_bill)
+                update_dict["customer_type"] = "INSURANCE" if bool(obj.is_insurance_bill) else "GENERAL"
             if getattr(obj, "claim_number", None) is not None: update_dict["claim_number"] = str(obj.claim_number)
             if getattr(obj, "id_card_number", None) is not None: update_dict["id_card_number"] = str(obj.id_card_number)
             if getattr(obj, "insurance_bill_number", None) is not None: update_dict["insurance_bill_number"] = str(obj.insurance_bill_number)
@@ -951,9 +953,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
 
-            raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
+            adm_cust_raw = (adm.get("customer_type") or adm.get("patient_type") or "") if adm else ""
+            bill_is_ins = bool(doc.get("is_insurance_bill", False)) or ("INSURANCE" in str(adm_cust_raw).upper())
+            bill_cust_type = str(adm_cust_raw or doc.get("customer_type") or ("INSURANCE" if bill_is_ins else "GENERAL")).strip()
+
+            raw_comp = (adm.get("insurance_company") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
             company_name_p = ""
-            if raw_comp:
+            if raw_comp and bill_is_ins:
                 if ins_map and str(raw_comp) in ins_map:
                     company_name_p = ins_map[str(raw_comp)]
                 else:
@@ -965,6 +971,21 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                         company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
                     except Exception:
                         company_name_p = str(raw_comp)
+
+            # For print bill alone: resolve insurance details from member master if it is an insurance bill
+            eff_claim = doc.get("claim_number") or ""
+            eff_id_card = doc.get("id_card_number") or ""
+            eff_company = (doc.get("company_name") or company_name_p or str(raw_comp)) if bill_is_ins else ""
+
+            if bill_is_ins and (not eff_claim or not eff_id_card or not eff_company):
+                p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() if p else ""
+                ins_member = _resolve_insurance_member_details(uhid=uhid, patient_name=p_name)
+                if not eff_claim and ins_member.get("claim_number"):
+                    eff_claim = ins_member["claim_number"]
+                if not eff_id_card and ins_member.get("id_card_number"):
+                    eff_id_card = ins_member["id_card_number"]
+                if not eff_company and ins_member.get("company_name"):
+                    eff_company = ins_member["company_name"]
 
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
@@ -985,9 +1006,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 "admission_date": adm_str,
                 "discharge_date": disch_str,
                 "room_no":        current_room,
-                "company":        doc.get("company_name") or company_name_p or str(raw_comp),
+                "company":        eff_company,
                 "company_code":   str(raw_comp),
-                "customer_type":  doc.get("customer_type") or (adm.get("customer_type") if adm else "") or ("INSURANCE" if doc.get("is_insurance_bill") else "GENERAL"),
+                "customer_type":  bill_cust_type,
+                "claim_number":   eff_claim,
+                "id_card_number": eff_id_card,
+                "card_no":        eff_id_card,
+                "referral_number": eff_claim,
             }
 
     created_by_val = doc.get("created_by")
@@ -1069,12 +1094,12 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         "net_amount":        _to_float(doc.get("net_amount")),
         "remarks":           doc.get("remarks") or "",
         "next_visit_date":   _safe_isoformat(doc.get("next_visit_date")),
-        "is_insurance_bill":     bool(doc.get("is_insurance_bill", False)),
-        "claim_number":          doc.get("claim_number") or "",
-        "id_card_number":        doc.get("id_card_number") or "",
+        "is_insurance_bill":     bill_is_ins,
+        "claim_number":          eff_claim if bill_is_ins else "",
+        "id_card_number":        eff_id_card if bill_is_ins else "",
         "insurance_bill_number": (str(doc.get("insurance_bill_number")).replace("/", "") if doc.get("insurance_bill_number") else ""),
-        "company_name":          doc.get("company_name") or "",
-        "customer_type":         doc.get("customer_type") or (adm.get("customer_type") if adm else "") or ("INSURANCE" if doc.get("is_insurance_bill") else "GENERAL"),
+        "company_name":          eff_company if bill_is_ins else "",
+        "customer_type":         bill_cust_type,
         "payment_method":        doc.get("payment_method") or "Cash",
         "created_by":             created_by_val,
         "created_by_name":        created_by_name,
@@ -1281,7 +1306,26 @@ def _apply_fields(obj, data, existing=None, request=None):
     meds_val  = flt("medicines_amount")
     imp_val   = flt("implant_amount") if data.get("implant_amount") is not None else flt("implants")
     tax_val   = flt("taxable_amount") + flt("gst_amount") + flt("room_tax")
-    gross_calculated = round(items_sum + meds_val + imp_val + tax_val, 2)
+
+    # If MEDICINE CHARGES is an item in the items list, avoid double counting
+    has_med_item = any(
+        isinstance(it, dict) and (
+            str(it.get("itemName") or it.get("name") or "").strip().upper() == "MEDICINE CHARGES" or
+            it.get("billTypeNo") == "PHARM01" or it.get("bill_type") == 13
+        )
+        for it in items
+    )
+    if meds_val == 0 and has_med_item:
+        for it in items:
+            if isinstance(it, dict) and (
+                str(it.get("itemName") or it.get("name") or "").strip().upper() == "MEDICINE CHARGES" or
+                it.get("billTypeNo") == "PHARM01" or it.get("bill_type") == 13
+            ):
+                meds_val = _to_float(it.get("amount", 0))
+                break
+
+    effective_meds = 0.0 if has_med_item else meds_val
+    gross_calculated = round(items_sum + effective_meds + imp_val + tax_val, 2)
 
     passed_total = flt("total_amount")
     if gross_calculated > passed_total and (meds_val > 0 or imp_val > 0):
@@ -2053,14 +2097,16 @@ def search_discharge_patient(request):
     guardian_val = patient_doc.get("guardian_name") or patient_doc.get("spouse_name") or patient_doc.get("father_name") or patient_doc.get("emergency_contact") or ""
     guardian_type_val = patient_doc.get("guardian_type") or ("W/o" if str(patient_doc.get("gender", "")).lower() == "female" and patient_doc.get("spouse_name") else "S/o")
 
-    cust_type = str(admission_doc.get("customer_type") or patient_doc.get("customer_type") or admission_doc.get("patient_type") or "").strip()
+    # Strictly determine Billing Type from admission alone - NEVER fall back to patient_doc or member master
+    adm_cust_raw = admission_doc.get("customer_type") or admission_doc.get("patient_type") or "GENERAL"
+    cust_type = str(adm_cust_raw).strip()
     is_insurance = "INSURANCE" in cust_type.upper()
 
-    # Resolve full insurance company name only if insurance patient
+    # Resolve full insurance company name strictly from admission if insurance patient
     raw_company = ""
     company_name = ""
     if is_insurance:
-        raw_company = admission_doc.get("company_code") or patient_doc.get("company_code") or admission_doc.get("insurance_company") or patient_doc.get("company_name") or ""
+        raw_company = admission_doc.get("insurance_company") or admission_doc.get("company_code") or ""
         if raw_company:
             try:
                 ins_doc = db["hospital_insuranceprovider"].find_one({
@@ -2471,29 +2517,58 @@ def search_discharge_patient(request):
                         except Exception:
                             pass
             name_cache = {}
+            price_cache = {}
             if missing_ids:
                 try:
-                    for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1}):
-                        name_cache[str(pi.get("item_id"))] = str(pi.get("item_name") or pi.get("name") or "")
+                    for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1, "unit_price": 1, "packing_price": 1, "mrp": 1}):
+                        sid = str(pi.get("item_id"))
+                        name_cache[sid] = str(pi.get("item_name") or pi.get("name") or "").strip()
+                        price_cache[sid] = _to_float(pi.get("unit_price") or pi.get("mrp") or pi.get("packing_price") or 0)
                 except Exception:
                     pass
+                # Secondary lookup in pharmacy billing if still missing
+                still_missing = [mid for mid in missing_ids if str(mid) not in name_cache]
+                if still_missing:
+                    try:
+                        for pb in db["hospital_pharmacybilling"].find(
+                            {"medicine_particulars.item_id": {"$in": still_missing}, "medicine_particulars.item_name": {"$exists": True, "$ne": ""}},
+                            {"medicine_particulars": 1}
+                        ).limit(50):
+                            for m in (pb.get("medicine_particulars") or []):
+                                mid = m.get("item_id")
+                                if mid in still_missing and m.get("item_name"):
+                                    smid = str(mid)
+                                    if smid not in name_cache:
+                                        name_cache[smid] = str(m.get("item_name")).strip()
+                                    if smid not in price_cache and m.get("price"):
+                                        price_cache[smid] = _to_float(m.get("price"))
+                    except Exception:
+                        pass
 
             for doc in pharm_docs:
                 tot_amt = _to_float(
                     doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
                 )
-                bill_no = str(doc.get("bill_no") or "")
+                disp_hist = doc.get("dispatch_history") or []
+                last_disp_bno = disp_hist[-1].get("bill_no") if (isinstance(disp_hist, list) and disp_hist and isinstance(disp_hist[-1], dict)) else ""
+                bill_no = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
                 meds = doc.get("medicine_particulars", [])
                 calc_tot = 0.0
                 if isinstance(meds, list) and len(meds) > 0:
                     for med in meds:
                         if isinstance(med, dict):
                             qty = float(med.get("qty") or med.get("quantity") or 1)
-                            rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or 0)
-                            d_val = _to_float(med.get("discount") or 0)
-                            amt = _to_float(med.get("amount") or med.get("calculated_price")) or max(0.0, rate * qty - d_val)
-                            calc_tot += amt
                             iid = str(med.get("item_id") or "")
+                            rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or price_cache.get(iid) or 0)
+                            d_val = _to_float(med.get("discount") or 0)
+                            amt = _to_float(med.get("amount") or med.get("calculated_price"))
+                            if amt == 0:
+                                if rate > 0:
+                                    amt = max(0.0, rate * qty - d_val)
+                                elif len(meds) == 1 and tot_amt > 0:
+                                    amt = tot_amt
+                                    rate = round(tot_amt / max(qty, 1), 2)
+                            calc_tot += amt
                             iname = str(med.get("item_name") or name_cache.get(iid) or f"Medicine {iid}").strip()
                             batch = str(med.get("batch_number") or "").strip()
                             pharmacy_medicines.append({
@@ -2518,6 +2593,28 @@ def search_discharge_patient(request):
 
         patient_info["medicines_amount"] = total_pharm_amt
         patient_info["pharmacy_medicines"] = pharmacy_medicines
+
+        # Add single summary MEDICINE CHARGES item to table list if pharmacy charges exist
+        if total_pharm_amt > 0:
+            invest_items.append({
+                "invest_bill_no": "PHARM01",
+                "bill_object_id": "",
+                "itemName":       "MEDICINE CHARGES",
+                "code":           "04009",
+                "price":          total_pharm_amt,
+                "rate":           str(total_pharm_amt),
+                "quantity":       1,
+                "discount":       0,
+                "amount":         total_pharm_amt,
+                "billTypeNo":     "PHARM01",
+                "bill_type":      13,
+                "test_id":        None,
+                "doctor":         patient_info.get("doctor") or "",
+                "payment_status": "Billed",
+                "package_name":   "",
+                "source":         "hospital_pharmacybilling",
+                "category":       "MEDICINE / PHARMACY CHARGES",
+            })
 
         # ── 5. Sales Returns & Ward Returns ──────────────────────────────────
         total_sales_return = 0.0
@@ -2946,25 +3043,56 @@ def get_discharge_bill_medicines(request):
                     except Exception:
                         pass
         name_cache = {}
+        price_cache = {}
         if missing_ids:
             try:
-                for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1}):
-                    name_cache[str(pi.get("item_id"))] = str(pi.get("item_name") or pi.get("name") or "")
+                for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1, "unit_price": 1, "packing_price": 1, "mrp": 1}):
+                    sid = str(pi.get("item_id"))
+                    name_cache[sid] = str(pi.get("item_name") or pi.get("name") or "").strip()
+                    price_cache[sid] = _to_float(pi.get("unit_price") or pi.get("mrp") or pi.get("packing_price") or 0)
             except Exception:
                 pass
+            still_missing = [mid for mid in missing_ids if str(mid) not in name_cache]
+            if still_missing:
+                try:
+                    for pb in db["hospital_pharmacybilling"].find(
+                        {"medicine_particulars.item_id": {"$in": still_missing}, "medicine_particulars.item_name": {"$exists": True, "$ne": ""}},
+                        {"medicine_particulars": 1}
+                    ).limit(50):
+                        for m in (pb.get("medicine_particulars") or []):
+                            mid = m.get("item_id")
+                            if mid in still_missing and m.get("item_name"):
+                                smid = str(mid)
+                                if smid not in name_cache:
+                                    name_cache[smid] = str(m.get("item_name")).strip()
+                                if smid not in price_cache and m.get("price"):
+                                    price_cache[smid] = _to_float(m.get("price"))
+                except Exception:
+                    pass
 
         pharmacy_medicines = []
         for doc in pharm_docs:
-            b_num = str(doc.get("bill_no") or doc.get("Bill_id") or "")
+            tot_amt = _to_float(
+                doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
+            )
+            disp_hist = doc.get("dispatch_history") or []
+            last_disp_bno = disp_hist[-1].get("bill_no") if (isinstance(disp_hist, list) and disp_hist and isinstance(disp_hist[-1], dict)) else ""
+            b_num = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
             meds = doc.get("medicine_particulars", [])
             if isinstance(meds, list):
                 for med in meds:
                     if isinstance(med, dict):
                         qty = float(med.get("qty") or med.get("quantity") or 1)
-                        rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or 0)
-                        d_val = _to_float(med.get("discount") or 0)
-                        amt = _to_float(med.get("amount") or med.get("calculated_price")) or max(0.0, rate * qty - d_val)
                         iid = str(med.get("item_id") or "")
+                        rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or price_cache.get(iid) or 0)
+                        d_val = _to_float(med.get("discount") or 0)
+                        amt = _to_float(med.get("amount") or med.get("calculated_price"))
+                        if amt == 0:
+                            if rate > 0:
+                                amt = max(0.0, rate * qty - d_val)
+                            elif len(meds) == 1 and tot_amt > 0:
+                                amt = tot_amt
+                                rate = round(tot_amt / max(qty, 1), 2)
                         iname = str(med.get("item_name") or name_cache.get(iid) or f"Medicine {iid}").strip()
                         batch = str(med.get("batch_number") or "").strip()
                         pharmacy_medicines.append({
