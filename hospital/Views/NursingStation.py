@@ -1201,7 +1201,7 @@ def save_lab_ward_request(request):
         else:
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-        prefix_key = f"{financial_year}/{bill_type_val}"
+        prefix_key = f"{financial_year}{bill_type_val}"
         counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
             {"_id": prefix_key},
@@ -2872,7 +2872,7 @@ def save_radiology_ward_request(request):
         else:
             financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
 
-        prefix_key = f"{financial_year}/{bill_type_val}"
+        prefix_key = f"{financial_year}{bill_type_val}"
         counters_collection = mongo_db["counters"]
         counter = counters_collection.find_one_and_update(
             {"_id": prefix_key},

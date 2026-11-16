@@ -336,6 +336,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-rack-update/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-opening-stock-report/?(\?.*)?$': 'HMS-API-IT',
     r'^(/_b_a_c_k_e_n_d/HMS)?/stores-item-master-stock-report/?(\?.*)?$': 'HMS-API-IT',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/outlet-wise-stock-report/?(\?.*)?$': 'HMS-P-DPRD',
 
     # ==================== DISCHARGE ====================
     r'^/_b_a_c_k_e_n_d/HMS/search-admissions/?(\?.*)?$': 'HMS-P-SADM',
