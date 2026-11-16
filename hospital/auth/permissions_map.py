@@ -79,7 +79,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/InsuranceReportsDashboard/?(\?.*)?$': 'HMS-P-FOR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports-dashboard/?(\?.*)?$': 'HMS-P-FOR',
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports/?(\?.*)?$': 'HMS-P-FOR',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': 'HMS-P-FOR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|medicine-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': 'HMS-P-FOR',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
 
     # ==================== INSURANCE CLAIMS & MEMBERS ====================

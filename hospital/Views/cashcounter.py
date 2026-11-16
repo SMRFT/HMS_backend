@@ -1010,14 +1010,7 @@ def calculate_shift_collection(shift_no):
                     amt = to_float(r["payment_details"].get("Paid_amount", 0))
 
                 results["sales_return"] += amt
-                c_ret, cr_ret = parse_payment_split(r, amt)
-                if cr_ret > 0 and c_ret == 0:
-                    results["total_credit"] = max(0.0, results["total_credit"] - cr_ret)
-                    results["credit_collection"] = max(0.0, results["credit_collection"] - cr_ret)
-                else:
-                    deduct = c_ret if c_ret > 0 else amt
-                    results["total_collection"] = max(0.0, results["total_collection"] - deduct)
-                    results["cash_collection"] = max(0.0, results["cash_collection"] - deduct)
+                # Sales returns are recorded separately in results["sales_return"] and subtracted during closing balance computation (ClosingBalance = OpeningBalance + collected_Amount - SalesReturnAmount)
 
         # 7. Receipt and Payment
         rp_docs = list(db["hospital_receiptandpayment"].find(
@@ -3711,7 +3704,7 @@ def get_shift_summary_report(request):
                 "CashCounterName": cc_map.get(cc_id, cc_id),
                 "OpeningBalance": _to_num(s.get("OpeningBalance")),
                 "ClosingBalance": _to_num(s.get("ClosingBalance")),
-                "collected_Amount": round(col_amt - ret_amt, 2),
+                "collected_Amount": round(col_amt, 2),
                 "CreditAmount": round(credit_amt, 2),
                 "credit_amount": round(credit_amt, 2),
                 "PettyCashBalance": _to_num(s.get("PettyCashBalance")),
