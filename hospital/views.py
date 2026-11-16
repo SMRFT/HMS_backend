@@ -714,7 +714,7 @@ def patient_registration_stats(request):
         doctor_id = request.GET.get('doctorId')
 
         # Get current date for defaults
-        today = timezone.now().date()
+        today = timezone.localdate()
 
         if from_date_str:
              from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
@@ -801,7 +801,7 @@ def patient_visit_list(request):
         to_date_str = request.GET.get('toDate')
         doctor_id = request.GET.get('doctorId')
 
-        today = timezone.now().date()
+        today = timezone.localdate()
 
         if from_date_str:
              from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
@@ -911,12 +911,20 @@ def patient_visit_list(request):
                 amt = r.refund_amount
                 if hasattr(amt, 'to_decimal'): amt = amt.to_decimal()
                 total_refunded += float(amt)
+
+                ref_dt_str = ''
+                if r.refund_date:
+                    ref_dt = r.refund_date
+                    if timezone.is_naive(ref_dt):
+                        ref_dt = timezone.make_aware(ref_dt)
+                    ref_dt_str = timezone.localtime(ref_dt).strftime("%d-%m-%Y %I:%M %p")
+
                 refund_data.append({
                     "refund_bill_no": r.refund_bill_no,
                     "amount": str(r.refund_amount),
                     "status": r.status,
                     "reason": r.remarks or '',
-                    "date": r.refund_date.strftime("%d-%m-%Y %I:%M %p") if r.refund_date else ''
+                    "date": ref_dt_str
                 })
 
             formatted_history = []
@@ -937,8 +945,14 @@ def patient_visit_list(request):
                     else:
                         formatted_changes[f_key] = f_val
 
+                h_date = h.get('date')
+                if isinstance(h_date, datetime):
+                    if timezone.is_naive(h_date):
+                        h_date = timezone.make_aware(h_date)
+                    h_date = timezone.localtime(h_date).strftime("%d-%m-%Y %I:%M %p")
+
                 formatted_history.append({
-                    'date': h.get('date'),
+                    'date': h_date,
                     'user': resolved_user,
                     'reason': h.get('reason', '') or (h.get('changes', {}).get('refund', {}).get('reason', '') if isinstance(h.get('changes'), dict) else ''),
                     'changes': formatted_changes
@@ -954,6 +968,13 @@ def patient_visit_list(request):
             area_val = getattr(p, 'area', '') or ''
             city_val = getattr(p, 'city', '') or ''
             dist_val = getattr(p, 'district', '') or ''
+
+            billed_dt_str = ''
+            if bill.billed_date:
+                b_dt = bill.billed_date
+                if timezone.is_naive(b_dt):
+                    b_dt = timezone.make_aware(b_dt)
+                billed_dt_str = timezone.localtime(b_dt).strftime("%d-%m-%Y %I:%M %p")
 
             data.append({
                 "uhid": p.uhid,
@@ -978,7 +999,7 @@ def patient_visit_list(request):
                 "billAmount": str(bill.total_fees or 0),
                 "paymentStatus": bill.payment_status,
                 "paymentMethod": bill.payment_method or 'Cash',
-                "date": bill.billed_date.strftime("%d-%m-%Y %I:%M %p") if bill.billed_date else '',
+                "date": billed_dt_str,
                 "created_by": str(bill.created_by or ''),
                 "preparedBy": emp_map.get(str(bill.created_by).strip()) or str(bill.created_by or 'Staff'),
                 "editHistory": formatted_history,
