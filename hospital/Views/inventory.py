@@ -583,55 +583,33 @@ def pharmacy_item_view(request, pk=None):
                     return docs
                 client, db = get_hms_db()
 
-                cat_ids = set()
-                for it in docs:
-                    c = it.get("category")
-                    if c is not None and str(c).strip():
-                        s = str(c).strip()
-                        if s.isdigit():
-                            cat_ids.add(int(s))
-                        cat_ids.add(s)
-
-                comp_ids = set()
-                for it in docs:
-                    comp = it.get("chemical_composition")
-                    if comp is not None and str(comp).strip():
-                        s = str(comp).strip()
-                        if s.isdigit():
-                            comp_ids.add(int(s))
-                        comp_ids.add(s)
+                # Preload all 47 categories and 1587 compositions into memory maps for O(1) instant lookup
+                try:
+                    cat_docs = list(db["hospital_pharmacycategory"].find({}, {"category_id": 1, "category_name": 1}))
+                except Exception:
+                    cat_docs = []
+                try:
+                    comp_docs = list(db["hospital_chemicalcomposition"].find({}, {"composition_id": 1, "composition_name": 1}))
+                except Exception:
+                    comp_docs = []
 
                 cat_map = {}
-                if cat_ids:
-                    cat_docs = list(db["hospital_pharmacycategory"].find({
-                        "$or": [
-                            {"category_id": {"$in": list(cat_ids)}},
-                            {"category_id": {"$in": [str(x) for x in cat_ids]}}
-                        ]
-                    }))
-                    for c in cat_docs:
-                        cid = str(c.get("category_id", "")).strip()
-                        cname = c.get("category_name", "")
-                        if cid:
-                            cat_map[cid] = cname
-                        if cname:
-                            cat_map[cname.lower()] = cname
+                for c in cat_docs:
+                    cid = str(c.get("category_id", "")).strip()
+                    cname = c.get("category_name", "")
+                    if cid:
+                        cat_map[cid] = cname
+                    if cname:
+                        cat_map[cname.lower()] = cname
 
                 comp_map = {}
-                if comp_ids:
-                    comp_docs = list(db["hospital_chemicalcomposition"].find({
-                        "$or": [
-                            {"composition_id": {"$in": list(comp_ids)}},
-                            {"composition_id": {"$in": [str(x) for x in comp_ids]}}
-                        ]
-                    }))
-                    for c in comp_docs:
-                        cid = str(c.get("composition_id", "")).strip()
-                        cname = c.get("composition_name", "")
-                        if cid:
-                            comp_map[cid] = cname
-                        if cname:
-                            comp_map[cname.lower()] = cname
+                for c in comp_docs:
+                    cid = str(c.get("composition_id", "")).strip()
+                    cname = c.get("composition_name", "")
+                    if cid:
+                        comp_map[cid] = cname
+                    if cname:
+                        comp_map[cname.lower()] = cname
 
                 for it in docs:
                     if it.get("item_name"):
@@ -652,11 +630,20 @@ def pharmacy_item_view(request, pk=None):
                 docs.sort(key=lambda x: str(x.get("item_name") or "").upper())
                 return docs
 
+            proj = {
+                "_id": 0, "item_id": 1, "item_name": 1, "item_last_name": 1, "brand_name": 1,
+                "item_code": 1, "hsn": 1, "category": 1, "chemical_composition": 1,
+                "mrp": 1, "purchase_rate": 1, "selling_price": 1, "gst": 1, "unit": 1, "is_active": 1,
+                "created_date": 1, "lastmodified_date": 1, "created_by": 1, "lastmodified_by": 1,
+                "hospital_code": 1, "branch_code": 1
+            }
+
             return Response(paginate_mongo_query(
                 "hospital_pharmacyitem",
                 filter_q,
                 sort=[("item_name", ASCENDING)],
                 enrich_fn=_enrich_pharmacy_items,
+                projection=proj,
                 request=request
             ))
 

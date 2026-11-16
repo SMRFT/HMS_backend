@@ -449,8 +449,16 @@ def paginate_mongo_query(
                 req_params = request.query_params
             elif hasattr(request, "GET") and request.GET:
                 req_params = request.GET
-        if not req_params.get("unlimited") and not req_params.get("export"):
-            cursor = cursor.limit(5000)
+        # In inventory search and master dropdowns, fetch all data without pagination/truncation across all alphabets
+        is_medicine_or_all = (
+            collection_name in ("hospital_pharmacyitem", "hospital_pharmacystock") or
+            req_params.get("unlimited") == "true" or
+            req_params.get("page") == "all" or
+            req_params.get("all") == "true" or
+            req_params.get("export")
+        )
+        if not is_medicine_or_all:
+            cursor = cursor.limit(50000)
 
         docs = clean_docs(list(cursor))
         docs = enrich_employee_names(docs)
