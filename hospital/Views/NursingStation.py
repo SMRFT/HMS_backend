@@ -153,6 +153,9 @@ def get_admission_list(request):
                 if shifting and isinstance(shifting, list):
 
                     active_shift = next((s for s in shifting if s.get("is_roomActive")), None)
+                    if not active_shift and shifting:
+                        # Fallback to latest room entry if no shift is flagged active
+                        active_shift = shifting[-1]
 
                     if active_shift:
 
@@ -377,6 +380,31 @@ def get_admission_list(request):
                 item["room_category"] = item.get("room_category")
                 item["block"] = item.get("block")
                 item["nursing_station"] = item.get("nursing_station")
+
+            # Format admissionDateTime into IST (Indian Standard Time)
+            raw_adm_dt = item.get("admissionDateTime")
+            if raw_adm_dt:
+                adm_dt_obj = None
+                if isinstance(raw_adm_dt, str):
+                    try:
+                        clean_str = raw_adm_dt.replace("Z", "+00:00")
+                        adm_dt_obj = datetime.fromisoformat(clean_str)
+                    except Exception:
+                        pass
+                elif isinstance(raw_adm_dt, datetime):
+                    adm_dt_obj = raw_adm_dt
+
+                if adm_dt_obj:
+                    try:
+                        if not adm_dt_obj.tzinfo:
+                            adm_dt_obj = pytz.UTC.localize(adm_dt_obj)
+                        kolkata_tz = pytz.timezone("Asia/Kolkata")
+                        ist_dt = adm_dt_obj.astimezone(kolkata_tz)
+                        item["admissionDateTime"] = ist_dt.isoformat()
+                        item["admissionDate"] = ist_dt.strftime("%d/%m/%Y")
+                        item["admissionTime"] = ist_dt.strftime("%I:%M %p")
+                    except Exception:
+                        pass
 
         # Phase 7: Batch compute pending request flags for admitted patients
         active_ips = [it.get("ipNumber") for it in data if it.get("ipNumber") and not it.get("is_discharged")]
@@ -852,6 +880,9 @@ def serialize_doc(doc):
         return str(doc)
 
     elif isinstance(doc, datetime):
+
+        if doc.tzinfo is None:
+            return doc.isoformat() + "Z"
 
         return doc.isoformat()
 
