@@ -796,6 +796,20 @@ def get_salesreturn_billdetails(request):
             except (ValueError, TypeError):
                 item_price = 0.0
 
+            # 🔹 DISCOUNT DETAILS FROM BILLED ITEM
+            disc_type = item.get("discount_type") or "percent"
+            try:
+                disc_val = float(item.get("discount_value") or item.get("discount_percent") or item.get("discount") or 0)
+            except (ValueError, TypeError):
+                disc_val = 0.0
+            try:
+                disc_amt = float(item.get("discount_amount") or 0)
+            except (ValueError, TypeError):
+                disc_amt = 0.0
+
+            # Pro-rate discount amount to remaining returnable quantity
+            remaining_disc_amt = round((disc_amt / billed_qty) * remaining_qty, 2) if billed_qty > 0 else 0.0
+
             items_data.append({
                 "item_id":            item_id,
                 "item_name":          item_name,
@@ -807,6 +821,11 @@ def get_salesreturn_billdetails(request):
                 "qty":                remaining_qty,            # returnable qty
                 "price":              item_price,
                 "calculated_price":   remaining_calc_price,     # pro-rated to remaining qty
+                "discount_type":      disc_type,
+                "discount_value":     disc_val,
+                "discount_percent":   disc_val,
+                "discount_amount":    remaining_disc_amt,
+                "original_discount_amount": disc_amt,
                 "mrp":                convert_decimal(stock.get("mrp")) if stock else 0,
                 "expiry_date":        stock.get("expiry_date") if stock else None,
                 "available_stock":    stock.get("total_stock", 0) if stock else 0,

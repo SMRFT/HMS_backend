@@ -450,6 +450,56 @@ def get_pharmacy_stock(request):
                 str(x.get("item_name") or "").upper()
             ))
 
+        # Enrich each stock item with expiry calculation (within 10 days of expiry)
+        now_dt = datetime.now()
+        import calendar
+        for item in result:
+            exp_str = item.get("expiry_date")
+            is_exp = False
+            is_soon = False
+            days_left = None
+            if exp_str:
+                try:
+                    exp_dt = None
+                    if isinstance(exp_str, datetime):
+                        exp_dt = exp_str.replace(tzinfo=None)
+                    elif isinstance(exp_str, str):
+                        clean_exp = exp_str.strip().split("T")[0]
+                        for sep in ["/", "-"]:
+                            if sep in clean_exp:
+                                parts = clean_exp.split(sep)
+                                if len(parts) >= 3:
+                                    if len(parts[0]) == 4:
+                                        exp_dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                                    else:
+                                        exp_dt = datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+                                    break
+                                elif len(parts) == 2:
+                                    if len(parts[0]) == 4:
+                                        yr, mo = int(parts[0]), int(parts[1])
+                                    else:
+                                        mo, yr = int(parts[0]), int(parts[1])
+                                    last_day = calendar.monthrange(yr, mo)[1]
+                                    exp_dt = datetime(yr, mo, last_day)
+                                    break
+                        if not exp_dt:
+                            try:
+                                exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                            except Exception:
+                                pass
+                    if exp_dt:
+                        diff = (exp_dt.date() - now_dt.date()).days
+                        days_left = diff
+                        if diff < 0:
+                            is_exp = True
+                        elif diff <= 10:
+                            is_soon = True
+                except Exception:
+                    pass
+            item["days_to_expiry"] = days_left
+            item["is_expired"] = is_exp
+            item["is_expiring_soon"] = is_soon
+
         return JsonResponse({
             "success": True,
             "data": result
@@ -532,12 +582,31 @@ def sanitize_medicines(medicines):
 
         # item_name is intentionally NOT stored: item_id is the source of truth,
         # and item_name is resolved on read / UI comparison
-        disc_val = float(med.get("discount_value", 0) or med.get("discount_percent", 0) or med.get("discount", 0) or 0)
+        raw_dv = med.get("discount_value")
+        if raw_dv is not None and str(raw_dv).strip() not in ("", "%"):
+            try:
+                disc_val = float(raw_dv)
+            except Exception:
+                disc_val = 0.0
+        elif med.get("discount") is not None and str(med.get("discount")).strip() not in ("", "%"):
+            try:
+                disc_val = float(med.get("discount"))
+            except Exception:
+                disc_val = 0.0
+        elif med.get("discount_percent") is not None and str(med.get("discount_percent")).strip() not in ("", "%"):
+            try:
+                disc_val = float(med.get("discount_percent"))
+            except Exception:
+                disc_val = 0.0
+        else:
+            disc_val = 0.0
+
         disc_type = str(med.get("discount_type") or "percent").strip()
         disc_amt = float(med.get("discount_amount", 0) or 0)
         qty_val = int(med.get("qty", 0) or med.get("quantity", 0))
         price_val = float(med.get("price", 0) or med.get("mrp", 0))
         calc_price = float(med.get("calculated_price", 0) or (qty_val * price_val))
+        mrp_val = float(med.get("mrp", 0) or (calc_price / qty_val if qty_val > 0 else price_val))
 
         if disc_amt == 0 and disc_val > 0:
             gross = float(qty_val * price_val)
@@ -548,10 +617,11 @@ def sanitize_medicines(medicines):
             "batch_number": bn_val,
             "qty": qty_val,
             "price": price_val,
+            "mrp": mrp_val,
             "calculated_price": calc_price,
             "discount_type": disc_type,
             "discount_value": disc_val,
-            "discount_percent": disc_val if disc_type == "percent" else 0.0,
+            "discount_percent": "%" if disc_type == "percent" else str(med.get("discount_percent") or "%"),
             "discount_amount": round(disc_amt, 2),
             "discount": disc_val,
             "edit_history": med.get("edit_history") or []
@@ -838,7 +908,7 @@ def save_pharmacy_bill(request):
         "payment_mode":             norm_pm,
     }
 
-    # ✅ Save patientname (model schema standard)
+    # ✅ Save patient_name (MongoDB standard used throughout)
     raw_pname = (
         data.get("patient_name")
         or data.get("patientname")
@@ -850,7 +920,6 @@ def save_pharmacy_bill(request):
         raw_pname = raw_pname.strip()
 
     if raw_pname:
-        fields["patientname"]  = raw_pname
         fields["patient_name"] = raw_pname
 
     # ======================================================
@@ -1622,8 +1691,26 @@ def get_estimate_bills(request):
                         pass
 
                 qty = float(med.get("qty", 0) or med.get("quantity", 0) or 0)
-                rate = float(med.get("price", 0) or med.get("mrp", 0) or med.get("Selling_Price", 0) or 0)
-                mrp = float(med.get("mrp", 0) or rate)
+                calc_price = float(med.get("calculated_price", 0) or 0)
+                med_total = float(med.get("total", 0) or 0)
+
+                # Robust unit MRP derivation:
+                unit_mrp = 0.0
+                if med.get("mrp") is not None and float(med.get("mrp")) > 0:
+                    unit_mrp = float(med.get("mrp"))
+                elif calc_price > 0 and qty > 0:
+                    unit_mrp = round(calc_price / qty, 2)
+                elif med_total > 0 and qty > 0:
+                    unit_mrp = round(med_total / qty, 2)
+                elif med.get("Selling_Price") is not None and float(med.get("Selling_Price")) > 0:
+                    unit_mrp = float(med.get("Selling_Price"))
+                elif med.get("selling_price") is not None and float(med.get("selling_price")) > 0:
+                    unit_mrp = float(med.get("selling_price"))
+                elif med.get("price") is not None and float(med.get("price")) > 0:
+                    unit_mrp = float(med.get("price"))
+
+                rate = float(med.get("price") or unit_mrp)
+                mrp = float(unit_mrp or rate)
 
                 particulars.append({
                     **med,
@@ -1635,9 +1722,10 @@ def get_estimate_bills(request):
                     "quantity": qty,
                     "price": rate,
                     "mrp": mrp,
-                    "selling_price": rate,
-                    "calculated_price": float(med.get("calculated_price", 0) or (qty * mrp)),
-                    "total": float(med.get("total", 0) or (qty * mrp)),
+                    "Selling_Price": mrp,
+                    "selling_price": mrp,
+                    "calculated_price": float(calc_price or (qty * mrp)),
+                    "total": float(med_total or (qty * mrp)),
                     "CGST_Percentage": float(med.get("CGST_Percentage", 0) or 0),
                     "SGST_Percentage": float(med.get("SGST_Percentage", 0) or 0),
                     "CGST_Amt": float(med.get("CGST_Amt", 0) or 0),
@@ -1729,16 +1817,38 @@ def convert_estimate_to_bill(request, estimate_no):
             if not isinstance(m, dict):
                 continue
             item_id = m.get("item_id")
-            rate = float(m.get("price") or m.get("Price") or m.get("mrp") or 0)
-            mrp = float(m.get("mrp") or rate)
+            qty = float(m.get("qty", 0) or m.get("quantity", 0) or 0)
+            calc_price = float(m.get("calculated_price", 0) or 0)
+            m_total = float(m.get("total", 0) or 0)
+
+            unit_mrp = 0.0
+            if m.get("mrp") is not None and float(m.get("mrp")) > 0:
+                unit_mrp = float(m.get("mrp"))
+            elif calc_price > 0 and qty > 0:
+                unit_mrp = round(calc_price / qty, 2)
+            elif m_total > 0 and qty > 0:
+                unit_mrp = round(m_total / qty, 2)
+            elif m.get("Selling_Price") is not None and float(m.get("Selling_Price")) > 0:
+                unit_mrp = float(m.get("Selling_Price"))
+            elif m.get("selling_price") is not None and float(m.get("selling_price")) > 0:
+                unit_mrp = float(m.get("selling_price"))
+            elif m.get("price") is not None and float(m.get("price")) > 0:
+                unit_mrp = float(m.get("price"))
+
+            rate = float(m.get("price") or unit_mrp)
+            mrp = float(unit_mrp or rate)
             converted_items.append({
                 "item_id": item_id,
                 "item_name": m.get("item_name") or m.get("medicine_name") or m.get("name") or "",
                 "batch_number": m.get("batch_number", ""),
-                "qty": float(m.get("qty", 0) or m.get("quantity", 0) or 0),
+                "qty": qty,
+                "quantity": qty,
                 "price": rate,
                 "mrp": mrp,
-                "calculated_price": float(m.get("calculated_price", 0) or 0),
+                "Selling_Price": mrp,
+                "selling_price": mrp,
+                "calculated_price": float(calc_price or (qty * mrp)),
+                "total": float(m_total or (qty * mrp)),
                 "edit_history": m.get("edit_history", [])
             })
 
@@ -4138,7 +4248,7 @@ def finalize_bill(request):
                 "branch_code":              branch_code,
                 "outlet_code":              bill_outlet,
                 "uhid":                     bill.get("uhid"),
-                "patientname":              resolved_p_name,
+                "patient_name":             resolved_p_name,
                 "inpatient_number":         bill.get("inpatient_number"),
                 "room_no":                  bill.get("room_no") or bill.get("ward_name"),
                 "doctor_id":                bill.get("doctor_id") or data.get("doctor_id"),
@@ -5229,7 +5339,15 @@ def pharmacy_view_bills(request):
 
             total_gst_pct = cgst_pct + sgst_pct
             product_val = round(calc_val / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_val
-            disc_val = to_num(it.get("discount_value", it.get("discount_percent", it.get("discount", 0))))
+            raw_dv = it.get("discount_value")
+            if raw_dv is not None and str(raw_dv).strip() not in ("", "%"):
+                disc_val = to_num(raw_dv)
+            elif it.get("discount") is not None and str(it.get("discount")).strip() not in ("", "%"):
+                disc_val = to_num(it.get("discount"))
+            elif it.get("discount_percent") is not None and str(it.get("discount_percent")).strip() not in ("", "%"):
+                disc_val = to_num(it.get("discount_percent"))
+            else:
+                disc_val = 0.0
             disc_amt = to_num(it.get("discount_amount", 0))
             if disc_amt == 0.0 and disc_val > 0:
                 disc_amt = round(product_val * (disc_val / 100.0), 4)
@@ -5953,10 +6071,13 @@ def PharmacyBillanalysis(request):
             except Exception:
                 pass
 
-        # Build Base Query
+        # Build Base Query (Strictly only Billed/Paid/Cancelled bills with a valid bill_no; Estimates excluded)
         query = {
             "hospital_code": hospital_code,
             "branch_code": branch_code,
+            "billing_status": {"$in": ["Billed", "Paid", "Cancelled", "billed", "paid", "cancelled"]},
+            "billing_mode": {"$nin": ["ESTIMATE", "estimate"]},
+            "bill_no": {"$exists": True, "$ne": None, "$nin": ["", "—", "None", "null"]},
         }
         if outlet_code:
             query["outlet_code"] = outlet_code
@@ -5980,6 +6101,9 @@ def PharmacyBillanalysis(request):
             search_query = {
                 "hospital_code": hospital_code,
                 "branch_code": branch_code,
+                "billing_status": {"$in": ["Billed", "Paid", "Cancelled", "billed", "paid", "cancelled"]},
+                "billing_mode": {"$nin": ["ESTIMATE", "estimate"]},
+                "bill_no": {"$exists": True, "$ne": None, "$nin": ["", "—", "None", "null"]},
             }
             if outlet_code:
                 search_query["outlet_code"] = outlet_code
@@ -6199,7 +6323,22 @@ def PharmacyBillanalysis(request):
         tot_sales_return = 0.0
 
         for b in raw_bills:
-            b_no = b.get("bill_no", "—")
+            b_status_raw = str(b.get("billing_status") or "").strip().lower()
+            b_mode_raw = str(b.get("billing_mode") or "").strip().lower()
+            b_no_raw = b.get("bill_no")
+            b_no_str = str(b_no_raw or "").strip()
+
+            # Strictly exclude Estimates: only billed, paid, or cancelled bills with a real bill number must display
+            if (
+                b_status_raw in ["estimate", "estimated"]
+                or b_mode_raw == "estimate"
+                or not b_no_raw
+                or b_no_str in ["", "—", "none", "null"]
+                or (b.get("estimate_no") and (not b_no_raw or b_no_str in ["", "—", "none", "null"]))
+            ):
+                continue
+
+            b_no = b_no_str
             u = b.get("uhid", "")
             raw_ip = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
             ip_num = "" if (not raw_ip or raw_ip == "—" or raw_ip.lower() == "none" or raw_ip.upper().startswith("OP")) else raw_ip
@@ -6273,47 +6412,44 @@ def PharmacyBillanalysis(request):
             discount = to_num(b.get("overall_discount_amount", 0))
             net = to_num(b.get("net_amount", 0))
 
-            # Status & Credit determination (matching Screenshot 1: "Ip Credit Bills", "Cash Bill", "Cancelled")
+            # Status determination based strictly on payment_mode:
+            # - payment_mode: "Cash" -> "Cash Bills"
+            # - payment_mode: "Credit" -> "Credit Bills"
+            # Even for cancelled bills, display the payment mode
             b_status = b.get("billing_status") or "Billed"
             is_cancelled = b_status.lower() in ["cancelled", "deleted"] or b.get("is_deleted") is True
             p_mode = str(b.get("payment_mode") or "").strip().lower()
             b_mode = str(b.get("billing_mode") or "").strip().upper()
-            is_ins = b.get("is_insurance") is True or str(b.get("customer_type") or "").strip().lower() == "insurance"
 
-            is_credit = (
-                p_mode == "credit"
-                or b_mode in ["WARD REQUEST", "IP CREDIT", "CREDIT"]
-                or is_ins
-                or bool(ip_num)
-                or "IP" in bt_name.upper()
-            )
-
-            if is_cancelled:
-                derived_status = "Cancelled"
-            elif is_credit:
-                derived_status = "Ip Credit Bills"
+            if p_mode == "credit" or b_mode in ["WARD REQUEST", "IP CREDIT", "CREDIT"]:
+                derived_status = "Credit Bills"
+            elif p_mode in ["cash", "card", "upi", "online", "multiple payment"] or b_mode == "DIRECT" or b.get("payment_details"):
+                derived_status = "Cash Bills"
             else:
-                derived_status = "Cash Bill"
+                if p_mode:
+                    derived_status = f"{p_mode.title()} Bills"
+                elif b.get("inpatient_number") or "IP" in bt_name.upper():
+                    derived_status = "Credit Bills"
+                else:
+                    derived_status = "Cash Bills"
 
-            # A bill is a Cash Bill ONLY if it is not an IP/Credit bill and not cancelled
-            is_cash_bill = not is_credit and not is_cancelled and (
-                p_mode == "cash"
-                or b_mode == "DIRECT"
-                or len(cash_list) > 0
-                or bool(b.get("payment_details"))
+            # A bill is a Cash Bill if payment_mode is Cash (or direct payment) and not cancelled
+            is_cash_bill = not is_cancelled and (
+                derived_status == "Cash Bills" or (p_mode != "credit" and b_mode not in ["WARD REQUEST", "IP CREDIT", "CREDIT"])
             )
 
             # Status filter
             if status_filter != "all":
-                if status_filter == "ip credit bills" and derived_status != "Ip Credit Bills":
+                sf = status_filter.lower()
+                if sf in ["credit bills", "ip credit bills", "credit bill", "credit"] and derived_status != "Credit Bills":
                     continue
-                elif status_filter == "cash bill" and derived_status != "Cash Bill":
+                elif sf in ["cash bills", "cash bill", "cash"] and derived_status != "Cash Bills":
                     continue
-                elif status_filter == "cancelled" and derived_status != "Cancelled":
+                elif sf == "cancelled" and not is_cancelled:
                     continue
-                elif status_filter == "sales return" and not has_sales_return:
+                elif sf == "sales return" and not has_sales_return:
                     continue
-                elif status_filter == "ip return" and not has_ip_return:
+                elif sf == "ip return" and not has_ip_return:
                     continue
 
             # Extract best timestamp and filter strictly by IST date
@@ -6596,10 +6732,12 @@ def PharmacyItemPatientAnalysis(request):
             except Exception:
                 pass
 
-        # Build Base Query for Pharmacy Bills (exclude deleted/cancelled)
+        # Build Base Query for Pharmacy Bills (exclude deleted/cancelled/estimates)
         query = {
             "is_deleted": {"$ne": True},
-            "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted"]},
+            "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted", "Estimate", "estimate", "ESTIMATE"]},
+            "billing_mode": {"$nin": ["ESTIMATE", "estimate"]},
+            "bill_no": {"$exists": True, "$ne": None, "$nin": ["", "—", "None", "null"]},
         }
         if hospital_code:
             query["hospital_code"] = hospital_code
@@ -6681,7 +6819,9 @@ def PharmacyItemPatientAnalysis(request):
         if len(raw_bills) == 0 and is_specific_search and outlet_code:
             fallback_query = {
                 "is_deleted": {"$ne": True},
-                "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted"]},
+                "billing_status": {"$nin": ["Cancelled", "cancelled", "Deleted", "deleted", "Estimate", "estimate", "ESTIMATE"]},
+                "billing_mode": {"$nin": ["ESTIMATE", "estimate"]},
+                "bill_no": {"$exists": True, "$ne": None, "$nin": ["", "—", "None", "null"]},
             }
             if hospital_code:
                 fallback_query["hospital_code"] = hospital_code
@@ -6717,7 +6857,22 @@ def PharmacyItemPatientAnalysis(request):
         all_item_ids = set()
 
         for b in raw_bills:
-            b_no = str(b.get("bill_no") or b.get("bill_number") or b.get("Bill_id") or "—").strip()
+            b_status_raw = str(b.get("billing_status") or "").strip().lower()
+            b_mode_raw = str(b.get("billing_mode") or "").strip().lower()
+            b_no_raw = b.get("bill_no")
+            b_no_str = str(b_no_raw or "").strip()
+
+            # Strictly exclude Estimates: only billed items should display
+            if (
+                b_status_raw in ["estimate", "estimated", "cancelled", "deleted"]
+                or b_mode_raw == "estimate"
+                or not b_no_raw
+                or b_no_str in ["", "—", "none", "null"]
+                or (b.get("estimate_no") and (not b_no_raw or b_no_str in ["", "—", "none", "null"]))
+            ):
+                continue
+
+            b_no = b_no_str
             u = str(b.get("uhid") or "").strip()
             raw_ip = str(b.get("inpatient_number") or b.get("ipNumber") or "").strip()
             ip_num = "" if (not raw_ip or raw_ip == "—" or raw_ip.lower() == "none" or raw_ip.upper().startswith("OP")) else raw_ip
