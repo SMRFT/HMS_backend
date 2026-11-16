@@ -18,7 +18,7 @@ from decimal import Decimal
 from ..models import Cashcountershiftdetails,PharmacyBilling,Patient,DischargeBilling,Billing
 
 
-from ..serializers import CashcountershiftdetailsSerializer,PharmacyBillingSerializer, PatientSerializer, DischargeBillingSerializer, BillingSerializer
+from ..serializers import CashcountershiftdetailsSerializer,PharmacyBillingSerializer, PatientSerializer, DischargeBillingSerializer, BillingSerializer, CashCounterCollectionSerializer
 from .dbcollection import (
     get_employee_cashcounter_permissions,
     validate_employee_cashcounter_access,
@@ -1822,19 +1822,12 @@ def post_receipt_payments(request):
 
         data = request.data
 
-
-
         # ✅ AUTH DATA
 
-        employee_id   = data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID") or request.META.get("HTTP_AUTH_USER_ID")
-
-        hospital_code = data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-
-        branch_code   = data.get("auth-branch-code") or request.META.get("HTTP_BRANCH_CODE") or (request.META.get("HTTP_AUTH_BRANCH_CODE") or request.META.get("HTTP_BRANCH_CODE"))
-
-        outlet_code   = data.get("auth-outlet-code") or request.META.get("HTTP_OUTLET_CODE") or (request.META.get("HTTP_AUTH_OUTLET_CODE") or request.META.get("HTTP_OUTLET_CODE"))
-
-
+        employee_id   = data.get("auth-user-id") 
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code   = data.get("auth-branch-code") 
+        outlet_code   = data.get("auth-outlet-code") 
 
         # ✅ REQUIRED FIELDS FROM FRONTEND
 
@@ -1919,6 +1912,75 @@ def post_receipt_payments(request):
             _rp_client.close()
         except Exception:
             pass
+
+        # =========================================================
+        # ✅ RECORD IN hospital_cashcountercollection
+        # =========================================================
+        try:
+            is_payment_type = str(receipt_type).strip().lower() == "payment"
+            parsed_amount = float(amount or 0)
+
+            # Resolve bill_type if sent or if account_head is integer
+            resolved_bill_type = None
+            if data.get("bill_type") is not None:
+                try:
+                    resolved_bill_type = int(data.get("bill_type"))
+                except (ValueError, TypeError):
+                    pass
+            elif str(account_head).isdigit():
+                try:
+                    resolved_bill_type = int(account_head)
+                except (ValueError, TypeError):
+                    pass
+
+            # Resolve counter code
+            resolved_counter_code = (
+                getattr(active_shift, "CashCounter", None)
+                or cash_counter
+                or "CC0001"
+            )
+
+            # Format remarks
+            if isinstance(description, dict):
+                import json
+                remarks_str = json.dumps(description)
+            else:
+                remarks_str = str(description or f"{receipt_type} - {account_head}").strip()
+
+            cash_counter_data = {
+                "hospital_code": str(hospital_code[0] if isinstance(hospital_code, (list, tuple)) else (hospital_code or "SH001")).strip(),
+                "branch_code": str(branch_code[0] if isinstance(branch_code, (list, tuple)) else (branch_code or "SHB001")).strip(),
+                "outlet_code": str(outlet_code[0] if isinstance(outlet_code, (list, tuple)) else (outlet_code or "OLET001")).strip(),
+                "created_by": str(employee_id[0] if isinstance(employee_id, (list, tuple)) else (employee_id or "admin")).strip(),
+                "lastmodified_by": str(employee_id[0] if isinstance(employee_id, (list, tuple)) else (employee_id or "admin")).strip(),
+
+                "Bill_id": getattr(obj, "id", None) if isinstance(getattr(obj, "id", None), int) else None,
+                "bill_no": voucher_no,
+                "bill_number": voucher_no,
+                "bill_type": resolved_bill_type,
+
+                "counter_code": str(resolved_counter_code).strip(),
+                "shift_no": str(shiftno) if shiftno else None,
+                "billing_category": "Payment" if is_payment_type else "Receipt",
+                "transaction_type": "Payment" if is_payment_type else "collected",
+
+                "collected_amount": 0.00 if is_payment_type else parsed_amount,
+                "Returned_amount": parsed_amount if is_payment_type else 0.00,
+                "RemittedToBank": 0.00,
+                "HandOverAmount": 0.00,
+                "remarks": remarks_str,
+            }
+
+            cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
+            if cc_serializer.is_valid():
+                cc_serializer.save()
+            else:
+                print(f"[CashCounterCollection] Warning for voucher {voucher_no}: {cc_serializer.errors}")
+                _cc_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                _cc_client["HMS"]["hospital_cashcountercollection"].insert_one(cash_counter_data)
+                _cc_client.close()
+        except Exception as cc_err:
+            print(f"[CashCounterCollection] Error saving collection for voucher {voucher_no}: {cc_err}")
 
 
 
@@ -4517,30 +4579,46 @@ def ipadvance_bills(request):
             is_received_req = req_status_str in ["paid", "received"]
             is_unpaid_req = req_status_str in ["unpaid", "unpaid_bills"]
 
+            import pytz
             from datetime import date, timedelta
-            today = timezone.localdate() if hasattr(timezone, "localdate") else timezone.now().date()
-            d_start = datetime.combine(today, datetime.min.time())
-            d_end = d_start + timedelta(days=1)
+            ist = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist)
+            today_date_ist = now_ist.date()
+            d_start = datetime.combine(today_date_ist, datetime.min.time())
+            d_end = datetime.combine(today_date_ist + timedelta(days=1), datetime.min.time())
 
             def _parse_bill_dt(payment):
                 bd = payment.get("bill_date") or payment.get("date") or payment.get("created_date")
                 if not bd:
                     return None
                 if isinstance(bd, datetime):
-                    return bd.replace(tzinfo=None) if bd.tzinfo else bd
+                    if bd.tzinfo is None:
+                        bd = ist.localize(bd)
+                    else:
+                        bd = bd.astimezone(ist)
+                    return bd.replace(tzinfo=None)
                 if isinstance(bd, date):
                     return datetime.combine(bd, datetime.min.time())
                 if isinstance(bd, str):
-                    s = bd.strip().replace("Z", "+00:00")
-                    try:
-                        dt = datetime.fromisoformat(s)
-                        return dt.replace(tzinfo=None) if dt.tzinfo else dt
-                    except Exception:
-                        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-                            try:
-                                return datetime.strptime(s.split(" ")[0].split("T")[0], fmt)
-                            except Exception:
-                                continue
+                    s = bd.strip()
+                    if not s:
+                        return None
+                    if "T" in s or "+" in s or s.endswith("Z"):
+                        s_norm = s.replace("Z", "+00:00")
+                        try:
+                            dt = datetime.fromisoformat(s_norm)
+                            if dt.tzinfo is None:
+                                dt = ist.localize(dt)
+                            else:
+                                dt = dt.astimezone(ist)
+                            return dt.replace(tzinfo=None)
+                        except Exception:
+                            pass
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+                        try:
+                            return datetime.strptime(s.split(".")[0], fmt)
+                        except Exception:
+                            continue
                 return None
 
             adm_filter = {
@@ -4579,13 +4657,26 @@ def ipadvance_bills(request):
                         "lastmodified_by": 1,
                         "lastmodified_date": 1,
                         "advance_payments": 1,
-                        "patient_details": 1
+                        "patient_details": 1,
+                        "patient_name": 1,
+                        "patientName": 1
                     }
                 ).sort("admissionDateTime", -1)
             )
 
+            # Deduplicate admissions by ipNumber (in case of duplicate admission docs)
+            seen_ips = set()
+            deduped_admissions = []
+            for adm in raw_admissions:
+                ip_num = str(adm.get("ipNumber") or "").strip()
+                if ip_num and ip_num in seen_ips:
+                    continue
+                if ip_num:
+                    seen_ips.add(ip_num)
+                deduped_admissions.append(adm)
+
             # Bulk fetch patient details in 1 single query (eliminates N+1 loop queries)
-            all_uhids = list({str(a.get("uhid")).strip() for a in raw_admissions if a.get("uhid")})
+            all_uhids = list({str(a.get("uhid")).strip() for a in deduped_admissions if a.get("uhid")})
             patient_map = {}
             if all_uhids:
                 try:
@@ -4605,15 +4696,16 @@ def ipadvance_bills(request):
                     print("ipadvance_bills bulk patient error:", e)
 
             result = []
+            seen_adv_keys = set()
 
-            for admission in raw_admissions:
+            for admission in deduped_admissions:
                 u_str = str(admission.get("uhid") or "").strip()
                 p_det = admission.get("patient_details") or {}
                 embedded_name = ""
                 if isinstance(p_det, dict):
                     embedded_name = p_det.get("patient_name") or f"{p_det.get('firstName', '')} {p_det.get('lastName', '')}".strip()
 
-                patient_name = embedded_name or patient_map.get(u_str) or None
+                patient_name = embedded_name or patient_map.get(u_str) or admission.get("patient_name") or admission.get("patientName") or None
 
                 raw_ap = admission.get("advance_payments") or []
                 if isinstance(raw_ap, str):
@@ -4643,6 +4735,14 @@ def ipadvance_bills(request):
                         if not p_copy.get("is_advanceActive", True):
                             continue
 
+                        # Deduplicate payments by bill_no / advance_id
+                        p_bill_no = str(p_copy.get("bill_no") or p_copy.get("bill_number") or p_copy.get("advance_id") or "").strip()
+                        adv_unique_key = f"{admission.get('ipNumber')}_{p_bill_no}" if p_bill_no else None
+                        if adv_unique_key and adv_unique_key in seen_adv_keys:
+                            continue
+                        if adv_unique_key:
+                            seen_adv_keys.add(adv_unique_key)
+
                         # Payment method check: Cash only
                         pm = ""
                         p_det = p_copy.get("payment_details")
@@ -4665,20 +4765,20 @@ def ipadvance_bills(request):
                         if is_received_req:
                             if p_status not in ["paid", "received"]:
                                 continue
-                            # ✅ Received bills also display current date paid bills
+                            # ✅ Received bills also display current date paid bills in IST
                             if p_paid_dt and not (d_start <= p_paid_dt < d_end):
                                 continue
                             p_copy["_dt"] = p_paid_dt
                         elif is_unpaid_req:
-                            # Prior date / other date unpaid bills
+                            # Prior date / other date unpaid bills (strictly before current date in IST)
                             if p_status != "pending":
                                 continue
-                            if p_dt and (d_start <= p_dt < d_end):
+                            if p_dt and p_dt >= d_start:
                                 # Skip today's bills in unpaid tab
                                 continue
                             p_copy["_dt"] = p_dt
                         else:
-                            # Current date pending bills
+                            # Current date pending bills in IST
                             if p_status != "pending":
                                 continue
                             if p_dt and not (d_start <= p_dt < d_end):
@@ -4690,6 +4790,13 @@ def ipadvance_bills(request):
 
                 if not clean_payments:
                     continue   # admission has no bills for this counter/status
+
+                # Fallback patient_name from payments if still empty
+                if not patient_name:
+                    for cp in clean_payments:
+                        if cp.get("patient_name"):
+                            patient_name = cp.get("patient_name")
+                            break
 
                 # Sort payments newest first
                 clean_payments.sort(key=lambda x: x.get("_dt") or datetime.min, reverse=True)
@@ -5456,26 +5563,34 @@ def OPPharmacy_pending_bills(request):
             else:
                 raw_bdate = bill.get("bill_date") or bill.get("created_date")
 
-            import re
             b_date_obj = None
             ist_date_str = "-"
             ist_time_str = "-"
             if raw_bdate:
-                if isinstance(raw_bdate, (datetime, date)):
-                    y, m, d = raw_bdate.year, raw_bdate.month, raw_bdate.day
-                    hour = getattr(raw_bdate, "hour", 0)
-                    minute = getattr(raw_bdate, "minute", 0)
-                    b_date_obj = date(y, m, d)
-                    ist_date_str = f"{d:02d}/{m:02d}/{y:04d}"
-                    ist_time_str = f"{hour:02d}:{minute:02d}"
+                dt_obj = None
+                if isinstance(raw_bdate, datetime):
+                    dt_obj = pytz.utc.localize(raw_bdate) if raw_bdate.tzinfo is None else raw_bdate.astimezone(pytz.utc)
+                elif isinstance(raw_bdate, date):
+                    b_date_obj = raw_bdate
+                    ist_date_str = f"{raw_bdate.day:02d}/{raw_bdate.month:02d}/{raw_bdate.year:04d}"
+                    ist_time_str = "00:00"
                 else:
                     s_val = str(raw_bdate).strip()
-                    m_match = re.match(r"^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})", s_val)
-                    if m_match:
-                        y, m, d, hour, minute = [int(x) for x in m_match.groups()]
-                        b_date_obj = date(y, m, d)
-                        ist_date_str = f"{d:02d}/{m:02d}/{y:04d}"
-                        ist_time_str = f"{hour:02d}:{minute:02d}"
+                    if s_val.endswith("Z"):
+                        s_val = s_val[:-1] + "+00:00"
+                    try:
+                        dt_obj = datetime.fromisoformat(s_val)
+                        if dt_obj.tzinfo is None:
+                            dt_obj = pytz.utc.localize(dt_obj)
+                        else:
+                            dt_obj = dt_obj.astimezone(pytz.utc)
+                    except Exception:
+                        pass
+                if dt_obj:
+                    dt_ist = dt_obj.astimezone(ist)
+                    b_date_obj = dt_ist.date()
+                    ist_date_str = dt_ist.strftime("%d/%m/%Y")
+                    ist_time_str = dt_ist.strftime("%I:%M:%S %p")
 
             is_today = bool(b_date_obj and b_date_obj == today_date_ist)
 
@@ -5493,7 +5608,18 @@ def OPPharmacy_pending_bills(request):
             bt_raw = bill.get("bill_type")
             bt_key = int(bt_raw) if str(bt_raw).isdigit() else bt_raw
 
-            serialized["patient_name"] = patient_map.get(uhid_str, "") or bill.get("patientname") or ""
+            p_name = (
+                patient_map.get(uhid_str, "")
+                or bill.get("patient_name")
+                or bill.get("patientname")
+                or bill.get("patientName")
+                or bill.get("customer_name")
+                or ""
+            )
+            serialized["patient_name"] = p_name
+            serialized["patientname"]  = p_name
+            serialized["uhid"]         = bill.get("uhid") or ""
+            serialized["uhid_no"]      = bill.get("uhid") or ""
             serialized["doctor_name"]  = doctor_map.get(doc_id_str, "")
             serialized["bill_type_name"] = billtype_map.get(bt_key, "")
 

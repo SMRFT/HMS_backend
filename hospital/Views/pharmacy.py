@@ -150,9 +150,10 @@ def get_pharmacy_stock(request):
         if outlet_code:
             match_stage["outlet_code"] = outlet_code
 
-        # Filter to active batches with total_stock > 0 to avoid scanning tens of thousands of historical 0-stock batches
+        # Filter to active batches with total_stock > 0 only when no search query is provided and zero stock is not requested
         include_zero_stock = request.GET.get("include_zero_stock") or data.get("include_zero_stock")
-        if not include_zero_stock or str(include_zero_stock).lower() == "false":
+        is_include_zero = include_zero_stock and str(include_zero_stock).lower() in ("true", "1")
+        if not is_include_zero and not search_query:
             match_stage["total_stock"] = {"$gt": 0}
 
         # Fast search filter: if search query is provided, find matching item_ids first
@@ -837,9 +838,20 @@ def save_pharmacy_bill(request):
         "payment_mode":             norm_pm,
     }
 
-    # ✅ Save patient_name ONLY when uhid is not provided
-    if not uhid:
-        fields["patient_name"] = data.get("patient_name")
+    # ✅ Save patientname (model schema standard)
+    raw_pname = (
+        data.get("patient_name")
+        or data.get("patientname")
+        or data.get("patientName")
+        or data.get("customer_name")
+        or ""
+    )
+    if isinstance(raw_pname, str):
+        raw_pname = raw_pname.strip()
+
+    if raw_pname:
+        fields["patientname"]  = raw_pname
+        fields["patient_name"] = raw_pname
 
     # ======================================================
     # 🔁 PATCH (UPDATE / CONVERT)
@@ -912,6 +924,17 @@ def save_pharmacy_bill(request):
             update_data["payment_mode"]   = norm_pm or "Cash"
             update_data["bill_date"]      = datetime.utcnow()
             update_data["billed_id"]      = employee_id
+
+        # 🔥 CANCEL BILL / ESTIMATE
+        elif status == "Cancelled":
+            update_data["billing_status"] = "Cancelled"
+            update_data["status"]         = "Cancelled"
+            update_data["is_cancelled"]   = True
+            update_data["cancelled_by"]   = employee_id
+            update_data["cancelled_date"] = datetime.utcnow()
+            update_data["cancel_reason"]  = data.get("cancel_reason") or data.get("edit_reason", "Cancelled by user")
+            # Release all blocked stock for this estimate
+            adjust_blocked_stock(old_meds, [], hospital_code or record.get("hospital_code"), branch_code or record.get("branch_code"), current_outlet_code)
 
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
@@ -1497,7 +1520,7 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
 @permission_classes([HasRoleAndDataPermission])
 def get_active_estimates(request):
     process_expired_estimate_bills()
-    estimates = list(bill_collection.find({"billing_status": "Estimate"}, {"_id": 0}).sort("Bill_id", -1))
+    estimates = list(bill_collection.find({"billing_status": "Estimate", "is_cancelled": {"$ne": True}}, {"_id": 0}).sort("Bill_id", -1))
     return Response(estimates, status=status.HTTP_200_OK)
 
 
@@ -1515,7 +1538,10 @@ def get_estimate_bills(request):
         # =========================================================
         # ✅ Fetch Active Estimate Bills directly from MongoDB
         # =========================================================
-        filter_query = {"billing_status": "Estimate"}
+        filter_query = {
+            "billing_status": "Estimate",
+            "is_cancelled": {"$ne": True}
+        }
         if hospital_code:
             filter_query["hospital_code"] = hospital_code
         if branch_code:
@@ -1768,6 +1794,138 @@ def convert_estimate_to_bill(request, estimate_no):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+@api_view(["POST"])
+# @permission_classes([HasRoleAndDataPermission])
+def cancel_estimate_bill(request):
+    """
+    Cancels an estimate bill in hospital_pharmacybilling, releases any blocked stock in hospital_pharmacystock,
+    updates billing_status to 'Cancelled', and writes an audit log to hospital_pharmacy_deleted_logs.
+    """
+    try:
+        data = request.data
+        employee_id   = data.get("auth-user-id")
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = resolve_request_outlet(request, data) if "resolve_request_outlet" in globals() else (data.get("auth-outlet-code") or data.get("outlet_code"))
+
+        bill_id = data.get("Bill_id") or data.get("bill_id")
+        estimate_no = data.get("estimate_no")
+        cancel_reason = data.get("cancel_reason") or data.get("reason") or "Cancelled by user"
+
+        query = {}
+        if bill_id is not None and str(bill_id).strip() != "":
+            try:
+                query["Bill_id"] = int(bill_id)
+            except (ValueError, TypeError):
+                query["Bill_id"] = bill_id
+        elif estimate_no:
+            query["estimate_no"] = str(estimate_no).strip()
+        else:
+            return Response({
+                "status": "error",
+                "message": "Bill_id or estimate_no is required to cancel estimate."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        record = bill_collection.find_one(query)
+        if not record:
+            return Response({
+                "status": "error",
+                "message": f"Estimate bill not found for query {query}."
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        current_status = str(record.get("billing_status") or record.get("status") or "").strip().lower()
+        if current_status in ["billed", "paid"]:
+            return Response({
+                "status": "error",
+                "message": "Cannot cancel this estimate because it has already been converted into a final bill."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if current_status == "cancelled" or record.get("is_cancelled") is True:
+            return Response({
+                "status": "success",
+                "message": "Estimate is already cancelled.",
+                "Bill_id": record.get("Bill_id"),
+                "estimate_no": record.get("estimate_no")
+            }, status=status.HTTP_200_OK)
+
+        # 1. Release blocked stock in hospital_pharmacystock
+        old_meds = record.get("medicine_particulars", [])
+        if isinstance(old_meds, str):
+            try:
+                old_meds = json.loads(old_meds)
+            except Exception:
+                old_meds = []
+
+        h_code = record.get("hospital_code") or hospital_code
+        b_code = record.get("branch_code") or branch_code
+        o_code = record.get("outlet_code") or outlet_code
+
+        adjust_blocked_stock(old_meds, [], h_code, b_code, o_code)
+
+        # 2. Update status in MongoDB
+        now_time = datetime.utcnow()
+        update_data = {
+            "billing_status": "Cancelled",
+            "status": "Cancelled",
+            "is_cancelled": True,
+            "cancelled_by": employee_id,
+            "cancelled_date": now_time,
+            "lastmodified_by": employee_id,
+            "lastmodified_date": now_time,
+            "cancel_reason": cancel_reason,
+        }
+        bill_collection.update_one({"_id": record["_id"]}, {"$set": update_data})
+
+        # 3. Update SQL PharmacyBilling model if it exists
+        try:
+            PharmacyBilling.objects.filter(Bill_id=int(record.get("Bill_id"))).update(
+                billing_status="Cancelled",
+                lastmodified_by=employee_id,
+                lastmodified_date=now_time
+            )
+        except Exception:
+            pass
+
+        # 4. Write audit entry to hospital_pharmacy_deleted_logs
+        try:
+            mongo_db["hospital_pharmacy_deleted_logs"].insert_one({
+                "Bill_id": record.get("Bill_id"),
+                "estimate_no": record.get("estimate_no"),
+                "uhid": record.get("uhid"),
+                "patient_name": record.get("patient_name") or record.get("patientname") or "",
+                "estimated_time": record.get("bill_date") or record.get("created_date"),
+                "cancelled_at": now_time,
+                "cancelled_by": employee_id,
+                "reason": cancel_reason,
+                "medicine_particulars": old_meds,
+                "hospital_code": h_code,
+                "branch_code": b_code,
+                "outlet_code": o_code,
+                "doctor_id": record.get("doctor_id"),
+                "doctor_name": get_doctor_name_by_id(record.get("doctor_id")) if record.get("doctor_id") else "",
+                "total_amount": float(record.get("total_amount", 0) or 0),
+                "net_amount": float(record.get("net_amount", 0) or 0),
+                "action": "ESTIMATE_CANCELLED",
+            })
+        except Exception as e_log:
+            print("[WARN] Failed to write deleted log for cancelled estimate:", e_log)
+
+        return Response({
+            "status": "success",
+            "message": "Estimate bill cancelled successfully.",
+            "Bill_id": record.get("Bill_id"),
+            "estimate_no": record.get("estimate_no")
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        print("[ERROR] cancel_estimate_bill:", e)
+        return Response({
+            "status": "error",
+            "message": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
 
 
 
@@ -1897,12 +2055,6 @@ def collect_oppharmacy_payment(request):
                 "error": "Bill_id is required"
             })
 
-        if not uhid:
-            return Response({
-                "success": False,
-                "error": "uhid is required"
-            })
-
         if not payment_details:
             return Response({
                 "success": False,
@@ -1947,7 +2099,7 @@ def collect_oppharmacy_payment(request):
 
         Bill_id = int(Bill_id)
 
-        uhid = str(uhid).strip()
+        uhid_clean = str(uhid).strip() if uhid and str(uhid).strip() not in ["-", "None", "null", ""] else None
 
         hospital_code = str(hospital_code).strip()
         branch_code = str(branch_code).strip()
@@ -1971,7 +2123,6 @@ def collect_oppharmacy_payment(request):
 
         query = {
             "Bill_id": Bill_id,
-            "uhid": uhid,
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "$or": [
@@ -1979,6 +2130,7 @@ def collect_oppharmacy_payment(request):
                 {"is_deleted": {"$exists": False}}
             ]
         }
+
         if len(parsed_outlets) == 1:
             query["outlet_code"] = parsed_outlets[0]
         elif len(parsed_outlets) > 1:
@@ -1990,15 +2142,26 @@ def collect_oppharmacy_payment(request):
             # Fallback search without outlet_code constraint in case bill is in another authorized outlet
             fallback_query = {
                 "Bill_id": Bill_id,
-                "uhid": uhid,
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
                 "$or": [
                     {"is_deleted": False},
                     {"is_deleted": {"$exists": False}}
                 ]
             }
+            if hospital_code:
+                fallback_query["hospital_code"] = hospital_code
+            if branch_code:
+                fallback_query["branch_code"] = branch_code
             bill = bill_collection.find_one(fallback_query)
+
+        if not bill:
+            # Final fallback by Bill_id alone
+            bill = bill_collection.find_one({
+                "Bill_id": Bill_id,
+                "$or": [
+                    {"is_deleted": False},
+                    {"is_deleted": {"$exists": False}}
+                ]
+            })
 
         if not bill:
             return Response({
@@ -2851,6 +3014,10 @@ def pharmacy_medicinechart(request):
                                 m_filter,
                                 {"$set": {"billing_status": "Billed", "is_dispatched": True}}
                             )
+                        if b_id:
+                            PharmacyBilling.objects.filter(Bill_id=int(b_id)).update(
+                                billing_status="Billed"
+                            )
                     except Exception:
                         pass
                 continue
@@ -2912,11 +3079,17 @@ def admissionstatus(request):
     # ✅ Convert _id
     admission["_id"] = str(admission["_id"])
 
+    # If insurance_company is empty but company_code exists, resolve name
+    if not admission.get("insurance_company") and admission.get("company_code"):
+        ins_name = get_insurance_company_name(admission.get("company_code"))
+        if ins_name:
+            admission["insurance_company"] = ins_name
+
     return Response({
         "success": True,
         "admitted": admitted,
-        # ✅ Only return data if admitted = True
-        "data": admission if admitted else []
+        # ✅ Always return latest admission document so customer_type, insurance_company, ipNumber etc. are accessible
+        "data": admission
     })
 
 
@@ -3153,13 +3326,31 @@ def patient_details(request):
         patient["is_admitted"] = is_adm
         patient["admission_status"] = "Admitted" if is_adm else "Not Admitted"
         if adm:
-            if is_adm:
-                patient["ip_number"] = adm.get("ipNumber") or adm.get("ip_number") or patient.get("ip_number") or ""
+            patient["ip_number"] = adm.get("ipNumber") or adm.get("ip_number") or patient.get("ip_number") or ""
             consulting_doc = adm.get("consultingDoctor") or adm.get("admittingDoctor") or ""
             patient["consulting_doctor"] = consulting_doc
             res_c_id, res_c_name = fast_resolve_doctor_pharmacy(consulting_doc)
             patient["consulting_doctor_id"] = res_c_id or ""
             patient["consulting_doctor_name"] = res_c_name or consulting_doc
+
+            # Customer type from admission (e.g. INSURANCE, General)
+            adm_cust_type = (adm.get("customer_type") or "").strip()
+            if adm_cust_type:
+                patient["customer_type"] = adm_cust_type
+
+            # Insurance company from admission or company_code
+            ins_comp = adm.get("insurance_company")
+            if not ins_comp and adm.get("company_code"):
+                ins_comp = get_insurance_company_name(adm.get("company_code"))
+            if not ins_comp and patient.get("company_code"):
+                ins_comp = get_insurance_company_name(patient.get("company_code"))
+            if ins_comp:
+                patient["insurance_company"] = ins_comp
+            if adm.get("company_code"):
+                patient["company_code"] = adm.get("company_code")
+        else:
+            if patient.get("company_code") and not patient.get("insurance_company"):
+                patient["insurance_company"] = get_insurance_company_name(patient.get("company_code")) or ""
 
     return Response({
         "success": True,
@@ -3446,7 +3637,7 @@ def finalize_bill(request):
         if inpatient_number:
             ip_advance = 0.0
             advance_check_blocked = False  # True = block billing (no active advance found)
-            customer_type = "General"
+            customer_type = ""
 
             try:
                 admission_doc = mongo_db["hospital_admission"].find_one({
@@ -3459,71 +3650,64 @@ def finalize_bill(request):
                     })
 
                 if admission_doc:
-                    customer_type = admission_doc.get("customer_type", "General") or "General"
-                    advance_payments = admission_doc.get("advance_payments", []) or []
+                    customer_type = str(admission_doc.get("customer_type") or admission_doc.get("customerType") or "").strip()
 
-                    if isinstance(advance_payments, list):
-                        # Active advance entries not cancelled or refunded
-                        valid_entries = [
-                            ap for ap in advance_payments
-                            if ap.get("is_advanceActive") is not False
-                            and str(ap.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
-                            and not ap.get("is_refund")
-                        ]
+                if not customer_type:
+                    patient_details_map = bill.get("patient_details") or {}
+                    customer_type = str(
+                        bill.get("customer_type") or
+                        data.get("customer_type") or
+                        patient_details_map.get("customer_type") or
+                        patient_details_map.get("customerType") or
+                        ""
+                    ).strip()
 
-                        if not valid_entries:
-                            advance_check_blocked = True
-                        else:
-                            ip_advance = sum(
-                                float(ap.get("ip_advance", 0) or 0)
-                                for ap in valid_entries
-                            )
+                # ── RULE: Only applicable for customer_type: "GENERAL IP" ───────
+                # Other customer types (General, Insurance, etc.) are NOT applicable for this concept.
+                is_general_ip = customer_type.upper() == "GENERAL IP"
 
-                    elif isinstance(advance_payments, dict):
-                        if (
-                            advance_payments.get("is_advanceActive") is not False
-                            and str(advance_payments.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
-                            and not advance_payments.get("is_refund")
-                        ):
-                            ip_advance = float(advance_payments.get("ip_advance", 0) or 0)
-                        else:
-                            advance_check_blocked = True
+                if is_general_ip:
+                    if admission_doc:
+                        advance_payments = admission_doc.get("advance_payments", []) or []
 
-                else:
-                    advance_check_blocked = True
+                        if isinstance(advance_payments, list):
+                            # Active advance entries not cancelled or refunded
+                            valid_entries = [
+                                ap for ap in advance_payments
+                                if ap.get("is_advanceActive") is not False
+                                and str(ap.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                                and not ap.get("is_refund")
+                            ]
 
-            except Exception as adm_err:
-                print("Warning: could not fetch admission advance —", adm_err)
-                ip_advance = None
+                            if not valid_entries:
+                                advance_check_blocked = True
+                            else:
+                                ip_advance = sum(
+                                    float(ap.get("ip_advance", 0) or 0)
+                                    for ap in valid_entries
+                                )
 
-            patient_details_map = bill.get("patient_details") or {}
-            is_insurance_patient = (
-                str(customer_type).strip().lower() == "insurance"
-                or bool(bill.get("is_insurance"))
-                or str(bill.get("customer_type", "")).strip().lower() == "insurance"
-                or str(data.get("customer_type", "")).strip().lower() == "insurance"
-                or bool(data.get("is_insurance"))
-                or bool(patient_details_map.get("is_insurance"))
-                or str(patient_details_map.get("customer_type", "")).strip().lower() == "insurance"
-                or bool(bill.get("insurance_company"))
-                or bool(patient_details_map.get("insurance_company"))
-            )
+                        elif isinstance(advance_payments, dict):
+                            if (
+                                advance_payments.get("is_advanceActive") is not False
+                                and str(advance_payments.get("status", "")).strip().lower() not in ["cancelled", "refunded"]
+                                and not advance_payments.get("is_refund")
+                            ):
+                                ip_advance = float(advance_payments.get("ip_advance", 0) or 0)
+                            else:
+                                advance_check_blocked = True
+                    else:
+                        advance_check_blocked = True
 
-            # ── IP Advance Check: Only for General/Cash patients ──────────────
-            # For Insurance patients, treatments and medicines are covered by insurance.
-            # Do NOT ask or deduct IP advance during billing.
-            if is_insurance_patient:
-                pass
-            else:
-                if advance_check_blocked:
-                    return Response(
-                        {
-                            "error": "No Active IP Advance found for this patient. Billing not allowed.",
-                        },
-                        status=400
-                    )
+                    if advance_check_blocked or ip_advance is None or ip_advance <= 0:
+                        return Response(
+                            {
+                                "error": "No Active IP Advance found for this patient. Billing not allowed.",
+                                "customer_type": customer_type,
+                            },
+                            status=400
+                        )
 
-                if ip_advance is not None and ip_advance > 0:
                     existing_billed_cursor = bill_collection.find({
                         "inpatient_number": inpatient_number,
                         "billing_status":   "Billed",
@@ -3538,7 +3722,7 @@ def finalize_bill(request):
                     cumulative_total = round(existing_total + total_amount_to_use, 2)
 
                     print(
-                        f"IP Advance check | customer_type={customer_type} | is_insurance=False "
+                        f"IP Advance check | customer_type={customer_type} "
                         f"| ip_advance={ip_advance} | existing_billed={existing_total} "
                         f"| current_payable={total_amount_to_use} | cumulative={cumulative_total}"
                     )
@@ -3557,13 +3741,8 @@ def finalize_bill(request):
                             status=400
                         )
 
-                elif ip_advance == 0:
-                    return Response(
-                        {
-                            "error": "IP Advance amount is 0. Billing not allowed.",
-                        },
-                        status=400
-                    )
+            except Exception as adm_err:
+                print("Warning: could not fetch admission advance —", adm_err)
 
         # =====================================================
         # ✅ DISPATCH TRACKING & RETRY GUARD (For Ward Requests)
@@ -3885,6 +4064,27 @@ def finalize_bill(request):
             set_payload["overall_discount_value"] = float(frontend_overall_discount_value)
         if frontend_overall_discount_amount is not None:
             set_payload["overall_discount_amount"] = float(frontend_overall_discount_amount)
+        # Determine if patient is an insurance patient
+        cust_type_val = str(
+            data.get("customer_type")
+            or bill.get("customer_type")
+            or (bill.get("patient_details") or {}).get("customer_type")
+            or ""
+        ).strip()
+        ins_comp_val = str(
+            data.get("insurance_company")
+            or bill.get("insurance_company")
+            or (bill.get("patient_details") or {}).get("insurance_company")
+            or ""
+        ).strip()
+        is_insurance_patient = bool(
+            data.get("is_insurance")
+            or bill.get("is_insurance")
+            or (bill.get("patient_details") or {}).get("is_insurance")
+            or cust_type_val.lower() == "insurance"
+            or ins_comp_val
+        )
+
         raw_final_pm = data.get("payment_mode") or data.get("paymentMode")
         if is_insurance_patient:
             set_payload["payment_mode"] = "Credit"
@@ -3909,6 +4109,19 @@ def finalize_bill(request):
             for bm in billed_invoice_meds:
                 bm["dispatched_qty"] = float(bm.get("quantity") or bm.get("qty") or 0)
 
+            ward_bill_type = bill.get("bill_type") or 18
+            resolved_p_name = bill.get("patientname") or bill.get("patient_name")
+            if not resolved_p_name and bill.get("uhid"):
+                try:
+                    p_doc = mongo_db["hospital_patient"].find_one({"uhid": bill.get("uhid")})
+                    if p_doc:
+                        sal = (p_doc.get("salutation") or "").strip()
+                        fn  = (p_doc.get("firstName") or "").strip()
+                        ln  = (p_doc.get("lastName") or "").strip()
+                        resolved_p_name = " ".join(f"{sal} {fn} {ln}".split()).strip()
+                except Exception:
+                    pass
+
             billed_doc = {
                 "Bill_id":                  next_Bill_id,
                 "bill_no":                  new_bill_no,
@@ -3918,14 +4131,14 @@ def finalize_bill(request):
                 "billing_mode":             bill.get("billing_mode") or "WARD REQUEST",
                 "payment_mode":             set_payload.get("payment_mode", "Cash"),
                 "is_ward_request":          True,
+                "bill_type":                ward_bill_type,
                 "source_ward_request_id":   bill.get("Bill_id"),
                 "is_dispatched":            True,
                 "hospital_code":            hospital_code,
                 "branch_code":              branch_code,
                 "outlet_code":              bill_outlet,
                 "uhid":                     bill.get("uhid"),
-                "patientname":              bill.get("patientname") or bill.get("patient_name"),
-                "patient_name":             bill.get("patientname") or bill.get("patient_name"),
+                "patientname":              resolved_p_name,
                 "inpatient_number":         bill.get("inpatient_number"),
                 "room_no":                  bill.get("room_no") or bill.get("ward_name"),
                 "doctor_id":                bill.get("doctor_id") or data.get("doctor_id"),
@@ -3949,9 +4162,10 @@ def finalize_bill(request):
                     Bill_id=next_Bill_id,
                     bill_no=new_bill_no,
                     bill_date=bill_date,
+                    bill_type=ward_bill_type,
                     uhid=bill.get("uhid"),
                     inpatient_number=bill.get("inpatient_number"),
-                    patientname=bill.get("patientname") or bill.get("patient_name"),
+                    patientname=resolved_p_name,
                     billing_status="Billed",
                     billing_mode=bill.get("billing_mode") or "WARD REQUEST",
                     payment_mode=set_payload.get("payment_mode", "Cash"),
@@ -3986,12 +4200,10 @@ def finalize_bill(request):
                 "lastmodified_date":    now_ts,
                 "lastmodified_by":      employee_id,
             }
-            if all_items_fully_dispatched:
-                update_req["billing_status"] = "Billed"
-                update_req["is_dispatched"]  = True
-            else:
-                update_req["billing_status"] = "Pending"
-                update_req["is_dispatched"]  = False
+            has_any_disp = any(float(m.get("dispatched_qty") or 0) > 0 for m in updated_orig_meds)
+            new_ward_status = "Billed" if all_items_fully_dispatched else ("Processing" if has_any_disp else "Pending")
+            update_req["billing_status"] = new_ward_status
+            update_req["is_dispatched"]  = bool(all_items_fully_dispatched)
 
             bill_collection.update_one(
                 {"_id": bill["_id"]},
@@ -4000,6 +4212,15 @@ def finalize_bill(request):
                     "$push": {"dispatch_history": dispatch_log}
                 }
             )
+
+            try:
+                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
+                    billing_status=new_ward_status,
+                    lastmodified_by=employee_id,
+                    lastmodified_date=now_ts
+                )
+            except Exception:
+                pass
 
             final_returned_bill_id = next_Bill_id
 
@@ -4642,48 +4863,61 @@ def pharmacy_view_bills(request):
     # =========================================================
     # ✅ Direct High-Speed MongoDB Bill Query
     # =========================================================
-    bill_q = {
-        "hospital_code": hospital_code,
-        "branch_code":   branch_code,
-        "billing_status": {"$in": ["Billed", "Paid", "Processing", "deleted"]}
-    }
+    and_conditions = [
+        {"hospital_code": hospital_code},
+        {"branch_code":   branch_code},
+        {"billing_status": {"$in": ["Billed", "Paid", "Processing", "Pending", "Completed", "deleted"]}}
+    ]
 
     if isinstance(matched_outlet, (list, tuple)):
-        bill_q["outlet_code"] = {"$in": list(matched_outlet)}
+        and_conditions.append({"outlet_code": {"$in": list(matched_outlet)}})
     elif matched_outlet:
-        bill_q["outlet_code"] = matched_outlet
+        and_conditions.append({"outlet_code": matched_outlet})
 
     if bill_type_param and bill_type_param != "ALL":
         try:
-            bill_q["bill_type"] = int(bill_type_param)
+            bt_int = int(bill_type_param)
+            if bt_int == 18:
+                and_conditions.append({"$or": [{"bill_type": 18}, {"is_ward_request": True}]})
+            else:
+                and_conditions.append({"bill_type": bt_int})
         except (ValueError, TypeError):
-            if allowed_bill_types:
-                bill_q["bill_type"] = {"$in": allowed_bill_types}
-    elif allowed_bill_types:
-        bill_q["bill_type"] = {"$in": allowed_bill_types}
+            pass
 
     if from_dt and to_dt:
-        bill_q["$or"] = [
-            {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
-            {"bill_date": {"$gte": from_date_str.strip(), "$lte": to_date_str.strip() + "T23:59:59.999999"}}
-        ]
+        and_conditions.append({
+            "$or": [
+                {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"bill_date": {"$gte": from_date_str.strip(), "$lte": to_date_str.strip() + "T23:59:59.999999"}},
+                {"created_date": {"$gte": from_dt, "$lte": to_dt}},
+                {"created_date": {"$gte": from_date_str.strip(), "$lte": to_date_str.strip() + "T23:59:59.999999"}},
+            ]
+        })
     elif from_dt:
-        bill_q["$or"] = [
-            {"bill_date": {"$gte": from_dt}},
-            {"bill_date": {"$gte": from_date_str.strip()}}
-        ]
+        and_conditions.append({
+            "$or": [
+                {"bill_date": {"$gte": from_dt}},
+                {"bill_date": {"$gte": from_date_str.strip()}},
+                {"created_date": {"$gte": from_dt}},
+                {"created_date": {"$gte": from_date_str.strip()}},
+            ]
+        })
     elif to_dt:
-        bill_q["$or"] = [
-            {"bill_date": {"$lte": to_dt}},
-            {"bill_date": {"$lte": to_date_str.strip() + "T23:59:59.999999"}}
-        ]
+        and_conditions.append({
+            "$or": [
+                {"bill_date": {"$lte": to_dt}},
+                {"bill_date": {"$lte": to_date_str.strip() + "T23:59:59.999999"}},
+                {"created_date": {"$lte": to_dt}},
+                {"created_date": {"$lte": to_date_str.strip() + "T23:59:59.999999"}},
+            ]
+        })
 
     if search_value:
         sv = re.escape(search_value)
         if search_by == "bill_no":
-            bill_q["bill_no"] = {"$regex": sv, "$options": "i"}
+            and_conditions.append({"bill_no": {"$regex": sv, "$options": "i"}})
         elif search_by == "uhid":
-            bill_q["uhid"] = {"$regex": sv, "$options": "i"}
+            and_conditions.append({"uhid": {"$regex": sv, "$options": "i"}})
         elif search_by == "patient_name":
             p_uhids = [
                 p["uhid"] for p in patient_collection.find(
@@ -4694,18 +4928,20 @@ def pharmacy_view_bills(request):
                     {"uhid": 1, "_id": 0}
                 ).limit(300)
             ]
+            or_conds = [
+                {"patient_name": {"$regex": sv, "$options": "i"}},
+                {"patientname": {"$regex": sv, "$options": "i"}},
+            ]
             if p_uhids:
-                bill_q["$or"] = [
-                    {"patientname": {"$regex": sv, "$options": "i"}},
-                    {"uhid": {"$in": p_uhids}}
-                ]
-            else:
-                bill_q["patientname"] = {"$regex": sv, "$options": "i"}
+                or_conds.append({"uhid": {"$in": p_uhids}})
+            and_conditions.append({"$or": or_conds})
         else:
-            bill_q["bill_no"] = {"$regex": sv, "$options": "i"}
+            and_conditions.append({"bill_no": {"$regex": sv, "$options": "i"}})
+
+    bill_q = {"$and": and_conditions} if len(and_conditions) > 1 else (and_conditions[0] if and_conditions else {})
 
     # Fetch bills directly via PyMongo
-    bills = list(oppharmacy_collection.find(bill_q).sort("bill_date", -1).limit(limit))
+    bills = list(oppharmacy_collection.find(bill_q).sort([("bill_date", -1), ("created_date", -1)]).limit(limit))
 
     # =========================================================
     # ✅ Collect IDs for Instant In-Memory Bulk Joins
@@ -4857,6 +5093,10 @@ def pharmacy_view_bills(request):
             return float(val)
         if hasattr(val, '__str__') and type(val).__name__ == 'ObjectId':
             return str(val)
+        if isinstance(val, dict):
+            return {k: serialize_val(v) for k, v in val.items()}
+        if isinstance(val, list):
+            return [serialize_val(x) for x in val]
         return val
 
     # =========================================================
@@ -4872,18 +5112,37 @@ def pharmacy_view_bills(request):
             else:
                 serialized[k] = serialize_val(v)
 
-        u = b.get("uhid") or ""
-        p_name = patient_map.get(u) or b.get("patientname") or ""
+        u = str(b.get("uhid") or "").strip()
+        adm_doc = admission_map.get(u) or {}
+        p_name = (
+            patient_map.get(u)
+            or b.get("patient_name")
+            or b.get("patientname")
+            or b.get("patientName")
+            or adm_doc.get("patient_name")
+            or adm_doc.get("patientName")
+            or b.get("customer_name")
+            or ""
+        )
         serialized["patient_name"] = p_name
         serialized["patientname"]  = p_name
 
         # Doctor
         doc_id_val = str(b.get("doctor_id") or "").strip()
-        serialized["doctor_name"] = profile_map.get(doc_id_val, "")
+        doc_display = profile_map.get(doc_id_val, "")
+        if not doc_display:
+            doc_display = b.get("doctor_name") or (doc_id_val if not doc_id_val.isdigit() else "")
+        serialized["doctor_name"] = doc_display
 
         # Bill type name
         bt_val = b.get("bill_type")
-        serialized["bill_type_name"] = billtype_map.get(int(bt_val) if bt_val is not None else 0, "")
+        try:
+            bt_name = billtype_map.get(int(bt_val)) if bt_val is not None else ""
+        except Exception:
+            bt_name = ""
+        if not bt_name and (b.get("is_ward_request") or b.get("billing_mode") == "WARD REQUEST" or b.get("outlet_code") == "OLET001"):
+            bt_name = billtype_map.get(18, "PHARMACY IP BILL")
+        serialized["bill_type_name"] = bt_name or ""
 
         # Billed / Employee name
         billed_id_val = str(b.get("billed_id") or "").strip()
@@ -5955,7 +6214,7 @@ def PharmacyBillanalysis(request):
 
             # Patient details
             pat = patients_map.get(u, {})
-            p_name = pat.get("name") or b.get("patientname") or "—"
+            p_name = pat.get("name") or b.get("patient_name") or b.get("patientname") or "—"
             p_age = pat.get("age") or b.get("age") or ""
             p_gender = pat.get("gender") or ""
             p_phone = pat.get("phone") or ""

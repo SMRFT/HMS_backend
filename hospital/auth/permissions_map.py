@@ -688,17 +688,13 @@ PAGE_MAPPING = DynamicPageMapping({
     # PHARMACY 
          r'^/_b_a_c_k_e_n_d/HMS/patient_details/[^/]+/?(\?.*)?$': 'HMS-P-PPD',
          r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/[^/]+/?(\?.*)?$': 'HMS-P-PGS',               
-
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_stock/': 'HMS-P-PGS',
-
         '/_b_a_c_k_e_n_d/HMS/save_pharmacy_bill/': 'HMS-P-PSB',
         '/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/': 'HMS-P-PGPBT',
         r'^/_b_a_c_k_e_n_d/HMS/get_pharmacy_BillType/?(\?.*)?$': 'HMS-P-PGPBT',
         '/_b_a_c_k_e_n_d/HMS/get_estimate_bills/': 'HMS-P-PGEB',
-        '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',
-        
-
-        
+        '/_b_a_c_k_e_n_d/HMS/cancel_estimate_bill/': 'HMS-P-PCEB',      
+        '/_b_a_c_k_e_n_d/HMS/get_last_billed_uhid/': 'HMS-P-PGLBU',   
          '/_b_a_c_k_e_n_d/HMS/pharmacy_deletebill/': 'HMS-P-PDB',
           '/_b_a_c_k_e_n_d/HMS/pharmacy_medicinechart/': 'HMS-P-PMC',
          '/_b_a_c_k_e_n_d/HMS/get_doctor_prescriptions/': 'HMS-P-PMC',
@@ -894,6 +890,3 @@ GEN_ACTION_MAPPING = {
     'DELETE': 'RW',
     'GET': 'R',
 }
-
-
-
