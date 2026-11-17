@@ -223,8 +223,8 @@ def patientCreateView(request):
                 }
                 if not serializer.instance:
                     save_kwargs['created_by'] = employee_id
-                    # Add registration date for new patients
-                    save_kwargs['registration_date'] = timezone.now().strftime("%Y-%m-%d")
+                    # Add registration date for new patients in local IST timezone
+                    save_kwargs['registration_date'] = (timezone.localdate() if hasattr(timezone, 'localdate') else timezone.localtime(timezone.now()).date()).strftime("%Y-%m-%d")
                     
                 patient = serializer.save(**save_kwargs)
                 print("Patient Saved:", patient)
