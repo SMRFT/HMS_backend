@@ -900,6 +900,7 @@ def get_invest_bill_types(request):
                 "billTypeNo": 1,
                 "outlet_code": 1,
                 "is_allowDiscount": 1,
+                "is_edit": 1,
                 "ward_medicine": 1,
                 "ward_lab": 1,
                 "ward_radiology": 1,
@@ -1072,6 +1073,7 @@ def get_investigation_items(request):
                     "test_id": 1,
                     "test_name": 1,
                     "SH_Rate": 1,
+                    "shortcut": 1,
                     "Credit_Rate": 1,
                     "_id": 0
                 }
@@ -1139,7 +1141,8 @@ def get_investigation_items(request):
                     "itemName": test.get('test_name', ''),
                     "price": str(price),
                     "test_id": t_id,
-                    "nabh_code": nabh_code
+                    "nabh_code": nabh_code,
+                    "shortcut": (item.get('shortcut') or "").strip(),
                 })
 
             if search_query_name and str(search_query_name).strip():
@@ -1195,7 +1198,8 @@ def get_investigation_items(request):
                             "itemName": item_name,
                             "item_id": item_id,
                             "price": price if (price and price.lower() != "none") else "0",
-                            "nabh_code": nabh_code
+                            "nabh_code": nabh_code,
+                           "shortcut": (item.get('shortcut') or "").strip(),
                         })
                 else:
                     # Only return items where the specific bill_type rate exists
@@ -1214,7 +1218,8 @@ def get_investigation_items(request):
                             "itemName": item_name,
                             "item_id": item_id,
                             "price": price,
-                            "nabh_code": nabh_code
+                            "nabh_code": nabh_code,
+                            "shortcut": (item.get('shortcut') or "").strip(),
                         })
 
             if search_query_name and str(search_query_name).strip():
