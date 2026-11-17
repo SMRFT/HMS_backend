@@ -1120,13 +1120,19 @@ def grn_view(request, pk=None):
                     expiry_date              = expiry_date,
                     mrp                      = float(it.get("mrp") or 0),
                     grn_number               = assigned_grn_no,
-                    total_stock              = (lambda pack, qty, free_val, free_qty, unit_val: int(round(qty + (float(free_qty) if free_qty is not None else ((free_val if (unit_val > 0 and free_val > unit_val and round(free_val) % round(pack) == 0) else free_val * pack) if pack > 1 else free_val)))))(
-                        float(it.get("packing") or 1) if float(it.get("packing") or 1) > 0 else 1.0,
-                        float(it.get("quantity") or 0),
-                        float(it.get("free") or 0),
-                        it.get("free_qty"),
-                        float(it.get("unit") or 0)
-                    ),
+                    total_stock              = (lambda it_data: int(round(
+                                                    float(it_data.get("total_stock"))
+                                                    if (it_data.get("total_stock") is not None and float(it_data.get("total_stock") or 0) > 0)
+                                                    else (
+                                                        float(it_data.get("quantity") or 0) + (
+                                                            float(it_data.get("free") or 0)
+                                                            if float(it_data.get("free") or 0) > 0
+                                                            else (
+                                                                float(it_data.get("free_pack") or 0) * (float(it_data.get("packing") or 1) if float(it_data.get("packing") or 1) > 0 else 1.0)
+                                                            )
+                                                        )
+                                                    )
+                                                )))(it),
                     sold_quantity            = 0,
                     transferred_out_quantity = 0,
                     stock_type               = "grn",
