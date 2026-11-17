@@ -922,6 +922,9 @@ def calculate_shift_collection(shift_no):
         for d in paid_discharge:
             dis_amt = to_float(d.get("net_amount", 0))
             c_amt, cr_amt = parse_payment_split(d, dis_amt)
+            if dis_amt < 0:
+                c_amt = -abs(c_amt)
+                cr_amt = -abs(cr_amt)
             results["total_collection"] += c_amt
             results["total_credit"] += cr_amt
             results["cash_collection"] += c_amt
@@ -2803,6 +2806,40 @@ def get_mainblock_pendingbills(request):
             pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
             total_fee = convert_decimal(bill.get("total_fees") or bill.get("consulting_fee") or 0)
 
+            # ✅ Zero-bill check: When 0 bills arise in cash counter, check customer_type in hospital_patient.
+            # Allow 0 payment bills ONLY if customer_type == "MHC Consultant".
+            # All other bills must have an amount to pay (> 0).
+            try:
+                tf_num = float(total_fee)
+            except (ValueError, TypeError):
+                tf_num = 0.0
+
+            # Customer type lookup
+            p_cust_type = ""
+            if patient and patient.get("customer_type"):
+                p_cust_type = str(patient.get("customer_type")).strip()
+            else:
+                u_val = bill.get("uhid") or bill.get("patient_uhid")
+                pid_val = bill.get("patient_id")
+                if u_val:
+                    p_doc = patient_col.find_one({"uhid": str(u_val).strip()}, {"customer_type": 1})
+                    if p_doc and p_doc.get("customer_type"):
+                        p_cust_type = str(p_doc.get("customer_type")).strip()
+                if not p_cust_type and pid_val:
+                    p_doc = patient_col.find_one({"id": pid_val}, {"customer_type": 1})
+                    if not p_doc and str(pid_val).isdigit():
+                        p_doc = patient_col.find_one({"id": int(pid_val)}, {"customer_type": 1})
+                    if p_doc and p_doc.get("customer_type"):
+                        p_cust_type = str(p_doc.get("customer_type")).strip()
+            if not p_cust_type:
+                p_cust_type = str(bill.get("customer_type") or "").strip()
+
+            if tf_num <= 0:
+                if p_cust_type.lower() != "mhc consultant":
+                    continue
+
+            is_mhc_bill = "mhc" in p_cust_type.lower()
+
             final_uhid = resolved_uhid or (f"P-{bill.get('patient_id')}" if bill.get('patient_id') else "-")
             final_patient_name = resolved_patient_name or (f"Patient #{bill.get('patient_id')}" if bill.get('patient_id') else "-")
 
@@ -2821,6 +2858,9 @@ def get_mainblock_pendingbills(request):
                 "doctor": doc_display,
                 "doctor_name": doc_display,
                 "payment_method": pay_method,
+                "customer_type": p_cust_type,
+                "is_mhc": is_mhc_bill,
+                "sub_text": "MHC" if is_mhc_bill else "",
                 "date": (bill.get("paid_date") if is_received_req else None) or bill.get("billed_date") or bill.get("created_date"),
                 "billed_date": bill.get("billed_date") or bill.get("created_date"),
                 "paid_date": bill.get("paid_date"),
@@ -2947,12 +2987,13 @@ def get_mainblock_pendingbills(request):
 
             resolved_uhid = (patient.get("uhid") if patient else None) or dis.get("uhid")
             resolved_patient_name = format_patient_name(patient) or dis.get("patient_name") or dis.get("patient")
-            bt_display_name = "DISCHARGE"
-
             doc_display = _get_doctor_display(dis.get("doctor_name") or dis.get("doctor") or dis.get("admittingDoctor") or dis.get("consultingDoctor"))
             raw_pm = dis.get("payment_method") or (dis.get("payment_details", {}).get("method") if isinstance(dis.get("payment_details"), dict) else None)
             pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
-            total_amt = convert_decimal(dis.get("net_amount") or dis.get("total_amount") or 0)
+            total_amt = convert_decimal(dis.get("net_amount") if dis.get("net_amount") is not None else (dis.get("total_amount") or 0))
+
+            is_dis_refund = total_amt < 0
+            bt_display_name = "DISCHARGE (REFUND)" if is_dis_refund else "DISCHARGE"
 
             final_uhid = resolved_uhid or (f"P-{dis.get('patient_id')}" if dis.get("patient_id") else "-")
             final_patient_name = resolved_patient_name or (f"Patient #{dis.get('patient_id')}" if dis.get("patient_id") else "-")
@@ -2972,6 +3013,9 @@ def get_mainblock_pendingbills(request):
                 "doctor": doc_display,
                 "doctor_name": doc_display,
                 "payment_method": pay_method,
+                "is_refund": is_dis_refund,
+                "refund_amount": abs(total_amt) if is_dis_refund else 0,
+                "payment_action": "Refund Payment" if is_dis_refund else "Collect",
                 "date": (dis.get("paid_date") if is_received_req else None) or dis.get("bill_date") or dis.get("created_date"),
                 "billed_date": dis.get("bill_date") or dis.get("created_date"),
                 "paid_date": dis.get("paid_date"),
@@ -3136,11 +3180,20 @@ def update_mainblock_pendingbills(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        paid_amount = float(
+        paid_amount_raw = float(
             payment_details.get("Paid_amount", 0)
         )
+        target_category = str(data.get("type") or data.get("bill_category") or data.get("category") or "").strip().lower()
 
-        if paid_amount <= 0:
+        if paid_amount_raw == 0:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Paid_amount must not be 0."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if paid_amount_raw < 0 and target_category != "discharge":
             return Response(
                 {
                     "status": "error",
@@ -3148,6 +3201,7 @@ def update_mainblock_pendingbills(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
+        paid_amount = abs(paid_amount_raw)
 
         if pending_amount > 0:
             return Response(
@@ -3283,7 +3337,17 @@ def update_mainblock_pendingbills(request):
             }, status=status.HTTP_200_OK)
 
         def update_discharge(discharge_doc):
+            dis_net = convert_decimal(discharge_doc.get("net_amount", 0))
+            is_refund = dis_net < 0
             new_status = "Paid" if pending_amount == 0 else "Partial"
+
+            # If discharge refund, ensure payment_details records negative Paid_amount and is_refund flag
+            if is_refund:
+                payment_details["Paid_amount"] = -abs(paid_amount)
+                payment_details["is_refund"] = True
+            else:
+                payment_details["Paid_amount"] = abs(paid_amount)
+
             discharge_col.update_one(
                 {"_id": discharge_doc["_id"]},
                 {
@@ -3318,6 +3382,18 @@ def update_mainblock_pendingbills(request):
             final_branch = _clean_str(branch_code or discharge_doc.get("branch_code"), "SHB001")
             final_cashier = _clean_str(CashierID or discharge_doc.get("CashierID") or discharge_doc.get("created_by"), "admin")
 
+            # ✅ Point 3: For discharge refund (net_amount < 0), store billing_category: "refund"
+            if is_refund:
+                final_billing_category = "refund"
+                final_tx_type = "Refund"
+                final_collected_amt = "0.00"
+                final_returned_amt = f"{abs(paid_amount):.2f}"
+            else:
+                final_billing_category = "Discharge"
+                final_tx_type = "collected"
+                final_collected_amt = f"{paid_amount:.2f}"
+                final_returned_amt = "0.00"
+
             cash_counter_data = {
                 "hospital_code": final_hosp,
                 "branch_code": final_branch,
@@ -3329,11 +3405,11 @@ def update_mainblock_pendingbills(request):
                 "bill_type": bill_type,
                 "counter_code": _clean_str(counter_id, "CC0001"),
                 "shift_no": _clean_str(shiftno, ""),
-                "billing_category": "Discharge",
-                "transaction_type": "collected",
-                "collected_amount": str(payment_details.get("Paid_amount", 0)),
-                "Returned_amount": "0.00",
-                "remarks": remarks,
+                "billing_category": final_billing_category,
+                "transaction_type": final_tx_type,
+                "collected_amount": final_collected_amt,
+                "Returned_amount": final_returned_amt,
+                "remarks": remarks or ("Discharge Refund" if is_refund else ""),
             }
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
@@ -3346,7 +3422,8 @@ def update_mainblock_pendingbills(request):
                 "type": "Discharge",
                 "bill_type": bill_type,
                 "bill_no": bill_no,
-                "new_payment_status": new_status
+                "new_payment_status": new_status,
+                "is_refund": is_refund
             }, status=status.HTTP_200_OK)
 
         # ── 0. Match by Direct Document ID (_id / bill_id) ────────────

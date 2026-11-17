@@ -719,7 +719,6 @@ def sanitize_medicines(medicines):
 
         clean_item = {
             "item_id": item_id_val,
-            "item_name": item_name_val,
             "batch_number": bn_val,
             "expiry_date": expiry_val,
             "hsn_code": hsn_val,
@@ -1036,7 +1035,7 @@ def save_pharmacy_bill(request):
         "payment_mode":             norm_pm,
     }
 
-    # ✅ Save patient_name (MongoDB standard used throughout)
+    # ✅ Save patient_name ONLY when billing WITHOUT UHID
     raw_pname = (
         data.get("patient_name")
         or data.get("patientname")
@@ -1047,7 +1046,9 @@ def save_pharmacy_bill(request):
     if isinstance(raw_pname, str):
         raw_pname = raw_pname.strip()
 
-    if raw_pname:
+    # When without UHID do billing, user enters patient name, that time alone patient_name stored.
+    # When UHID is present, do NOT store patient_name in bill document; compare & display from patient table.
+    if not uhid and raw_pname:
         fields["patient_name"] = raw_pname
 
     # ======================================================
@@ -1133,9 +1134,14 @@ def save_pharmacy_bill(request):
             # Release all blocked stock for this estimate
             adjust_blocked_stock(old_meds, [], hospital_code or record.get("hospital_code"), branch_code or record.get("branch_code"), current_outlet_code)
 
+        patch_update_ops = {"$set": update_data}
+        if uhid or record.get("uhid"):
+            update_data.pop("patient_name", None)
+            patch_update_ops["$unset"] = {"patient_name": ""}
+
         bill_collection.update_one(
             {"Bill_id": int(Bill_id)},
-            {"$set": update_data}
+            patch_update_ops
         )
 
         try:
@@ -1550,8 +1556,19 @@ def save_oppharmacy_estimate(request):
         "created_by": employee_id,
         "created_date": now_ist,
         "bill_date": now_ist,
-        
     }
+
+    raw_pname = (
+        data.get("patient_name")
+        or data.get("patientname")
+        or data.get("patientName")
+        or data.get("customer_name")
+        or ""
+    )
+    if isinstance(raw_pname, str):
+        raw_pname = raw_pname.strip()
+    if not data.get("uhid") and raw_pname:
+        record_doc["patient_name"] = raw_pname
 
     result = bill_collection.insert_one(record_doc)
 
@@ -1729,6 +1746,59 @@ def process_expired_estimate_bills(hospital_code=None, branch_code=None, outlet_
 def get_active_estimates(request):
     process_expired_estimate_bills()
     estimates = list(bill_collection.find({"billing_status": "Estimate", "is_cancelled": {"$ne": True}}, {"_id": 0}).sort("Bill_id", -1))
+    
+    # Dynamic enrichment: resolve patient_name from hospital_patient and item_name from hospital_pharmacyitem
+    uhids = {str(e.get("uhid")).strip() for e in estimates if e.get("uhid")}
+    item_ids = set()
+    for e in estimates:
+        for m in (e.get("medicine_particulars") or []):
+            if isinstance(m, dict) and m.get("item_id"):
+                item_ids.add(m.get("item_id"))
+
+    pat_map = {}
+    if uhids:
+        try:
+            for p in mongo_db["hospital_patient"].find({"uhid": {"$in": list(uhids)}}, {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1, "_id": 0}):
+                sal = (p.get("salutation") or "").strip()
+                fn  = (p.get("firstName") or "").strip()
+                ln  = (p.get("lastName") or "").strip()
+                if ln.lower() == fn.lower():
+                    ln = ""
+                full_n = " ".join(f"{sal} {fn} {ln}".split())
+                pat_map[p["uhid"]] = full_n
+        except Exception:
+            pass
+
+    item_name_map = {}
+    if item_ids:
+        try:
+            search_iids = []
+            for iid in item_ids:
+                search_iids.append(iid)
+                if str(iid).isdigit():
+                    search_iids.append(int(iid))
+                    search_iids.append(str(iid))
+            for itm in mongo_db["hospital_pharmacyitem"].find({"item_id": {"$in": search_iids}}, {"item_id": 1, "item_name": 1, "_id": 0}):
+                raw_id = itm.get("item_id")
+                nm = itm.get("item_name", "")
+                item_name_map[raw_id] = nm
+                item_name_map[str(raw_id)] = nm
+        except Exception:
+            pass
+
+    for e in estimates:
+        u = str(e.get("uhid") or "").strip()
+        if u and u in pat_map:
+            e["patient_name"] = pat_map[u]
+            e["patientname"]  = pat_map[u]
+        for m in (e.get("medicine_particulars") or []):
+            if isinstance(m, dict):
+                iid = m.get("item_id")
+                if not m.get("item_name") and (iid in item_name_map or str(iid) in item_name_map):
+                    resolved_name = item_name_map.get(iid) or item_name_map.get(str(iid)) or ""
+                    m["item_name"] = resolved_name
+                    m["name"] = resolved_name
+
     return Response(estimates, status=status.HTTP_200_OK)
 
 
@@ -1765,18 +1835,24 @@ def get_estimate_bills(request):
             uhid = bill.get("uhid") or ""
 
             # =========================================================
-            # ✅ Get Patient Name
+            # ✅ Get Patient Name (compare from patient table if UHID present)
             # =========================================================
-            patient_name = bill.get("patient_name") or bill.get("patientname") or ""
-            if not patient_name and uhid:
+            patient_name = ""
+            if uhid:
                 try:
-                    pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "patient_name": 1, "name": 1})
+                    pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "salutation": 1, "patient_name": 1, "name": 1})
                     if pat:
-                        fn = pat.get("firstName") or ""
-                        ln = pat.get("lastName") or ""
-                        patient_name = f"{fn} {ln}".strip() or pat.get("patient_name") or pat.get("name") or ""
+                        sal = (pat.get("salutation") or "").strip()
+                        fn = (pat.get("firstName") or "").strip()
+                        ln = (pat.get("lastName") or "").strip()
+                        if ln.lower() == fn.lower():
+                            ln = ""
+                        patient_name = " ".join(f"{sal} {fn} {ln}".split()) or pat.get("patient_name") or pat.get("name") or ""
                 except Exception:
                     pass
+
+            if not patient_name:
+                patient_name = bill.get("patient_name") or bill.get("patientname") or ""
 
             if not patient_name and bill.get("inpatient_number"):
                 try:
@@ -1974,11 +2050,21 @@ def convert_estimate_to_bill(request, estimate_no):
             elif m.get("price") is not None and float(m.get("price")) > 0:
                 unit_mrp = float(m.get("price"))
 
+            item_name = m.get("item_name") or m.get("medicine_name") or m.get("name") or ""
+            if not item_name and item_id:
+                try:
+                    p_it = mongo_db["hospital_pharmacyitem"].find_one({"item_id": int(item_id)}, {"item_name": 1})
+                    if p_it:
+                        item_name = p_it.get("item_name", "")
+                except Exception:
+                    pass
+
             rate = float(m.get("price") or unit_mrp)
             mrp = float(unit_mrp or rate)
             converted_items.append({
                 "item_id": item_id,
-                "item_name": m.get("item_name") or m.get("medicine_name") or m.get("name") or "",
+                "item_name": item_name,
+                "name": item_name,
                 "batch_number": m.get("batch_number", ""),
                 "qty": qty,
                 "quantity": qty,
@@ -1991,17 +2077,22 @@ def convert_estimate_to_bill(request, estimate_no):
                 "edit_history": m.get("edit_history", [])
             })
 
-        patient_name = estimate.get("patient_name") or estimate.get("patientname") or ""
         uhid = estimate.get("uhid")
-        if not patient_name and uhid:
+        patient_name = ""
+        if uhid:
             try:
-                pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "patient_name": 1, "name": 1})
+                pat = mongo_db["hospital_patient"].find_one({"uhid": uhid}, {"firstName": 1, "lastName": 1, "salutation": 1, "patient_name": 1, "name": 1})
                 if pat:
-                    fn = pat.get("firstName") or ""
-                    ln = pat.get("lastName") or ""
-                    patient_name = f"{fn} {ln}".strip() or pat.get("patient_name") or pat.get("name") or ""
+                    sal = (pat.get("salutation") or "").strip()
+                    fn = (pat.get("firstName") or "").strip()
+                    ln = (pat.get("lastName") or "").strip()
+                    if ln.lower() == fn.lower():
+                        ln = ""
+                    patient_name = " ".join(f"{sal} {fn} {ln}".split()) or pat.get("patient_name") or pat.get("name") or ""
             except Exception:
                 pass
+        if not patient_name:
+            patient_name = estimate.get("patient_name") or estimate.get("patientname") or ""
 
         doc_id = estimate.get("doctor_id") or ""
         doc_name = get_doctor_name_by_id(doc_id) if doc_id else ""
@@ -5368,7 +5459,9 @@ def pharmacy_view_bills(request):
             return 0.0
         if isinstance(val, (int, float)):
             return float(val)
-        if isinstance(val, (Decimal, Decimal128)):
+        if isinstance(val, Decimal128):
+            return float(val.to_decimal())
+        if isinstance(val, Decimal):
             return float(val)
         try:
             return float(str(val).strip())
@@ -5378,7 +5471,9 @@ def pharmacy_view_bills(request):
     def serialize_val(val):
         if isinstance(val, (datetime, date)):
             return val.isoformat()
-        if isinstance(val, (Decimal, Decimal128)):
+        if isinstance(val, Decimal128):
+            return float(val.to_decimal())
+        if isinstance(val, Decimal):
             return float(val)
         if hasattr(val, '__str__') and type(val).__name__ == 'ObjectId':
             return str(val)
@@ -5488,13 +5583,22 @@ def pharmacy_view_bills(request):
             item_id_val = it.get("item_id")
             bn_val = str(it.get("batch_number") or it.get("batch_no") or it.get("batch") or "").strip()
             master_item = item_map.get(item_id_val, {})
+            if not master_item and str(item_id_val).isdigit():
+                master_item = item_map.get(int(item_id_val)) or item_map.get(str(item_id_val)) or {}
             stock_item = stock_map.get((item_id_val, bn_val), {})
             if not stock_item and str(item_id_val).isdigit():
                 stock_item = stock_map.get((int(item_id_val), bn_val), {})
 
             raw_name = (it.get("item_name") or it.get("medicine_name") or it.get("name") or "").strip()
             if not raw_name:
-                raw_name = (stock_item.get("item_name") or master_item.get("item_name") or "").strip()
+                raw_name = (master_item.get("item_name") or stock_item.get("item_name") or "").strip()
+            if not raw_name and item_id_val:
+                try:
+                    p_itm = pharmacy_item_collection.find_one({"item_id": int(item_id_val)}, {"item_name": 1})
+                    if p_itm:
+                        raw_name = (p_itm.get("item_name") or "").strip()
+                except Exception:
+                    pass
             it["item_name"]     = raw_name
             it["medicine_name"] = raw_name
 
