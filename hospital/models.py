@@ -91,7 +91,7 @@ class Patient(AuditModel):
     firstName = models.CharField(max_length=100)
     lastName = models.CharField(max_length=100)
     dob = models.DateField()
-    age = models.IntegerField()
+    age = models.FloatField(blank=True, null=True)
     gender = models.CharField(max_length=10)
     permanent_address = models.TextField(blank=True, null=True)
     area = models.CharField(max_length=100, blank=True, null=True)
