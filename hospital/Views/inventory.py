@@ -1118,7 +1118,7 @@ def grn_view(request, pk=None):
                     item_id                  = int(it.get("item_id") or 0),
                     batch_number             = str(it.get("batch") or ""),
                     expiry_date              = expiry_date,
-                    mrp                      = float(it.get("mrp") or 0),
+                    mrp                      = float(it.get("unit_mrp") or it.get("mrp") or 0),
                     grn_number               = assigned_grn_no,
                     total_stock              = (lambda it_data: int(round(
                                                     float(it_data.get("total_stock"))
