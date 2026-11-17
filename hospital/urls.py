@@ -1,4 +1,4 @@
-from django.urls import path, re_path
+from django.urls import path, re_path, include
 from . import views
 from .Views import (
     admission,
@@ -77,6 +77,7 @@ from .Views.AccountsReport import (
     purchase_gst_report,
     op_pharmacy_sales_report,
     cashcounter_rollover_service,
+    unified_accounts_report,
 )
 from .Views.Stores import stores, cathlab_intent
 from .Views.Assets import assets
@@ -740,6 +741,8 @@ urlpatterns = [
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
     path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
     path('cash-bills-report/', accounting_reports.cash_bills_report, name='cash_bills_report'),
+    path('unified-accounts-report/', unified_accounts_report.unified_accounts_report_api, name='unified_accounts_report'),
+    path('master-accounts/', include('hospital.Views.MasterAccountsReport.master_urls')),
     path('date_wise_collection_summary_report/', accounting_reports.date_wise_collection_summary_report, name='date_wise_collection_summary_report'),
     path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
     path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),

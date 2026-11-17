@@ -767,7 +767,9 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/purchase-gst-report/?(\?.*)?$': 'HMS-P-CCC',
-        r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-sales-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-sales-report/?(\?.*)?$': 'HMS-P-CCC',   
+        r'^/_b_a_c_k_e_n_d/HMS/unified-accounts-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/master-accounts/.*$': 'HMS-P-CCC',
 
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',
