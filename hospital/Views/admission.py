@@ -1149,15 +1149,19 @@ def admission_view(request):
             # Date Range Filter
             from_date = to_date = None
             if from_date_str:
-                try:
-                    from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
-                except Exception:
-                    pass
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                    try:
+                        from_date = datetime.strptime(from_date_str.strip(), fmt).date()
+                        break
+                    except ValueError:
+                        pass
             if to_date_str:
-                try:
-                    to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
-                except Exception:
-                    pass
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                    try:
+                        to_date = datetime.strptime(to_date_str.strip(), fmt).date()
+                        break
+                    except ValueError:
+                        pass
 
             if from_date or to_date:
                 date_or = []
@@ -1168,19 +1172,27 @@ def admission_view(request):
                 c_aware = {}
                 if gte_aware: c_aware["$gte"] = gte_aware
                 if lte_aware: c_aware["$lte"] = lte_aware
-                if c_aware: date_or.append({"admissionDateTime": c_aware})
+                if c_aware:
+                    date_or.append({"admissionDateTime": c_aware})
+                    date_or.append({"created_date": c_aware})
 
                 # 2. Naive UTC
                 c_naive = {}
                 if gte_aware: c_naive["$gte"] = gte_aware.replace(tzinfo=None)
                 if lte_aware: c_naive["$lte"] = lte_aware.replace(tzinfo=None)
-                if c_naive: date_or.append({"admissionDateTime": c_naive})
+                if c_naive:
+                    date_or.append({"admissionDateTime": c_naive})
+                    date_or.append({"created_date": c_naive})
 
                 # 3. String representation
                 c_str = {}
-                if from_date_str: c_str["$gte"] = from_date_str
-                if to_date_str:   c_str["$lte"] = to_date_str + "\uffff"
-                if c_str: date_or.append({"admissionDateTime": c_str})
+                from_iso = from_date.strftime('%Y-%m-%d') if from_date else ''
+                to_iso   = to_date.strftime('%Y-%m-%d') if to_date else ''
+                if from_iso: c_str["$gte"] = from_iso
+                if to_iso:   c_str["$lte"] = to_iso + "\uffff"
+                if c_str:
+                    date_or.append({"admissionDateTime": c_str})
+                    date_or.append({"created_date": c_str})
 
                 if date_or:
                     and_conditions.append({"$or": date_or})
@@ -1295,6 +1307,17 @@ def admission_view(request):
                             continue
                     else:
                         if ct_low != customer_type_filter.lower():
+                            continue
+
+                # 4. Strict IST Date Range check
+                if from_date or to_date:
+                    d_dt_val = d.get("admissionDateTime") or d.get("created_date")
+                    d_ist = _to_ist_dt(d_dt_val)
+                    if d_ist:
+                        d_cal_date = d_ist.date()
+                        if from_date and d_cal_date < from_date:
+                            continue
+                        if to_date and d_cal_date > to_date:
                             continue
 
                 filtered_result.append(d)
@@ -2587,7 +2610,25 @@ def today_registered_patients(request):
             # 1. Fetch patients registered on target date from hospital_patient
             p_filter = {}
             if date_str != 'all':
-                p_filter["registration_date"] = date_str
+                target_dt = None
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                    try:
+                        target_dt = datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+                if target_dt:
+                    start_dt = IST_TZ.localize(datetime.combine(target_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                    end_dt   = IST_TZ.localize(datetime.combine(target_dt, dt_time.max)).astimezone(dt_timezone.utc)
+                    t_str_iso = target_dt.strftime("%Y-%m-%d")
+                    p_filter["$or"] = [
+                        {"registration_date": t_str_iso},
+                        {"registration_date": date_str},
+                        {"created_date": {"$gte": start_dt, "$lte": end_dt}},
+                        {"created_date": {"$gte": start_dt.replace(tzinfo=None), "$lte": end_dt.replace(tzinfo=None)}}
+                    ]
+                else:
+                    p_filter["registration_date"] = date_str
 
             if hospital_code and hospital_code != "system":
                 p_filter["hospital_code"] = hospital_code

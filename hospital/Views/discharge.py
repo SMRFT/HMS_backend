@@ -574,6 +574,23 @@ def _resolve_employee_name(emp_id):
     for k in lookup_keys:
         if k in _employee_name_cache:
             return _employee_name_cache[k]
+
+    try:
+        from django.contrib.auth.models import User
+        u = User.objects.filter(username=emp_str).first()
+        if not u and emp_str.isdigit():
+            u = User.objects.filter(id=int(emp_str)).first()
+        if u:
+            full = u.get_full_name().strip()
+            if full:
+                _employee_name_cache[emp_str] = full
+                return full
+            elif u.username:
+                _employee_name_cache[emp_str] = u.username
+                return u.username
+    except Exception:
+        pass
+
     try:
         client, _ = get_hms_db()
         db = client["Global"]
@@ -582,9 +599,14 @@ def _resolve_employee_name(emp_id):
             or_conds.append({"employeeId": k})
             if k.isdigit():
                 or_conds.append({"employeeId": int(k)})
+            or_conds.append({"userName": k})
+            or_conds.append({"username": k})
+            or_conds.append({"userId": k})
+            or_conds.append({"user_id": k})
+            or_conds.append({"employee_id": k})
         profile = db["backend_diagnostics_profile"].find_one(
             {"$or": or_conds} if len(or_conds) > 1 else or_conds[0],
-            {"employeeName": 1, "firstName": 1, "lastName": 1}
+            {"employeeName": 1, "firstName": 1, "lastName": 1, "userName": 1}
         )
         if profile:
             name = profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip()
@@ -613,8 +635,19 @@ def _resolve_employee_designation(emp_id):
     try:
         client, _ = get_hms_db()
         db = client["Global"]
-        profile = db["backend_diagnostics_profile"].find_one(
+        or_conds = [
             {"employeeId": emp_str},
+            {"userName": emp_str},
+            {"username": emp_str},
+            {"userId": emp_str},
+            {"user_id": emp_str},
+            {"employee_id": emp_str}
+        ]
+        if emp_str.isdigit():
+            or_conds.append({"employeeId": int(emp_str)})
+
+        profile = db["backend_diagnostics_profile"].find_one(
+            {"$or": or_conds},
             {"designation": 1, "department": 1}
         )
         if profile:
@@ -640,7 +673,7 @@ def _resolve_employee_designation(emp_id):
     except Exception as e:
         logger.error(f"Error resolving employee designation for {emp_id}: {e}")
 
-    return ""
+    return "INSURANCE EXECUTIVE"
 
 
 def _resolve_insurance_manager():
