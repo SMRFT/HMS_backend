@@ -327,6 +327,7 @@ class ABHAProfileSerializer(serializers.ModelSerializer):
 class PatientSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     uhid = serializers.CharField(read_only=True)
+    age = serializers.FloatField(required=False, allow_null=True)
     class Meta:
         model = Patient
         fields = '__all__'

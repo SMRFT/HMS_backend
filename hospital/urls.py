@@ -67,6 +67,7 @@ from .Views import (
     tumourboard,
     ward_geo_verification,
     outlet_stock_report,
+    patient_master,
 )
 from .auth import permissions_map
 from .Views.AccountsReport import (
@@ -300,6 +301,10 @@ urlpatterns = [
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
     path('patient-registration-stats/', views.patient_registration_stats, name='patient_registration_stats'),
     path('patient-visit-list/', views.patient_visit_list, name='patient_visit_list'),
+    path('patient-master-list/', patient_master.patient_master_list, name='patient_master_list'),
+    path('patient-master-update/<path:uhid>/', patient_master.patient_master_update, name='patient_master_update'),
+    path('patient-op-visits/<path:uhid>/', patient_master.patient_op_visits, name='patient_op_visits'),
+    path('patient-bill-update/<path:bill_number>/', patient_master.patient_bill_update, name='patient_bill_update'),
     path('generate-qr-session/', views.generate_qr_session, name='generate_qr_session'),
     path('submit-qr-registration/', views.submit_qr_registration, name='submit_qr_registration'),
     path('check-qr-status/', views.check_qr_status, name='check_qr_status'),

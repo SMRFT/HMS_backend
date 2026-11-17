@@ -3535,8 +3535,8 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     diet_count = len(diet_bills)
     laundry_count = len(laundry_bills)
 
-    # Diet is excluded from billing clearance verification per requirement
-    pending_total = lab_count + rad_count + pharm_count + implant_count + laundry_count
+    # Diet and Radiology are excluded from billing clearance verification per requirement
+    pending_total = lab_count + pharm_count + implant_count + laundry_count
     is_clear = (pending_total == 0)
 
     return {
@@ -3552,10 +3552,11 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                 "items": lab_pending_items,
             },
             "radiology": {
-                "name": "Radiology",
+                "name": "Radiology (Exempt)",
                 "icon": "bi-camera",
-                "is_cleared": rad_count == 0,
-                "pending_count": rad_count,
+                "is_cleared": True,
+                "pending_count": 0,
+                "order_count": rad_count,
                 "bills": rad_bills,
                 "items": rad_pending_items,
             },
