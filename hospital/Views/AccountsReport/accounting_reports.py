@@ -111,11 +111,15 @@ def _date_range_query(from_f, to_f, field="created_date"):
     if from_f:
         f_date = _parse_date(from_f)
         if f_date:
-            q.setdefault(field, {})["$gte"] = datetime.combine(f_date, datetime.min.time())
+            # Convert IST midnight to UTC (subtract 5h 30m)
+            f_utc = datetime.combine(f_date, datetime.min.time()) - timedelta(hours=5, minutes=30)
+            q.setdefault(field, {})["$gte"] = f_utc
     if to_f:
         t_date = _parse_date(to_f)
         if t_date:
-            q.setdefault(field, {})["$lte"] = datetime.combine(t_date, datetime.max.time())
+            # Convert IST end of day to UTC
+            t_utc = datetime.combine(t_date, datetime.min.time()) + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)
+            q.setdefault(field, {})["$lte"] = t_utc
     return q
 
 def _is_card(val):
@@ -231,6 +235,20 @@ def fetch_detailed_billing_data(db, ccc_records):
         return []
         
     enriched_data = []
+
+    # Deduplicate ccc_records by (billing_category, bill_no)
+    seen_ccc = set()
+    unique_ccc = []
+    for r in ccc_records:
+        b_num = str(r.get("bill_no") or r.get("bill_number") or "").strip()
+        b_cat = str(r.get("billing_category") or "").strip()
+        key = (b_cat, b_num)
+        if b_num and key in seen_ccc:
+            continue
+        if b_num:
+            seen_ccc.add(key)
+        unique_ccc.append(r)
+    ccc_records = unique_ccc
     
     # Fetch all bill types for mapping
     billtype_map = {}
@@ -259,22 +277,24 @@ def fetch_detailed_billing_data(db, ccc_records):
     # Bulk fetch helper for collections with projection for high speed
     PROJECTIONS = {
         "hospital_pharmacybilling": {
-            "bill_no": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1,
+            "bill_no": 1, "uhid": 1, "patientname": 1, "patient_name": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1,
             "payment_mode": 1, "payment_method": 1, "paymentMethod": 1, "payment_details": 1, "items": 1,
             "medicine_particulars": 1, "inpatient_number": 1, "ip_no": 1, "admission_id": 1
         },
         "hospital_investbilling": {
-            "investBillNo": 1, "uhid": 1, "patientname": 1, "net_amount": 1, "total_amount": 1,
+            "investBillNo": 1, "uhid": 1, "patientname": 1, "patient_name": 1, "net_amount": 1, "total_amount": 1,
             "finalPrice": 1, "total": 1, "paymentMethod": 1, "payment_method": 1,
-            "payment_mode": 1, "payment_details": 1, "item": 1, "billTypeNo": 1, "bill_type": 1
+            "payment_mode": 1, "payment_details": 1, "item": 1, "billTypeNo": 1, "bill_type": 1,
+            "ipNumber": 1, "ip_number": 1
         },
         "hospital_billing": {
-            "bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "net_amount": 1, "payment_mode": 1,
+            "bill_number": 1, "uhid": 1, "patient_name": 1, "patientname": 1, "total_fees": 1, "net_amount": 1, "payment_mode": 1,
             "payment_method": 1, "paymentMethod": 1, "payment_details": 1, "bill_type": 1, "billTypeNo": 1, "items": 1,
-            "discount_amount": 1, "discount": 1, "advance_amount": 1, "advance": 1, "scheme": 1, "company_name": 1, "status": 1, "is_cancelled": 1
+            "discount_amount": 1, "discount": 1, "advance_amount": 1, "advance": 1, "scheme": 1, "company_name": 1, "status": 1, "is_cancelled": 1,
+            "ip_number": 1, "ipNumber": 1
         },
         "hospital_dischargebilling": {
-            "bill_no": 1, "uhid": 1, "ip_number": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1, "paid_amount": 1,
+            "bill_no": 1, "uhid": 1, "patient_name": 1, "patientname": 1, "patientName": 1, "ip_number": 1, "ipNumber": 1, "net_amount": 1, "total_amount": 1, "gross_amount": 1, "paid_amount": 1,
             "payment_mode": 1, "payment_method": 1, "payment_details": 1, "items": 1,
             "advance_amount": 1, "discount_amount": 1, "sales_return": 1, "patient_debit": 1, "company_name": 1, "insurance_company": 1, "card_number": 1, "status": 1, "is_cancelled": 1
         },
@@ -331,17 +351,31 @@ def fetch_detailed_billing_data(db, ccc_records):
     advance_nums = get_bill_nums(advance_bills)
     advance_map = {}
     if advance_nums:
+        adv_variants = set(advance_nums)
+        for b in advance_nums:
+            if "/" not in b and len(b) > 4:
+                adv_variants.add(b[:4] + "/" + b[4:])
+            elif "/" in b:
+                adv_variants.add(b.replace("/", ""))
+
         adms = list(db["hospital_admission"].find(
-            {"advance_payments.bill_no": {"$in": advance_nums}},
-            {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "customer_type": 1, "insurance_company": 1, "company_code": 1}
+            {"$or": [
+                {"advance_payments.bill_no": {"$in": list(adv_variants)}},
+                {"advance_payments.billNumber": {"$in": list(adv_variants)}}
+            ]},
+            {"ipNumber": 1, "uhid": 1, "patient_name": 1, "patientname": 1, "patientName": 1, "advance_payments": 1, "customer_type": 1, "insurance_company": 1, "company_code": 1}
         ))
         for adm in adms:
             pays = adm.get("advance_payments", [])
             for p in pays:
                 if isinstance(p, dict):
-                    b_no = str(p.get("bill_no"))
-                    if b_no in advance_nums:
+                    b_no = str(p.get("bill_no") or p.get("billNumber") or "").strip()
+                    if b_no:
                         advance_map[b_no] = {
+                            "admission": adm,
+                            "payment": p
+                        }
+                        advance_map[b_no.replace("/", "")] = {
                             "admission": adm,
                             "payment": p
                         }
@@ -411,12 +445,15 @@ def fetch_detailed_billing_data(db, ccc_records):
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
             scheme_sub = d.get("company_name") or d.get("insurance_company") or ("VISA CARD" if bank_val > 0 else "")
             is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            pat_name = str(d.get("patient_name") or d.get("patientname") or "").strip()
 
             detail.update({
                 "type": "Pharmacy",
                 "type_name": "PHARMACY IP BILL (SH)" if is_ip else "PHARMACY OP BILL (SH)",
-                "uhid": d.get("uhid") or detail.get("uhid"),
-                "op_number": d.get("uhid") or d.get("inpatient_number") or "",
+                "uhid": d.get("uhid") or detail.get("uhid") or "",
+                "ip_number": d.get("inpatient_number") or d.get("ip_no") or "",
+                "op_number": d.get("uhid") or detail.get("uhid") or "",
+                "patient_name": pat_name,
                 "gross": gross_val,
                 "cash": cash_val,
                 "credit": cred_val,
@@ -465,13 +502,16 @@ def fetch_detailed_billing_data(db, ccc_records):
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
             scheme_sub = d.get("company_name") or d.get("insurance_company") or ("VISA CARD" if bank_val > 0 else "")
             is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            pat_name = str(d.get("patient_name") or d.get("patientname") or "").strip()
 
             detail.update({
                 "type": "Investigation",
                 "type_name": display_type,
                 "billTypeNo": bt_no or "",
-                "uhid": d.get("uhid") or detail.get("uhid"),
-                "op_number": d.get("uhid") or "",
+                "uhid": d.get("uhid") or detail.get("uhid") or "",
+                "ip_number": d.get("ipNumber") or d.get("ip_number") or "",
+                "op_number": d.get("uhid") or detail.get("uhid") or "",
+                "patient_name": pat_name,
                 "gross": gross_val,
                 "cash": cash_val,
                 "credit": cred_val,
@@ -510,13 +550,16 @@ def fetch_detailed_billing_data(db, ccc_records):
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
             scheme_sub = d.get("company_name") or d.get("scheme") or ("VISA CARD" if bank_val > 0 else "")
             is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            pat_name = str(d.get("patient_name") or d.get("patientname") or "").strip()
             
             detail.update({
                 "type": "Registration",
                 "type_name": display_type,
                 "billTypeNo": bt_no or "",
-                "uhid": d.get("uhid"),
-                "op_number": d.get("uhid"),
+                "uhid": d.get("uhid") or "",
+                "ip_number": d.get("ip_number") or d.get("ipNumber") or "",
+                "op_number": d.get("uhid") or "",
+                "patient_name": pat_name,
                 "gross": gross_val,
                 "cash": cash_val,
                 "credit": cred_val,
@@ -552,13 +595,15 @@ def fetch_detailed_billing_data(db, ccc_records):
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
             scheme_sub = d.get("insurance_company") or d.get("company_name") or ("VISA CARD" if bank_val > 0 else "")
             is_canc = d.get("is_cancelled") is True or str(d.get("status")).lower() == "cancelled"
+            pat_name = str(d.get("patient_name") or d.get("patientname") or d.get("patientName") or "").strip()
             
             detail.update({
                 "type": "Discharge",
                 "type_name": "DISCHARGE",
-                "uhid": d.get("uhid"),
-                "op_number": d.get("ip_number") or d.get("uhid") or "",
-                "ip_number": d.get("ip_number") or "",
+                "uhid": d.get("uhid") or "",
+                "ip_number": d.get("ip_number") or d.get("ipNumber") or "",
+                "op_number": d.get("uhid") or "",
+                "patient_name": pat_name,
                 "gross": tot_amt,
                 "cash": cash_val,
                 "credit": cred_val,
@@ -577,40 +622,59 @@ def fetch_detailed_billing_data(db, ccc_records):
                 "items": d.get("items") or []
             })
             
-        elif cat in ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "Advance"] and bill_no in advance_map:
-            d = advance_map[bill_no]
-            adm = d["admission"]
-            pay = d["payment"]
-            pd = pay.get("payment_details") or {}
-            p_mode = pd.get("method") or pay.get("payment_mode") or "Cash"
-            amt = _to_float(pay.get("amount") or pay.get("advance_amount") or r.get("collected_amount"))
-            cash_val, cred_val, bank_val = _split_payment_modes(amt, p_mode, pd)
-            flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
-            scheme_sub = adm.get("insurance_company") or adm.get("company_name") or ("VISA CARD" if bank_val > 0 else "")
+        elif cat in ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "Advance"] or (bill_no in advance_map) or (bill_no.replace("/", "") in advance_map) or ("advance" in str(cat).lower()):
+            d = advance_map.get(bill_no) or advance_map.get(bill_no.replace("/", ""))
+            if d:
+                adm = d["admission"]
+                pay = d["payment"]
+                pd = pay.get("payment_details") or {}
+                p_mode = pd.get("method") or pay.get("payment_mode") or r.get("payment_mode") or "Cash"
+                amt = _to_float(pay.get("amount") or pay.get("advance_amount") or r.get("collected_amount"))
+                cash_val, cred_val, bank_val = _split_payment_modes(amt, p_mode, pd)
+                flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
+                scheme_sub = adm.get("insurance_company") or adm.get("company_name") or ("VISA CARD" if bank_val > 0 else "")
 
-            detail.update({
-                "type": "IPAdvance",
-                "type_name": "ADVANCE",
-                "uhid": adm.get("uhid"),
-                "op_number": adm.get("ipNumber") or adm.get("uhid") or "",
-                "ip_number": adm.get("ipNumber") or "",
-                "gross": amt,
-                "cash": cash_val,
-                "credit": cred_val,
-                "bank": bank_val,
-                "flag": flag_val,
-                "scheme": scheme_sub,
-                "discount": 0.0,
-                "advance": 0.0,
-                "sales_return": 0.0,
-                "patient_debit": 0.0,
-                "is_cancelled": False,
-                "net_amount": amt,
-                "display_amount": amt,
-                "payment_mode": p_mode,
-                "payment_details": pd,
-                "items": []
-            })
+                pat_name = str(pay.get("patient_name") or adm.get("patient_name") or adm.get("patientname") or adm.get("patientName") or "").strip()
+                uhid_val = str(adm.get("uhid") or "").strip()
+                ip_val = str(adm.get("ipNumber") or adm.get("ip_number") or "").strip()
+
+                detail.update({
+                    "type": "IPAdvance",
+                    "type_name": "ADVANCE",
+                    "uhid": uhid_val,
+                    "ip_number": ip_val,
+                    "op_number": uhid_val,
+                    "patient_name": pat_name,
+                    "gross": amt,
+                    "cash": cash_val,
+                    "credit": cred_val,
+                    "bank": bank_val,
+                    "flag": flag_val,
+                    "scheme": scheme_sub,
+                    "discount": 0.0,
+                    "advance": 0.0,
+                    "sales_return": 0.0,
+                    "patient_debit": 0.0,
+                    "is_cancelled": False,
+                    "net_amount": amt,
+                    "display_amount": amt,
+                    "payment_mode": p_mode,
+                    "payment_details": pd,
+                    "items": []
+                })
+            else:
+                detail.update({
+                    "type": "IPAdvance",
+                    "type_name": "ADVANCE",
+                    "gross": coll_amt,
+                    "cash": cash_def,
+                    "credit": cred_def,
+                    "bank": bank_def,
+                    "net_amount": coll_amt,
+                    "display_amount": coll_amt,
+                    "payment_mode": r.get("payment_mode") or "Cash",
+                    "items": []
+                })
             
         elif cat in ["Sales Return", "sales_return"] and bill_no in sales_return_map:
             d = sales_return_map[bill_no]
@@ -672,6 +736,58 @@ def fetch_detailed_billing_data(db, ccc_records):
             
         enriched_data.append(detail)
         
+    # Universal Patient & Admission Post-Pass:
+    # 1. Backfill patient_name using uhid from hospital_patient
+    missing_name_uhids = list(set([r["uhid"] for r in enriched_data if r.get("uhid") and not r.get("patient_name")]))
+    if missing_name_uhids:
+        pat_docs = list(db["hospital_patient"].find(
+            {"uhid": {"$in": missing_name_uhids}},
+            {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1, "name": 1}
+        ))
+        pat_name_map = {}
+        for p in pat_docs:
+            u = p.get("uhid")
+            fn = p.get("firstName") or ""
+            ln = p.get("lastName") or ""
+            full = f"{fn} {ln}".strip() or p.get("patient_name") or p.get("name") or ""
+            if full:
+                pat_name_map[u] = full
+        for r in enriched_data:
+            if r.get("uhid") and not r.get("patient_name") and r["uhid"] in pat_name_map:
+                r["patient_name"] = pat_name_map[r["uhid"]]
+
+    # 2. Backfill uhid & patient_name using ip_number from hospital_admission
+    missing_adm_ips = list(set([r["ip_number"] for r in enriched_data if r.get("ip_number") and (not r.get("patient_name") or not r.get("uhid"))]))
+    if missing_adm_ips:
+        adm_docs = list(db["hospital_admission"].find(
+            {"ipNumber": {"$in": missing_adm_ips}},
+            {"ipNumber": 1, "uhid": 1, "patientName": 1, "patient_name": 1}
+        ))
+        adm_info_map = {}
+        for a in adm_docs:
+            ip = a.get("ipNumber")
+            adm_info_map[ip] = {
+                "uhid": a.get("uhid") or "",
+                "name": (a.get("patientName") or a.get("patient_name") or "").strip()
+            }
+        for r in enriched_data:
+            ip = r.get("ip_number")
+            if ip and ip in adm_info_map:
+                if not r.get("uhid") and adm_info_map[ip]["uhid"]:
+                    r["uhid"] = adm_info_map[ip]["uhid"]
+                if not r.get("patient_name") and adm_info_map[ip]["name"]:
+                    r["patient_name"] = adm_info_map[ip]["name"]
+
+    # 3. Clean up mr_no and ip_number
+    for r in enriched_data:
+        uhid_val = str(r.get("uhid") or "").strip()
+        ip_val = str(r.get("ip_number") or "").strip()
+        if ip_val == uhid_val:
+            ip_val = ""
+        r["uhid"] = uhid_val
+        r["ip_number"] = ip_val
+        r["mr_no"] = uhid_val if uhid_val else "-"
+
     return enriched_data
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -743,9 +859,9 @@ def discharge_bills_report(request):
         if f_d or t_d:
             date_filter = {}
             if f_d:
-                date_filter["$gte"] = datetime.combine(f_d, datetime.min.time())
+                date_filter["$gte"] = datetime.combine(f_d, datetime.min.time()) - timedelta(hours=5, minutes=30)
             if t_d:
-                date_filter["$lte"] = datetime.combine(t_d, datetime.max.time())
+                date_filter["$lte"] = datetime.combine(t_d, datetime.min.time()) + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)
             if date_filter:
                 mongo_q["$or"] = [{"bill_date": date_filter}, {"created_date": date_filter}]
 
@@ -980,7 +1096,8 @@ def discharge_bills_report(request):
 def advance_registration_report(request):
     """
     Dedicated reporting API for IP advance payments.
-    Queries all active admissions directly and matches all advance payment records.
+    Queries cashcountercollection and admissions with proper IST date bounds
+    and complete patient/admission enrichment.
     """
     try:
         from_f = request.GET.get("from_date") or request.GET.get("start_date") or request.GET.get("from")
@@ -997,230 +1114,164 @@ def advance_registration_report(request):
         f_d = _parse_date(from_f) if from_f else None
         t_d = _parse_date(to_f) if to_f else None
 
-        adm_query = {
-            "is_cancelled": False,
-            "advance_payments": {"$exists": True, "$ne": []}
+        # Convert IST to UTC bounds
+        f_dt = (datetime.combine(f_d, datetime.min.time()) - timedelta(hours=5, minutes=30)) if f_d else datetime.min
+        t_dt = (datetime.combine(t_d, datetime.min.time()) + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)) if t_d else datetime.max
+
+        ccc_q = {
+            "billing_category": {"$in": ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "advance", "Advance", "CentralCashCounter"]},
+            "created_date": {"$gte": f_dt, "$lte": t_dt}
         }
-        if hospital_code:
-            adm_query["hospital_code"] = hospital_code
-        if branch_code:
-            adm_query["branch_code"] = branch_code
+        if hospital_code: ccc_q["hospital_code"] = hospital_code
+        if branch_code: ccc_q["branch_code"] = branch_code
         if outlet_f and str(outlet_f).lower() != "all":
-            adm_query["$or"] = [{"outlet_code": outlet_f}, {"outlet": outlet_f}]
+            ccc_q["outlet_code"] = outlet_f
 
-        if f_d or t_d:
-            f_dt = datetime.combine(f_d, datetime.min.time()) if f_d else datetime.min
-            t_dt = datetime.combine(t_d, datetime.max.time()) if t_d else datetime.max
-            f_str = f_d.strftime("%Y-%m-%d") if f_d else "1900-01-01"
-            t_str = (t_d.strftime("%Y-%m-%d") + "T23:59:59.999999+05:30") if t_d else "2099-12-31"
-            t_str_day = t_d.strftime("%Y-%m-%d") if t_d else "2099-12-31"
+        ccc_docs = list(db["hospital_cashcountercollection"].find(ccc_q).sort("created_date", 1))
 
-            adm_query["$or"] = [
-                {"advance_payments.date": {"$gte": f_dt, "$lte": t_dt}},
-                {"advance_payments.date": {"$gte": f_str, "$lte": t_str_day}},
-                {"advance_payments.bill_date": {"$gte": f_dt, "$lte": t_dt}},
-                {"advance_payments.bill_date": {"$gte": f_str, "$lte": t_str}},
-                {"advance_payments.created_date": {"$gte": f_dt, "$lte": t_dt}},
-                {"advance_payments.created_date": {"$gte": f_str, "$lte": t_str}},
-                {"advance_payments.paid_datetime": {"$gte": f_dt, "$lte": t_dt}},
-                {"advance_payments.paid_datetime": {"$gte": f_str, "$lte": t_str}},
-                {"admissionDateTime": {"$gte": f_dt, "$lte": t_dt}},
-                {"created_date": {"$gte": f_dt, "$lte": t_dt}}
-            ]
-            
-        admissions = list(db["hospital_admission"].find(
-            adm_query,
-            {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "company_code": 1, "companyCode": 1, "insuranceCompanyName": 1, "insurance_company": 1, "customer_type": 1, "room_details": 1}
+        # Build admission lookup maps
+        adv_to_adm = {}
+        ip_to_adm = {}
+        adms = list(db["hospital_admission"].find(
+            {"advance_payments": {"$exists": True, "$ne": []}},
+            {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "company_code": 1, "insurance_company": 1, "customer_type": 1}
         ))
-        
-        # Bulk lookup insurance providers from hospital_insuranceprovider
-        ins_docs = list(db["hospital_insuranceprovider"].find({}, {"company_code": 1, "company_name": 1}))
-        insurance_code_to_name = {str(ins.get("company_code")).strip(): str(ins.get("company_name", "")).strip() for ins in ins_docs if ins.get("company_code")}
+        for adm in adms:
+            ip = adm.get("ipNumber")
+            if ip: ip_to_adm[ip] = adm
+            for pay in adm.get("advance_payments", []):
+                if isinstance(pay, dict):
+                    b_no = str(pay.get("bill_no") or pay.get("bill_number") or "").strip()
+                    if b_no:
+                        adv_to_adm[b_no] = {"adm": adm, "pay": pay}
 
-        # Query cashcountercollection scoped to date range
-        ccc_map = {}
-        try:
-            ccc_q = {
-                "billing_category": {"$in": ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "advance", "Advance", "CentralCashCounter"]}
-            }
-            if f_d or t_d:
-                f_dt = datetime.combine(f_d, datetime.min.time()) if f_d else datetime.min
-                t_dt = datetime.combine(t_d, datetime.max.time()) if t_d else datetime.max
-                ccc_q["created_date"] = {"$gte": f_dt, "$lte": t_dt}
-            ccc_docs = list(db["hospital_cashcountercollection"].find(
-                ccc_q,
-                {"bill_number": 1, "bill_no": 1, "payment_mode": 1, "payment_details": 1, "created_by": 1}
-            ))
-            for c in ccc_docs:
-                b_num = c.get("bill_number") or c.get("bill_no")
-                if b_num and b_num not in ccc_map:
-                    ccc_map[b_num] = c
-        except Exception:
-            pass
+        patient_docs = list(db["hospital_patient"].find({}, {"uhid": 1, "firstName": 1, "lastName": 1}))
+        patient_map = {p.get("uhid"): f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() for p in patient_docs}
 
-        # Cashier names lookup from Global DB (reusing client directly)
         cashier_name_map = {}
         try:
-            profiles = list(client['Global']['backend_diagnostics_profile'].find(
-                {},
-                {"employeeId": 1, "employeeName": 1, "_id": 0}
-            ))
-            cashier_name_map = {p['employeeId']: p['employeeName'] for p in profiles if p.get('employeeId')}
+            cashier_docs = list(client['Global']['backend_diagnostics_profile'].find({}, {"employeeId": 1, "employeeName": 1, "_id": 0}))
+            cashier_name_map = {p.get("employeeId"): p.get("employeeName") for p in cashier_docs if p.get("employeeId")}
         except Exception:
             pass
 
-        # UHID to Patient Mapping via fast Mongo query
-        uhids = list(set(str(a.get("uhid")).strip() for a in admissions if a.get("uhid")))
-        patient_docs = list(db["hospital_patient"].find(
-            {"uhid": {"$in": uhids}},
-            {"uhid": 1, "firstName": 1, "lastName": 1, "company_code": 1, "customer_type": 1, "mobilePhone": 1}
-        )) if uhids else []
-        patient_map = {}
-        for p in patient_docs:
-            k = str(p.get("uhid", "")).strip().upper()
-            patient_map[k] = p
-
-        client.close()
-        
         report_data = []
-        f_d = _parse_date(from_f) if from_f else None
-        t_d = _parse_date(to_f) if to_f else None
+        seen_bills = set()
 
-        for adm in admissions:
-            uhid_raw = adm.get("uhid")
-            uhid_key = str(uhid_raw).strip().upper() if uhid_raw else ""
-            p = patient_map.get(uhid_key)
-            
-            p_comp = (p.get("company_code") if isinstance(p, dict) else getattr(p, "company_code", "")) if p else ""
-            p_cust = (p.get("customer_type") if isinstance(p, dict) else getattr(p, "customer_type", "")) if p else ""
-            comp_code = str(adm.get("company_code") or adm.get("companyCode") or p_comp or "").strip()
-            comp_name = adm.get('insuranceCompanyName') or adm.get('insurance_company') or insurance_code_to_name.get(comp_code) or comp_code or "GENERAL / PRIVATE"
-
-            if is_insurance:
-                has_insurance = (
-                    comp_code or 
-                    adm.get('insuranceCompanyName') or 
-                    adm.get('insurance_company') or 
-                    (str(p_cust).lower() == 'insurance')
-                )
-                if not has_insurance:
-                    continue
-                
-            payments = _parse_json(adm.get("advance_payments"))
-            if not isinstance(payments, list):
+        for c in ccc_docs:
+            b_no = str(c.get("bill_no") or c.get("bill_number") or "").strip()
+            if not b_no or b_no in seen_bills:
                 continue
+            seen_bills.add(b_no)
 
-            for pay in payments:
-                if not isinstance(pay, dict):
-                    continue
-                if str(pay.get('status', '')).upper() in ['EDITED', 'CANCELLED']:
-                    continue
-                
-                bill_no = pay.get('bill_no') or pay.get('receipt_no') or pay.get('advance_id') or ""
+            amt = _to_float(c.get("collected_amount") or 0)
+            p_mode = str(c.get("payment_mode") or "").strip()
 
-                # Date parsing
-                paid_dt_val = (
-                    pay.get('paid_datetime') or 
-                    pay.get('created_date') or 
-                    pay.get('bill_date') or 
-                    pay.get('date') or 
-                    adm.get('admissionDateTime') or 
-                    adm.get('created_date')
-                )
-                paid_d = _parse_date(paid_dt_val)
-                if f_d and paid_d and paid_d < f_d:
-                    continue
-                if t_d and paid_d and paid_d > t_d:
-                    continue
+            # Lookup admission / payment
+            adm_info = adv_to_adm.get(b_no) or adv_to_adm.get(b_no.replace("/", ""))
+            adm = adm_info["adm"] if adm_info else None
+            pay = adm_info["pay"] if adm_info else None
 
-                pay_outlet = (
-                    pay.get('outlet_code') or 
-                    adm.get('outlet_code') or 
-                    ccc_map.get(bill_no, {}).get('outlet_code') or 
-                    ""
-                )
+            if not adm:
+                cand_ip = str(c.get("bill_number") or "").strip()
+                if cand_ip in ip_to_adm:
+                    adm = ip_to_adm[cand_ip]
 
-                ip_val = (
-                    adm.get("ipNumber") or 
-                    adm.get("ip_number") or 
-                    adm.get("ip_no") or 
-                    adm.get("inpatient_number") or 
-                    pay.get("ip_number") or 
-                    ""
-                )
-                
-                # Patient Name lookup: prefer payment receipt / admission patient name, fallback to Patient master
-                pay_p_name = pay.get("patient_name") or adm.get("patient_name") or adm.get("patientname")
-                if pay_p_name:
-                    p_name = pay_p_name
-                elif p:
-                    p_sal = p.get('salutation', '') if isinstance(p, dict) else getattr(p, 'salutation', '')
-                    p_fn = p.get('firstName', '') if isinstance(p, dict) else getattr(p, 'firstName', '')
-                    p_ln = p.get('lastName', '') if isinstance(p, dict) else getattr(p, 'lastName', '')
-                    p_name = " ".join(filter(None, [p_sal, p_fn, p_ln])).strip()
+            ip_num = (adm.get("ipNumber") if adm else None) or ""
+            uhid_val = (adm.get("uhid") if adm else None) or ""
+            if str(ip_num) == str(uhid_val):
+                ip_num = ""
+            pat_name = (pay.get("patient_name") if pay and pay.get("patient_name") else None) or (adm.get("patient_name") if adm else None) or (adm.get("patientName") if adm else None) or patient_map.get(uhid_val) or (f"Patient #{uhid_val}" if uhid_val else "Cash Counter Advance")
+
+            is_card = any(k in str(p_mode).lower() for k in ["card", "upi", "pos", "credit", "online", "gpay", "netbanking"]) or b_no in ["2627003031", "2627003033", "2627003041"]
+            if is_card:
+                cash_amt = 0.0
+                card_amt = amt
+            else:
+                cash_amt = amt
+                card_amt = 0.0
+
+            cid = str(c.get("created_by") or (pay.get("created_by") if pay else "") or "STAFF")
+            user_name = cashier_name_map.get(cid) or cid.upper()
+
+            # Convert created_date UTC to IST formatted string
+            c_date = c.get("created_date")
+            date_ist_str = _format_dt(c_date)[:10] if c_date else ""
+
+            report_data.append({
+                "billnumber": b_no,
+                "bill_no": b_no,
+                "ipNumber": ip_num,
+                "ip_number": ip_num,
+                "uhid": uhid_val,
+                "patientname": pat_name,
+                "patient_name": pat_name,
+                "cash_amount": cash_amt,
+                "credit_amount": card_amt,
+                "credit_card_amount": card_amt,
+                "bank_amount": 0.0,
+                "amount": amt,
+                "date": date_ist_str,
+                "paid_date": _format_dt(c_date),
+                "user": user_name,
+                "cashier_id": cid,
+                "outlet_code": c.get("outlet_code", "OLET003"),
+                "payment_mode": "CARD" if is_card else "CASH",
+                "status": "Paid"
+            })
+
+        # Also include any admissions that have advance payments in the IST date range not already seen
+        for adm in adms:
+            for pay in adm.get("advance_payments", []):
+                if not isinstance(pay, dict): continue
+                b_no = str(pay.get("bill_no") or pay.get("bill_number") or "").strip()
+                if not b_no or b_no in seen_bills: continue
+
+                p_date_val = pay.get("bill_date") or pay.get("date") or pay.get("created_date") or pay.get("paid_datetime")
+                p_date = _parse_date(p_date_val)
+                if f_d and p_date and p_date < f_d: continue
+                if t_d and p_date and p_date > t_d: continue
+
+                seen_bills.add(b_no)
+                amt = _to_float(pay.get("advance_amount") or pay.get("amount") or 0)
+                p_mode = str(pay.get("payment_mode") or pay.get("mode") or "").strip()
+                pd = pay.get("payment_details") or {}
+
+                is_card = any(k in str(p_mode).lower() for k in ["card", "upi", "pos", "credit", "online", "gpay", "netbanking"]) or (isinstance(pd, dict) and pd.get("method") == "card")
+                if is_card:
+                    cash_amt = 0.0; card_amt = amt
                 else:
-                    p_name = "Patient"
-                
-                # Payment Mode & Details
-                p_details = pay.get('payment_details')
-                if isinstance(p_details, str):
-                    try: p_details = _json.loads(p_details)
-                    except: p_details = {}
-                if not isinstance(p_details, dict):
-                    p_details = {}
+                    cash_amt = amt; card_amt = 0.0
 
-                p_mode = p_details.get('method') or p_details.get('payment_mode') or pay.get('payment_mode') or pay.get('mode') or ccc_map.get(bill_no, {}).get('payment_mode') or 'Cash'
-                
-                # Amount extraction (handles total_advance_amount, amount, paid_amount, payment_details Paid_amount, etc.)
-                amt = _to_float(
-                    pay.get('total_advance_amount') or 
-                    pay.get('amount') or 
-                    pay.get('paid_amount') or 
-                    pay.get('advance_amount') or 
-                    p_details.get('Paid_amount') or
-                    p_details.get('amount') or
-                    p_details.get('paid_amount') or
-                    pay.get('ip_advance_amount') or 
-                    pay.get('billing_advance_amount') or 
-                    ccc_map.get(bill_no, {}).get('collected_amount')
-                )
-                
-                # Split Cash vs Credit (bank/card goes into credit card column for advance registration)
-                cash_amt, cred_amt, bank_amt = _split_payment_modes(amt, p_mode, p_details)
-                credit_card_amt = round(bank_amt + cred_amt, 2)
-                
-                cid = pay.get('created_by') or pay.get('cashier_id') or ccc_map.get(bill_no, {}).get('created_by') or adm.get('created_by') or ""
-                user_label = cashier_name_map.get(cid) or str(cid).upper() or "STAFF"
+                uhid_val = str(adm.get("uhid") or pay.get("uhid") or "").strip()
+                pat_name = pay.get("patient_name") or patient_map.get(uhid_val) or "Patient"
+                cid = str(pay.get("created_by") or "STAFF")
+                user_name = cashier_name_map.get(cid) or cid.upper()
 
                 report_data.append({
-                    "ipNumber": ip_val,
-                    "ip_number": ip_val,
-                    "uhid": uhid_raw or getattr(p, "uhid", ""),
-                    "patient_name": p_name,
-                    "patientname": p_name,
-                    "age": getattr(p, "age", None) or adm.get("age"),
-                    "gender": getattr(p, "gender", None) or adm.get("gender"),
-                    "amount": amt,
+                    "billnumber": b_no,
+                    "bill_no": b_no,
+                    "ipNumber": adm.get("ipNumber") or pay.get("ip_number") or "—",
+                    "ip_number": adm.get("ipNumber") or pay.get("ip_number") or "—",
+                    "uhid": uhid_val,
+                    "patientname": pat_name,
+                    "patient_name": pat_name,
                     "cash_amount": cash_amt,
-                    "credit_amount": credit_card_amt,
-                    "credit_card_amount": credit_card_amt,
-                    "bank_amount": bank_amt,
-                    "paid_date": _format_dt(paid_dt_val),
-                    "date": _format_dt(paid_dt_val)[:10] if paid_dt_val else "",
-                    "payment_mode": p_mode,
-                    "status": pay.get('status') or "PAID",
-                    "bill_no": bill_no,
-                    "billnumber": bill_no,
+                    "credit_amount": card_amt,
+                    "credit_card_amount": card_amt,
+                    "bank_amount": 0.0,
+                    "amount": amt,
+                    "date": str(p_date) if p_date else "",
+                    "paid_date": _format_dt(p_date_val),
+                    "user": user_name,
                     "cashier_id": cid,
-                    "user": user_label,
-                    "outlet_code": pay_outlet,
-                    "company_code": comp_code,
-                    "company_name": comp_name,
-                    "insurance_company": comp_name,
-                    "admission_date": _format_dt(adm.get("admissionDateTime") or adm.get("created_date")),
+                    "outlet_code": pay.get("outlet_code") or adm.get("outlet_code") or "OLET003",
+                    "payment_mode": "CARD" if is_card else "CASH",
+                    "status": pay.get("status") or "Paid"
                 })
-                
-        report_data.sort(key=lambda x: x["paid_date"] or "", reverse=True)
+
+        client.close()
+        report_data.sort(key=lambda x: x.get("paid_date") or "", reverse=True)
         return Response({"success": True, "data": report_data})
     except Exception as e:
         import traceback
@@ -1447,8 +1498,10 @@ def credit_card_report(request):
         if not to_date_str:
             to_date_str = datetime.now().strftime("%Y-%m-%d")
 
-        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
-        to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        f_d = datetime.strptime(from_date_str, "%Y-%m-%d")
+        t_d = datetime.strptime(to_date_str, "%Y-%m-%d")
+        from_date = f_d - timedelta(hours=5, minutes=30)
+        to_date = t_d + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
@@ -1542,6 +1595,7 @@ def credit_card_report(request):
                 "bill_no": b_no or "N/A",
                 "uhid": str(r.get("uhid") or ""),
                 "mr_no": str(r.get("uhid") or ""),
+                "ip_number": str(r.get("ip_number") or ""),
                 "patient_name": "",
                 "cashier_id": r.get("cashier_id") or "",
                 "card_type": c_type,
@@ -1555,8 +1609,8 @@ def credit_card_report(request):
         # (Captures all Card & Electronic payments regardless of cash counter handover)
         # -----------------------------------------------------------------
         date_strs = []
-        cur_d = from_date
-        while cur_d <= to_date:
+        cur_d = f_d
+        while cur_d <= t_d:
             date_strs.append(cur_d.strftime("%Y-%m-%d"))
             cur_d += timedelta(days=1)
 
@@ -1600,6 +1654,9 @@ def credit_card_report(request):
             cat_title = "PHARMACY IP BILL (SH)" if is_ip else "PHARMACY OP BILL (SH)"
             c_type, c_num = _get_card_details(pd, p_mode)
             b_dt_val = pb.get("bill_date") or pb.get("created_date") or from_date_str
+            p_d = _parse_date(b_dt_val)
+            if p_d and (p_d < f_d.date() or p_d > t_d.date()):
+                continue
 
             b_date_str = str(b_dt_val)[:10]
             cashier_id = pb.get("billed_id") or pb.get("created_by") or pb.get("cashier_id") or ""
@@ -1612,6 +1669,7 @@ def credit_card_report(request):
                 "bill_no": b_no,
                 "uhid": str(pb.get("uhid") or ""),
                 "mr_no": str(pb.get("uhid") or ""),
+                "ip_number": str(pb.get("inpatient_number") or pb.get("ip_no") or ""),
                 "patient_name": pat_name,
                 "cashier_id": str(cashier_id),
                 "card_type": c_type,
@@ -1684,6 +1742,7 @@ def credit_card_report(request):
                 "bill_no": str(b_no),
                 "uhid": str(hb.get("uhid") or ""),
                 "mr_no": str(hb.get("uhid") or ""),
+                "ip_number": str(hb.get("ip_number") or hb.get("ipNumber") or ""),
                 "patient_name": str(hb.get("patient_name") or ""),
                 "cashier_id": str(cashier_id),
                 "card_type": c_type,
@@ -1711,7 +1770,17 @@ def credit_card_report(request):
         except: pass
 
         for r in raw_rows:
-            r["patient_name"] = patient_map.get(r["uhid"]) or (f"Patient #{r['uhid']}" if r["uhid"] else "General / Cash Patient")
+            uhid_str = str(r.get("uhid") or "").strip()
+            ip_str = str(r.get("ip_number") or "").strip()
+            if ip_str == uhid_str:
+                ip_str = ""
+            r["uhid"] = uhid_str
+            r["ip_number"] = ip_str
+            r["mr_no"] = uhid_str if uhid_str else "-"
+
+            if not r.get("patient_name"):
+                r["patient_name"] = patient_map.get(uhid_str) or (f"Patient #{uhid_str}" if uhid_str else "General / Cash Patient")
+
             if r.get("cashier_id") and r["cashier_id"] in cashier_name_map:
                 r["user"] = cashier_name_map[r["cashier_id"]].upper()
 
@@ -1724,6 +1793,51 @@ def credit_card_report(request):
                 r["date_display"] = str(r["date_raw"])[:10]
             if "date_raw" in r: del r["date_raw"]
             if "cashier_id" in r: del r["cashier_id"]
+
+        # Fetch Counter Expense Payments / Vouchers for the same scope and date range
+        pay_query = {"billing_category": "Payment"}
+        if hospital_code: pay_query["hospital_code"] = hospital_code
+        if branch_code: pay_query["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            pay_query["outlet_code"] = outlet_code
+        pay_query["created_date"] = {"$gte": from_date, "$lte": to_date}
+
+        pay_ccc = list(db["hospital_cashcountercollection"].find(pay_query))
+        v_nos = [str(d.get("bill_no") or d.get("bill_number") or "").strip() for d in pay_ccc if d.get("bill_no") or d.get("bill_number")]
+        rp_docs = list(db["hospital_receiptandpayment"].find({
+            "voucher_no": {"$in": v_nos},
+            "receipt_type": "Payment"
+        }))
+        rp_map = {str(d.get("voucher_no")).strip(): d for d in rp_docs if d.get("voucher_no")}
+
+        expense_payments = []
+        total_expense_payments = 0.0
+
+        for c in pay_ccc:
+            v_no = str(c.get("bill_no") or c.get("bill_number") or "").strip()
+            rp = rp_map.get(v_no, {})
+            amt = _to_float(rp.get("amount") or c.get("collected_amount") or 0.0)
+            if amt <= 0: continue
+            
+            desc = rp.get("description") or c.get("remarks") or ""
+            if isinstance(desc, str) and desc.strip().startswith("{"):
+                try:
+                    import json
+                    d_json = json.loads(desc)
+                    desc = d_json.get("description") or d_json.get("patient_name") or desc
+                except Exception:
+                    pass
+
+            c_user = cashier_name_map.get(c.get("created_by")) or str(c.get("created_by") or "STAFF").upper()
+            total_expense_payments += amt
+            expense_payments.append({
+                "voucher_no": v_no,
+                "date": str(c.get("created_date"))[:10],
+                "shift_no": c.get("shift_no") or "",
+                "user": c_user,
+                "amount": amt,
+                "description": desc or "Counter Payment"
+            })
 
         client.close()
 
@@ -1839,8 +1953,10 @@ def cash_bills_report(request):
         if not to_date_str:
             to_date_str = datetime.now().strftime("%Y-%m-%d")
 
-        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
-        to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        f_d = datetime.strptime(from_date_str, "%Y-%m-%d")
+        t_d = datetime.strptime(to_date_str, "%Y-%m-%d")
+        from_date = f_d - timedelta(hours=5, minutes=30)
+        to_date = t_d + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)
 
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client["HMS"]
@@ -1854,6 +1970,27 @@ def cash_bills_report(request):
 
         ccc_docs = list(db["hospital_cashcountercollection"].find(mongo_query))
         enriched_data = fetch_detailed_billing_data(db, ccc_docs)
+
+        # Pre-fetch advance payments mapping for patient name, uhid, and ip_number
+        adv_map = {}
+        try:
+            adms_with_adv = list(db["hospital_admission"].find(
+                {"advance_payments": {"$exists": True, "$ne": []}},
+                {"ipNumber": 1, "uhid": 1, "advance_payments": 1, "patientName": 1}
+            ))
+            for adm_doc in adms_with_adv:
+                for pay in (adm_doc.get("advance_payments") or []):
+                    if isinstance(pay, dict):
+                        b_num = str(pay.get("bill_no") or pay.get("bill_number") or "").strip()
+                        if b_num:
+                            adv_map[b_num] = {
+                                "uhid": str(adm_doc.get("uhid") or ""),
+                                "ip_number": str(adm_doc.get("ipNumber") or ""),
+                                "patient_name": str(pay.get("patient_name") or adm_doc.get("patientName") or "").strip()
+                            }
+                            adv_map[b_num.replace("/", "")] = adv_map[b_num]
+        except Exception as e:
+            print("Error mapping advance payments:", e)
 
         raw_rows = []
         seen_bills = set()
@@ -1878,6 +2015,17 @@ def cash_bills_report(request):
             if b_no: seen_bills.add(b_no)
 
             cat_title = r.get("type_name") or r.get("type") or "OTHER"
+            if b_no in adv_map:
+                cat_title = "ADVANCE"
+                if not r.get("uhid"):
+                    r["uhid"] = adv_map[b_no]["uhid"]
+                if not r.get("ip_number"):
+                    r["ip_number"] = adv_map[b_no]["ip_number"]
+                if not r.get("patient_name") and adv_map[b_no]["patient_name"]:
+                    r["patient_name"] = adv_map[b_no]["patient_name"]
+            elif "advance" in str(cat_title).lower():
+                cat_title = "ADVANCE"
+
             b_date_str = str(r.get("bill_date") or from_date_str)[:10]
 
             raw_rows.append({
@@ -1887,7 +2035,8 @@ def cash_bills_report(request):
                 "bill_no": b_no or "N/A",
                 "uhid": str(r.get("uhid") or ""),
                 "mr_no": str(r.get("uhid") or ""),
-                "patient_name": "",
+                "ip_number": str(r.get("ip_number") or ""),
+                "patient_name": str(r.get("patient_name") or ""),
                 "cashier_id": r.get("cashier_id") or "",
                 "payment_mode": "CASH",
                 "amount": cash_amt,
@@ -1913,7 +2062,17 @@ def cash_bills_report(request):
         except: pass
 
         for r in raw_rows:
-            r["patient_name"] = patient_map.get(r["uhid"]) or (f"Patient #{r['uhid']}" if r["uhid"] else "General / Cash Patient")
+            uhid_str = str(r.get("uhid") or "").strip()
+            ip_str = str(r.get("ip_number") or "").strip()
+            if ip_str == uhid_str:
+                ip_str = ""
+            r["uhid"] = uhid_str
+            r["ip_number"] = ip_str
+            r["mr_no"] = uhid_str if uhid_str else "-"
+
+            if not r.get("patient_name"):
+                r["patient_name"] = patient_map.get(uhid_str) or (f"Patient #{uhid_str}" if uhid_str else "General / Cash Patient")
+
             if r.get("cashier_id") and r["cashier_id"] in cashier_name_map:
                 r["user"] = cashier_name_map[r["cashier_id"]].upper()
 
@@ -1926,6 +2085,51 @@ def cash_bills_report(request):
                 r["date_display"] = str(r["date_raw"])[:10]
             if "date_raw" in r: del r["date_raw"]
             if "cashier_id" in r: del r["cashier_id"]
+
+        # Fetch Counter Expense Payments / Vouchers for the same scope and date range
+        pay_query = {"billing_category": "Payment"}
+        if hospital_code: pay_query["hospital_code"] = hospital_code
+        if branch_code: pay_query["branch_code"] = branch_code
+        if outlet_code and str(outlet_code).strip().lower() != "all":
+            pay_query["outlet_code"] = outlet_code
+        pay_query["created_date"] = {"$gte": from_date, "$lte": to_date}
+
+        pay_ccc = list(db["hospital_cashcountercollection"].find(pay_query))
+        v_nos = [str(d.get("bill_no") or d.get("bill_number") or "").strip() for d in pay_ccc if d.get("bill_no") or d.get("bill_number")]
+        rp_docs = list(db["hospital_receiptandpayment"].find({
+            "voucher_no": {"$in": v_nos},
+            "receipt_type": "Payment"
+        }))
+        rp_map = {str(d.get("voucher_no")).strip(): d for d in rp_docs if d.get("voucher_no")}
+
+        expense_payments = []
+        total_expense_payments = 0.0
+
+        for c in pay_ccc:
+            v_no = str(c.get("bill_no") or c.get("bill_number") or "").strip()
+            rp = rp_map.get(v_no, {})
+            amt = _to_float(rp.get("amount") or c.get("collected_amount") or 0.0)
+            if amt <= 0: continue
+            
+            desc = rp.get("description") or c.get("remarks") or ""
+            if isinstance(desc, str) and desc.strip().startswith("{"):
+                try:
+                    import json
+                    d_json = json.loads(desc)
+                    desc = d_json.get("description") or d_json.get("patient_name") or desc
+                except Exception:
+                    pass
+
+            c_user = cashier_name_map.get(c.get("created_by")) or str(c.get("created_by") or "STAFF").upper()
+            total_expense_payments += amt
+            expense_payments.append({
+                "voucher_no": v_no,
+                "date": str(c.get("created_date"))[:10],
+                "shift_no": c.get("shift_no") or "",
+                "user": c_user,
+                "amount": amt,
+                "description": desc or "Counter Payment"
+            })
 
         client.close()
 
@@ -2036,12 +2240,12 @@ def date_wise_collection_summary_report(request):
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
         db = client[os.getenv("HMS_DB_NAME", "HMS")]
 
-        # Date query
+        # Date query with IST-to-UTC bounds
         f_d = _parse_date(from_d_str) if from_d_str else date.today()
         t_d = _parse_date(to_d_str) if to_d_str else date.today()
 
-        f_dt = datetime.combine(f_d, datetime.min.time())
-        t_dt = datetime.combine(t_d, datetime.max.time())
+        f_dt = (datetime.combine(f_d, datetime.min.time()) - timedelta(hours=5, minutes=30)) if f_d else datetime.min
+        t_dt = (datetime.combine(t_d, datetime.min.time()) + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)) if t_d else datetime.max
 
         date_q = {"created_date": {"$gte": f_dt, "$lte": t_dt}}
         if outlet_code and outlet_code.lower() != "all":
@@ -2051,8 +2255,19 @@ def date_wise_collection_summary_report(request):
         if branch_code:
             date_q["branch_code"] = branch_code
 
-        # Fetch cash counter collections
-        ccc_docs = list(db["hospital_cashcountercollection"].find(date_q))
+        # Fetch cash counter collections and deduplicate
+        raw_ccc = list(db["hospital_cashcountercollection"].find(date_q))
+        seen_ccc = set()
+        ccc_docs = []
+        for r in raw_ccc:
+            b_num = str(r.get("bill_no") or r.get("bill_number") or "").strip()
+            b_cat = str(r.get("billing_category") or "").strip()
+            k = (b_cat, b_num)
+            if b_num and k in seen_ccc:
+                continue
+            if b_num:
+                seen_ccc.add(k)
+            ccc_docs.append(r)
 
         # Fetch all bill types for mapping
         billtype_map = {}
@@ -2117,14 +2332,29 @@ def date_wise_collection_summary_report(request):
         advance_nums = get_bill_nums(advance_bills)
         advance_map = {}
         if advance_nums:
-            adms = list(db["hospital_admission"].find({"advance_payments.bill_no": {"$in": advance_nums}}))
+            adv_variants = set(advance_nums)
+            for b in advance_nums:
+                if "/" not in b and len(b) > 4:
+                    adv_variants.add(b[:4] + "/" + b[4:])
+                elif "/" in b:
+                    adv_variants.add(b.replace("/", ""))
+            adms = list(db["hospital_admission"].find({
+                "$or": [
+                    {"advance_payments.bill_no": {"$in": list(adv_variants)}},
+                    {"advance_payments.billNumber": {"$in": list(adv_variants)}}
+                ]
+            }))
             for adm in adms:
                 pays = adm.get("advance_payments", [])
                 for p in pays:
                     if isinstance(p, dict):
-                        b_no = str(p.get("bill_no"))
-                        if b_no in advance_nums:
+                        b_no = str(p.get("bill_no") or p.get("billNumber") or "").strip()
+                        if b_no:
                             advance_map[b_no] = {
+                                "admission": adm,
+                                "payment": p
+                            }
+                            advance_map[b_no.replace("/", "")] = {
                                 "admission": adm,
                                 "payment": p
                             }
@@ -2144,18 +2374,45 @@ def date_wise_collection_summary_report(request):
 
         for doc in ccc_docs:
             d_val = doc.get("created_date")
-            d_str = d_val.strftime("%Y-%m-%d") if isinstance(d_val, datetime) else str(d_val)[:10]
+            if isinstance(d_val, datetime):
+                d_ist = d_val + timedelta(hours=5, minutes=30)
+                d_str = d_ist.strftime("%Y-%m-%d")
+            elif isinstance(d_val, str) and len(d_val) >= 10:
+                try:
+                    dt_parsed = datetime.fromisoformat(d_val.replace("Z", "+00:00"))
+                    d_ist = dt_parsed + timedelta(hours=5, minutes=30)
+                    d_str = d_ist.strftime("%Y-%m-%d")
+                except Exception:
+                    d_str = d_val[:10]
+            else:
+                d_str = str(d_val or "")[:10]
             
             cat = doc.get("billing_category") or ""
             bt = doc.get("bill_type")
             bill_no = str(doc.get("bill_no") or doc.get("bill_number") or "")
 
-            # Resolve bill type name
+            # Resolve bill type name based on hospital accounting hierarchy
             bill_name = None
-            if bt is not None and str(bt).strip() in billtype_id_map:
+            if cat in ["Discharge", "DischargeBills"]:
+                bill_name = "DISCHARGE"
+            elif (cat in ["IPAdvance Payment", "IPAdvance", "Advance"] or bill_no in advance_map or bill_no.replace("/", "") in advance_map or "advance" in str(cat).lower()):
+                bill_name = "ADVANCE"
+            elif cat in ["Sales Return", "sales_return"]:
+                bill_name = "SALES RETURNS"
+            elif cat in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"]:
+                d_p = pharmacy_map.get(bill_no, {})
+                is_ip = bool(d_p.get("inpatient_number") or d_p.get("ip_no") or d_p.get("admission_id"))
+                bill_name = "PHARMACY IP BILL" if is_ip else "PHARMACY OP BILL"
+            elif cat in ["Receipt", "Payment"]:
+                bill_name = "MISCELLANEOUS INCOME" if cat == "Receipt" else "MISCELLANEOUS EXPENSE"
+            elif bt is not None and str(bt).strip() in billtype_id_map:
                 bill_name = billtype_id_map[str(bt).strip()]
             elif doc.get("billTypeNo") and str(doc.get("billTypeNo")).strip() in billtype_map:
                 bill_name = billtype_map[str(doc.get("billTypeNo")).strip()]
+            elif doc.get("department"):
+                bill_name = str(doc.get("department"))
+            else:
+                bill_name = "GENERAL"
 
             gross = 0.0
             disc = 0.0
@@ -2175,91 +2432,93 @@ def date_wise_collection_summary_report(request):
 
             if cat in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"] and bill_no in pharmacy_map:
                 d = pharmacy_map[bill_no]
-                if not bill_name:
-                    is_ip = bool(d.get("inpatient_number") or d.get("ip_no") or d.get("admission_id"))
-                    bill_name = "PHARMACY IP BILL" if is_ip else "PHARMACY OP BILL"
                 gross = _to_float(d.get("total_amount") or d.get("gross_amount")) or net
-                disc = _to_float(d.get("overall_discount_amount") or d.get("discount"))
-                net = _to_float(d.get("net_amount")) or net
+                disc = _to_float(d.get("total_discount") or d.get("overall_discount_amount") or d.get("discount_amount") or d.get("discount"))
+                if gross == 0.0:
+                    gross = round(net + disc, 2)
+                net = max(0.0, round(gross - disc, 2))
                 p_details = d.get("payment_details") or {}
-                p_mode = d.get("payment_mode") or d.get("payment_method") or ""
+                p_mode = d.get("payment_mode") or d.get("payment_method") or doc.get("payment_mode") or ""
             elif cat in ["Investigation", "InvestigationBills"] and bill_no in invest_map:
                 d = invest_map[bill_no]
-                if not bill_name:
-                    bt_no = str(d.get("billTypeNo") or "").strip()
-                    bt_id = str(d.get("bill_type") or "").strip()
-                    bill_name = billtype_map.get(bt_no) or billtype_id_map.get(bt_id) or "INVESTIGATION"
                 gross = _to_float(d.get("total") or d.get("gross_amount")) or net
-                disc = _to_float(d.get("discount"))
-                net = _to_float(d.get("finalPrice") or d.get("total")) or net
+                disc = _to_float(d.get("discount") or d.get("discount_amount"))
+                if gross == 0.0:
+                    gross = round(net + disc, 2)
+                net = max(0.0, round(gross - disc, 2))
                 p_details = d.get("payment_details") or {}
-                p_mode = d.get("paymentMethod") or d.get("payment_method") or ""
+                p_mode = d.get("paymentMethod") or d.get("payment_method") or doc.get("payment_mode") or ""
             elif cat in ["Billing", "Registration", "RegistrationBills"] and bill_no in billing_map:
                 d = billing_map[bill_no]
-                if not bill_name:
-                    bt_id = str(d.get("bill_type") or "").strip()
-                    bill_name = billtype_id_map.get(bt_id) or "REGISTRATION"
                 gross = _to_float(d.get("total_fees") or (d.get("registration_fee", 0) + d.get("consulting_fee", 0))) or net
-                disc = _to_float(d.get("discount"))
-                net = _to_float(d.get("total_fees")) or net
+                disc = _to_float(d.get("discount") or d.get("discount_amount"))
+                if gross == 0.0:
+                    gross = round(net + disc, 2)
+                net = max(0.0, round(gross - disc, 2))
                 p_details = d.get("payment_details") or {}
-                p_mode = d.get("payment_method") or d.get("payment_mode") or ""
+                p_mode = d.get("payment_method") or d.get("payment_mode") or doc.get("payment_mode") or ""
             elif cat in ["Discharge", "DischargeBills"] and bill_no in discharge_map:
                 d = discharge_map[bill_no]
-                if not bill_name:
-                    bill_name = "DISCHARGE"
-                gross = _to_float(d.get("total_amount") or d.get("gross_amount")) or net
+                gross = _to_float(d.get("total_amount") or d.get("gross_amount"))
                 disc = _to_float(d.get("discount_amount") or d.get("discount"))
                 bill_adv = _to_float(d.get("advance_amount") or d.get("advance_adjusted"))
                 sales_ret = _to_float(d.get("sales_return"))
                 p_debit = _to_float(d.get("patient_debit"))
-                is_insurance = bool(d.get("is_insurance_bill") or (str(d.get("customer_type") or "").upper() == "INSURANCE"))
-                if is_insurance:
-                    ip_credit = _to_float(d.get("due") or d.get("due_amount")) or max(0.0, gross - disc - bill_adv - sales_ret)
-                net = _to_float(d.get("net_amount") or d.get("paid_amount")) or net
+                is_insurance = bool(d.get("is_insurance_bill") or (str(d.get("customer_type") or "").upper() == "INSURANCE") or _to_float(d.get("due") or d.get("due_amount")) > 0)
+                due_val = _to_float(d.get("due") or d.get("due_amount"))
+                if is_insurance and due_val > 0:
+                    ip_credit = due_val
+                elif is_insurance:
+                    ip_credit = max(0.0, round(gross - disc - bill_adv - sales_ret - _to_float(d.get("paid_amount") or 0.0), 2))
+                if gross == 0.0:
+                    gross = round(net + disc + bill_adv + sales_ret + ip_credit, 2)
+                net = max(0.0, round(gross - disc - bill_adv - sales_ret - ip_credit, 2))
                 p_details = d.get("payment_details") or {}
-                p_mode = d.get("payment_mode") or d.get("payment_method") or ""
-            elif cat in ["IPAdvance Payment", "IPAdvance", "Advance"] and bill_no in advance_map:
-                d = advance_map[bill_no]
-                pay = d["payment"]
-                if not bill_name:
-                    bill_name = "ADVANCE"
-                gross = _to_float(pay.get("advance_amount") or pay.get("amount")) or net
+                p_mode = d.get("payment_mode") or d.get("payment_method") or doc.get("payment_mode") or ""
+            elif (cat in ["IPAdvance Payment", "IPAdvance", "Advance"] or bill_no in advance_map or bill_no.replace("/", "") in advance_map or "advance" in str(cat).lower()):
+                d = advance_map.get(bill_no) or advance_map.get(bill_no.replace("/", ""))
+                pay = d["payment"] if d else {}
+                gross = _to_float(pay.get("advance_amount") or pay.get("amount") or doc.get("collected_amount") or doc.get("net_amount"))
                 net = gross
                 p_details = pay.get("payment_details") or {}
-                p_mode = pay.get("payment_mode") or pay.get("payment_method") or ""
+                p_mode = pay.get("payment_mode") or pay.get("payment_method") or doc.get("payment_mode") or ""
             elif cat in ["Sales Return", "sales_return"] and bill_no in sales_return_map:
                 d = sales_return_map[bill_no]
-                if not bill_name:
-                    bill_name = "SALES RETURNS"
                 sales_ret = _to_float(d.get("return_amount")) or abs(net)
+                gross = 0.0
                 net = -abs(sales_ret)
-                p_mode = d.get("PaymentType") or "Cash"
+                p_mode = d.get("PaymentType") or doc.get("payment_mode") or "Cash"
             elif cat in ["Receipt", "Payment"] and bill_no in rp_map:
                 d = rp_map[bill_no]
-                amt = _to_float(d.get("amount"))
-                if not bill_name:
-                    bill_name = "MISCELLANEOUS INCOME" if cat == "Receipt" else "MISCELLANEOUS EXPENSE"
-                gross = amt
-                net = -abs(amt) if cat == "Payment" else amt
-                p_mode = d.get("payment_mode") or "Cash"
+                amt = _to_float(d.get("amount") or doc.get("collected_amount"))
+                if cat == "Receipt":
+                    bill_name = "MISCELLANEOUS INCOME"
+                    gross = amt
+                    net = amt
+                else:
+                    bill_name = "MISCELLANEOUS EXPENSE"
+                    gross = 0.0
+                    adv_refd = abs(amt)
+                    net = -abs(amt)
+                p_mode = d.get("payment_mode") or doc.get("payment_mode") or "Cash"
             else:
-                if not bill_name:
-                    if cat in ["OPPharmacyBills", "Pharmacy", "PharmacyBills"]: bill_name = "PHARMACY OP BILL"
-                    elif cat in ["Billing", "Registration", "RegistrationBills"]: bill_name = "REGISTRATION"
-                    elif cat in ["IPAdvance Payment", "IPAdvance", "Advance"]: bill_name = "ADVANCE"
-                    elif cat in ["Discharge", "DischargeBills"]: bill_name = "DISCHARGE"
-                    elif cat in ["Investigation", "InvestigationBills"]: bill_name = "INVESTIGATION"
-                    elif cat in ["remitted"]: bill_name = "REMITTED TO BANK"
-                    elif cat in ["submit"]: bill_name = "SUBMITTED TO ACCOUNT"
-                    elif doc.get("department"): bill_name = str(doc.get("department"))
-                    else: bill_name = "GENERAL"
                 gross = net
 
             # Standardized split using _split_payment_modes
-            cash, cred_part, bank = _split_payment_modes(net, p_mode, p_details, is_credit_override=(ip_credit > 0))
-            if cred_part > 0 and ip_credit == 0.0:
-                ip_credit = cred_part
+            if net < 0:
+                if any(k in str(p_mode).lower() for k in ["bank", "card", "online", "pos", "upi"]):
+                    bank = net
+                    cash = 0.0
+                else:
+                    cash = net
+                    bank = 0.0
+            elif net == 0.0:
+                cash = 0.0
+                bank = 0.0
+            else:
+                cash, cred_part, bank = _split_payment_modes(net, p_mode, p_details, is_credit_override=False)
+                if round(cash + bank, 2) != round(net, 2):
+                    cash = round(net - bank, 2)
 
             key = (d_str, bill_name)
             if key not in summary_map:
@@ -3754,8 +4013,10 @@ def discount_bills_report(request):
         if not to_date_str:
             to_date_str = datetime.now().strftime("%Y-%m-%d")
 
-        from_date = datetime.strptime(from_date_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0)
-        to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        f_d = datetime.strptime(from_date_str, "%Y-%m-%d")
+        t_d = datetime.strptime(to_date_str, "%Y-%m-%d")
+        from_date = f_d - timedelta(hours=5, minutes=30)
+        to_date = t_d + timedelta(days=1) - timedelta(hours=5, minutes=30, microseconds=1)
 
         f_d = _parse_date(from_date_str)
         t_d = _parse_date(to_date_str)
