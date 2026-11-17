@@ -1142,7 +1142,7 @@ def get_investigation_items(request):
                     "price": str(price),
                     "test_id": t_id,
                     "nabh_code": nabh_code,
-                    "shortcut": (item.get('shortcut') or "").strip(),
+                    "shortcut": (test.get('shortcut') or "").strip(),
                 })
 
             if search_query_name and str(search_query_name).strip():
