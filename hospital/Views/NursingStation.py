@@ -1347,6 +1347,8 @@ def cancel_individual_ward_request_item(request):
         doc = collection.find_one({"_id": ObjectId(bill_id)})
         if not doc:
             return Response({"success": False, "error": "Invest billing request not found"}, status=404)
+        if doc.get("status") == "Cancelled" or doc.get("is_active") is False:
+            return Response({"success": False, "error": "Cannot update status on a cancelled ward request"}, status=400)
 
         raw_items = doc.get("item", [])
         if isinstance(raw_items, str):
@@ -1448,6 +1450,8 @@ def update_ward_request_item_status(request):
         doc = collection.find_one({"_id": ObjectId(bill_id)})
         if not doc:
             return Response({"success": False, "error": "Invest billing request not found"}, status=404)
+        if doc.get("status") == "Cancelled" or doc.get("is_active") is False:
+            return Response({"success": False, "error": "Cannot update status on a cancelled ward request"}, status=400)
 
         raw_items = doc.get("item", [])
         if isinstance(raw_items, str):
