@@ -286,6 +286,13 @@ def patient_master_update(request, uhid):
         if "company_name" in update_dict:
             update_dict["companyName"] = update_dict["company_name"]
 
+        # If customer_type is not insurance or corporate, clear company_code and company_name
+        effective_cust_type = str(update_dict.get("customer_type") or doc.get("customer_type") or doc.get("customerType") or "").strip().lower()
+        if effective_cust_type and effective_cust_type not in ["insurance", "corporate"]:
+            update_dict["company_code"] = ""
+            update_dict["company_name"] = ""
+            update_dict["companyName"] = ""
+
         # Backward compatibility between guardian_name and spouse_name
         if "guardian_name" in update_dict and not update_dict.get("spouse_name"):
             update_dict["spouse_name"] = update_dict["guardian_name"]
