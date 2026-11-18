@@ -1076,10 +1076,15 @@ def admission_view(request):
             query = {}
             if hospital_code and hospital_code != "system":
                 query["hospital_code"] = hospital_code
-            if branch_code and branch_code != "system":
-                query["branch_code"] = branch_code
-            if outlet_code and outlet_code != "system":
-                query["outlet_code"] = outlet_code
+
+            # For general listing, scope by branch and outlet;
+            # but if searching for a specific patient by UHID or IP Number, do NOT scope by outlet/branch
+            # so that hospital-wide admission history and active status are correctly retrieved.
+            if not ip_filter and not uhid_filter:
+                if branch_code and branch_code != "system":
+                    query["branch_code"] = branch_code
+                if outlet_code and outlet_code != "system":
+                    query["outlet_code"] = outlet_code
 
             if ip_filter:
                 if "/" in ip_filter:
@@ -1332,31 +1337,61 @@ def admission_view(request):
         try:
             data = {k: request.data.get(k) for k in request.data}
             uhid = str(data.get('uhid', '')).strip()
-            if not uhid:
+            clean_uhid = str(uhid).strip()
+            if not clean_uhid:
                 return JsonResponse({"error": "UHID is required"}, status=400)
 
             client, hms_db = _get_hms_db()
             try:
                 # ── Fast check for existing active admission with index ──
-                existing_adm = hms_db["hospital_admission"].find_one({
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code,
-                    "outlet_code": outlet_code,
-                    "uhid": uhid,
-                    "is_admitted": True,
-                    "is_discharged": False,
-                    "is_cancelled": {"$ne": True}
-                })
+                # A patient identified by UHID cannot be physically admitted more than once across the hospital!
+                # Do NOT restrict by outlet_code or branch_code so multi-outlet active admissions are caught.
+                active_adm_q = {
+                    "uhid": {"$in": [clean_uhid, clean_uhid.upper(), clean_uhid.lower()]},
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"is_admitted": True, "is_discharged": {"$ne": True}},
+                        {"is_discharged": False}
+                    ]
+                }
+                if hospital_code and hospital_code != "system":
+                    active_adm_q["hospital_code"] = hospital_code
+
+                existing_adm = hms_db["hospital_admission"].find_one(active_adm_q)
+                if not existing_adm:
+                    # Secondary safety check in Django ORM
+                    existing_orm = Admission.objects.filter(
+                        uhid__iexact=clean_uhid,
+                        is_cancelled=False
+                    ).filter(
+                        Q(is_admitted=True, is_discharged=False) | Q(is_discharged=False)
+                    ).first()
+                    if existing_orm:
+                        existing_adm = {
+                            "ipNumber": existing_orm.ipNumber,
+                            "admissionDateTime": existing_orm.admissionDateTime,
+                            "room_details": existing_orm.room_details,
+                            "roomShitingDetails": getattr(existing_orm, "roomShitingDetails", []),
+                        }
+
                 if existing_adm:
                     adm_dt_iso = _to_ist_iso(existing_adm.get("admissionDateTime"))
                     cur_room = _get_current_room(existing_adm)
+                    ip_no = str(existing_adm.get("ipNumber") or "").strip()
+                    r_no = cur_room.get("roomNo") or ""
+                    b_no = cur_room.get("bedNo") or ""
+                    loc_details = []
+                    if r_no: loc_details.append(f"Room {r_no}")
+                    if b_no: loc_details.append(f"Bed {b_no}")
+                    loc_str = f" ({', '.join(loc_details)})" if loc_details else ""
+
                     return JsonResponse({
-                        "error": "Patient already admitted",
+                        "error": f"Patient with UHID {clean_uhid} is currently admitted under IP Number {ip_no}{loc_str}. Patient cannot be admitted again until discharged.",
                         "already_admitted": True,
-                        "ipNumber": existing_adm.get("ipNumber"),
+                        "ipNumber": ip_no,
                         "admissionDateTime": adm_dt_iso,
-                        "roomNo": cur_room.get("roomNo", ""),
-                        "bedNo":  cur_room.get("bedNo",  ""),
+                        "roomNo": r_no,
+                        "bedNo":  b_no,
                     }, status=400)
 
                 # ── Patient info lookup ──
@@ -2807,15 +2842,18 @@ def today_registered_patients(request):
             if uhids_list:
                 adm_cursor = hms_db["hospital_admission"].find({
                     "uhid": {"$in": uhids_list},
-                    "is_admitted": True,
-                    "is_discharged": False,
-                    "is_cancelled": False,
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"is_admitted": True, "is_discharged": {"$ne": True}},
+                        {"is_discharged": False}
+                    ]
                 })
                 for adm in adm_cursor:
                     adm_u = str(adm.get("uhid") or "").strip()
-                    if adm_u in patient_map:
-                        patient_map[adm_u]["is_admitted"] = True
-                        patient_map[adm_u]["ipNumber"] = adm.get("ipNumber") or ""
+                    for k in patient_map:
+                        if k.lower() == adm_u.lower():
+                            patient_map[k]["is_admitted"] = True
+                            patient_map[k]["ipNumber"] = adm.get("ipNumber") or ""
 
             results = list(patient_map.values())
 
