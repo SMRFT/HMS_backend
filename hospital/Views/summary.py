@@ -912,6 +912,7 @@ def get_patient_investigations(request, ip_no):
                 'is_approved':   report.get('is_approved', False),
                 'investBillNo':  report.get('investBillNo', ''),
                 'billTypeNo':    bill_type_no,
+                'date':          _to_ymd(report.get('date')),
             })
        
         return JsonResponse(all_reports, safe=False)
@@ -1371,6 +1372,31 @@ def serialize_mongo(val):
         return {k: serialize_mongo(v) for k, v in val.items()}
     return val
 
+def _to_ymd(val):
+    """Any date/datetime/string -> 'YYYY-MM-DD' (datetimes converted UTC -> IST)."""
+    from datetime import timedelta
+    if not val:
+        return ""
+    if isinstance(val, datetime):
+        return (val + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    s = str(val).strip()
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.match(r'^(\d{2})[-/](\d{2})[-/](\d{4})', s)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    return ""
+
+
+def _record_test_date(record, test):
+    """Date from the core_testvalue / core_mbtestvalue record; falls back to the test's approve_time."""
+    for k in ('date', 'created_date', 'test_date', 'collection_date'):
+        d = _to_ymd(record.get(k))
+        if d:
+            return d
+    return _to_ymd(test.get('approve_time'))
+
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def get_printsummary(request, ip_no):
@@ -1669,6 +1695,7 @@ def get_printsummary(request, ip_no):
                         "approve_time":   approve_time,
                         "dispatch_time":  dispatch_time,
                         "is_microbiology": False,  # Flag: standard test
+                        "test_date":      _record_test_date(test_value, test),
                     }
 
                     if parameters and len(parameters) > 0 and core_test:
@@ -1804,6 +1831,7 @@ def get_printsummary(request, ip_no):
                         "approve_by":      approve_by,
                         "approve_time":    approve_time,
                         "is_microbiology": True,  # Flag for frontend renderer
+                        "test_date":       _record_test_date(mb_record, test),
                     }
 
                     # Process parameters (antibiogram rows)
