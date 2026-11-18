@@ -163,6 +163,29 @@ def _to_ist_dt(val):
     return dt.astimezone(_IST_TZ)
 
 
+def _parse_discharge_dt(val):
+    if not val:
+        return None
+    parsed = _parse_dt(val)
+    if not parsed and isinstance(val, str):
+        s = val.strip()
+        for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                parsed = _datetime.strptime(s[:10], fmt)
+                break
+            except Exception:
+                pass
+    if parsed:
+        if parsed.tzinfo is None:
+            now_ist = _to_ist_dt(timezone.now()) or timezone.now()
+            now_time = now_ist.time() if hasattr(now_ist, "time") else _datetime.min.time()
+            if parsed.hour == 0 and parsed.minute == 0:
+                parsed = _datetime.combine(parsed.date(), now_time)
+            parsed = parsed.replace(tzinfo=_IST_TZ)
+        return parsed
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Raw PyMongo — InvestBilling ONLY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -429,6 +452,12 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
                 if isinstance(bd_val, _date) and not isinstance(bd_val, _datetime):
                     bd_val = _datetime(bd_val.year, bd_val.month, bd_val.day, tzinfo=_dt_module.timezone.utc)
                 update_dict["bill_date"] = bd_val
+            if getattr(obj, "discharge_date", None):
+                dd_val = obj.discharge_date
+                if isinstance(dd_val, _date) and not isinstance(dd_val, _datetime):
+                    dd_val = _datetime(dd_val.year, dd_val.month, dd_val.day, tzinfo=_dt_module.timezone.utc)
+                update_dict["discharge_date"] = dd_val
+                update_dict["dischargeDateTime"] = dd_val
             if getattr(obj, "lastmodified_by", None): update_dict["lastmodified_by"] = str(obj.lastmodified_by)
             if getattr(obj, "lastmodified_date", None): update_dict["lastmodified_date"] = obj.lastmodified_date
             if getattr(obj, "branch_code", None): update_dict["branch_code"] = str(obj.branch_code)
@@ -974,14 +1003,22 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 if not dept_name and adm:
                     dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
-            disch_dt = adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None
+            target_b = locals().get("doc") if "doc" in locals() else locals().get("obj")
+            disch_dt = (
+                (target_b.get("discharge_date") if isinstance(target_b, dict) else getattr(target_b, "discharge_date", None)) or
+                (target_b.get("dischargeDateTime") if isinstance(target_b, dict) else getattr(target_b, "dischargeDateTime", None)) or
+                (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
+                (target_b.get("bill_date") if isinstance(target_b, dict) else getattr(target_b, "bill_date", None))
+            ) if target_b else (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None)
             disch_str = ""
             if isinstance(disch_dt, _datetime):
-                disch_str = disch_dt.strftime("%d-%m-%Y")
+                ist_d = _to_ist_dt(disch_dt)
+                disch_str = ist_d.strftime("%d-%m-%Y") if ist_d else disch_dt.strftime("%d-%m-%Y")
             elif isinstance(disch_dt, _date):
                 disch_str = disch_dt.strftime("%d-%m-%Y")
             elif isinstance(disch_dt, str) and disch_dt:
-                disch_str = disch_dt[:10]
+                parsed_s = _parse_dt(disch_dt)
+                disch_str = parsed_s.strftime("%d-%m-%Y") if parsed_s else disch_dt[:10]
 
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
@@ -1146,6 +1183,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         "outlet_code":       doc.get("outlet_code"),
         "hospital_code":     doc.get("hospital_code"),
         "shiftno":           doc.get("shiftno", "") or "",
+        "discharge_date":    disch_str,
+        "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
         "patient_details":   patient_details,
     }
 
@@ -1192,14 +1231,22 @@ def _obj_to_dict(obj):
             if not dept_name and adm:
                 dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
-            disch_dt = adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None
+            target_b = locals().get("doc") if "doc" in locals() else locals().get("obj")
+            disch_dt = (
+                (target_b.get("discharge_date") if isinstance(target_b, dict) else getattr(target_b, "discharge_date", None)) or
+                (target_b.get("dischargeDateTime") if isinstance(target_b, dict) else getattr(target_b, "dischargeDateTime", None)) or
+                (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
+                (target_b.get("bill_date") if isinstance(target_b, dict) else getattr(target_b, "bill_date", None))
+            ) if target_b else (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None)
             disch_str = ""
             if isinstance(disch_dt, _datetime):
-                disch_str = disch_dt.strftime("%d-%m-%Y")
+                ist_d = _to_ist_dt(disch_dt)
+                disch_str = ist_d.strftime("%d-%m-%Y") if ist_d else disch_dt.strftime("%d-%m-%Y")
             elif isinstance(disch_dt, _date):
                 disch_str = disch_dt.strftime("%d-%m-%Y")
             elif isinstance(disch_dt, str) and disch_dt:
-                disch_str = disch_dt[:10]
+                parsed_s = _parse_dt(disch_dt)
+                disch_str = parsed_s.strftime("%d-%m-%Y") if parsed_s else disch_dt[:10]
 
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
@@ -1293,6 +1340,8 @@ def _obj_to_dict(obj):
         "outlet_code":       getattr(obj, "outlet_code", None),
         "hospital_code":     getattr(obj, "hospital_code", None),
         "shiftno":           getattr(obj, "shiftno", "") or "",
+        "discharge_date":    disch_str,
+        "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
         "patient_details":   patient_details,
     }
 
@@ -1451,6 +1500,15 @@ def _apply_fields(obj, data, existing=None, request=None):
     elif existing and getattr(existing, "next_visit_date", None):
         obj.next_visit_date = existing.next_visit_date
 
+    # Handle user-selected discharge_date / date_of_discharge
+    raw_dd = data.get("discharge_date") or data.get("date_of_discharge") or data.get("dischargeDateTime")
+    if raw_dd:
+        parsed_dd = _parse_discharge_dt(raw_dd)
+        if parsed_dd:
+            obj.discharge_date = parsed_dd
+    elif existing and getattr(existing, "discharge_date", None):
+        obj.discharge_date = existing.discharge_date
+
     # ── Audit & Organization Fields ──────────────────────────────────────────
     user_id = None
     if request:
@@ -1555,13 +1613,14 @@ def _apply_fields(obj, data, existing=None, request=None):
             curr_history = getattr(existing, "edit_history", []) or []
             if not isinstance(curr_history, list):
                 curr_history = []
-def _finalize_discharge(ip_number, user_id=None, uhid=None):
+def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None):
     """
     Called upon final discharge billing generation (status='Billed') or conversion from Estimate.
     1. Updates Admission:
        - is_discharged = True, is_admitted = False, status = "Discharged", ward_status = "Discharged"
+       - sets dischargeDateTime and discharge_date to user-selected discharge date (or now).
        - In room_details and roomShitingDetails:
-         makes is_roomActive = False, is_roomCleaned = True, sets endDateTime / end_time to now.
+         makes is_roomActive = False, is_roomCleaned = True, sets endDateTime to discharge date.
        - updates lastmodified_by, lastmodified_date.
     2. Updates Pharmacy Billing:
        - For outlet_code: "OLET001", matching ip_number/uhid, payment_mode: "Credit", billing_status: "Billed", is_ward_request: True
@@ -1575,6 +1634,12 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
 
     now_dt = timezone.now()
     now_iso = now_dt.isoformat()
+    disch_target_dt = _parse_discharge_dt(discharge_date) if discharge_date else None
+    if not disch_target_dt:
+        disch_target_dt = now_dt
+    disch_iso = disch_target_dt.isoformat()
+    disch_ymd = disch_target_dt.strftime("%Y-%m-%d")
+
     user_str = str(user_id).strip() if user_id else "System"
 
     try:
@@ -1591,6 +1656,9 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
         if adm:
             adm.is_discharged = True
             adm.is_admitted = False
+            adm.dischargeDateTime = disch_target_dt
+            if hasattr(adm, "discharge_date"):
+                adm.discharge_date = disch_ymd
             adm.lastmodified_by = user_str
             adm.lastmodified_date = now_dt
 
@@ -1623,7 +1691,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
                     if r_copy.get("is_roomActive"):
                         r_copy["is_roomActive"] = False
                         r_copy["is_roomCleaned"] = False
-                        r_copy["endDateTime"] = now_iso
+                        r_copy["endDateTime"] = disch_iso
                     # Ensure no extra non-standard date variables exist
                     r_copy.pop("end_time", None)
                     r_copy.pop("endTime", None)
@@ -1640,7 +1708,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
                     if s_copy.get("is_roomActive"):
                         s_copy["is_roomActive"] = False
                         s_copy["is_roomCleaned"] = False
-                        s_copy["endDateTime"] = now_iso
+                        s_copy["endDateTime"] = disch_iso
                     # Ensure no extra non-standard date variables exist
                     s_copy.pop("end_time", None)
                     s_copy.pop("endTime", None)
@@ -1667,6 +1735,8 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
                 {"$set": {
                     "is_discharged":       True,
                     "is_admitted":         False,
+                    "dischargeDateTime":   disch_target_dt,
+                    "discharge_date":      disch_ymd,
                     "room_details":       rd_array,
                     "roomShitingDetails": sd_array,
                     "advance_payments":   ap_array,
@@ -1939,8 +2009,8 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None):
         traceback.print_exc()
 
 
-def _mark_admission_discharged(ip_number, user_id=None, uhid=None):
-    _finalize_discharge(ip_number, user_id=user_id, uhid=uhid)
+def _mark_admission_discharged(ip_number, user_id=None, uhid=None, discharge_date=None):
+    _finalize_discharge(ip_number, user_id=user_id, uhid=uhid, discharge_date=discharge_date)
 
 
 def _revert_admission_discharge(ip_number):
@@ -2528,10 +2598,41 @@ def search_discharge_patient(request):
                 })
 
         # ── 4. hospital_pharmacybilling ────────────────────────────────────────
-        pharm_q = get_query(
-            ["inpatient_number", "ipNumber", "ip_number"],
-            {"is_deleted": {"$ne": True}}
-        )
+        # For discharge billing, medicines are taken strictly based on IP number,
+        # and ONLY bills where billing_status is "Billed" and payment_mode is "Credit"
+        pharm_q = None
+        if effective_ip:
+            clean_ip = str(effective_ip).strip()
+            allowed_statuses = ["Billed", "billed"]
+            if for_print:
+                allowed_statuses.extend(["Completed", "completed"])
+
+            pharm_q = {
+                "$and": [
+                    {
+                        "$or": [
+                            {"inpatient_number": clean_ip},
+                            {"ipNumber": clean_ip},
+                            {"ip_number": clean_ip},
+                            {"ip_no": clean_ip},
+                        ]
+                    },
+                    {"is_deleted": {"$ne": True}},
+                    {
+                        "$or": [
+                            {"billing_status": {"$in": allowed_statuses}},
+                            {"billing_status": {"$regex": "^(billed" + ("|completed" if for_print else "") + ")$", "$options": "i"}},
+                        ]
+                    },
+                    {
+                        "$or": [
+                            {"payment_mode": {"$in": ["Credit", "credit"]}},
+                            {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                        ]
+                    }
+                ]
+            }
         total_pharm_amt = 0.0
         pharm_docs = []
         pharmacy_medicines = []
@@ -3061,7 +3162,25 @@ def get_discharge_bill_medicines(request):
             if client: client.close()
             return JsonResponse({"success": True, "pharmacy_medicines": []})
 
-        pharm_q = {"$or": or_clauses, "is_deleted": {"$ne": True}}
+        pharm_q = {
+            "$and": [
+                {"$or": or_clauses},
+                {"is_deleted": {"$ne": True}},
+                {
+                    "$or": [
+                        {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
+                        {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"payment_mode": {"$in": ["Credit", "credit"]}},
+                        {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                        {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                    ]
+                }
+            ]
+        }
         pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
             "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
             "medicine_particulars": 1, "bill_no": 1, "Bill_id": 1
@@ -3627,7 +3746,15 @@ def discharge_billing_list_create(request):
         obj = DischargeBilling()
         _apply_fields(obj, data, request=request)
         obj.status    = billing_status
-        obj.bill_date = timezone.now()
+
+        raw_dd = data.get("discharge_date") or data.get("date_of_discharge") or data.get("bill_date") or data.get("dischargeDateTime")
+        parsed_dd = _parse_discharge_dt(raw_dd)
+        if parsed_dd:
+            obj.discharge_date = parsed_dd
+            obj.bill_date = parsed_dd
+        else:
+            obj.bill_date = timezone.now()
+            obj.discharge_date = obj.bill_date
 
         if billing_status == "Estimate":
             obj.estimate_number = generate_estimate_number()
@@ -3640,7 +3767,12 @@ def discharge_billing_list_create(request):
             obj.save()
             _sync_mongo_items_array(obj)
             if billing_status == "Billed":
-                _mark_admission_discharged(obj.ip_number, user_id=obj.created_by or obj.lastmodified_by, uhid=obj.uhid)
+                _mark_admission_discharged(
+                    obj.ip_number,
+                    user_id=obj.created_by or obj.lastmodified_by,
+                    uhid=obj.uhid,
+                    discharge_date=getattr(obj, "discharge_date", None) or obj.bill_date
+                )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3684,13 +3816,26 @@ def discharge_billing_detail(request, pk):
             billing.status = request.data.get("status")
         else:
             billing.status = curr_status
+
+        raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("bill_date") or request.data.get("dischargeDateTime")
+        if raw_dd:
+            parsed_dd = _parse_discharge_dt(raw_dd)
+            if parsed_dd:
+                billing.discharge_date = parsed_dd
+                billing.bill_date = parsed_dd
+
         _normalise_decimals(billing)
 
         try:
             billing.save()
             _sync_mongo_items_array(billing)
             if billing.status == "Billed":
-                _mark_admission_discharged(billing.ip_number, user_id=billing.lastmodified_by, uhid=billing.uhid)
+                _mark_admission_discharged(
+                    billing.ip_number,
+                    user_id=billing.lastmodified_by,
+                    uhid=billing.uhid,
+                    discharge_date=getattr(billing, "discharge_date", None) or billing.bill_date
+                )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3751,7 +3896,16 @@ def convert_estimate_to_bill(request, pk):
 
     estimate.status    = "Billed"
     estimate.bill_no   = generate_bill_number()
-    estimate.bill_date = timezone.now()   # full datetime matching admissionDateTime
+
+    raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("bill_date") or getattr(estimate, "discharge_date", None)
+    parsed_dd = _parse_discharge_dt(raw_dd)
+    if parsed_dd:
+        estimate.discharge_date = parsed_dd
+        estimate.bill_date = parsed_dd
+    else:
+        estimate.bill_date = timezone.now()
+        estimate.discharge_date = estimate.bill_date
+
     estimate.shiftno   = request.data.get("shiftno")
     if request.data.get("payment_method"):
         estimate.payment_method = str(request.data.get("payment_method")).strip()
@@ -3762,7 +3916,12 @@ def convert_estimate_to_bill(request, pk):
     try:
         estimate.save()
         _sync_mongo_items_array(estimate)
-        _mark_admission_discharged(estimate.ip_number, user_id=estimate.lastmodified_by, uhid=estimate.uhid)
+        _mark_admission_discharged(
+            estimate.ip_number,
+            user_id=estimate.lastmodified_by,
+            uhid=estimate.uhid,
+            discharge_date=getattr(estimate, "discharge_date", None) or estimate.bill_date
+        )
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

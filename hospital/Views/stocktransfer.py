@@ -398,20 +398,26 @@ def pharmacy_stock_view(request, pk=None):
                     row["SGST_Percentage"]          = str(_dec(row.get("SGST_Percentage", 0)))
                     row["CGST_Amt"]                 = str(_dec(row.get("CGST_Amt", 0)))
                     row["SGST_Amt"]                 = str(_dec(row.get("SGST_Amt", 0)))
-                    row["total_stock"]              = _int(row.get("total_stock", 0))
-                    row["sold_quantity"]            = _int(row.get("sold_quantity", 0))
-                    row["transferred_out_quantity"] = _int(row.get("transferred_out_quantity", 0))
-                    row["grn_return_quantity"]      = _int(row.get("grn_return_quantity", 0))
-                    row["blocked_quantity"]         = _int(row.get("blocked_quantity", 0))
-                    row["sales_return_quantity"]    = _int(row.get("sales_return_quantity", 0))
-                    row["available_qty"] = (
-                        row["total_stock"]
-                        - row["sold_quantity"]
-                        - row["transferred_out_quantity"]
-                        - row["grn_return_quantity"]
-                        - row["blocked_quantity"]
-                        + row["sales_return_quantity"]
-                    )
+                    t_stock = float(_dec(row.get("total_stock", 0)))
+                    s_qty   = float(_dec(row.get("sold_quantity", 0)))
+                    to_qty  = float(_dec(row.get("transferred_out_quantity", 0)))
+                    grn_ret = float(_dec(row.get("grn_return_quantity", 0)))
+                    blk_qty = float(_dec(row.get("blocked_quantity", 0)))
+                    sr_qty  = float(_dec(row.get("sales_return_quantity", 0)))
+
+                    row["total_stock"]              = int(t_stock) if t_stock.is_integer() else round(t_stock, 2)
+                    row["sold_quantity"]            = int(s_qty) if s_qty.is_integer() else round(s_qty, 2)
+                    row["transferred_out_quantity"] = int(to_qty) if to_qty.is_integer() else round(to_qty, 2)
+                    row["grn_return_quantity"]      = int(grn_ret) if grn_ret.is_integer() else round(grn_ret, 2)
+                    row["blocked_quantity"]         = int(blk_qty) if blk_qty.is_integer() else round(blk_qty, 2)
+                    row["sales_return_quantity"]    = int(sr_qty) if sr_qty.is_integer() else round(sr_qty, 2)
+
+                    # Pharmacy available stock formula:
+                    # total_stock - sold_quantity - transferred_out_quantity - grn_return_quantity - blocked_quantity + sales_return_quantity
+                    avail = max(0.0, t_stock - s_qty - to_qty - grn_ret - blk_qty + sr_qty)
+                    avail_val = int(avail) if avail.is_integer() else round(avail, 2)
+                    row["available_qty"] = avail_val
+                    row["available_stock"] = avail_val
                     enriched.append(row)
                 enriched.sort(key=lambda x: str(x.get("item_name") or "").upper())
                 return enriched
@@ -501,18 +507,65 @@ def stock_transfer_view(request, pk=None):
         if ref_number:
             filter_q["transfer_ref_number"] = ref_number
 
+        transfer_type = (
+            request.GET.get("transfer_type")
+            or request.GET.get("type")
+            or request.GET.get("tab")
+            or ""
+        ).strip().lower()
+        filter_outlet = (
+            request.GET.get("filter_outlet")
+            or request.GET.get("outlet")
+            or ""
+        ).strip()
+        status_filter = (
+            request.GET.get("status")
+            or request.GET.get("is_verified")
+            or ""
+        ).strip()
+
         and_clauses = []
-        if is_drug_purchase:
-            and_clauses.append({
-                "$or": [
-                    {"to_outlet": {"$in": ["", None, "OLET006"]}},
-                    {"outlet_code": {"$in": ["", None, "OLET006"]}}
-                ]
-            })
-        elif outlet_code:
-            and_clauses.append({
-                "$or": [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
-            })
+
+        # 1. Transfer direction filtering (created vs requested vs all)
+        if transfer_type == "created":
+            # Transfers created by this outlet (outgoing / sender)
+            if is_drug_purchase:
+                and_clauses.append({"outlet_code": {"$in": ["", None, "OLET006"]}})
+            elif outlet_code:
+                and_clauses.append({"outlet_code": outlet_code})
+            if filter_outlet and filter_outlet.lower() != "all":
+                and_clauses.append({"to_outlet": filter_outlet})
+        elif transfer_type == "requested":
+            # Transfers requested/destined to this outlet (incoming / receiver)
+            if is_drug_purchase:
+                and_clauses.append({"to_outlet": {"$in": ["", None, "OLET006"]}})
+            elif outlet_code:
+                and_clauses.append({"to_outlet": outlet_code})
+            if filter_outlet and filter_outlet.lower() != "all":
+                if filter_outlet in ("", "OLET006"):
+                    and_clauses.append({"outlet_code": {"$in": ["", None, "OLET006"]}})
+                else:
+                    and_clauses.append({"outlet_code": filter_outlet})
+        else:
+            # All transfers involving this outlet (either as sender or receiver)
+            if is_drug_purchase:
+                and_clauses.append({
+                    "$or": [
+                        {"to_outlet": {"$in": ["", None, "OLET006"]}},
+                        {"outlet_code": {"$in": ["", None, "OLET006"]}}
+                    ]
+                })
+            elif outlet_code:
+                and_clauses.append({
+                    "$or": [{"outlet_code": outlet_code}, {"to_outlet": outlet_code}]
+                })
+            if filter_outlet and filter_outlet.lower() != "all":
+                and_clauses.append({
+                    "$or": [{"outlet_code": filter_outlet}, {"to_outlet": filter_outlet}]
+                })
+
+        if status_filter and status_filter.lower() != "all":
+            and_clauses.append({"is_verified": status_filter})
 
         search = request.GET.get("search", "").strip()
         if search:
@@ -535,16 +588,43 @@ def stock_transfer_view(request, pk=None):
 
         filter_q = apply_date_filter(filter_q, request, "created_date")
 
+        # ── Calculate tab counts for both categories ──────────────────────────
+        client, hms_db = get_hms_db()
+        base_count_q = {}
+        if hospital_code and hospital_code != "system":
+            base_count_q["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            base_count_q["branch_code"] = branch_code
+        base_count_q = apply_date_filter(base_count_q, request, "created_date")
+
+        created_count_q = dict(base_count_q)
+        requested_count_q = dict(base_count_q)
+
+        if is_drug_purchase:
+            created_count_q["outlet_code"] = {"$in": ["", None, "OLET006"]}
+            requested_count_q["to_outlet"] = {"$in": ["", None, "OLET006"]}
+        elif outlet_code:
+            created_count_q["outlet_code"] = outlet_code
+            requested_count_q["to_outlet"] = outlet_code
+
+        created_count = hms_db["hospital_stocktransfer"].count_documents(created_count_q)
+        requested_count = hms_db["hospital_stocktransfer"].count_documents(requested_count_q)
+
         def _enrich_page(data_list):
             return _enrich_transfers_batch(data_list, hospital_code, branch_code)
 
-        return Response(paginate_mongo_query(
+        paginated_res = paginate_mongo_query(
             "hospital_stocktransfer",
             filter_q,
             sort=[("created_date", DESCENDING)],
             request=request,
             enrich_fn=_enrich_page
-        ))
+        )
+        if isinstance(paginated_res, dict):
+            paginated_res["created_count"] = created_count
+            paginated_res["requested_count"] = requested_count
+
+        return Response(paginated_res)
 
     # ─────────────────────────────────────────────────────────────────────────
     # POST — Create Draft Transfer
@@ -649,14 +729,14 @@ def stock_transfer_view(request, pk=None):
                 )
                 continue
 
-            available = (
-                _int(getattr(source, "total_stock",               0))
-                - _int(getattr(source, "sold_quantity",           0))
-                - _int(getattr(source, "transferred_out_quantity", 0))
-                - _int(getattr(source, "grn_return_quantity",      0))
-                - _int(getattr(source, "blocked_quantity",         0))
-                + _int(getattr(source, "sales_return_quantity",    0))
-            )
+            t_stock = float(_dec(getattr(source, "total_stock", 0)))
+            s_qty   = float(_dec(getattr(source, "sold_quantity", 0)))
+            to_qty  = float(_dec(getattr(source, "transferred_out_quantity", 0)))
+            grn_ret = float(_dec(getattr(source, "grn_return_quantity", 0)))
+            blk_qty = float(_dec(getattr(source, "blocked_quantity", 0)))
+            sr_qty  = float(_dec(getattr(source, "sales_return_quantity", 0)))
+            avail_calc = max(0.0, t_stock - s_qty - to_qty - grn_ret - blk_qty + sr_qty)
+            available  = int(avail_calc) if avail_calc.is_integer() else round(avail_calc, 2)
 
             if transfer_qty > available:
                 errors.append(
@@ -906,14 +986,14 @@ def stock_transfer_action_view(request):
 
             # If not deducted when entered (legacy transfers), deduct now
             if not source_deducted:
-                available = (
-                    _int(getattr(source, "total_stock",               0))
-                    - _int(getattr(source, "sold_quantity",           0))
-                    - _int(getattr(source, "transferred_out_quantity", 0))
-                    - _int(getattr(source, "grn_return_quantity",      0))
-                    - _int(getattr(source, "blocked_quantity",         0))
-                    + _int(getattr(source, "sales_return_quantity",    0))
-                )
+                t_stock = float(_dec(getattr(source, "total_stock", 0)))
+                s_qty   = float(_dec(getattr(source, "sold_quantity", 0)))
+                to_qty  = float(_dec(getattr(source, "transferred_out_quantity", 0)))
+                grn_ret = float(_dec(getattr(source, "grn_return_quantity", 0)))
+                blk_qty = float(_dec(getattr(source, "blocked_quantity", 0)))
+                sr_qty  = float(_dec(getattr(source, "sales_return_quantity", 0)))
+                avail_calc = max(0.0, t_stock - s_qty - to_qty - grn_ret - blk_qty + sr_qty)
+                available  = int(avail_calc) if avail_calc.is_integer() else round(avail_calc, 2)
                 if transfer_qty > available:
                     errors.append(
                         f"Item {idx + 1} (batch={batch_number}): "

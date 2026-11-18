@@ -1089,6 +1089,7 @@ class DischargeBilling(AuditModel):
 
     # ── Bill Date (auto now datetime from backend) ────────────────────────────
     bill_date       = models.DateTimeField(default=timezone.now)
+    discharge_date  = models.DateTimeField(null=True, blank=True)
 
     # ── Items stored as JSON array ────────────────────────────────────────────
     # Each item: { investigation_id, itemName, category, quantity, rate, discount, amount, doctor, doctor_fee, item_description }
