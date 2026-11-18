@@ -63,6 +63,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
         search_uhid = (request.GET.get('uhid') or '').strip()
         search_ip = (request.GET.get('ip_number') or request.GET.get('ip_no') or '').strip()
         search_bill = (request.GET.get('bill_number') or request.GET.get('bill_no') or '').strip()
+        filter_payment_mode = (request.GET.get('payment_mode') or '').strip()
         from_date_str = request.GET.get('from_date') or request.GET.get('start_date')
         to_date_str = request.GET.get('to_date') or request.GET.get('end_date')
 
@@ -172,32 +173,75 @@ def patient_wise_pharmacy_ip_bill_api(request):
             ]
         }))
         all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
-        all_ips.add(target_ip)
+        if target_ip and target_ip != target_uhid:
+            all_ips.add(target_ip)
         all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
-        all_uhids.add(target_uhid)
+        if target_uhid:
+            all_uhids.add(target_uhid)
 
-        bill_query_or = [
-            {"uhid": {"$in": list(all_uhids)}},
-            {"inpatient_number": {"$in": list(all_ips)}}
-        ]
-        for ip in all_ips:
-            bill_query_or.append({"uhid": ip})
+        bill_query_or = []
+        if all_uhids:
+            bill_query_or.append({"uhid": {"$in": list(all_uhids)}})
+        if all_ips:
+            bill_query_or.append({"inpatient_number": {"$in": list(all_ips)}})
+            for ip in all_ips:
+                bill_query_or.append({"uhid": ip})
         if wr_dispatch_map:
             bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
+        if search_bill:
+            bill_query_or.append({"bill_no": search_bill})
 
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
             "$or": bill_query_or,
-            "is_ward_request": {"$ne": True}
+            "bill_no": {"$exists": True, "$ne": ""},
+            "is_deleted": {"$ne": True},
+            "billing_status": {"$nin": ["Cancelled", "Deleted"]}
         }).sort("created_date", 1))
 
-        # Filter to only IP CREDIT / IP mode bills
+        # Resolve doctor name if needed
+        if not patient_info.get("doctor_name") or str(patient_info.get("doctor_name")).isdigit():
+            doc_from_bill = next((b.get('doctor_name') for b in raw_bills if b.get('doctor_name') and not str(b.get('doctor_name')).isdigit()), None)
+            if doc_from_bill:
+                patient_info["doctor_name"] = doc_from_bill
+
+        # Filter to only IP Credit bills (checking payment_mode == 'Credit' / IP Credit mode, excluding counter direct cash sales)
         ip_bills = []
         for b in raw_bills:
             b_mode = str(b.get('billing_mode') or '').upper()
             b_type = b.get('bill_type')
             b_no = b.get('bill_no')
-            if b_no in wr_dispatch_map or 'IP' in b_mode or b_type == 18:
-                ip_bills.append(b)
+            b_ip = str(b.get('inpatient_number') or '').strip()
+            p_mode = str(b.get('payment_mode') or '').strip()
+
+            # If user explicitly requested a payment_mode filter
+            if filter_payment_mode and p_mode.lower() != filter_payment_mode.lower():
+                continue
+
+            # Pure counter direct cash/card/UPI sales are excluded from IP credit report
+            if p_mode.lower() in ('cash', 'card', 'upi') and 'IP' not in b_mode and b_no not in wr_dispatch_map:
+                continue
+
+            # Must be a Credit bill: payment_mode == 'Credit', or billing_mode has 'IP CREDIT' / 'CREDIT', or bill_type 18
+            is_credit = False
+            if p_mode.lower() == 'credit':
+                is_credit = True
+            elif 'IP CREDIT' in b_mode or 'CREDIT' in b_mode or b_type == 18:
+                if p_mode.lower() in ('cash', 'card', 'upi') and not b.get('is_insurance') and b_mode != 'IP CREDIT':
+                    is_credit = False
+                else:
+                    is_credit = True
+            elif b_no in wr_dispatch_map or b.get('is_ward_request'):
+                is_credit = True
+
+            if not is_credit:
+                continue
+
+            # If user explicitly searched by an IP number (which is different from UHID), restrict to that IP
+            if search_ip and search_ip != search_uhid and b_ip:
+                if b_ip.lower() != search_ip.lower():
+                    continue
+
+            ip_bills.append(b)
 
         if not ip_bills:
             return Response({
@@ -231,14 +275,17 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 item_master_map[doc['item_id']] = doc
 
         stock_map = {}
+        stock_fallback = {}
         if all_item_ids:
             for s in hms_db['hospital_pharmacystock'].find(
                 {'item_id': {'$in': list(all_item_ids)}},
-                {'item_id': 1, 'batch_number': 1, 'expiry_date': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1}
+                {'item_id': 1, 'batch_number': 1, 'expiry_date': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1, 'Selling_Price': 1, 'mrp': 1}
             ):
                 k = (s.get('item_id'), str(s.get('batch_number') or '').strip())
                 if k not in stock_map or s.get('expiry_date'):
                     stock_map[k] = s
+                if s.get('item_id') not in stock_fallback or s.get('expiry_date'):
+                    stock_fallback[s.get('item_id')] = s
 
         bills_output = []
         all_flattened_items = []
@@ -296,39 +343,54 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 im_doc = item_master_map.get(it_id_int, {})
                 batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
                 stk_doc = stock_map.get((it_id_int, batch), {})
+                if not stk_doc and it_id_int in stock_fallback:
+                    stk_doc = stock_fallback[it_id_int]
 
                 part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
-                qty = clean_num(itm.get('qty') or 1)
-                price = clean_num(itm.get('price') or 0)
-                calc_price = clean_num(itm.get('calculated_price') or (price * qty))
+                qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
+
+                cgst_pct = clean_num(itm.get('CGST_Percentage') or itm.get('cgst_pct') or stk_doc.get('CGST_Percentage') or 2.5)
+                sgst_pct = clean_num(itm.get('SGST_Percentage') or itm.get('sgst_pct') or stk_doc.get('SGST_Percentage') or 2.5)
+                total_gst_pct = cgst_pct + sgst_pct
+
+                if itm.get('taxable_value') is not None and clean_num(itm.get('taxable_value')) > 0:
+                    taxable = round(clean_num(itm.get('taxable_value')), 2)
+                    cgst = round(clean_num(itm.get('CGST_Amt') if itm.get('CGST_Amt') is not None else (taxable * (cgst_pct / 100.0))), 2)
+                    sgst = round(clean_num(itm.get('SGST_Amt') if itm.get('SGST_Amt') is not None else (taxable * (sgst_pct / 100.0))), 2)
+                    item_amt = round(clean_num(itm.get('total') or itm.get('calculated_price') or (taxable + cgst + sgst)), 2)
+                elif clean_num(stk_doc.get('Selling_Price')) > 0:
+                    sp = clean_num(stk_doc.get('Selling_Price'))
+                    taxable = round(sp * qty, 2)
+                    cgst = round(taxable * (cgst_pct / 100.0), 2)
+                    sgst = round(taxable * (sgst_pct / 100.0), 2)
+                    mrp = clean_num(itm.get('mrp') or stk_doc.get('mrp') or 0)
+                    item_amt = round(mrp * qty, 2) if mrp > 0 else round(taxable + cgst + sgst, 2)
+                else:
+                    price = clean_num(itm.get('price') or stk_doc.get('mrp') or 0)
+                    calc_price = clean_num(itm.get('calculated_price') or (price * qty))
+                    taxable = round(calc_price / (1.0 + (total_gst_pct / 100.0)), 2) if total_gst_pct > 0 else calc_price
+                    cgst = round(taxable * (cgst_pct / 100.0), 2)
+                    sgst = round(taxable * (sgst_pct / 100.0), 2)
+                    item_amt = round(calc_price, 2)
 
                 # Expiry resolution from item, or stock batch
                 exp_raw = itm.get('expiry_date') or itm.get('expiry') or stk_doc.get('expiry_date')
                 exp_str = "-"
                 if isinstance(exp_raw, datetime):
-                    exp_str = exp_raw.strftime("%m/%Y")
+                    exp_str = exp_raw.strftime("%Y/%m")
                 elif exp_raw:
-                    exp_str = str(exp_raw)[:10]
+                    exp_str = str(exp_raw)[:7].replace('-', '/')
 
-                hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip() or "300490"
-
-                # In Hospital Pharmacy Bills: calculated_price is the taxable base amount
-                taxable = calc_price
-
-                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or from stock / itm)
-                cgst_pct = clean_num(itm.get('cgst_pct') or stk_doc.get('CGST_Percentage') or 2.5)
-                sgst_pct = clean_num(itm.get('sgst_pct') or stk_doc.get('SGST_Percentage') or 2.5)
-
-                cgst = round(taxable * (cgst_pct / 100.0), 2)
-                sgst = round(taxable * (sgst_pct / 100.0), 2)
-                item_amt = round(taxable + cgst + sgst, 2)
+                hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip()
+                if not hsn or hsn in ('—', '-'):
+                    hsn = str(im_doc.get('hsn') or "300490").strip()
 
                 b_taxable_tot += taxable
                 b_cgst_tot += cgst
                 b_sgst_tot += sgst
                 b_net_tot += item_amt
 
-                slab_key = f"{int(cgst_pct + sgst_pct)}%"
+                slab_key = f"{int(round(total_gst_pct))}%"
                 if slab_key not in tax_slab_map:
                     tax_slab_map[slab_key] = {"tax_slab": slab_key, "taxable_value": 0.0, "cgst": 0.0, "sgst": 0.0, "total_tax": 0.0}
 
@@ -341,7 +403,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     "sl_no": len(items_list) + 1,
                     "bill_date": b_date_str,
                     "bill_no": b_no,
-                    "qty": int(qty),
+                    "qty": int(qty) if (hasattr(qty, 'is_integer') and qty.is_integer()) else qty,
                     "particulars": part_name,
                     "batch": batch,
                     "expiry": exp_str,
@@ -375,6 +437,8 @@ def patient_wise_pharmacy_ip_bill_api(request):
             bills_output.append({
                 "bill_no": b_no,
                 "bill_date": b_date_str,
+                "payment_mode": b.get('payment_mode') or "Credit",
+                "billing_mode": b.get('billing_mode') or "IP CREDIT",
                 "items": items_list,
                 "tax_summary": list(tax_slab_map.values()),
                 "taxable_amt": b_taxable_tot,
