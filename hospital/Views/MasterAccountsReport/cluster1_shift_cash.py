@@ -86,8 +86,8 @@ def shift_basis_collection_api(request):
 def cash_bills_summary_api(request):
     """
     Dedicated Cash Bills Summary Report API.
-    Categorizes cash bills by billing heads and provides the exact
-    Counter Expense deduction block for 100% tally with Shift Basis.
+    Categorizes cash bills by billing heads grouped by Date and Category,
+    matching Shanmuga Hospital official format with 100% Shift Basis tally.
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
@@ -98,33 +98,135 @@ def cash_bills_summary_api(request):
             shift_no=data.get("shiftno") or data.get("shift_no")
         )
         
-        # Group cash bills by category
-        grouped = {}
+        def _parse_date_keys(raw_d):
+            raw_s = str(raw_d or '')
+            parts = raw_s[:10].split('/')
+            if len(parts) == 3 and len(parts[2]) == 4:
+                return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}", f"{parts[0].zfill(2)}/{parts[1].zfill(2)}/{parts[2]}"
+            parts_dash = raw_s[:10].split('-')
+            if len(parts_dash) == 3 and len(parts_dash[0]) == 4:
+                return raw_s[:10], f"{parts_dash[2]}/{parts_dash[1]}/{parts_dash[0]}"
+            return raw_s[:10], raw_s[:10]
+
+        # Extract and normalize cash bills
+        normalized_bills = []
         for b in res["bills"]:
-            if b["cash"] > 0:
-                cat = b["category"]
-                grouped.setdefault(cat, []).append(b)
+            if b.get("cash", 0) > 0:
+                sort_key, d_disp = _parse_date_keys(b.get("date"))
+                uhid_val = str(b.get("uhid") or b.get("mr_no") or "").strip()
+                ip_val = str(b.get("ip_number") or "").strip()
+                if ip_val == uhid_val:
+                    ip_val = ""
+                amt = round(float(b.get("cash", 0)), 2)
                 
-        grouped_data = []
-        for cat, items in grouped.items():
-            tot = round(sum(it["cash"] for it in items), 2)
-            grouped_data.append({
-                "category": cat,
-                "count": len(items),
-                "total": tot,
-                "items": items
-            })
+                normalized_bills.append({
+                    **b,
+                    "date": sort_key,
+                    "date_display": d_disp,
+                    "category": b.get("category") or "OTHER",
+                    "bill_no": b.get("bill_no") or "-",
+                    "mr_no": uhid_val if uhid_val else "-",
+                    "uhid": uhid_val,
+                    "ip_number": ip_val,
+                    "patient_name": b.get("patient_name") or "General / Cash Patient",
+                    "payment_mode": "CASH",
+                    "amount": amt,
+                    "cash": amt,
+                    "user": (b.get("cashier_name") or b.get("user") or "STAFF").upper(),
+                    "_sort_key": sort_key
+                })
+
+        # Sort all rows by (date asc, category asc, bill_no asc)
+        normalized_bills.sort(key=lambda x: (x["_sort_key"], x["category"], str(x["bill_no"])))
+
+        # Build hierarchical structure: Date -> Category (Sections) -> Items
+        date_groups = {}
+        for b in normalized_bills:
+            d_key = b["_sort_key"]
+            d_disp = b["date_display"]
+            cat = b["category"]
             
+            if d_key not in date_groups:
+                date_groups[d_key] = {
+                    "date": d_key,
+                    "date_display": d_disp,
+                    "sections": {},
+                    "date_total": 0.0,
+                    "count": 0
+                }
+            dg = date_groups[d_key]
+            if cat not in dg["sections"]:
+                dg["sections"][cat] = {
+                    "category": cat,
+                    "items": [],
+                    "total": 0.0,
+                    "count": 0
+                }
+            sec = dg["sections"][cat]
+            sec["items"].append(b)
+            sec["total"] += b["amount"]
+            sec["count"] += 1
+            dg["date_total"] += b["amount"]
+            dg["count"] += 1
+
+        grouped_result = []
+        flat_rows_with_slno = []
+        global_slno = 1
+
+        for d_key in sorted(date_groups.keys()):
+            dg = date_groups[d_key]
+            sec_list = []
+            for cat_name in sorted(dg["sections"].keys()):
+                sec_obj = dg["sections"][cat_name]
+                for item in sec_obj["items"]:
+                    item_clean = {k: v for k, v in item.items() if k != "_sort_key"}
+                    item_clean["slno"] = global_slno
+                    item_clean["displaySlno"] = global_slno
+                    global_slno += 1
+                    flat_rows_with_slno.append(item_clean)
+                sec_list.append({
+                    "category": sec_obj["category"],
+                    "items": sec_obj["items"],
+                    "total": round(sec_obj["total"], 2),
+                    "count": sec_obj["count"]
+                })
+            grouped_result.append({
+                "date": dg["date"],
+                "date_display": dg["date_display"],
+                "sections": sec_list,
+                "date_total": round(dg["date_total"], 2),
+                "count": dg["count"]
+            })
+
+        grand_total = round(sum(r["amount"] for r in flat_rows_with_slno), 2)
+        by_category_summary = {}
+        for r in flat_rows_with_slno:
+            by_category_summary[r["category"]] = round(by_category_summary.get(r["category"], 0.0) + r["amount"], 2)
+
+        summary = {
+            **res["financial_summary"],
+            "total_transactions": len(flat_rows_with_slno),
+            "total_amount": grand_total,
+            "total_cash_bills": grand_total,
+            "total_expenses": res["financial_summary"].get("counter_expenses_paid", 0.0),
+            "net_cash_receipts": res["financial_summary"].get("net_cash_handover", 0.0),
+            "total_bills_count": len(flat_rows_with_slno),
+            "by_category": by_category_summary
+        }
+
         return Response({
             "success": True,
             "report_title": "Cash Bills Summary Report",
             "date_range": res["date_range"],
             "financial_summary": res["financial_summary"],
-            "grouped_data": grouped_data,
-            "data": [b for b in res["bills"] if b["cash"] > 0],
+            "grouped_data": grouped_result,
+            "data": flat_rows_with_slno,
+            "summary": summary,
+            "grand_total": grand_total,
+            "category_summary": by_category_summary,
             "expense_vouchers": res["expense_vouchers"],
-            "total_cash": res["financial_summary"]["gross_cash_collections"],
-            "net_handover_cash": res["financial_summary"]["net_cash_handover"]
+            "total_cash": grand_total,
+            "net_handover_cash": res["financial_summary"].get("net_cash_handover", 0.0)
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -361,7 +463,7 @@ def cashier_wise_summary_api(request):
             r["card"] = r["card_amount"]
             r["credit_amount"] = round(r["credit_amount"], 2)
             r["credit"] = r["credit_amount"]
-            r["total_revenue"] = round(r["total_revenue"], 2)
+            r["total_revenue"] = round(r["cash"] + r["card"] + r["credit"], 2)
             r["total"] = r["total_revenue"]
             rows.append(r)
             

@@ -39,7 +39,7 @@ def parse_date(date_val):
     if not date_val:
         return None
     if isinstance(date_val, datetime):
-        return date_val
+        return date_val.replace(tzinfo=None) if date_val.tzinfo else date_val
     if hasattr(date_val, "year") and hasattr(date_val, "month") and hasattr(date_val, "day"):
         return datetime(date_val.year, date_val.month, date_val.day)
 
@@ -58,13 +58,15 @@ def parse_date(date_val):
         "%d-%m-%Y",
     ):
         try:
-            return datetime.strptime(s[: len(fmt)], fmt)
+            dt = datetime.strptime(s[: len(fmt)], fmt)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
         except Exception:
             pass
 
     try:
         # ISO fallback
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
     except Exception:
         return None
 
@@ -99,42 +101,29 @@ def normalize_uom(unit_str):
     return "Numbers"
 
 
-@api_view(["GET"])
-@permission_classes([HasRoleAndDataPermission])
-def purchase_gst_report_api(request):
+def get_purchase_gst_report_data(from_date_param=None, to_date_param=None, source_type="all", tax_rate_filter=None, vendor_filter=None, search_query=""):
     """
-    GST Purchase Register (GSTR-1 Format for Purchases)
-    Provides:
-      1. B2B Purchase Invoices (VELAVAN HOSPITAL NEEDS_GSTR 1_B2B.xlsm)
-      2. HSN Wise Summary (VELAVAN HOSPITAL NEEDS_GSTR 1_HSN wise.xlsm)
-      3. Document Summary (VELAVAN HOSPITAL NEEDS_GSTR 1_Docs.xlsm)
+    Core engine for GST Purchase Register (GSTR-1 Format for Purchases).
+    Returns dict with summary, b2b_data, hsn_data, docs_data.
+    """
+    now = timezone.now()
+    source_type = (source_type or "all").lower().strip()
+    search_query = (search_query or "").strip().lower()
 
-    Sources:
-      - Drug Purchase: hospital_grn & hospital_vendor
-      - General Stores: hospital_storesgrn & hospital_generalstorevendor
-    """
+    # Default date range: current month 1st to today
+    if not from_date_param:
+        dt_from = datetime(now.year, now.month, 1, 0, 0, 0)
+    else:
+        p_from = parse_date(from_date_param)
+        dt_from = datetime(p_from.year, p_from.month, p_from.day, 0, 0, 0) if p_from else datetime(now.year, now.month, 1)
+
+    if not to_date_param:
+        dt_to = datetime(now.year, now.month, now.day, 23, 59, 59, 999999)
+    else:
+        p_to = parse_date(to_date_param)
+        dt_to = datetime(p_to.year, p_to.month, p_to.day, 23, 59, 59, 999999) if p_to else datetime(now.year, now.month, now.day, 23, 59, 59)
+
     try:
-        from_date_param = request.GET.get("from_date")
-        to_date_param = request.GET.get("to_date")
-        source_type = (request.GET.get("source_type") or "all").lower().strip()  # "all" | "drug" | "stores"
-        tax_rate_filter = request.GET.get("tax_rate")
-        vendor_filter = request.GET.get("vendor_id")
-        search_query = (request.GET.get("search") or "").strip().lower()
-
-        now = timezone.now()
-        # Default date range: current month 1st to today
-        if not from_date_param:
-            dt_from = datetime(now.year, now.month, 1, 0, 0, 0)
-        else:
-            p_from = parse_date(from_date_param)
-            dt_from = datetime(p_from.year, p_from.month, p_from.day, 0, 0, 0) if p_from else datetime(now.year, now.month, 1)
-
-        if not to_date_param:
-            dt_to = datetime(now.year, now.month, now.day, 23, 59, 59, 999999)
-        else:
-            p_to = parse_date(to_date_param)
-            dt_to = datetime(p_to.year, p_to.month, p_to.day, 23, 59, 59, 999999) if p_to else datetime(now.year, now.month, now.day, 23, 59, 59)
-
         client = MongoClient(os.getenv("GLOBAL_DB_HOST"), serverSelectionTimeoutMS=5000)
         hms_db = client["HMS"]
 
@@ -605,17 +594,46 @@ def purchase_gst_report_api(request):
             "rate_wise_summary": rate_wise_summary,
         }
 
-        return Response({
+        return {
             "success": True,
             "summary": summary,
             "b2b_data": b2b_list,
             "hsn_data": hsn_list,
             "docs_data": docs_list,
-        }, status=status.HTTP_200_OK)
+        }
 
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print("❌ Error in purchase_gst_report_api:", tb)
-        return Response({"success": False, "error": str(e), "traceback": tb}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        print("❌ Error in get_purchase_gst_report_data:", tb)
+        return {"success": False, "error": str(e), "traceback": tb}
+
+
+@api_view(["GET"])
+@permission_classes([HasRoleAndDataPermission])
+def purchase_gst_report_api(request):
+    """
+    GST Purchase Register API endpoint.
+    """
+    try:
+        from_date_param = request.GET.get("from_date")
+        to_date_param = request.GET.get("to_date")
+        source_type = (request.GET.get("source_type") or "all").lower().strip()
+        tax_rate_filter = request.GET.get("tax_rate")
+        vendor_filter = request.GET.get("vendor_id")
+        search_query = (request.GET.get("search") or "").strip().lower()
+
+        data = get_purchase_gst_report_data(
+            from_date_param=from_date_param,
+            to_date_param=to_date_param,
+            source_type=source_type,
+            tax_rate_filter=tax_rate_filter,
+            vendor_filter=vendor_filter,
+            search_query=search_query
+        )
+        if data.get("success"):
+            return Response(data, status=status.HTTP_200_OK)
+        return Response(data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

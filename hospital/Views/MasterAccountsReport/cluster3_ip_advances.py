@@ -80,11 +80,11 @@ def insurance_advance_registration_api(request):
         data = request.data if request.method == "POST" else request.query_params
         f_str = data.get("from_date") or data.get("start_date")
         t_str = data.get("to_date") or data.get("end_date")
-        company_filter = data.get("company") or data.get("company_name") or "all"
+        company_filter = (data.get("company") or data.get("company_name") or data.get("category") or data.get("billType") or "all").strip()
         outlet_filter = (data.get("outlet_code") or data.get("outlet") or "all").strip()
         
         from datetime import datetime, timedelta
-        from .core_ledger_engine import get_db, parse_date, clean_num
+        from .core_ledger_engine import get_db, parse_date, clean_num, format_ist_date
         client, db, g_db = get_db()
         try:
             f_d = parse_date(f_str) if f_str else None
@@ -92,7 +92,15 @@ def insurance_advance_registration_api(request):
             
             # Lookup insurance provider map
             ins_docs = list(db["hospital_insuranceprovider"].find({}, {"company_code": 1, "company_name": 1}))
-            ins_code_map = {str(p.get("company_code")): p.get("company_name") for p in ins_docs if p.get("company_code")}
+            ins_code_map = {}
+            ins_name_to_code = {}
+            for p in ins_docs:
+                c_code = str(p.get("company_code") or "").strip()
+                c_name = str(p.get("company_name") or "").strip()
+                if c_code:
+                    ins_code_map[c_code] = c_name
+                if c_name:
+                    ins_name_to_code[c_name.lower()] = c_code
             
             # Query discharge bills in date range with insurance
             q = {"is_cancelled": False}
@@ -141,16 +149,37 @@ def insurance_advance_registration_api(request):
                 if not is_ins:
                     continue
                     
-                comp_code = str(adm.get("company_code") or d.get("company_code") or "")
-                comp_name = (
-                    d.get("company_name") or
-                    adm.get("insurance_company") or
-                    ins_code_map.get(comp_code) or
-                    (f"Company #{comp_code}" if comp_code else "INSURANCE CLAIM")
-                )
+                comp_code = str(adm.get("company_code") or d.get("company_code") or adm.get("companyCode") or "").strip()
+                adm_ins = str(adm.get("insurance_company") or adm.get("insuranceCompanyName") or "").strip()
+                dis_ins = str(d.get("company_name") or d.get("insurance_company") or "").strip()
                 
-                if company_filter and company_filter.lower() != "all" and comp_name != company_filter:
-                    continue
+                comp_name = None
+                if dis_ins and not dis_ins.isdigit() and dis_ins not in ins_code_map:
+                    comp_name = dis_ins
+                elif adm_ins and not adm_ins.isdigit() and adm_ins not in ins_code_map:
+                    comp_name = adm_ins
+                elif comp_code and ins_code_map.get(comp_code):
+                    comp_name = ins_code_map[comp_code]
+                elif dis_ins and ins_code_map.get(dis_ins):
+                    comp_name = ins_code_map[dis_ins]
+                elif adm_ins and ins_code_map.get(adm_ins):
+                    comp_name = ins_code_map[adm_ins]
+                elif dis_ins:
+                    comp_name = dis_ins
+                elif adm_ins:
+                    comp_name = adm_ins
+                elif comp_code:
+                    comp_name = f"Company #{comp_code}"
+                else:
+                    comp_name = "INSURANCE CLAIM"
+
+                if not comp_code and comp_name:
+                    comp_code = ins_name_to_code.get(comp_name.lower(), "")
+                
+                if company_filter and company_filter.lower() != "all":
+                    c_filt_lower = company_filter.lower().strip()
+                    if comp_name.lower() != c_filt_lower and comp_code.lower() != c_filt_lower and c_filt_lower not in comp_name.lower():
+                        continue
                     
                 p_name = pat_map.get(uhid_n) or str(d.get("patient_name") or adm.get("patient_name") or "Patient").strip()
                 bill_amt = clean_num(d.get("total_amount"))
@@ -175,7 +204,7 @@ def insurance_advance_registration_api(request):
                     "patient_name": p_name,
                     "admitting_date": adm_dt,
                     "discharge_date": format_ist_date(d.get("discharge_date") or b_dt),
-                    "card_number": d.get("id_card_number") or adm.get("card_number") or "-",
+                    "card_number": d.get("id_card_number") or adm.get("card_number") or adm.get("policy_no") or "-",
                     "service_no": adm.get("service_no") or "-",
                     "claim_reference": d.get("claim_number") or adm.get("claim_reference") or "-",
                     "place": adm.get("place") or "Salem",
@@ -196,10 +225,50 @@ def insurance_advance_registration_api(request):
                     "has_insurance": True,
                     "old_billno": ""
                 })
+
+            # Group records by Company Name (case-insensitive grouping)
+            company_groups_map = {}
+            for r in records:
+                c_name = str(r["company_name"]).strip()
+                c_key = c_name.upper()
+                if c_key not in company_groups_map:
+                    company_groups_map[c_key] = {
+                        "company_name": c_name,
+                        "company_code": r.get("company_code") or "",
+                        "count": 0,
+                        "total_bill_amount": 0.0,
+                        "total_advance": 0.0,
+                        "total_settled": 0.0,
+                        "total_patient_paid": 0.0,
+                        "total_disallowed": 0.0,
+                        "total_due": 0.0,
+                        "items": []
+                    }
+                grp = company_groups_map[c_key]
+                grp["count"] += 1
+                grp["total_bill_amount"] = round(grp["total_bill_amount"] + r["bill_amount"], 2)
+                grp["total_advance"] = round(grp["total_advance"] + r["advance"], 2)
+                grp["total_settled"] = round(grp["total_settled"] + r["settled_amount"], 2)
+                grp["total_patient_paid"] = round(grp["total_patient_paid"] + r["paid_by_patient"], 2)
+                grp["total_disallowed"] = round(grp["total_disallowed"] + r["disallowed_amount"], 2)
+                grp["total_due"] = round(grp["total_due"] + r["due"], 2)
+                grp["items"].append(r)
+                if r.get("company_code") and not grp["company_code"]:
+                    grp["company_code"] = r["company_code"]
+
+            grouped_data = sorted(list(company_groups_map.values()), key=lambda g: g["company_name"].upper())
+
+            # Unique companies list for dropdown
+            unique_companies = [
+                {"name": g["company_name"], "code": g["company_code"], "count": g["count"]}
+                for g in grouped_data
+            ]
                 
             tot_bill = round(sum(r["bill_amount"] for r in records), 2)
             tot_adv = round(sum(r["advance"] for r in records), 2)
             tot_settled = round(sum(r["settled_amount"] for r in records), 2)
+            tot_patient_paid = round(sum(r["paid_by_patient"] for r in records), 2)
+            tot_disallowed = round(sum(r["disallowed_amount"] for r in records), 2)
             tot_due = round(sum(r["due"] for r in records), 2)
             
             return Response({
@@ -211,9 +280,14 @@ def insurance_advance_registration_api(request):
                     "total_advance": tot_adv,
                     "total_settled": tot_settled,
                     "total_due": tot_due,
-                    "total_count": len(records)
+                    "total_patient_paid": tot_patient_paid,
+                    "total_disallowed": tot_disallowed,
+                    "total_count": len(records),
+                    "total_companies": len(grouped_data)
                 },
                 "total_advance_amount": tot_adv,
+                "unique_companies": unique_companies,
+                "grouped_data": grouped_data,
                 "data": records
             }, status=status.HTTP_200_OK)
         finally:
@@ -226,12 +300,15 @@ def insurance_advance_registration_api(request):
 def ip_advance_collection_register_api(request):
     """
     Dedicated IP Advance Collection Register API.
-    Running in-patient advances grouped by Floor/Ward matching IPAdvanceReport.js.
+    Running in-patient advances with company-wise and floor-wise filtering and grouping.
     """
     try:
-        data = request.data if request.method == "POST" else request.query_params
+        data = request.data if request.method == "POST" else (
+            request.query_params if hasattr(request, "query_params") else getattr(request, "GET", {})
+        )
         as_on_date_str = data.get("as_on_date") or data.get("date") or data.get("to_date")
         floor_filter = (data.get("floor") or "all").strip()
+        company_filter = (data.get("company") or data.get("company_name") or "all").strip()
         advance_filter = (data.get("has_advance") or "all").strip().lower()
         customer_type_filter = (data.get("customer_type") or "all").strip()
         search_query = (data.get("search") or "").strip().lower()
@@ -245,11 +322,61 @@ def ip_advance_collection_register_api(request):
             if isinstance(ref_date, datetime):
                 ref_date = ref_date.date()
                 
-            # Query currently active admissions
-            adm_query = {"is_discharged": False, "is_cancelled": {"$ne": True}}
+            # 1. Fetch all discharged IP numbers from hospital_dischargebilling
+            discharged_docs = list(db["hospital_dischargebilling"].find(
+                {"is_cancelled": False},
+                {"ip_number": 1, "ipNumber": 1, "inpatient_number": 1, "bill_date": 1, "created_date": 1}
+            ))
+            discharged_ips = set()
+            for d in discharged_docs:
+                d_dt = d.get("bill_date") or d.get("created_date")
+                d_d = parse_date(d_dt)
+                if isinstance(d_d, datetime):
+                    d_d = d_d.date()
+                if not ref_date or not d_d or d_d <= ref_date:
+                    for k in ["ip_number", "ipNumber", "inpatient_number"]:
+                        val = str(d.get(k) or "").strip()
+                        if val:
+                            discharged_ips.add(val)
+
+            # 2. Query admissions and filter out discharged, cancelled & future patients
+            adm_query = {"is_discharged": False}
             if outlet_filter and outlet_filter != "all":
                 adm_query["$or"] = [{"outlet_code": outlet_filter}, {"outlet": outlet_filter}, {"SelectedOutlet": outlet_filter}]
-            admissions = list(db["hospital_admission"].find(adm_query))
+            raw_admissions = list(db["hospital_admission"].find(adm_query))
+            
+            admissions = []
+            for adm in raw_admissions:
+                ip_num = str(adm.get("ipNumber") or "").strip()
+                if not ip_num or ip_num in discharged_ips:
+                    continue
+                if adm.get("is_discharged") in (True, "True", "true", 1, "1"):
+                    continue
+                if adm.get("is_admitted") in (False, "False", "false", 0, "0"):
+                    continue
+                if adm.get("is_cancelled") in (True, "True", "true", 1, "1"):
+                    continue
+                w_status = str(adm.get("ward_status") or "").strip().lower()
+                if any(k in w_status for k in ["discharg", "billed", "clearance", "settled", "completed"]):
+                    continue
+                
+                # Check admission date
+                adm_dt = adm.get("admissionDateTime") or adm.get("created_date")
+                adm_date = None
+                if isinstance(adm_dt, str):
+                    try:
+                        adm_date = datetime.fromisoformat(adm_dt.replace('Z', '+00:00')).date()
+                    except Exception:
+                        adm_date = parse_date(adm_dt)
+                elif isinstance(adm_dt, datetime):
+                    adm_date = adm_dt.date()
+                elif isinstance(adm_dt, date):
+                    adm_date = adm_dt
+
+                if adm_date and ref_date and adm_date > ref_date:
+                    continue
+
+                admissions.append(adm)
             
             # Insurance map
             ins_docs = list(db["hospital_insuranceprovider"].find({}, {"company_code": 1, "company_name": 1}))
@@ -281,6 +408,7 @@ def ip_advance_collection_register_api(request):
                 if "NICU" in nursing or "NICU" in r_str: return "NICU"
                 if "CHEMO" in nursing or "CHEMO" in r_str: return "CHEMO"
                 if "DAYCAR" in nursing or "DAYCAR" in r_str: return "DAYCAR"
+                if "DIALYSIS" in nursing or "DLS" in r_str: return "DIALYSIS"
                 num_part = "".join(c for c in r_str if c.isdigit())
                 if num_part:
                     num = int(num_part)
@@ -292,7 +420,8 @@ def ip_advance_collection_register_api(request):
                 return "1ST FLOOR"
                 
             raw_records = []
-            distinct_floors = set()
+            all_available_floors = set()
+            all_available_companies = set()
             
             for adm in admissions:
                 ip_num = str(adm.get("ipNumber") or "").strip()
@@ -315,7 +444,7 @@ def ip_advance_collection_register_api(request):
                     
                 room_obj = room_map.get(room_no)
                 floor_name = resolve_floor(room_no, room_obj)
-                distinct_floors.add(floor_name)
+                all_available_floors.add(floor_name)
                 
                 # Resolve admitting date & no_of_days
                 adm_dt = adm.get("admissionDateTime") or adm.get("created_date")
@@ -345,6 +474,12 @@ def ip_advance_collection_register_api(request):
                             is_active = p.get("is_advanceActive", True)
                             p_status = p.get("status", "Paid")
                             if is_active and p_status != "Cancelled" and not p.get("is_refund"):
+                                p_dt_raw = p.get("date") or p.get("bill_date") or p.get("created_date")
+                                p_d = parse_date(p_dt_raw)
+                                if isinstance(p_d, datetime):
+                                    p_d = p_d.date()
+                                if p_d and ref_date and p_d > ref_date:
+                                    continue
                                 amt = clean_num(p.get("advance_amount") or p.get("amount") or 0)
                                 total_adv += amt
                                 advance_items.append({
@@ -368,7 +503,10 @@ def ip_advance_collection_register_api(request):
                     (adm.get("customer_type") if adm.get("customer_type") and adm.get("customer_type") != "General" else "") or
                     ""
                 ).strip()
+                if not comp_name or comp_name.upper() in ("GENERAL", "CASH"):
+                    comp_name = "GENERAL"
 
+                all_available_companies.add(comp_name)
                 c_type = str(adm.get("customer_type") or "General").capitalize()
                 
                 record = {
@@ -397,19 +535,31 @@ def ip_advance_collection_register_api(request):
                 }
                 
                 # Filters
-                if floor_filter != "all" and floor_name.lower() != floor_filter.lower(): continue
-                if advance_filter == "with_advance" and total_adv <= 0: continue
-                if advance_filter == "zero_advance" and total_adv > 0: continue
+                if floor_filter != "all" and floor_name.lower() != floor_filter.lower():
+                    continue
+
+                if company_filter != "all":
+                    c_filt = company_filter.lower().strip()
+                    comp_lower = comp_name.lower()
+                    if c_filt != comp_lower and c_filt not in comp_lower:
+                        continue
+
+                if advance_filter == "with_advance" and total_adv <= 0:
+                    continue
+                if advance_filter == "zero_advance" and total_adv > 0:
+                    continue
+
                 if customer_type_filter != "all":
                     c_val = c_type.lower()
                     c_comp = comp_name.lower()
                     req_c = customer_type_filter.lower()
-                    if req_c == "general" and (comp_name or c_val not in ("general", "")):
+                    if req_c == "general" and (comp_name != "GENERAL" and c_val not in ("general", "")):
                         continue
-                    elif req_c == "insurance" and not (comp_name or "insurance" in c_val):
+                    elif req_c == "insurance" and (comp_name == "GENERAL" or "insurance" not in c_val):
                         continue
                     elif req_c not in ("general", "insurance") and req_c not in c_val and req_c not in c_comp:
                         continue
+
                 if search_query:
                     match = (
                         search_query in ip_num.lower() or
@@ -419,17 +569,18 @@ def ip_advance_collection_register_api(request):
                         search_query in comp_name.lower() or
                         search_query in floor_name.lower()
                     )
-                    if not match: continue
+                    if not match:
+                        continue
                     
                 raw_records.append(record)
                 
             # Floor Ordering Definition
             floor_order = [
                 "1ST FLOOR", "2ND FLOOR", "3RD FLOOR", "ALL FLOOR",
-                "MICU", "SICU", "NICU", "CHEMO", "DAYCAR", "GW-A", "RECOVERY WARD"
+                "MICU", "SICU", "NICU", "CHEMO", "DAYCAR", "DIALYSIS", "GW-A", "RECOVERY WARD"
             ]
             def get_floor_sort_key(flr):
-                flr_u = flr.upper()
+                flr_u = str(flr).upper()
                 try:
                     return (0, floor_order.index(flr_u), flr_u)
                 except ValueError:
@@ -445,17 +596,17 @@ def ip_advance_collection_register_api(request):
             for idx, r in enumerate(raw_records, 1):
                 r["sl_no"] = idx
 
-            # Floor grouping
-            grouped_dict = {}
+            # 1. Floor grouping
+            floor_grouped_dict = {}
             for r in raw_records:
                 flr = r["floor"]
-                if flr not in grouped_dict:
-                    grouped_dict[flr] = []
-                grouped_dict[flr].append(r)
+                if flr not in floor_grouped_dict:
+                    floor_grouped_dict[flr] = []
+                floor_grouped_dict[flr].append(r)
                 
             grouped_data = []
-            for flr in sorted(grouped_dict.keys(), key=get_floor_sort_key):
-                flr_records = grouped_dict[flr]
+            for flr in sorted(floor_grouped_dict.keys(), key=get_floor_sort_key):
+                flr_records = floor_grouped_dict[flr]
                 subtotal_adv = round(sum(clean_num(item["advance"]) for item in flr_records), 2)
                 grouped_data.append({
                     "floor": flr,
@@ -466,7 +617,31 @@ def ip_advance_collection_register_api(request):
                     "subtotal": subtotal_adv
                 })
 
-            distinct_floors = sorted(list({r["floor"] for r in raw_records}), key=get_floor_sort_key)
+            # 2. Company grouping
+            comp_grouped_dict = {}
+            for r in raw_records:
+                c = r["company_name"]
+                if c not in comp_grouped_dict:
+                    comp_grouped_dict[c] = []
+                comp_grouped_dict[c].append(r)
+
+            company_grouped_data = []
+            for c in sorted(comp_grouped_dict.keys()):
+                c_records = comp_grouped_dict[c]
+                subtotal_adv = round(sum(clean_num(item["advance"]) for item in c_records), 2)
+                company_grouped_data.append({
+                    "company_name": c,
+                    "company": c,
+                    "records": c_records,
+                    "patients": c_records,
+                    "count": len(c_records),
+                    "subtotal_advance": subtotal_adv,
+                    "subtotal": subtotal_adv
+                })
+
+            distinct_floors = sorted(list(all_available_floors), key=get_floor_sort_key)
+            distinct_companies = sorted(list(all_available_companies))
+
             tot_patients = len(raw_records)
             with_adv = sum(1 for r in raw_records if r["has_advance"])
             zero_adv = tot_patients - with_adv
@@ -476,8 +651,13 @@ def ip_advance_collection_register_api(request):
                 "success": True,
                 "report_title": "IP Advance Collection Register",
                 "data": raw_records,
+                "records": raw_records,
                 "grouped_data": grouped_data,
+                "floor_grouped_data": grouped_data,
+                "company_grouped_data": company_grouped_data,
                 "floors_list": distinct_floors,
+                "companies_list": distinct_companies,
+                "unique_companies": distinct_companies,
                 "summary": {
                     "total_patients": tot_patients,
                     "total_with_advance": with_adv,
@@ -501,13 +681,15 @@ def discharge_bills_summary_api(request):
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
+        mode_param = (data.get("payment_mode") or data.get("mode") or data.get("bill_type") or data.get("category") or "").strip()
+
         res = AccountsLedgerEngine.get_ledger_data(
             from_str=data.get("from_date") or data.get("start_date"),
             to_str=data.get("to_date") or data.get("end_date"),
             outlet_code=data.get("outlet_code") or data.get("outlet")
         )
-        dis_bills = [b for b in res["bills"] if b["category"] == "DISCHARGE"]
-        for b in dis_bills:
+        all_dis_bills = [b for b in res["bills"] if b["category"] == "DISCHARGE"]
+        for b in all_dis_bills:
             g_amt = clean_num(b.get("gross_amount") or b.get("gross") or b.get("bill_amount") or b.get("total_amount") or 0.0)
             adv_adj = clean_num(b.get("advance_adjustment") or b.get("advance_adjusted") or b.get("advance_amount") or 0.0)
             c_val = clean_num(b.get("cash"))
@@ -533,6 +715,29 @@ def discharge_bills_summary_api(request):
             b["credit"] = round(k_val, 2)
             b["mr_no"] = b.get("uhid") or "-"
 
+        # Filter by payment mode if specified
+        if mode_param and mode_param.lower() not in ["all", "all payment modes", "all types"]:
+            fm = mode_param.strip().lower()
+            dis_bills = []
+            for b in all_dis_bills:
+                bm = str(b.get("payment_mode") or "").strip().lower()
+                if fm == "cash":
+                    if bm == "cash":
+                        dis_bills.append(b)
+                elif fm in ["card", "credit card", "bank", "online", "pos"]:
+                    if any(k in bm for k in ["card", "bank", "online", "pos", "upi", "neft"]):
+                        dis_bills.append(b)
+                elif "multi" in fm:
+                    if "multi" in bm:
+                        dis_bills.append(b)
+                elif fm == "cheque":
+                    if "cheque" in bm:
+                        dis_bills.append(b)
+                elif fm in bm:
+                    dis_bills.append(b)
+        else:
+            dis_bills = all_dis_bills
+
         tot_gross = round(sum(b["bill_amount"] for b in dis_bills), 2)
         tot_adv = round(sum(b["advance_adjusted"] for b in dis_bills), 2)
         tot_net = round(sum(b["net_settlement"] for b in dis_bills), 2)
@@ -556,7 +761,7 @@ def discharge_bills_summary_api(request):
             },
             "total_amount": tot_gross,
             "total_cash": tot_cash,
-            "total_card": round(sum(b["bank"] for b in dis_bills), 2),
+            "total_card": round(sum(b.get("bank", 0) for b in dis_bills), 2),
             "total_credit": tot_credit,
             "data": dis_bills
         }, status=status.HTTP_200_OK)

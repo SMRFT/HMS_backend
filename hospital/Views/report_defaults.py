@@ -944,6 +944,303 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'route': '/DrugOpeningStockReport'
             }
         ]
+    },
+    {   'created_by': 'system',
+        'group': 'Master Accounts',
+        'group_id': 7,
+        'is_active': True,
+        'lastmodified_by': 'system',
+        'order': 7,
+        'pages': [
+            {
+                'page_id': 701,
+                'name': 'Unified Accounts & Reconciliation',
+                'description': 'Single Source of Truth: Gross Collections, Counter Expense Deductions, Net Cash Handover, and Shift-Wise Tally.',
+                'icon': 'Receipt',
+                'route': '/MasterUnifiedAccountsReport',
+                'permissions': {'Unified Accounts & Reconciliation': 'HMS-MACC-UNIFIED-RPT'}
+            },
+            {
+                'page_id': 702,
+                'name': 'Shift Basis Collection Report',
+                'description': 'Shift-wise closing balances, cash handovers, expense deductions, and 100% mathematical tally status.',
+                'icon': 'Clock',
+                'route': '/MasterShiftBasisReport',
+                'permissions': {'Shift Basis Collection Report': 'HMS-MACC-SHIFT-BASIS-RPT'}
+            },
+            {
+                'page_id': 703,
+                'name': 'Cash Bills Summary Report',
+                'description': 'Direct cash receipts summary categorized by OPD, IPD, Diagnostics, Pharmacy, and Advance deposits.',
+                'icon': 'Banknote',
+                'route': '/MasterCashBillsReport',
+                'permissions': {'Cash Bills Summary Report': 'HMS-MACC-CASH-BILLS-RPT'}
+            },
+            {
+                'page_id': 704,
+                'name': 'Daily Cash Collection Report (Cash Book)',
+                'description': 'Daily Cash Book format: opening balance, cash receipts, drawer expenses paid, and closing cash.',
+                'icon': 'Wallet',
+                'route': '/MasterDailyCashReport',
+                'permissions': {'Daily Cash Collection Report': 'HMS-MACC-DAILY-CASH-RPT'}
+            },
+            {
+                'page_id': 705,
+                'name': 'Cashier-Wise Collection Summary',
+                'description': 'Collections per counter operator with Cash, Card POS, UPI, and Credit breakdown across shifts.',
+                'icon': 'Users',
+                'route': '/MasterCashierWiseReport',
+                'permissions': {'Cashier-Wise Collection Summary': 'HMS-MACC-CASHIER-WISE-RPT'}
+            },
+            {
+                'page_id': 706,
+                'name': 'Cashier-Wise Detailed Collection',
+                'description': 'Line-by-line itemized collection audit per cashier across active shifts.',
+                'icon': 'ClipboardList',
+                'route': '/MasterCashierDetailedReport',
+                'permissions': {'Cashier-Wise Detailed Collection': 'HMS-MACC-CASHIER-DET-RPT'}
+            },
+            {
+                'page_id': 707,
+                'name': 'Credit Card & Electronic Payment Report',
+                'description': 'POS terminal swipe machine receipts, card network auth codes, and electronic settlements.',
+                'icon': 'CreditCard',
+                'route': '/MasterCreditCardReport',
+                'permissions': {'Credit Card & Electronic Payment Report': 'HMS-MACC-CREDIT-CARD-RPT'}
+            },
+            {
+                'page_id': 708,
+                'name': 'Date-Wise Collection Summary',
+                'description': 'Day-by-day revenue summary across all hospital departments for custom date ranges.',
+                'icon': 'Calendar',
+                'route': '/MasterDatewiseSummaryReport',
+                'permissions': {'Date-Wise Collection Summary': 'HMS-MACC-DATEWISE-COLL-RPT'}
+            },
+            {
+                'page_id': 709,
+                'name': 'Department-Wise Revenue & Volume Report',
+                'description': 'Clinical department revenue and volume breakdown across OP, IP, Pharmacy, and Doctor Performance.',
+                'icon': 'Building2',
+                'route': '/MasterDepartmentWiseReport',
+                'permissions': {'Department-Wise Revenue & Volume Report': 'HMS-MACC-DEPT-WISE-RPT'}
+            },
+            {
+                'page_id': 710,
+                'name': 'Bill Type-Wise Collection Report',
+                'description': 'Financial revenue performance grouped by hospital bill types, pharmacy, and diagnostic services.',
+                'icon': 'Layers',
+                'route': '/MasterBillTypeWiseReport',
+                'permissions': {'Bill Type-Wise Collection Report': 'HMS-MACC-BILL-TYPE-RPT'}
+            },
+            {
+                'page_id': 711,
+                'name': 'Advance Registration Report',
+                'description': 'Patient running advance deposits register with payment mode decomposition and IP tracking.',
+                'icon': 'Wallet',
+                'route': '/MasterAdvanceRegistration',
+                'permissions': {'Advance Registration Report': 'HMS-MACC-ADV-REG-RPT'}
+            },
+            {
+                'page_id': 712,
+                'name': 'Insurance & Corporate Advance Report',
+                'description': 'TPA and Corporate insurance advance deposits and claim ledgers.',
+                'icon': 'ShieldCheck',
+                'route': '/MasterInsuranceAdvanceReport',
+                'permissions': {'Insurance & Corporate Advance Report': 'HMS-MACC-ADV-INS-RPT'}
+            },
+            {
+                'page_id': 713,
+                'name': 'IP Advance Collection Register',
+                'description': 'Inpatient interim advance payment tracker with outstanding bed dues, ward floors, and TPA filtering.',
+                'icon': 'UserCheck',
+                'route': '/MasterIPAdvanceReport',
+                'permissions': {'IP Advance Collection Register': 'HMS-MACC-IP-ADV-RPT'}
+            },
+            {
+                'page_id': 714,
+                'name': 'Admission vs Discharge Report',
+                'description': 'Inpatient admission and discharge comparison sorted by IP Number, with room, stay duration, advance, and company name.',
+                'icon': 'BedDouble',
+                'route': '/MasterAdmissionVsDischargeReport',
+                'permissions': {'Admission vs Discharge Report': 'HMS-MACC-ADM-DIS-RPT'}
+            },
+            {
+                'page_id': 715,
+                'name': 'Discharge Patient Bills Summary',
+                'description': 'IP final settlement bills and clearance summary for discharged patients.',
+                'icon': 'ClipboardList',
+                'route': '/MasterDischargeBillsReport',
+                'permissions': {'Discharge Patient Bills Summary': 'HMS-MACC-DISCHARGE-BILLS-RPT'}
+            },
+            {
+                'page_id': 716,
+                'name': 'Discharge Bills Detailed Breakdown',
+                'description': 'Line-by-line itemized discharge audit across room rent, procedures, pharmacy, investigations, and surgery charges.',
+                'icon': 'FileText',
+                'route': '/MasterDischargeDetailedReport',
+                'permissions': {'Discharge Bills Detailed Breakdown': 'HMS-MACC-DISCHARGE-DET-RPT'}
+            },
+            {
+                'page_id': 717,
+                'name': 'Debit & Due Bills Register',
+                'description': 'Pending patient receivables, company balances, and unsettled credit dues.',
+                'icon': 'Clock',
+                'route': '/MasterDebitDueBillsReport',
+                'permissions': {'Debit & Due Bills Register': 'HMS-MACC-DEBIT-BILLS-RPT'}
+            },
+            {
+                'page_id': 718,
+                'name': 'Discount & Concession Register',
+                'description': 'Hospital concessions, management waivers, and authorized doctor discounts.',
+                'icon': 'Percent',
+                'route': '/MasterDiscountBillsReport',
+                'permissions': {'Discount & Concession Register': 'HMS-MACC-DISCOUNT-BILLS-RPT'}
+            },
+            {
+                'page_id': 719,
+                'name': 'Bill Cancellation Register',
+                'description': 'Detailed log of cancelled receipts and refunded bills with authorized reasons.',
+                'icon': 'MinusCircle',
+                'route': '/MasterBillCancelReport',
+                'permissions': {'Bill Cancellation Register': 'HMS-MACC-BILL-CANCEL-RPT'}
+            },
+            {
+                'page_id': 720,
+                'name': 'Master Accounts Audit Report',
+                'description': 'Comprehensive transactional audit report for all cash counter vouchers and billing adjustments.',
+                'icon': 'FileText',
+                'route': '/MasterAccountsAuditReport',
+                'permissions': {'Master Accounts Audit Report': 'HMS-MACC-AUDIT-RPT'}
+            },
+            {
+                'page_id': 721,
+                'name': 'Bill Wise Detailed Report',
+                'description': 'Itemized line-by-line revenue analysis per patient bill across all billing modules.',
+                'icon': 'FileText',
+                'route': '/MasterBillWiseReport',
+                'permissions': {'Bill Wise Detailed Report': 'HMS-MACC-BILL-WISE-RPT'}
+            },
+            {
+                'page_id': 722,
+                'name': 'Miscellaneous Payment Report',
+                'description': 'Sundry hospital income receipts and cash drawer expense payout vouchers.',
+                'icon': 'Wallet',
+                'route': '/MasterMiscPaymentReport',
+                'permissions': {'Miscellaneous Payment Report': 'HMS-MACC-MISC-PAY-RPT'}
+            },
+            {
+                'page_id': 723,
+                'name': 'Sales Tax Register (GST)',
+                'description': 'GST output tax collection register grouped by operating day and tax slab (0%, 5%, 12%, 18%).',
+                'icon': 'Percent',
+                'route': '/MasterSalesTaxRegister',
+                'permissions': {'Sales Tax Register': 'HMS-MACC-SALES-TAX-RPT'}
+            },
+            {
+                'page_id': 724,
+                'name': 'Day-wise Sales Tax Register (GST)',
+                'description': 'Day-wise summary breakdown of pharmacy OP/IP bills and sales returns across GST tax slabs (Exempted, 5%, 12%, 18%) with Sales, Returns, and Net breakdown tabs.',
+                'icon': 'Layers',
+                'route': '/MasterDaywiseSalesTaxRegister',
+                'permissions': {'Day-wise Sales Tax Register': 'HMS-MACC-DAYWISE-TAX-RPT'}
+            },
+            {
+                'page_id': 725,
+                'name': 'Drug Purchase - B2B Invoices',
+                'description': 'Drug Purchase B2B invoice-level tax register in Winman GSTR-1 format.',
+                'icon': 'FileText',
+                'route': '/MasterDrugPurchaseB2B',
+                'permissions': {'Drug Purchase - B2B Invoices': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 726,
+                'name': 'Drug Purchase - HSN Wise Summary',
+                'description': 'Drug Purchase medicine HSN-wise summaries with quantity, rate, and ITC breakdowns.',
+                'icon': 'Package',
+                'route': '/MasterDrugHSNReport',
+                'permissions': {'Drug Purchase - HSN Wise Summary': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 727,
+                'name': 'Drug Purchase - Document Summary',
+                'description': 'Drug Purchase inward supply invoice document series, range, and voucher counts.',
+                'icon': 'Layers',
+                'route': '/MasterDrugDocsReport',
+                'permissions': {'Drug Purchase - Document Summary': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 728,
+                'name': 'General Stores - B2B Invoices',
+                'description': 'General Stores inward purchase invoice tax register by tax rate.',
+                'icon': 'FileText',
+                'route': '/MasterStoreB2BReport',
+                'permissions': {'General Stores - B2B Invoices': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 729,
+                'name': 'General Stores - HSN Wise Summary',
+                'description': 'General Stores product HSN summary with UOM, quantity, taxable value, and tax lines.',
+                'icon': 'Package',
+                'route': '/MasterStoreHSNReport',
+                'permissions': {'General Stores - HSN Wise Summary': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 730,
+                'name': 'General Stores - Document Summary',
+                'description': 'General Stores inward invoice series, serial ranges, and cancellation counts.',
+                'icon': 'Layers',
+                'route': '/MasterStoreDocsReport',
+                'permissions': {'General Stores - Document Summary': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 731,
+                'name': 'Purchase GST Register - Consolidated (GSTR-1)',
+                'description': 'Consolidated multi-tab register covering both Drug Purchase & General Stores.',
+                'icon': 'FileSpreadsheet',
+                'route': '/MasterPurchaseGSTReport',
+                'permissions': {'Purchase GST Register': 'HMS-MACC-PURCHASE-GST-RPT'}
+            },
+            {
+                'page_id': 732,
+                'name': 'OP Pharmacy Sales - Invoices',
+                'description': 'OP Pharmacy outward patient sales invoices with Bill No as Invoice No, Customer Name, and GST tax breakdown.',
+                'icon': 'FileText',
+                'route': '/MasterOPPharmacySalesInvoices',
+                'permissions': {'OP Pharmacy Sales - Invoices': 'HMS-MACC-OP-PHARMACY-SALES-RPT'}
+            },
+            {
+                'page_id': 733,
+                'name': 'OP Pharmacy Sales - HSN Wise Summary',
+                'description': 'HSN-wise medicine product sales summary with quantities, tax rates, and output GST totals.',
+                'icon': 'Package',
+                'route': '/MasterOPPharmacySalesHSN',
+                'permissions': {'OP Pharmacy Sales - HSN Wise Summary': 'HMS-MACC-OP-PHARMACY-SALES-RPT'}
+            },
+            {
+                'page_id': 734,
+                'name': 'OP Pharmacy Sales - Document Summary',
+                'description': 'Document summary of OP Pharmacy outward supply bills, serial number series from/to, and cancellations.',
+                'icon': 'Layers',
+                'route': '/MasterOPPharmacySalesDocs',
+                'permissions': {'OP Pharmacy Sales - Document Summary': 'HMS-MACC-OP-PHARMACY-SALES-RPT'}
+            },
+            {
+                'page_id': 735,
+                'name': 'IP / OP Stock Movement Report',
+                'description': 'Audit of medical and pharmacy items dispensed to Inpatients vs Outpatients.',
+                'icon': 'Package',
+                'route': '/MasterStockReportIpOp',
+                'permissions': {'IP / OP Stock Movement Report': 'HMS-MACC-STOCK-IP-OP-RPT'}
+            },
+            {
+                'page_id': 736,
+                'name': 'Sales Return Report',
+                'description': 'Medicine sales returns, refunds, customer credit notes, and restocking audit trail.',
+                'icon': 'RotateCcw',
+                'route': '/MasterSalesReturnReport',
+                'permissions': {'Sales Return Report': 'HMS-MACC-SALES-RETURN-RPT'}
+            }
+        ]
     }]
 
 def seed_default_report_masters(force=False):

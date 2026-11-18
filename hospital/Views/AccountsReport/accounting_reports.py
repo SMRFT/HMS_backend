@@ -3681,6 +3681,7 @@ def patient_advance_details_report(request):
     try:
         as_on_date_str = request.GET.get("as_on_date") or request.GET.get("date") or request.GET.get("to_date")
         floor_filter = (request.GET.get("floor") or "").strip()
+        company_filter = (request.GET.get("company") or request.GET.get("company_name") or "all").strip()
         has_advance_filter = (request.GET.get("has_advance") or "all").strip().lower()
         customer_type_filter = (request.GET.get("customer_type") or "all").strip()
         search_query = (request.GET.get("search") or "").strip().lower()
@@ -3699,17 +3700,47 @@ def patient_advance_details_report(request):
         db = client[os.getenv("HMS_DB_NAME", "HMS")]
 
         # Query currently admitted patients
+        discharged_docs = list(db["hospital_dischargebilling"].find(
+            {"is_cancelled": False},
+            {"ip_number": 1, "ipNumber": 1, "inpatient_number": 1, "bill_date": 1, "created_date": 1}
+        ))
+        discharged_ips = set()
+        for d in discharged_docs:
+            d_dt = d.get("bill_date") or d.get("created_date")
+            d_d = _parse_date(str(d_dt)[:10]) if d_dt else None
+            if not ref_date or not d_d or d_d <= ref_date:
+                for k in ["ip_number", "ipNumber", "inpatient_number"]:
+                    val = str(d.get(k) or "").strip()
+                    if val:
+                        discharged_ips.add(val)
+
         adm_query = {
             "is_admitted": True,
-            "is_discharged": False,
-            "is_cancelled": {"$ne": True}
+            "is_discharged": False
         }
         if hospital_code:
             adm_query["hospital_code"] = hospital_code
         if branch_code:
             adm_query["branch_code"] = branch_code
 
-        admissions = list(db["hospital_admission"].find(adm_query))
+        raw_admissions = list(db["hospital_admission"].find(adm_query))
+        admissions = []
+        for adm in raw_admissions:
+            ip_val = str(adm.get("ipNumber") or "").strip()
+            if not ip_val or ip_val in discharged_ips:
+                continue
+            if adm.get("is_discharged") in (True, "True", "true", 1, "1"):
+                continue
+            if adm.get("is_cancelled") in (True, "True", "true", 1, "1"):
+                continue
+            w_status = str(adm.get("ward_status") or "").strip().lower()
+            if any(k in w_status for k in ["discharg", "billed", "clearance", "settled", "completed"]):
+                continue
+            adm_dt = adm.get("admissionDateTime") or adm.get("created_date")
+            adm_d = _parse_date(str(adm_dt)[:10]) if adm_dt else None
+            if adm_d and ref_date and adm_d > ref_date:
+                continue
+            admissions.append(adm)
 
         # Bulk fetch insurance providers, rooms, and patients
         ins_docs = list(db["hospital_insuranceprovider"].find({}, {"company_code": 1, "company_name": 1}))
@@ -3853,6 +3884,8 @@ def patient_advance_details_report(request):
                 (adm.get("customer_type") if adm.get("customer_type") and adm.get("customer_type") != "General" else "") or
                 ""
             ).strip()
+            if not comp_name or comp_name.upper() in ("GENERAL", "CASH"):
+                comp_name = "GENERAL"
 
             raw_records.append({
                 "room": room_no,
@@ -3870,12 +3903,21 @@ def patient_advance_details_report(request):
                 "advance_items": advance_items
             })
 
+        all_available_floors = sorted(list({r["floor"] for r in raw_records}))
+        all_available_companies = sorted(list({r["company_name"] for r in raw_records}))
+
         # Apply Filters
         filtered_records = []
         for rec in raw_records:
             # Floor filter
             if floor_filter and floor_filter.lower() != "all" and floor_filter.lower() != "all floor":
                 if rec["floor"].lower() != floor_filter.lower():
+                    continue
+
+            # Company filter
+            if company_filter and company_filter.lower() != "all":
+                c_filt = company_filter.lower().strip()
+                if c_filt != rec["company_name"].lower() and c_filt not in rec["company_name"].lower():
                     continue
 
             # Advance filter
@@ -3889,9 +3931,9 @@ def patient_advance_details_report(request):
                 c_val = (rec["customer_type"] or "").lower()
                 c_comp = (rec["company_name"] or "").lower()
                 req_c = customer_type_filter.lower()
-                if req_c == "general" and (rec["company_name"] or c_val not in ("general", "")):
+                if req_c == "general" and (rec["company_name"] != "GENERAL" and c_val not in ("general", "")):
                     continue
-                elif req_c == "insurance" and not (rec["company_name"] or "insurance" in c_val):
+                elif req_c == "insurance" and (rec["company_name"] == "GENERAL" or "insurance" not in c_val):
                     continue
                 elif req_c not in ("general", "insurance") and req_c not in c_val and req_c not in c_comp:
                     continue
@@ -3915,12 +3957,13 @@ def patient_advance_details_report(request):
             "NICU",
             "CHEMO",
             "DAYCAR",
+            "DIALYSIS",
             "GW-A",
             "RECOVERY WARD"
         ]
 
         def get_floor_sort_key(flr):
-            flr_u = flr.upper()
+            flr_u = str(flr).upper()
             try:
                 return (0, floor_order.index(flr_u), flr_u)
             except ValueError:
@@ -3956,7 +3999,28 @@ def patient_advance_details_report(request):
                 "subtotal_advance": subtotal_adv
             })
 
-        distinct_floors = sorted(list({r["floor"] for r in raw_records}), key=get_floor_sort_key)
+        # Group data by Company
+        comp_grouped_dict = {}
+        for r in filtered_records:
+            c = r["company_name"]
+            if c not in comp_grouped_dict:
+                comp_grouped_dict[c] = []
+            comp_grouped_dict[c].append(r)
+
+        company_grouped_data = []
+        for c in sorted(comp_grouped_dict.keys()):
+            c_records = comp_grouped_dict[c]
+            subtotal_adv = round(sum(item["advance"] for item in c_records), 2)
+            company_grouped_data.append({
+                "company_name": c,
+                "company": c,
+                "records": c_records,
+                "count": len(c_records),
+                "subtotal_advance": subtotal_adv
+            })
+
+        distinct_floors = sorted(list(all_available_floors), key=get_floor_sort_key)
+        distinct_companies = sorted(list(all_available_companies))
 
         total_patients = len(filtered_records)
         total_with_advance = sum(1 for r in filtered_records if r["advance"] > 0)
@@ -3976,7 +4040,11 @@ def patient_advance_details_report(request):
             "success": True,
             "data": filtered_records,
             "grouped_data": grouped_data,
+            "floor_grouped_data": grouped_data,
+            "company_grouped_data": company_grouped_data,
             "floors_list": distinct_floors,
+            "companies_list": distinct_companies,
+            "unique_companies": distinct_companies,
             "summary": summary
         })
 

@@ -18,7 +18,8 @@ from hospital.Views.AccountsReport.accounting_reports import date_wise_collectio
 def credit_card_report_api(request):
     """
     Dedicated Credit Card & Electronic Payment Report API.
-    Itemized POS, Card, UPI, and Bank settlements matching EDC bank statements.
+    Itemized POS, Card, UPI, and Bank settlements grouped by Date and Category,
+    matching Shanmuga Hospital official format with 100% Shift Basis tally.
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
@@ -29,47 +30,161 @@ def credit_card_report_api(request):
             shift_no=data.get("shiftno") or data.get("shift_no")
         )
         
-        # Filter for digital/card payments
-        card_bills = []
+        def _parse_date_keys(raw_d):
+            raw_s = str(raw_d or '')
+            parts = raw_s[:10].split('/')
+            if len(parts) == 3 and len(parts[2]) == 4:
+                return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}", f"{parts[0].zfill(2)}/{parts[1].zfill(2)}/{parts[2]}"
+            parts_dash = raw_s[:10].split('-')
+            if len(parts_dash) == 3 and len(parts_dash[0]) == 4:
+                return raw_s[:10], f"{parts_dash[2]}/{parts_dash[1]}/{parts_dash[0]}"
+            return raw_s[:10], raw_s[:10]
+
+        # Extract and normalize card/bank bills
+        normalized_bills = []
         for b in res["bills"]:
-            if b["bank"] > 0:
-                b["card_amount"] = b["bank"]
-                b["card"] = b["bank"]
-                b["amount"] = b["bank"]
-                b["net_amount"] = b["bank"]
-                b["mr_no"] = b.get("uhid") or "-"
-                b["terminal_machine"] = b.get("outlet_code") or "Main POS"
-                b["card_type"] = b.get("payment_mode") or "Credit/Debit Card"
-                b["auth_code"] = "-"
-                card_bills.append(b)
-        
-        # Group by category
-        by_category = {}
-        for b in card_bills:
+            if b.get("bank", 0) > 0:
+                sort_key, d_disp = _parse_date_keys(b.get("date"))
+                uhid_val = str(b.get("uhid") or b.get("mr_no") or "").strip()
+                ip_val = str(b.get("ip_number") or "").strip()
+                if ip_val == uhid_val:
+                    ip_val = ""
+                amt = round(float(b.get("bank", 0)), 2)
+
+                p_mode = str(b.get("payment_mode") or "").strip().upper()
+                card_type = b.get("card_type")
+                if not card_type:
+                    if any(k in p_mode for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "PAYTM", "BHIM", "QR"]):
+                        card_type = "UPI"
+                    elif "RUPAY" in p_mode:
+                        card_type = "RUPAY CARD"
+                    elif "VISA" in p_mode:
+                        card_type = "VISA CARD"
+                    elif "MASTER" in p_mode:
+                        card_type = "MASTER CARD"
+                    elif "DEBIT" in p_mode:
+                        card_type = "DEBIT CARD"
+                    elif "CREDIT" in p_mode:
+                        card_type = "CREDIT CARD"
+                    else:
+                        card_type = "CARD"
+                else:
+                    card_type = str(card_type).upper()
+
+                card_number = b.get("card_number") or b.get("terminal_machine") or "POS"
+                
+                normalized_bills.append({
+                    **b,
+                    "date": sort_key,
+                    "date_display": d_disp,
+                    "category": b.get("category") or "OTHER",
+                    "bill_no": b.get("bill_no") or "-",
+                    "mr_no": uhid_val if uhid_val else "-",
+                    "uhid": uhid_val,
+                    "ip_number": ip_val,
+                    "patient_name": b.get("patient_name") or "General / Cash Patient",
+                    "card_type": card_type,
+                    "card_number": card_number,
+                    "amount": amt,
+                    "card_amount": amt,
+                    "bank": amt,
+                    "user": (b.get("cashier_name") or b.get("user") or "STAFF").upper(),
+                    "_sort_key": sort_key
+                })
+
+        # Sort all rows by (date asc, category asc, bill_no asc)
+        normalized_bills.sort(key=lambda x: (x["_sort_key"], x["category"], str(x["bill_no"])))
+
+        # Build hierarchical structure: Date -> Category (Sections) -> Items
+        date_groups = {}
+        for b in normalized_bills:
+            d_key = b["_sort_key"]
+            d_disp = b["date_display"]
             cat = b["category"]
-            by_category.setdefault(cat, []).append(b)
             
-        grouped_data = []
-        for cat, items in by_category.items():
-            tot = round(sum(it["bank"] for it in items), 2)
-            grouped_data.append({
-                "category": cat,
-                "count": len(items),
-                "total": tot,
-                "items": items
+            if d_key not in date_groups:
+                date_groups[d_key] = {
+                    "date": d_key,
+                    "date_display": d_disp,
+                    "sections": {},
+                    "date_total": 0.0,
+                    "count": 0
+                }
+            dg = date_groups[d_key]
+            if cat not in dg["sections"]:
+                dg["sections"][cat] = {
+                    "category": cat,
+                    "items": [],
+                    "total": 0.0,
+                    "count": 0
+                }
+            sec = dg["sections"][cat]
+            sec["items"].append(b)
+            sec["total"] += b["amount"]
+            sec["count"] += 1
+            dg["date_total"] += b["amount"]
+            dg["count"] += 1
+
+        grouped_result = []
+        flat_rows_with_slno = []
+        global_slno = 1
+
+        for d_key in sorted(date_groups.keys()):
+            dg = date_groups[d_key]
+            sec_list = []
+            for cat_name in sorted(dg["sections"].keys()):
+                sec_obj = dg["sections"][cat_name]
+                for item in sec_obj["items"]:
+                    item_clean = {k: v for k, v in item.items() if k != "_sort_key"}
+                    item_clean["slno"] = global_slno
+                    item_clean["displaySlno"] = global_slno
+                    global_slno += 1
+                    flat_rows_with_slno.append(item_clean)
+                sec_list.append({
+                    "category": sec_obj["category"],
+                    "items": sec_obj["items"],
+                    "total": round(sec_obj["total"], 2),
+                    "count": sec_obj["count"]
+                })
+            grouped_result.append({
+                "date": dg["date"],
+                "date_display": dg["date_display"],
+                "sections": sec_list,
+                "date_total": round(dg["date_total"], 2),
+                "count": dg["count"]
             })
-            
+
+        grand_total = round(sum(r["amount"] for r in flat_rows_with_slno), 2)
+        by_category_summary = {}
+        for r in flat_rows_with_slno:
+            by_category_summary[r["category"]] = round(by_category_summary.get(r["category"], 0.0) + r["amount"], 2)
+
+        machine_summary = {}
+        for r in flat_rows_with_slno:
+            m_key = r.get("card_number") or r.get("card_type") or "Main POS"
+            machine_summary[m_key] = round(machine_summary.get(m_key, 0.0) + r["amount"], 2)
+
+        summary = {
+            **res["financial_summary"],
+            "total_transactions": len(flat_rows_with_slno),
+            "total_amount": grand_total,
+            "total_card_collection": grand_total,
+            "total_card_amount": grand_total,
+            "by_category": by_category_summary,
+            "by_machine": machine_summary
+        }
+
         return Response({
             "success": True,
             "report_title": "Credit Card & Electronic Payment Report",
             "date_range": res["date_range"],
-            "summary": {
-                **res["financial_summary"],
-                "total_card_amount": res["financial_summary"]["card_and_bank_collections"],
-                "total_transactions": len(card_bills)
-            },
-            "grouped_data": grouped_data,
-            "data": card_bills
+            "financial_summary": res["financial_summary"],
+            "grouped_data": grouped_result,
+            "data": flat_rows_with_slno,
+            "summary": summary,
+            "grand_total": grand_total,
+            "category_summary": by_category_summary,
+            "machine_summary": machine_summary
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -227,13 +342,15 @@ def date_wise_collection_summary_api(request):
 
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
-def department_wise_collection_api(request):
+def bill_type_wise_collection_api(request):
     """
-    Dedicated Department-Wise Collection API.
-    Revenue grouped by clinical and store departments.
+    Dedicated Bill Type-Wise Collection API.
+    Revenue grouped by hospital billing heads (Pharmacy, Lab, Scan, Registration, Advance, Discharge).
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
+        cat_filter = (data.get("category") or data.get("bill_type") or "").strip()
+
         res = AccountsLedgerEngine.get_ledger_data(
             from_str=data.get("from_date") or data.get("start_date"),
             to_str=data.get("to_date") or data.get("end_date"),
@@ -243,7 +360,12 @@ def department_wise_collection_api(request):
         dept_map = {}
         for b in res["bills"]:
             cat = b["category"]
+            if cat_filter and cat_filter.lower() not in ["all", "all types", "all categories", ""]:
+                if cat.strip().lower() != cat_filter.lower():
+                    continue
             dept_map.setdefault(cat, {
+                "bill_type": cat,
+                "category": cat,
                 "department": cat,
                 "cash": 0.0,
                 "card": 0.0,
@@ -254,7 +376,6 @@ def department_wise_collection_api(request):
             dept_map[cat]["cash"] += b["cash"]
             dept_map[cat]["card"] += b["bank"]
             dept_map[cat]["credit"] += b["credit"]
-            dept_map[cat]["total_revenue"] += b["gross"]
             dept_map[cat]["bill_count"] += 1
             
         rows = list(dept_map.values())
@@ -263,7 +384,7 @@ def department_wise_collection_api(request):
             r["cash"] = round(r["cash"], 2)
             r["card"] = round(r["card"], 2)
             r["credit"] = round(r["credit"], 2)
-            r["total_revenue"] = round(r["total_revenue"], 2)
+            r["total_revenue"] = round(r["cash"] + r["card"] + r["credit"], 2)
             r["total"] = r["total_revenue"]
             
         rows.sort(key=lambda x: -x["total_revenue"])
@@ -271,11 +392,11 @@ def department_wise_collection_api(request):
         tot_cash = round(sum(r["cash"] for r in rows), 2)
         tot_card = round(sum(r["card"] for r in rows), 2)
         tot_credit = round(sum(r["credit"] for r in rows), 2)
-        tot_rev = round(sum(r["total"] for r in rows), 2)
+        tot_rev = round(tot_cash + tot_card + tot_credit, 2)
 
         return Response({
             "success": True,
-            "report_title": "Department-Wise Collection Report",
+            "report_title": "Bill Type-Wise Collection Report",
             "date_range": res["date_range"],
             "summary": {
                 **res["financial_summary"],
@@ -288,3 +409,5 @@ def department_wise_collection_api(request):
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+department_wise_collection_api = bill_type_wise_collection_api

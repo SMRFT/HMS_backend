@@ -33,7 +33,7 @@ def parse_date(date_val):
     if not date_val:
         return None
     if isinstance(date_val, datetime):
-        return date_val
+        return date_val.replace(tzinfo=None) if date_val.tzinfo else date_val
     if hasattr(date_val, "year") and hasattr(date_val, "month") and hasattr(date_val, "day"):
         return datetime(date_val.year, date_val.month, date_val.day)
 
@@ -51,12 +51,14 @@ def parse_date(date_val):
         "%d-%m-%Y",
     ):
         try:
-            return datetime.strptime(s[: len(fmt)], fmt)
+            dt = datetime.strptime(s[: len(fmt)], fmt)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
         except Exception:
             pass
 
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
     except Exception:
         return None
 

@@ -16,6 +16,9 @@ from pyauth.auth import HasRoleAndDataPermission
 from .core_ledger_engine import clean_num, parse_date, format_dt, get_db, format_ist_date
 from datetime import datetime, timedelta
 
+from hospital.Views.AccountsReport.purchase_gst_report import get_purchase_gst_report_data
+from hospital.Views.AccountsReport.op_pharmacy_sales_report import get_op_pharmacy_sales_report_data
+
 @api_view(["GET", "POST"])
 @permission_classes([HasRoleAndDataPermission])
 def sales_tax_register_api(request):
@@ -99,87 +102,50 @@ def sales_tax_register_api(request):
 def op_pharmacy_sales_gst_api(request):
     """
     Dedicated OP Pharmacy Sales GST API in Winman GSTR-1 format:
-    - B2B/B2C Invoices
-    - HSN Summary (HSN 300490 etc.)
-    - Document Summary
+    - B2B/B2C Invoices (sales_data)
+    - HSN Summary (hsn_data)
+    - Document Summary (docs_data)
     """
     try:
-        data = request.data if request.method == "POST" else request.query_params
+        data = request.data if request.method == "POST" else (
+            request.query_params if hasattr(request, "query_params") else getattr(request, "GET", {})
+        )
         from_str = data.get("from_date") or data.get("start_date")
         to_str = data.get("to_date") or data.get("end_date")
-        
-        f_d = parse_date(from_str) if from_str else datetime.now().date()
-        t_d = parse_date(to_str, is_end=True) if to_str else datetime.now()
-        f_dt_utc = f_d - timedelta(hours=5, minutes=30)
-        t_dt_utc = t_d - timedelta(hours=5, minutes=30)
+        outlet_code = data.get("outlet_code")
+        tax_rate = data.get("tax_rate")
+        search = data.get("search")
 
-        client, db, g_db = get_db()
-        try:
-            bills = list(db["hospital_pharmacybilling"].find({
-                "created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc},
-                "billing_mode": {"$regex": "OP", "$options": "i"}
-            }).sort("created_date", 1))
+        res_data = get_op_pharmacy_sales_report_data(
+            from_date_param=from_str,
+            to_date_param=to_str,
+            outlet_code_filter=outlet_code,
+            tax_rate_filter=tax_rate,
+            search_query=search
+        )
+        if not isinstance(res_data, dict) or ("sales_data" not in res_data and not res_data.get("success")):
+            return Response(res_data if isinstance(res_data, dict) else {"success": False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            invoices = []
-            hsn_map = {}
-            for b in bills:
-                b_no = b.get("bill_no") or f"PH_{b.get('Bill_id')}"
-                amt = clean_num(b.get("net_amount") or b.get("total_amount"))
-                taxable = round(amt / 1.05, 2)
-                gst = round(amt - taxable, 2)
-                cgst = round(gst / 2.0, 2)
-                sgst = round(gst - cgst, 2)
+        sales = res_data.get("sales_data") or []
+        hsn = res_data.get("hsn_data") or []
+        docs = res_data.get("docs_data") or []
+        summary = res_data.get("summary") or {}
 
-                invoices.append({
-                    "invoice_no": b_no,
-                    "date": format_ist_date(b.get("bill_date") or b.get("created_date")),
-                    "customer_name": b.get("patient_name") or b.get("patientname") or "Cash Patient",
-                    "taxable_value": taxable,
-                    "cgst_amount": cgst,
-                    "sgst_amount": sgst,
-                    "total_invoice_value": amt,
-                    "rate": "5.0%"
-                })
-
-                # HSN Summary (300490)
-                hsn = "300490"
-                hsn_map.setdefault(hsn, {"hsn": hsn, "description": "Medicaments", "uom": "NOS", "qty": 0, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "total": 0.0})
-                hsn_map[hsn]["qty"] += 1
-                hsn_map[hsn]["taxable"] += taxable
-                hsn_map[hsn]["cgst"] += cgst
-                hsn_map[hsn]["sgst"] += sgst
-                hsn_map[hsn]["total"] += amt
-
-            hsn_rows = list(hsn_map.values())
-            for h in hsn_rows:
-                h["taxable"] = round(h["taxable"], 2)
-                h["cgst"] = round(h["cgst"], 2)
-                h["sgst"] = round(h["sgst"], 2)
-                h["total"] = round(h["total"], 2)
-
-            doc_summary = [{
-                "doc_type": "Outward Supplies (Invoices)",
-                "from_serial": invoices[0]["invoice_no"] if invoices else "—",
-                "to_serial": invoices[-1]["invoice_no"] if invoices else "—",
-                "total_count": len(invoices),
-                "cancelled_count": 0
-            }]
-
-            return Response({
-                "success": True,
-                "report_title": "OP Pharmacy Sales GST Register (GSTR-1)",
-                "invoices": invoices,
-                "hsn_summary": hsn_rows,
-                "document_summary": doc_summary,
-                "summary": {
-                    "total_taxable": round(sum(i["taxable_value"] for i in invoices), 2),
-                    "total_cgst": round(sum(i["cgst_amount"] for i in invoices), 2),
-                    "total_sgst": round(sum(i["sgst_amount"] for i in invoices), 2),
-                    "total_value": round(sum(i["total_invoice_value"] for i in invoices), 2)
-                }
-            }, status=status.HTTP_200_OK)
-        finally:
-            client.close()
+        # Standardized payload with multi-version aliases
+        return Response({
+            "success": True,
+            "report_title": "OP Pharmacy Sales GST Register (GSTR-1)",
+            "sales_data": sales,
+            "invoices": sales,
+            "invoices_data": sales,
+            "b2b_data": sales,
+            "hsn_data": hsn,
+            "hsn_summary": hsn,
+            "docs_data": docs,
+            "document_summary": docs,
+            "doc_summary": docs[0] if docs else {},
+            "summary": summary
+        }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -187,56 +153,153 @@ def op_pharmacy_sales_gst_api(request):
 @permission_classes([HasRoleAndDataPermission])
 def purchase_gst_consolidated_api(request):
     """
-    Dedicated Purchase GST Consolidated Register API (ITC).
-    Combines Drug Purchase & General Stores inward supply GRNs with tax breakdown.
+    Dedicated Purchase GST Consolidated Register API (ITC in Winman GSTR-1 Format).
+    Supports:
+    - Drug Purchase (source_type=drug)
+    - General Stores (source_type=stores)
+    - Consolidated (source_type=all)
+    Returns:
+    - B2B Invoices (b2b_data / invoices)
+    - HSN Summary (hsn_data / hsn_summary)
+    - Document Summary (docs_data / document_summary)
     """
     try:
-        data = request.data if request.method == "POST" else request.query_params
+        data = request.data if request.method == "POST" else (
+            request.query_params if hasattr(request, "query_params") else getattr(request, "GET", {})
+        )
         from_str = data.get("from_date") or data.get("start_date")
         to_str = data.get("to_date") or data.get("end_date")
-        
-        f_d = parse_date(from_str) if from_str else datetime.now().date()
-        t_d = parse_date(to_str, is_end=True) if to_str else datetime.now()
-        f_dt_utc = f_d - timedelta(hours=5, minutes=30)
-        t_dt_utc = t_d - timedelta(hours=5, minutes=30)
+        source_type = data.get("source_type") or "all"
+        tax_rate_filter = data.get("tax_rate")
+        vendor_filter = data.get("vendor_id")
+        search_query = data.get("search") or ""
 
-        client, db, g_db = get_db()
-        try:
-            # Check purchases in hospital_drugpurchase or hospital_storesgrn
-            grn_docs = list(db["hospital_storesgrn"].find({
-                "created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}
-            })) if "hospital_storesgrn" in db.list_collection_names() else []
+        res_data = get_purchase_gst_report_data(
+            from_date_param=from_str,
+            to_date_param=to_str,
+            source_type=source_type,
+            tax_rate_filter=tax_rate_filter,
+            vendor_filter=vendor_filter,
+            search_query=search_query
+        )
+        if not isinstance(res_data, dict) or ("b2b_data" not in res_data and not res_data.get("success")):
+            return Response(res_data if isinstance(res_data, dict) else {"success": False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            invoices = []
-            for g in grn_docs:
-                tot = clean_num(g.get("total_amount") or g.get("net_amount"))
-                taxable = clean_num(g.get("taxable_amount") or (tot / 1.12))
-                cgst = clean_num(g.get("cgst_amount") or ((tot - taxable) / 2))
-                sgst = clean_num(g.get("sgst_amount") or ((tot - taxable) / 2))
+        b2b = res_data.get("b2b_data") or []
+        hsn = res_data.get("hsn_data") or []
+        docs = res_data.get("docs_data") or []
+        summary = res_data.get("summary") or {}
 
-                invoices.append({
-                    "grn_no": g.get("grn_number") or g.get("grn_no"),
-                    "supplier_name": g.get("supplier_name") or "Supplier",
-                    "supplier_gstin": g.get("supplier_gstin") or "33AAAAA0000A1Z5",
-                    "taxable_value": round(taxable, 2),
-                    "cgst_amount": round(cgst, 2),
-                    "sgst_amount": round(sgst, 2),
-                    "total_invoice_value": round(tot, 2)
-                })
+        # Filter by source_type if explicitly requested in query or body
+        src = str(source_type).lower().strip()
+        if src == "drug":
+            b2b = [r for r in b2b if r.get("source_type") == "Drug Purchase"]
+            hsn = [r for r in hsn if r.get("source_type") == "Drug Purchase"]
+            docs = [r for r in docs if "Drug Purchase" in (r.get("particulars") or "")]
+        elif src == "stores":
+            b2b = [r for r in b2b if r.get("source_type") == "General Stores"]
+            hsn = [r for r in hsn if r.get("source_type") == "General Stores"]
+            docs = [r for r in docs if "General Stores" in (r.get("particulars") or "")]
 
-            return Response({
-                "success": True,
-                "report_title": "Purchase GST Consolidated Register (ITC)",
-                "date_range": {"from_date": str(f_d)[:10], "to_date": str(t_d)[:10]},
-                "invoices": invoices,
-                "summary": {
-                    "total_taxable": round(sum(i["taxable_value"] for i in invoices), 2),
-                    "total_itc_cgst": round(sum(i["cgst_amount"] for i in invoices), 2),
-                    "total_itc_sgst": round(sum(i["sgst_amount"] for i in invoices), 2),
-                    "total_purchase_value": round(sum(i["total_invoice_value"] for i in invoices), 2)
-                }
-            }, status=status.HTTP_200_OK)
-        finally:
-            client.close()
+        return Response({
+            "success": True,
+            "report_title": "Purchase GST Consolidated Register (ITC)",
+            "b2b_data": b2b,
+            "invoices": b2b,
+            "hsn_data": hsn,
+            "hsn_summary": hsn,
+            "docs_data": docs,
+            "document_summary": docs,
+            "doc_summary": docs[0] if docs else {},
+            "summary": summary
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def drug_purchase_gst_api(request):
+    """Convenience endpoint specifically scoped for Drug Purchase inward supply."""
+    try:
+        data = request.data if request.method == "POST" else (
+            request.query_params if hasattr(request, "query_params") else getattr(request, "GET", {})
+        )
+        from_str = data.get("from_date") or data.get("start_date")
+        to_str = data.get("to_date") or data.get("end_date")
+        tax_rate_filter = data.get("tax_rate")
+        vendor_filter = data.get("vendor_id")
+        search_query = data.get("search") or ""
+
+        res_data = get_purchase_gst_report_data(
+            from_date_param=from_str,
+            to_date_param=to_str,
+            source_type="drug",
+            tax_rate_filter=tax_rate_filter,
+            vendor_filter=vendor_filter,
+            search_query=search_query
+        )
+        if not isinstance(res_data, dict) or ("b2b_data" not in res_data and not res_data.get("success")):
+            return Response(res_data if isinstance(res_data, dict) else {"success": False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        b2b = [r for r in res_data.get("b2b_data", []) if r.get("source_type") == "Drug Purchase"]
+        hsn = [r for r in res_data.get("hsn_data", []) if r.get("source_type") == "Drug Purchase"]
+        docs = [r for r in res_data.get("docs_data", []) if "Drug Purchase" in (r.get("particulars") or "")]
+
+        return Response({
+            "success": True,
+            "report_title": "Drug Purchase GST Register (ITC)",
+            "b2b_data": b2b,
+            "invoices": b2b,
+            "hsn_data": hsn,
+            "hsn_summary": hsn,
+            "docs_data": docs,
+            "document_summary": docs,
+            "doc_summary": docs[0] if docs else {},
+            "summary": res_data.get("summary") or {}
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def stores_purchase_gst_api(request):
+    """Convenience endpoint specifically scoped for General Stores inward supply."""
+    try:
+        data = request.data if request.method == "POST" else (
+            request.query_params if hasattr(request, "query_params") else getattr(request, "GET", {})
+        )
+        from_str = data.get("from_date") or data.get("start_date")
+        to_str = data.get("to_date") or data.get("end_date")
+        tax_rate_filter = data.get("tax_rate")
+        vendor_filter = data.get("vendor_id")
+        search_query = data.get("search") or ""
+
+        res_data = get_purchase_gst_report_data(
+            from_date_param=from_str,
+            to_date_param=to_str,
+            source_type="stores",
+            tax_rate_filter=tax_rate_filter,
+            vendor_filter=vendor_filter,
+            search_query=search_query
+        )
+        if not isinstance(res_data, dict) or ("b2b_data" not in res_data and not res_data.get("success")):
+            return Response(res_data if isinstance(res_data, dict) else {"success": False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        b2b = [r for r in res_data.get("b2b_data", []) if r.get("source_type") == "General Stores"]
+        hsn = [r for r in res_data.get("hsn_data", []) if r.get("source_type") == "General Stores"]
+        docs = [r for r in res_data.get("docs_data", []) if "General Stores" in (r.get("particulars") or "")]
+
+        return Response({
+            "success": True,
+            "report_title": "General Stores GST Register (ITC)",
+            "b2b_data": b2b,
+            "invoices": b2b,
+            "hsn_data": hsn,
+            "hsn_summary": hsn,
+            "docs_data": docs,
+            "document_summary": docs,
+            "doc_summary": docs[0] if docs else {},
+            "summary": res_data.get("summary") or {}
+        }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
