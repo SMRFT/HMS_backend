@@ -1395,6 +1395,9 @@ def admission_view(request):
                         insurance_company = prov.company_name
                     except Exception:
                         insurance_company = company_code
+            else:
+                company_code = ""
+                insurance_company = ""
 
             # Extract age & age_type (from request or calculated from Patient DOB)
             age_val = data.get("age")
@@ -1749,22 +1752,28 @@ def admission_detail(request, ipNumber):
                 if 'customer_type' in data or 'customerType' in data:
                     c_type = str(get_val(data.get('customer_type')) or get_val(data.get('customerType')) or 'GENERAL').strip().upper()
                     adm.customer_type = c_type
-                if 'company_code' in data or 'insuranceProviderCode' in data:
-                    c_code = str(get_val(data.get('company_code')) or get_val(data.get('insuranceProviderCode')) or '').strip()
-                    adm.company_code = c_code
-                if 'insurance_company' in data or 'insuranceCompanyName' in data:
-                    i_comp = str(get_val(data.get('insurance_company')) or get_val(data.get('insuranceCompanyName')) or '').strip()
-                    adm.insurance_company = i_comp
-                elif str(getattr(adm, "customer_type", "") or "").strip().upper() == "INSURANCE" and getattr(adm, "company_code", ""):
-                    try:
-                        prov = InsuranceProvider.objects.get(company_code=adm.company_code)
-                        adm.insurance_company = prov.company_name
-                    except Exception:
-                        pass
-
+                    if c_type != 'INSURANCE':
+                        adm.company_code = ""
+                        adm.insurance_company = ""
                 if str(getattr(adm, "customer_type", "") or "").strip().upper() == "INSURANCE":
+                    if 'company_code' in data or 'insuranceProviderCode' in data:
+                        c_code = str(get_val(data.get('company_code')) or get_val(data.get('insuranceProviderCode')) or '').strip()
+                        adm.company_code = c_code
+                    if 'insurance_company' in data or 'insuranceCompanyName' in data:
+                        i_comp = str(get_val(data.get('insurance_company')) or get_val(data.get('insuranceCompanyName')) or '').strip()
+                        adm.insurance_company = i_comp
+                    elif getattr(adm, "company_code", ""):
+                        try:
+                            prov = InsuranceProvider.objects.get(company_code=adm.company_code)
+                            adm.insurance_company = prov.company_name
+                        except Exception:
+                            pass
+
                     if not getattr(adm, "company_code", "") and not getattr(adm, "insurance_company", ""):
                         return JsonResponse({"error": "Insurance Company is required for Insurance customer type"}, status=400)
+                else:
+                    adm.company_code = ""
+                    adm.insurance_company = ""
 
                 if 'age' in data:
                     age_v = get_val(data.get('age'))
@@ -1787,7 +1796,8 @@ def admission_detail(request, ipNumber):
                 new_room_no = str(get_val(data.get("roomNo")) or "").strip()
                 new_bed_no  = str(get_val(data.get("bedNo"))  or "").strip()
 
-                if new_room_no or new_bed_no:
+                # If the patient is already discharged, room details cannot be changed
+                if not getattr(adm, "is_discharged", False) and (new_room_no or new_bed_no):
                     # If the patient has already been shifted, their current room is governed by roomShitingDetails.
                     # rd (room_details) must strictly contain only the initial admitted room.
                     if sd:

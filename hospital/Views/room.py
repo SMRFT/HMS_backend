@@ -1950,6 +1950,91 @@ def get_active_admission(request):
             if ins_doc:
                 company_name = str(ins_doc.get("company_name") or "").strip()
 
+        # ── Financial Assessment (Total Advance, Final Bill, Outstanding) ─────
+        total_advance = 0.0
+        adv_list = _safe_list(admission.get("advance_payments"))
+        advances_summary = []
+        for adv in adv_list:
+            if isinstance(adv, dict) and adv.get("is_advanceActive") and str(adv.get("status", "")).lower() not in ("cancelled", "edited"):
+                try:
+                    amt = float(adv.get("advance_amount") or 0.0)
+                except (ValueError, TypeError):
+                    amt = 0.0
+                refunds = adv.get("refund_details", [])
+                ref_amt = 0.0
+                if isinstance(refunds, list):
+                    for r in refunds:
+                        if isinstance(r, dict):
+                            try:
+                                ref_amt += float(r.get("refunded_amount") or 0.0)
+                            except (ValueError, TypeError):
+                                pass
+                net_adv = max(0.0, amt - ref_amt)
+                total_advance += net_adv
+                advances_summary.append({
+                    "advance_id": adv.get("advance_id", ""),
+                    "bill_no": str(adv.get("bill_no") or adv.get("bill_number") or "").replace("/", ""),
+                    "date": str(adv.get("date") or "")[:10],
+                    "advance_amount": amt,
+                    "refunded_amount": ref_amt,
+                    "net_amount": net_adv,
+                    "status": adv.get("status", "Paid"),
+                    "payment_mode": adv.get("payment_details", {}).get("method") if isinstance(adv.get("payment_details"), dict) else adv.get("payment_mode", "Cash"),
+                })
+        total_advance = round(total_advance, 2)
+
+        # Final bill resolution
+        final_bill_amount = 0.0
+        bill_source = "None"
+        bill_doc = hms_db["hospital_dischargebilling"].find_one(
+            {"ip_number": adm_ip, "is_cancelled": {"$ne": True}},
+            sort=[("bill_date", -1), ("_id", -1)]
+        )
+        if bill_doc:
+            try:
+                final_bill_amount = float(bill_doc.get("net_amount") or bill_doc.get("total_amount") or 0.0)
+            except (ValueError, TypeError):
+                final_bill_amount = 0.0
+            bill_source = bill_doc.get("status") or "Discharge Bill"
+        else:
+            # Check running charges: room rent + pharmacy + investigations
+            rent = 0.0
+            cur_r_no = active_room.get("roomNo")
+            if cur_r_no:
+                r_obj = hms_db["hospital_room"].find_one({"room_number": cur_r_no})
+                if r_obj:
+                    try:
+                        rent = float(r_obj.get("rent") or r_obj.get("room_rate") or 0.0)
+                    except (ValueError, TypeError):
+                        rent = 0.0
+            est_room_charge = round(rent * max(1, total_days), 2)
+            pharm_docs = list(hms_db["hospital_pharmacybilling"].find(
+                {"$or": [{"ip_number": adm_ip}, {"admission_id": adm_ip}], "is_deleted": {"$ne": True}},
+                {"netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1}
+            ))
+            pharm_total = 0.0
+            for p in pharm_docs:
+                try:
+                    pharm_total += float(p.get("netAmount") or p.get("net_amount") or p.get("totalAmount") or p.get("total_amount") or 0.0)
+                except (ValueError, TypeError):
+                    pass
+
+            inv_docs = list(hms_db["hospital_investbilling"].find(
+                {"$or": [{"ip_number": adm_ip}, {"admission_id": adm_ip}], "is_cancelled": {"$ne": True}},
+                {"net_amount": 1, "netAmount": 1, "total_amount": 1}
+            ))
+            inv_total = 0.0
+            for i in inv_docs:
+                try:
+                    inv_total += float(i.get("net_amount") or i.get("netAmount") or i.get("total_amount") or 0.0)
+                except (ValueError, TypeError):
+                    pass
+
+            final_bill_amount = round(est_room_charge + pharm_total + inv_total, 2)
+            bill_source = "Running Charges" if final_bill_amount > 0 else "None"
+
+        outstanding_balance = round(final_bill_amount - total_advance, 2)
+
         return Response({
             "success": True,
             "data": {
@@ -1974,6 +2059,13 @@ def get_active_admission(request):
                 "bedNo":            active_room.get("bedNo", ""),
                 "room_details":     _normalize_ist_timestamps(room_details),
                 "has_shifted":      has_shifted,
+                # ── Financial summary ──────────────────────────────────────
+                "total_advance":        total_advance,
+                "advance_count":        len(advances_summary),
+                "advances_breakdown":   advances_summary,
+                "final_bill_amount":    final_bill_amount,
+                "outstanding_balance":  outstanding_balance,
+                "bill_source":          bill_source,
                 # ── Reservation fields ─────────────────────────────────────
                 "has_reservation":  has_reservation,
                 "reservedRoomNo":   reserved_room or "",
