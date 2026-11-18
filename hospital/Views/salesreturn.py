@@ -1,6 +1,7 @@
 from django.http import JsonResponse
 from pymongo import MongoClient
 import os
+import re
 import json
 import pytz
 from datetime import datetime, date, timedelta
@@ -193,9 +194,24 @@ def get_salesreturn_details(request):
                             "amount": round(ret_amt, 2),
                         })
 
+            # Format Date & Time in IST: "18/11/2026 08:30:00 AM"
+            formatted_dt = "—"
+            if r.return_bill_date:
+                try:
+                    ist = pytz.timezone("Asia/Kolkata")
+                    dt_val = r.return_bill_date
+                    if timezone.is_aware(dt_val):
+                        dt_ist = dt_val.astimezone(ist)
+                    else:
+                        dt_ist = ist.localize(dt_val)
+                    formatted_dt = dt_ist.strftime("%d/%m/%Y %I:%M:%S %p")
+                except Exception:
+                    formatted_dt = str(r.return_bill_date)[:19]
+
             data.append({
                 "return_bill_no":   r.return_bill_no,
                 "return_bill_date": r.return_bill_date,
+                "formatted_datetime": formatted_dt,
                 "bill_no":          r.bill_no,
                 "uhid":             r.uhid,
                 "return_amount":    r.return_amount,
@@ -366,10 +382,61 @@ def salesreturn_get_patientdetails(request):
         matching_patients = list(Patient.objects.filter(uhid_cond).order_by('-id')[:25])
         if not matching_patients:
             matching_patients = list(Patient.objects.filter(
-                Q(uhid__icontains=clean_uhid) |
-                Q(ip_number__iexact=clean_uhid) |
-                Q(ip_number__icontains=clean_uhid)
+                Q(uhid__icontains=clean_uhid)
             ).order_by('-id')[:25])
+
+        # If clean_uhid didn't match UHID directly, check if it's an IP number in Admission
+        if not matching_patients:
+            try:
+                from ..models import Admission
+                adms = list(Admission.objects.filter(
+                    Q(ipNumber__iexact=clean_uhid) |
+                    Q(ipNumber__icontains=clean_uhid) |
+                    Q(ipNumber__iendswith=clean_uhid)
+                ).order_by('-admissionDateTime')[:25])
+                if adms:
+                    adm_uhids = list(dict.fromkeys([a.uhid for a in adms if a.uhid]))
+                    if adm_uhids:
+                        matching_patients = list(Patient.objects.filter(uhid__in=adm_uhids).order_by('-id')[:25])
+            except Exception:
+                pass
+
+        # If still not found, check MongoDB hospital_pharmacybilling and hospital_patient
+        if not matching_patients:
+            try:
+                client, db = _get_db()
+                m_uhids = []
+                # Check pharmacy bills for matching inpatient_number or uhid
+                bill_matches = list(db["hospital_pharmacybilling"].find({
+                    "$or": [
+                        {"inpatient_number": {"$regex": re.escape(clean_uhid), "$options": "i"}},
+                        {"uhid": {"$regex": re.escape(clean_uhid), "$options": "i"}},
+                        {"patientname": {"$regex": re.escape(clean_uhid), "$options": "i"}}
+                    ]
+                }, {"uhid": 1}).sort("created_date", -1).limit(25))
+                for bm in bill_matches:
+                    u = bm.get("uhid")
+                    if u and u not in m_uhids:
+                        m_uhids.append(u)
+
+                # Check hospital_patient
+                pat_matches = list(db["hospital_patient"].find({
+                    "$or": [
+                        {"uhid": {"$regex": re.escape(clean_uhid), "$options": "i"}},
+                        {"patientname": {"$regex": re.escape(clean_uhid), "$options": "i"}},
+                        {"firstName": {"$regex": re.escape(clean_uhid), "$options": "i"}},
+                    ]
+                }, {"uhid": 1}).limit(25))
+                for pm in pat_matches:
+                    u = pm.get("uhid")
+                    if u and u not in m_uhids:
+                        m_uhids.append(u)
+
+                if m_uhids:
+                    matching_patients = list(Patient.objects.filter(uhid__in=m_uhids).order_by('-id')[:25])
+                client.close()
+            except Exception:
+                pass
 
         if not matching_patients:
             return Response({
@@ -892,6 +959,7 @@ from django.utils import timezone
 from datetime import datetime
 from pymongo import MongoClient
 import os
+import re
 import json
 
 from ..models import SalesReturn
@@ -1200,7 +1268,7 @@ def OP_salesreturn_billdetails(request):
         # Build print_data for immediate sales return slip print view
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
-        formatted_dt = now_ist.strftime("%d/%m/%Y & %H:%M:%S")
+        formatted_dt = now_ist.strftime("%d/%m/%Y %I:%M:%S %p")
 
         patient_name = ""
         try:
@@ -1862,13 +1930,29 @@ def get_salesreturn_print_details(request):
         except Exception:
             pass
 
+        if not patient_name:
+            try:
+                client_temp = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+                pb_doc = client_temp["HMS"]["hospital_pharmacybilling"].find_one({"bill_no": sr.bill_no})
+                if pb_doc:
+                    patient_name = pb_doc.get("patientname") or pb_doc.get("patient_name") or ""
+                    if not ip_number:
+                        ip_number = pb_doc.get("inpatient_number") or ""
+                if not patient_name and sr.uhid:
+                    pat_doc = client_temp["HMS"]["hospital_patient"].find_one({"uhid": sr.uhid})
+                    if pat_doc:
+                        patient_name = pat_doc.get("firstName") or pat_doc.get("patient_name") or pat_doc.get("name") or ""
+                client_temp.close()
+            except Exception:
+                pass
+
         # 2. Pharmacist / User lookup
         raw_user = sr.created_by or sr.pharmacist_id or ""
         user_name = get_employee_name_by_id(str(raw_user).strip()) if raw_user else ""
         if not user_name or user_name == "Unknown":
             user_name = str(raw_user).strip()
 
-        # 3. Format Date & Time in IST: "01/09/2026 & 10:47:15"
+        # 3. Format Date & Time in IST: "18/11/2026 08:30:00 AM"
         formatted_datetime = "—"
         dt = sr.return_bill_date
         if dt:
@@ -1878,9 +1962,9 @@ def get_salesreturn_print_details(request):
                     dt_ist = dt.astimezone(ist)
                 else:
                     dt_ist = ist.localize(dt)
-                formatted_datetime = dt_ist.strftime("%d/%m/%Y & %H:%M:%S")
+                formatted_datetime = dt_ist.strftime("%d/%m/%Y %I:%M:%S %p")
             except Exception:
-                formatted_datetime = dt.strftime("%d/%m/%Y & %H:%M:%S")
+                formatted_datetime = dt.strftime("%d/%m/%Y %I:%M:%S %p")
 
         # 4. Medicine particulars parsing & enrichment
         mp = sr.medicine_particulars
