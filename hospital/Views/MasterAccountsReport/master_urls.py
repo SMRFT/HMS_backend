@@ -17,6 +17,7 @@ from .cluster2_digital_dept import (
     credit_card_report_api,
     date_wise_collection_summary_api,
     department_wise_collection_api,
+    bill_type_wise_collection_api,
 )
 from .cluster3_ip_advances import (
     advance_registration_api,
@@ -28,6 +29,7 @@ from .cluster3_ip_advances import (
     discount_bills_api,
     bill_cancellation_register_api,
 )
+from .admission_vs_discharge_api import admission_vs_discharge_api
 from .cluster4_audit_sundry import (
     accounts_audit_report_api,
     bill_wise_detailed_api,
@@ -37,6 +39,8 @@ from .cluster5_gst_taxation import (
     sales_tax_register_api,
     op_pharmacy_sales_gst_api,
     purchase_gst_consolidated_api,
+    drug_purchase_gst_api,
+    stores_purchase_gst_api,
 )
 from .cluster6_inventory_stock import (
     ip_op_stock_movement_api,
@@ -59,11 +63,13 @@ urlpatterns = [
     path('credit-card-electronic-payment/', credit_card_report_api, name='master_credit_card_electronic_payment'),
     path('date-wise-collection-summary/', date_wise_collection_summary_api, name='master_date_wise_collection_summary'),
     path('department-wise-collection/', department_wise_collection_api, name='master_department_wise_collection'),
+    path('bill-type-wise-collection/', bill_type_wise_collection_api, name='master_bill_type_wise_collection'),
 
     # Cluster 3: IP Admissions, Advances & Billing
     path('advance-registration/', advance_registration_api, name='master_advance_registration'),
     path('insurance-advance-registration/', insurance_advance_registration_api, name='master_insurance_advance_registration'),
     path('ip-advance-collection/', ip_advance_collection_register_api, name='master_ip_advance_collection'),
+    path('admission-vs-discharge/', admission_vs_discharge_api, name='master_admission_vs_discharge'),
     path('discharge-bills-summary/', discharge_bills_summary_api, name='master_discharge_bills_summary'),
     path('discharge-bills-detailed/', discharge_bills_detailed_api, name='master_discharge_bills_detailed'),
     path('debit-and-due-bills/', debit_and_due_bills_api, name='master_debit_and_due_bills'),
@@ -85,6 +91,8 @@ urlpatterns = [
     path('purchase-b2b-invoices/', purchase_gst_consolidated_api, name='master_purchase_b2b_invoices'),
     path('purchase-hsn-summary/', purchase_gst_consolidated_api, name='master_purchase_hsn_summary'),
     path('purchase-doc-summary/', purchase_gst_consolidated_api, name='master_purchase_doc_summary'),
+    path('drug-purchase-gst/', drug_purchase_gst_api, name='master_drug_purchase_gst'),
+    path('stores-purchase-gst/', stores_purchase_gst_api, name='master_stores_purchase_gst'),
 
     # Cluster 6: Inventory & Stock Auditing
     path('ip-op-stock-movement/', ip_op_stock_movement_api, name='master_ip_op_stock_movement'),

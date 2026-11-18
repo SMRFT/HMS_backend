@@ -585,17 +585,29 @@ def occupancy_company_wise_api(request):
         company_filter = request.GET.get('company_name', 'ALL').strip()
         outlet_filter = request.GET.get('outlet_name', 'ALL').strip()
 
-        # Query active admitted inpatients from MongoDB
-        query = {"$or": [{"is_admitted": True}, {"is_discharged": False}]}
-        if outlet_filter and outlet_filter.upper() != 'ALL':
-            query["outlet_code"] = outlet_filter
+        # Discharged IP check from hospital_dischargebilling
+        dis_docs = list(hms_db['hospital_dischargebilling'].find({'is_cancelled': False}, {'ip_number': 1, 'ipNumber': 1, 'inpatient_number': 1}))
+        discharged_ips = set()
+        for d in dis_docs:
+            for k in ['ip_number', 'ipNumber', 'inpatient_number']:
+                val = str(d.get(k) or '').strip()
+                if val:
+                    discharged_ips.add(val)
 
+        # Query active admitted inpatients from MongoDB
+        query = {"is_discharged": False}
         fields = {
             "ipNumber": 1, "uhid": 1, "patientName": 1, "company_name": 1,
-            "insurance_company": 1, "admissionDateTime": 1, "created_date": 1,
+            "insurance_company": 1, "company_code": 1, "companyCode": 1,
+            "admissionDateTime": 1, "created_date": 1, "is_discharged": 1,
+            "is_admitted": 1, "is_cancelled": 1, "ward_status": 1,
             "roomNumber": 1, "bedNumber": 1, "room_details": 1, "outlet_code": 1
         }
         live_admissions = list(hms_db['hospital_admission'].find(query, fields))
+
+        # Insurance providers mapping
+        ins_docs = list(hms_db['hospital_insuranceprovider'].find({}, {"company_code": 1, "company_name": 1}))
+        ins_code_map = {str(p.get("company_code")): p.get("company_name") for p in ins_docs if p.get("company_code")}
 
         # Batch fetch patient demographics to avoid N+1 queries
         uhids = list(set([a.get('uhid') for a in live_admissions if a.get('uhid')]))
@@ -609,15 +621,89 @@ def occupancy_company_wise_api(request):
             for p in pat_cursor:
                 pat_map[p.get('uhid')] = p
 
+        def is_company_match(filter_val, cname, comp_code='', ins_val=''):
+            if not filter_val or filter_val.strip().upper() in ('ALL', 'ALL COMPANIES', ''):
+                return True
+            f = filter_val.strip().upper()
+            c = cname.strip().upper()
+            if f == c:
+                return True
+            if f in ['PRIVATE / CASH', 'PRIVATE/CASH', 'PRIVATE', 'CASH']:
+                return c in ['PRIVATE / CASH', 'PRIVATE/CASH', 'PRIVATE', 'CASH']
+            if 'CGHS' in f:
+                if 'CGHS' not in c: return False
+                if 'CREDIT' in f: return 'CREDIT' in c
+                if 'CASH' in f: return 'CASH' in c
+                return True
+            if ('M.A.' in f or 'MEDI ASSIST' in f) and ('GOVT' in f and 'GOVT' in c):
+                return True
+            if ('M.A.' in f or 'MEDI ASSIST' in f) and ('PENSIONER' in f and 'PENSIONER' in c):
+                return True
+            if 'STAR HEALTH' in f and 'STAR HEALTH' in c:
+                return True
+            if 'RAILWAY' in f and 'RAILWAY' in c:
+                return True
+            if comp_code and f == comp_code.upper():
+                return True
+            if ins_val and f == ins_val.upper():
+                return True
+            return f in c or c in f
+
         raw_occupancy = []
+        all_active_companies = set()
+
         for adm in live_admissions:
-            cname = (adm.get('insurance_company') or adm.get('company_name') or 'PRIVATE / CASH').strip()
-            if not cname or cname == 'N':
+            ip_val = str(adm.get('ipNumber') or '').strip()
+            if not ip_val or ip_val in discharged_ips:
+                continue
+            if adm.get('is_discharged') in (True, 'True', 'true', 1, '1'):
+                continue
+            if adm.get('is_admitted') in (False, 'False', 'false', 0, '0'):
+                continue
+            if adm.get('is_cancelled') in (True, 'True', 'true', 1, '1'):
+                continue
+            w_status = str(adm.get('ward_status') or '').strip().lower()
+            if any(k in w_status for k in ['discharg', 'billed', 'clearance', 'settled', 'completed']):
+                continue
+
+            # Outlet filter
+            if outlet_filter and outlet_filter.upper() != 'ALL':
+                outl_u = outlet_filter.upper()
+                adm_outl = str(adm.get('outlet_code') or '').upper()
+                if outl_u in ['MAIN', 'OLET003'] and 'OLET003' not in adm_outl and 'MAIN' not in adm_outl:
+                    continue
+                elif outl_u in ['ANNEX', 'OLET004'] and 'OLET004' not in adm_outl and 'ANNEX' not in adm_outl:
+                    continue
+                elif outl_u not in ['MAIN', 'OLET003', 'ANNEX', 'OLET004'] and outl_u not in adm_outl:
+                    continue
+
+            ins_val = str(adm.get('insurance_company') or '').strip()
+            comp_name = str(adm.get('company_name') or '').strip()
+            comp_code = str(adm.get('company_code') or adm.get('companyCode') or '').strip()
+
+            cname = None
+            if comp_name and not comp_name.isdigit() and comp_name not in ins_code_map:
+                cname = comp_name
+            elif ins_val and not ins_val.isdigit() and ins_val not in ins_code_map:
+                cname = ins_val
+            elif ins_val and ins_code_map.get(ins_val):
+                cname = ins_code_map[ins_val]
+            elif comp_code and ins_code_map.get(comp_code):
+                cname = ins_code_map[comp_code]
+            elif comp_name:
+                cname = comp_name
+            elif ins_val:
+                cname = ins_val
+            else:
                 cname = 'PRIVATE / CASH'
 
-            if company_filter and company_filter.upper() != 'ALL':
-                if company_filter.upper() not in cname.upper():
-                    continue
+            cname = str(cname).strip() or 'PRIVATE / CASH'
+            if cname == 'N': cname = 'PRIVATE / CASH'
+
+            all_active_companies.add(cname)
+
+            if not is_company_match(company_filter, cname, comp_code, ins_val):
+                continue
 
             uhid = adm.get('uhid')
             pat = pat_map.get(uhid)
@@ -661,7 +747,7 @@ def occupancy_company_wise_api(request):
             raw_occupancy.append({
                 "company_name": cname,
                 "floor": floor,
-                "ip_number": adm.get('ipNumber', ''),
+                "ip_number": ip_val,
                 "op_number": uhid or '',
                 "patient_name": pname,
                 "age_gender": age_gender,

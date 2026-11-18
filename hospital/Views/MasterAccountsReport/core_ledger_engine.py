@@ -222,8 +222,17 @@ class AccountsLedgerEngine:
                             advance_map[b.replace("/", "")] = {"adm": adm, "pay": p}
 
             # Bill types map
-            billtype_docs = list(db["hospital_billtypes"].find({}, {"billTypeNo": 1, "billTypeName": 1, "bill_type_name": 1}))
-            billtype_map = {b.get("billTypeNo"): (b.get("billTypeName") or b.get("bill_type_name")) for b in billtype_docs if b.get("billTypeNo")}
+            billtype_docs = list(db["hospital_billtype"].find({}, {"billTypeNo": 1, "bill_name": 1, "bill_type": 1}))
+            billtype_map = {}
+            billtype_id_map = {}
+            for b in billtype_docs:
+                bt_no = b.get("billTypeNo")
+                bt_name = b.get("bill_name") or b.get("billTypeName") or b.get("bill_type_name")
+                bt_id = b.get("bill_type")
+                if bt_no and bt_name:
+                    billtype_map[str(bt_no).strip()] = str(bt_name).strip()
+                if bt_id is not None and bt_name:
+                    billtype_id_map[str(bt_id).strip()] = str(bt_name).strip()
 
             # Cashier profile map
             cashier_map = {}
@@ -308,7 +317,17 @@ class AccountsLedgerEngine:
                 elif cat in ["Investigation", "InvestigationBills"] and b_no in invest_map:
                     d = invest_map[b_no]
                     bt_no = d.get("billTypeNo")
-                    disp_type = billtype_map.get(bt_no) or "Investigation"
+                    bt_name = billtype_map.get(str(bt_no).strip()) if bt_no else None
+                    if not bt_name and (d.get("item") or d.get("particulars")):
+                        items_list = d.get("item") or d.get("particulars") or []
+                        if items_list and isinstance(items_list[0], dict):
+                            first_item = items_list[0]
+                            first_bt_no = first_item.get("billTypeNo")
+                            bt_name = billtype_map.get(str(first_bt_no).strip()) if first_bt_no else None
+                    if not bt_name and d.get("bill_type") is not None:
+                        bt_name = billtype_id_map.get(str(d.get("bill_type")).strip())
+                    
+                    disp_type = bt_name or "Investigation"
                     if "(SH)" not in disp_type: disp_type = f"{disp_type} (SH)"
                     item_data["category"] = disp_type
                     item_data["uhid"] = d.get("uhid") or ""

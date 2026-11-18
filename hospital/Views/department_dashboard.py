@@ -46,46 +46,88 @@ def department_dashboard_stats(request):
             {"employeeId": 1, "employeeName": 1, "department": 1, "specialty": 1, "_id": 0}
         ))
         
-        # Build mapping of doctor employeeId -> resolved department name & profile info
-        doctor_dept_map = {} # employeeId -> dept_name
+        # Build mapping of doctor employeeId & doctor name -> resolved department name & profile info
+        doctor_dept_map = {} # employeeId / name -> dept_name
         doctor_info_map = {} # employeeId -> profile dict
         
+        import re
+        def clean_doc_name(n):
+            n = re.sub(r'^(DR\.?|DOCTOR)\s*', '', str(n).strip(), flags=re.IGNORECASE)
+            n = re.sub(r'[\.,/].*$', '', n)
+            return re.sub(r'[^a-zA-Z]', '', n).upper()
+
         for doc in doctor_profiles:
             emp_id = str(doc.get("employeeId", "")).strip()
             raw_dept = doc.get("department", "")
             resolved_dept = dept_map.get(raw_dept, raw_dept) if raw_dept else "General"
+            raw_name = str(doc.get("employeeName", emp_id)).strip()
             
             doctor_dept_map[emp_id] = resolved_dept
+            doctor_dept_map[raw_name.upper()] = resolved_dept
+            c_name = clean_doc_name(raw_name)
+            if c_name:
+                doctor_dept_map[c_name] = resolved_dept
+
             doctor_info_map[emp_id] = {
                 "id": emp_id,
-                "name": doc.get("employeeName", emp_id),
+                "name": raw_name,
                 "department": resolved_dept,
-                "specialty": doc.get("specialty", "General")
+                "specialty": doc.get("specialty", "General"),
+                "clean_name": c_name
             }
 
+        def resolve_doc_dept(doc_ref):
+            ref = str(doc_ref or "").strip()
+            if not ref:
+                return "General"
+            if ref in doctor_dept_map:
+                return doctor_dept_map[ref]
+            if ref.upper() in doctor_dept_map:
+                return doctor_dept_map[ref.upper()]
+            c_ref = clean_doc_name(ref)
+            if c_ref and c_ref in doctor_dept_map:
+                return doctor_dept_map[c_ref]
+            for p in doctor_info_map.values():
+                if p["clean_name"] and p["clean_name"] in c_ref:
+                    return p["department"]
+            return "General"
+
         # Unique Departments List
-        all_departments = sorted(list(set(doctor_dept_map.values())))
+        all_departments = sorted(list(set(dept_map.values())))
         if not all_departments:
             all_departments = ["General"]
 
         # Request Parameters
-        selected_dept = request.GET.get('department') or "All"
+        raw_dept_param = request.GET.get('department') or "All"
+        is_all = not raw_dept_param or raw_dept_param.strip().lower() in ["all", "all departments", ""]
+        selected_dept = "All" if is_all else raw_dept_param.strip()
         month_param = request.GET.get('month')
         year_param = request.GET.get('year')
+        from_date_param = request.GET.get('from_date') or request.GET.get('start_date')
+        to_date_param = request.GET.get('to_date') or request.GET.get('end_date')
 
         now = timezone.now()
-        if not month_param or not year_param:
-            month = now.month
-            year = now.year
-        else:
-            month = int(month_param)
-            year = int(year_param)
-
-        num_days = calendar.monthrange(year, month)[1]
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-        month_start = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999)
+
+        if from_date_param and to_date_param:
+            from datetime import datetime
+            f_d = datetime.strptime(str(from_date_param)[:10], "%Y-%m-%d")
+            t_d = datetime.strptime(str(to_date_param)[:10], "%Y-%m-%d")
+            month_start = timezone.make_aware(f_d.replace(hour=0, minute=0, second=0, microsecond=0))
+            month_end = timezone.make_aware(t_d.replace(hour=23, minute=59, second=59, microsecond=999999))
+            num_days = max(1, (t_d - f_d).days + 1)
+        else:
+            if not month_param or not year_param:
+                month = now.month
+                year = now.year
+            else:
+                month = int(month_param)
+                year = int(year_param)
+
+            num_days = calendar.monthrange(year, month)[1]
+            month_start = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+            month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999)
 
         # 3. Fetch Monthly Records
         monthly_billings = list(Billing.objects.filter(billed_date__range=(month_start, month_end)))
@@ -121,7 +163,7 @@ def department_dashboard_stats(request):
         # Process OP Billings
         for b in monthly_billings:
             doc_id = str(b.doctor_id or "").strip()
-            d_name = doctor_dept_map.get(doc_id, "General")
+            d_name = resolve_doc_dept(doc_id)
             if d_name not in dept_stats:
                 dept_stats[d_name] = {
                     "department": d_name, "doctor_count": 0, "total_op": 0, "today_op": 0,
@@ -139,7 +181,7 @@ def department_dashboard_stats(request):
         for a in monthly_admissions:
             c_doc = str(a.consultingDoctor or "").strip()
             a_doc = str(a.admittingDoctor or "").strip()
-            d_name = doctor_dept_map.get(c_doc) or doctor_dept_map.get(a_doc) or "General"
+            d_name = resolve_doc_dept(c_doc) if c_doc else (resolve_doc_dept(a_doc) if a_doc else "General")
             
             if d_name not in dept_stats:
                 dept_stats[d_name] = {
@@ -155,19 +197,29 @@ def department_dashboard_stats(request):
         # Process Pharmacy Billings
         for p in monthly_pharmacy:
             doc_id = str(p.doctor_id or "").strip()
-            d_name = doctor_dept_map.get(doc_id, "General")
-            if d_name in dept_stats:
-                dept_stats[d_name]["pharmacy_income"] += float(str(p.net_amount or 0))
+            d_name = resolve_doc_dept(doc_id)
+            if d_name not in dept_stats:
+                dept_stats[d_name] = {
+                    "department": d_name, "doctor_count": 0, "total_op": 0, "today_op": 0,
+                    "total_ip": 0, "today_ip": 0, "op_income": 0.0, "pharmacy_income": 0.0,
+                    "department_income": 0.0, "total_revenue": 0.0
+                }
+            dept_stats[d_name]["pharmacy_income"] += float(str(p.net_amount or 0))
 
         # Process Discharge / Department Billings
         for db in monthly_discharge:
             for item in (db.items or []):
                 if not isinstance(item, dict): continue
-                doc_id = str(item.get("doctor") or "").strip()
-                d_name = doctor_dept_map.get(doc_id, "General")
+                doc_ref = item.get("doctor") or ""
+                d_name = resolve_doc_dept(doc_ref)
                 amt = float(str(item.get("doctor_fee") or item.get("amount") or 0))
-                if d_name in dept_stats:
-                    dept_stats[d_name]["department_income"] += amt
+                if d_name not in dept_stats:
+                    dept_stats[d_name] = {
+                        "department": d_name, "doctor_count": 0, "total_op": 0, "today_op": 0,
+                        "total_ip": 0, "today_ip": 0, "op_income": 0.0, "pharmacy_income": 0.0,
+                        "department_income": 0.0, "total_revenue": 0.0
+                    }
+                dept_stats[d_name]["department_income"] += amt
 
         # Calculate Total Revenue per Department
         for d_name, stats in dept_stats.items():
@@ -178,7 +230,7 @@ def department_dashboard_stats(request):
         dept_breakdown = sorted(dept_breakdown, key=lambda x: x["total_revenue"], reverse=True)
 
         # Overall Totals (across all departments or filtered by selected department)
-        target_depts = [selected_dept] if selected_dept != "All" else all_departments
+        target_depts = [selected_dept] if not is_all else list(dept_stats.keys())
         
         overall_kpis = {
             "total_op": sum(dept_stats[d]["total_op"] for d in target_depts if d in dept_stats),
@@ -195,12 +247,12 @@ def department_dashboard_stats(request):
         # Doctor Performance Table (for doctors in selected department)
         doctor_performance = []
         for emp_id, info in doctor_info_map.items():
-            if selected_dept != "All" and info["department"] != selected_dept:
+            if not is_all and info["department"].strip().lower() != selected_dept.strip().lower():
                 continue
             
-            doc_op = len([b for b in monthly_billings if str(b.doctor_id or "").strip() == emp_id])
-            doc_ip = len([a for a in monthly_admissions if str(a.consultingDoctor or "").strip() == emp_id or str(a.admittingDoctor or "").strip() == emp_id])
-            doc_rev = sum([float(str(b.consulting_fee or b.total_fees or 0)) for b in monthly_billings if str(b.doctor_id or "").strip() == emp_id])
+            doc_op = len([b for b in monthly_billings if str(b.doctor_id or "").strip() == emp_id or (info["clean_name"] and info["clean_name"] in clean_doc_name(b.doctor_id))])
+            doc_ip = len([a for a in monthly_admissions if str(a.consultingDoctor or "").strip() == emp_id or str(a.admittingDoctor or "").strip() == emp_id or (info["clean_name"] and info["clean_name"] in clean_doc_name(a.consultingDoctor))])
+            doc_rev = sum([float(str(b.consulting_fee or b.total_fees or 0)) for b in monthly_billings if str(b.doctor_id or "").strip() == emp_id or (info["clean_name"] and info["clean_name"] in clean_doc_name(b.doctor_id))])
             
             doctor_performance.append({
                 "employeeId": emp_id,
