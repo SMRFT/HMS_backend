@@ -479,6 +479,32 @@ def _resolve_seed_room_kit(db):
     return max_id
 
 
+def _resolve_seed_medicine_ward_request(db, prefix):
+    """Finds maximum sequence for medicine ward request prefix (e.g. MRIP or MROP)."""
+    max_num = 0
+    try:
+        cursor = db["hospital_pharmacybilling"].find(
+            {"$or": [
+                {"request_no": {"$regex": f"^{re.escape(prefix)}"}},
+                {"bill_no": {"$regex": f"^{re.escape(prefix)}"}}
+            ]},
+            {"request_no": 1, "bill_no": 1}
+        )
+        for doc in cursor:
+            raw = str(doc.get("request_no") or doc.get("bill_no") or "").strip()
+            digits = re.findall(r'\d+', raw.replace(prefix, ""))
+            if digits:
+                try:
+                    num = int(digits[0])
+                    if num > max_num:
+                        max_num = num
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return max_num
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core Atomic Sequence Generator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -793,3 +819,23 @@ def get_next_sales_return_bill_no(outlet_code=None, fy=None, db_instance=None):
         db_instance=db_instance
     )
     return f"{year_prefix}{outlet_suffix}{seq:06d}"
+
+
+# 8. Medicine Ward Request Number (MRIP / MROP)
+def get_next_medicine_ward_request_no(is_ip=True, prefix=None, db_instance=None):
+    """
+    Returns next sequential Medicine Ward Request number:
+    e.g. 'MRIP001', 'MRIP002' for IP; 'MROP001', 'MROP002' for OP.
+    Thread-safe and atomic via MongoDB 'counters' collection.
+    """
+    if not prefix:
+        prefix = "MRIP" if is_ip else "MROP"
+    clean_prefix = str(prefix).strip().upper()
+    counter_name = f"medicine_ward_request_{clean_prefix.lower()}"
+    seq = get_next_sequence_value(
+        counter_name,
+        seed_resolver=lambda db: _resolve_seed_medicine_ward_request(db, clean_prefix),
+        db_instance=db_instance
+    )
+    return f"{clean_prefix}{seq:03d}"
+

@@ -1307,9 +1307,11 @@ def invest_billing_create(request):
         invest_collection = mongo_db['hospital_investbilling']
         counters_collection = mongo_db['counters']
 
-        # ── Deactivate related estimate ─────────────────────────
+        # ── Deactivate related estimate & transfer ward request context ───────
         est_bill_no = data.get("EstBillNo")
+        est_doc = None
         if est_bill_no:
+            est_doc = mongo_db['hospital_estimatebilling'].find_one({"EstBillNo": est_bill_no})
             mongo_db['hospital_estimatebilling'].update_one(
                 {"EstBillNo": est_bill_no, "is_active": True},
                 {"$set": {
@@ -1319,8 +1321,25 @@ def invest_billing_create(request):
                 }}
             )
 
-        data.pop("EstBillNo", None)
         data.pop("EstBillDate", None)
+
+        # Retain reference to original EstBillNo
+        if est_bill_no:
+            data["fromEstBillNo"] = est_bill_no
+            data["EstBillNo"] = est_bill_no
+
+        if est_doc:
+            if est_doc.get("is_ward_request") or data.get("is_ward_request"):
+                data["is_ward_request"] = True
+                data["ward_request_type"] = est_doc.get("ward_request_type") or data.get("ward_request_type") or "LAB"
+            if not data.get("roomNo") and est_doc.get("roomNo"):
+                data["roomNo"] = est_doc.get("roomNo")
+            if not data.get("wardName") and est_doc.get("wardName"):
+                data["wardName"] = est_doc.get("wardName")
+            if not data.get("ipNumber") and est_doc.get("ipNumber"):
+                data["ipNumber"] = est_doc.get("ipNumber")
+            if not data.get("status") and est_doc.get("status"):
+                data["status"] = est_doc.get("status")
 
         bill_type = data.get("bill_type")
         if not bill_type:
@@ -1426,6 +1445,15 @@ def invest_billing_create(request):
 
         # Insert
         invest_collection.insert_one(data)
+
+        if est_bill_no:
+            mongo_db['hospital_estimatebilling'].update_one(
+                {"EstBillNo": est_bill_no},
+                {"$set": {
+                    "converted_to_invest_bill": invest_bill_no,
+                    "billing_status": "Billed"
+                }}
+            )
 
         return Response(
             {"message": "Billing saved successfully!",
