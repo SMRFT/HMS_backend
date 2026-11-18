@@ -2994,8 +2994,8 @@ def pharmacy_medicinechart(request):
                 b["_id"] = str(b["_id"])
             for date_key in ["created_date", "lastmodified_date", "bill_date", "ward_request_date"]:
                 val = b.get(date_key)
-                if val and hasattr(val, "isoformat"):
-                    b[date_key] = val.isoformat()
+                if val:
+                    b[date_key] = to_utc_iso(val)
             serialized_data.append(b)
 
         if not serialized_data:
@@ -4172,32 +4172,21 @@ def finalize_bill(request):
                 u_item["pending_qty"] = pending_qty     # Remaining quantity
                 updated_orig_meds.append(u_item)
 
-        is_partial_or_subsequent = is_ward and (not all_items_fully_dispatched or has_prior_dispatches)
-
         # =====================================================
         # ✅ GENERATE BILL NO
         # =====================================================
         fy = get_financial_year()
-        if is_partial_or_subsequent or not bill.get("bill_no"):
+        new_bill_no = bill.get("bill_no")
+        bill_date   = bill.get("bill_date")
+        if not new_bill_no:
             new_bill_no = get_next_pharmacy_bill_no(
                 outlet_code=bill_outlet,
                 fy=fy,
                 db_instance=mongo_db
             )
             bill_date = datetime.utcnow()
-            if not is_partial_or_subsequent:
-                bill_collection.update_one(
-                    {"_id": bill["_id"]},
-                    {
-                        "$set": {
-                            "bill_no":   new_bill_no,
-                            "bill_date": bill_date,
-                        }
-                    }
-                )
-        else:
-            new_bill_no = bill.get("bill_no")
-            bill_date   = bill.get("bill_date")
+        elif not bill_date:
+            bill_date = datetime.utcnow()
 
         # =====================================================
         # ✅ PREPARE MEDICINE HISTORY
@@ -4434,158 +4423,82 @@ def finalize_bill(request):
         elif raw_final_pm:
             set_payload["payment_mode"] = "Credit" if str(raw_final_pm).strip().lower() == "credit" else "Cash"
 
-        if is_partial_or_subsequent:
-            # 1. Determine unique next_Bill_id for this new billed transaction
-            last_doc = bill_collection.find_one({}, sort=[("Bill_id", -1)], projection={"Bill_id": 1})
-            next_Bill_id = (int(last_doc["Bill_id"]) + 1) if (last_doc and "Bill_id" in last_doc and last_doc["Bill_id"] is not None) else 1
-            while bill_collection.find_one({"Bill_id": next_Bill_id}):
-                next_Bill_id += 1
+        # Resolve patient name and age
+        resolved_p_name = (
+            bill.get("patientname")
+            or bill.get("patient_name")
+            or data.get("patient_name")
+            or data.get("patientname")
+        )
+        if not resolved_p_name and bill.get("uhid"):
+            try:
+                p_doc = mongo_db["hospital_patient"].find_one({"uhid": bill.get("uhid")})
+                if p_doc:
+                    sal = (p_doc.get("salutation") or "").strip()
+                    fn  = (p_doc.get("firstName") or "").strip()
+                    ln  = (p_doc.get("lastName") or "").strip()
+                    resolved_p_name = " ".join(f"{sal} {fn} {ln}".split()).strip()
+            except Exception:
+                pass
 
-            # Only items billed in this transaction (with qty > 0)
-            billed_invoice_meds = [
-                m for m in medicine_history
-                if float(m.get("quantity") or m.get("qty") or 0) > 0
+        resolved_age = bill.get("age") or data.get("age")
+
+        # Sanitize medicines so ALL normal billing fields are stored (taxable_value, product_value, CGST, SGST, discount, total, etc.)
+        sanitized_meds = sanitize_medicines(medicines_to_use)
+
+        set_payload["bill_no"]              = new_bill_no
+        set_payload["bill_date"]            = bill_date
+        set_payload["billing_status"]       = "Billed"
+        set_payload["billed_id"]            = employee_id
+        set_payload["is_dispatched"]        = True
+        set_payload["lastmodified_date"]    = now_ts
+        set_payload["lastmodified_by"]      = employee_id
+        set_payload["medicine_particulars"] = sanitized_meds
+        set_payload["total_amount"]         = total_amount_to_use
+        set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
+        if resolved_p_name:
+            set_payload["patientname"]      = resolved_p_name
+            set_payload["patient_name"]     = resolved_p_name
+        if resolved_age:
+            set_payload["age"]              = resolved_age
+
+        dispatch_log = {
+            "bill_no":        new_bill_no,
+            "billed_Bill_id": bill.get("Bill_id"),
+            "timestamp":      now_ts.isoformat(),
+            "billed_by":      employee_id,
+            "items": [
+                {
+                    "item_id": int(m.get("item_id")),
+                    "qty": float(m.get("qty") or m.get("quantity") or 0)
+                }
+                for m in sanitized_meds
+                if float(m.get("qty") or m.get("quantity") or 0) > 0
             ]
-            for bm in billed_invoice_meds:
-                bm["dispatched_qty"] = float(bm.get("quantity") or bm.get("qty") or 0)
+        }
 
-            ward_bill_type = bill.get("bill_type") or 18
-            resolved_p_name = bill.get("patientname") or bill.get("patient_name")
-            if not resolved_p_name and bill.get("uhid"):
-                try:
-                    p_doc = mongo_db["hospital_patient"].find_one({"uhid": bill.get("uhid")})
-                    if p_doc:
-                        sal = (p_doc.get("salutation") or "").strip()
-                        fn  = (p_doc.get("firstName") or "").strip()
-                        ln  = (p_doc.get("lastName") or "").strip()
-                        resolved_p_name = " ".join(f"{sal} {fn} {ln}".split()).strip()
-                except Exception:
-                    pass
-
-            billed_doc = {
-                "Bill_id":                  next_Bill_id,
-                "bill_no":                  new_bill_no,
-                "bill_date":                bill_date,
-                "created_date":             now_ts,
-                "billing_status":           "Billed",
-                "billing_mode":             bill.get("billing_mode") or "WARD REQUEST",
-                "payment_mode":             set_payload.get("payment_mode", "Cash"),
-                "is_ward_request":          True,
-                "bill_type":                ward_bill_type,
-                "source_ward_request_id":   bill.get("Bill_id"),
-                "is_dispatched":            True,
-                "hospital_code":            hospital_code,
-                "branch_code":              branch_code,
-                "outlet_code":              bill_outlet,
-                "uhid":                     bill.get("uhid"),
-                "patient_name":             resolved_p_name,
-                "inpatient_number":         bill.get("inpatient_number"),
-                "room_no":                  bill.get("room_no") or bill.get("ward_name"),
-                "doctor_id":                bill.get("doctor_id") or data.get("doctor_id"),
-                "billed_id":                employee_id,
-                "created_by":               employee_id,
-                "total_amount":             total_amount_to_use,
-                "net_amount":               float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use),
-                "overall_discount_type":    frontend_overall_discount_type,
-                "overall_discount_value":   float(frontend_overall_discount_value or 0),
-                "overall_discount_amount":  float(frontend_overall_discount_amount or 0),
-                "medicine_particulars":     billed_invoice_meds,
-                "patient_details":          bill.get("patient_details"),
-                "customer_type":            bill.get("customer_type"),
-                "is_insurance":             is_insurance_patient,
-                "insurance_company":        bill.get("insurance_company"),
+        bill_collection.update_one(
+            {"_id": bill["_id"]},
+            {
+                "$set": set_payload,
+                "$push": {"dispatch_history": dispatch_log}
             }
-            bill_collection.insert_one(billed_doc)
+        )
 
-            try:
-                PharmacyBilling.objects.create(
-                    Bill_id=next_Bill_id,
-                    bill_no=new_bill_no,
-                    bill_date=bill_date,
-                    bill_type=ward_bill_type,
-                    uhid=bill.get("uhid"),
-                    inpatient_number=bill.get("inpatient_number"),
-                    patientname=resolved_p_name,
-                    billing_status="Billed",
-                    billing_mode=bill.get("billing_mode") or "WARD REQUEST",
-                    payment_mode=set_payload.get("payment_mode", "Cash"),
-                    total_amount=total_amount_to_use,
-                    net_amount=float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use),
-                    doctor_id=bill.get("doctor_id") or data.get("doctor_id"),
-                    room_no=bill.get("room_no") or bill.get("ward_name"),
-                    is_ward_request=True,
-                    medicine_particulars=billed_invoice_meds,
-                )
-            except Exception as pe:
-                print("Warning: PharmacyBilling create error:", pe)
-
-            # 2. Update master ward request: preserve requested qty, update dispatched_qty & pending_qty
-            dispatch_log = {
-                "bill_no":        new_bill_no,
-                "billed_Bill_id": next_Bill_id,
-                "timestamp":      now_ts.isoformat(),
-                "billed_by":      employee_id,
-                "items": [
-                    {
-                        "item_id": int(m.get("item_id")),
-                        "qty": float(m.get("qty") or m.get("quantity") or 0)
-                    }
-                    for m in medicines_to_use
-                    if float(m.get("qty") or m.get("quantity") or 0) > 0
-                ]
-            }
-
-            update_req = {
-                "medicine_particulars": updated_orig_meds,
-                "lastmodified_date":    now_ts,
-                "lastmodified_by":      employee_id,
-            }
-            has_any_disp = any(float(m.get("dispatched_qty") or 0) > 0 for m in updated_orig_meds)
-            new_ward_status = "Billed" if all_items_fully_dispatched else ("Processing" if has_any_disp else "Pending")
-            update_req["billing_status"] = new_ward_status
-            update_req["is_dispatched"]  = bool(all_items_fully_dispatched)
-
-            bill_collection.update_one(
-                {"_id": bill["_id"]},
-                {
-                    "$set": update_req,
-                    "$push": {"dispatch_history": dispatch_log}
-                }
+        try:
+            PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
+                billing_status="Billed",
+                billed_id=employee_id,
+                bill_no=new_bill_no,
+                bill_date=bill_date,
+                payment_mode=set_payload.get("payment_mode", "Cash"),
+                total_amount=set_payload.get("total_amount", float(bill.get("total_amount", 0))),
+                net_amount=set_payload.get("net_amount", float(bill.get("net_amount", 0)))
             )
+        except Exception:
+            pass
 
-            try:
-                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
-                    billing_status=new_ward_status,
-                    lastmodified_by=employee_id,
-                    lastmodified_date=now_ts
-                )
-            except Exception:
-                pass
-
-            final_returned_bill_id = next_Bill_id
-
-        else:
-            if is_ward:
-                set_payload["medicine_particulars"] = updated_orig_meds
-            bill_collection.update_one(
-                {"_id": bill["_id"]},
-                {
-                    "$set": set_payload,
-                }
-            )
-
-            try:
-                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
-                    billing_status="Billed",
-                    billed_id=employee_id,
-                    payment_mode=set_payload.get("payment_mode", "Cash"),
-                    total_amount=set_payload.get("total_amount", float(bill.get("total_amount", 0))),
-                    net_amount=set_payload.get("net_amount", float(bill.get("net_amount", 0)))
-                )
-            except Exception:
-                pass
-
-            final_returned_bill_id = bill.get("Bill_id")
+        final_returned_bill_id = bill.get("Bill_id")
 
         # Resolve doctor name and employee name
         doc_id = bill.get("doctor_id") or data.get("doctor_id")
@@ -5206,7 +5119,8 @@ def pharmacy_view_bills(request):
     and_conditions = [
         {"hospital_code": hospital_code},
         {"branch_code":   branch_code},
-        {"billing_status": {"$in": ["Billed", "Paid", "Processing", "Pending", "Completed", "deleted"]}}
+        {"billing_status": {"$in": ["Billed", "Paid", "deleted"]}},
+        {"bill_no": {"$nin": [None, "", "—"]}}
     ]
 
     if isinstance(matched_outlet, (list, tuple)):
