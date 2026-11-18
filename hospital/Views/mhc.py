@@ -100,7 +100,7 @@ def get_mhc_investigations(request):
 
     try:
         # 1. Billing Query
-        billing_filter = {'billTypeNo': 'PACK', 'is_active': True}
+        billing_filter = {'billTypeNo': 'PACK', 'is_active': True, 'doctor': 'MHC001'}
 
         if hospital_code and hospital_code != 'system':
             billing_filter['hospital_code'] = hospital_code
