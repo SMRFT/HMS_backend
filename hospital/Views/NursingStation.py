@@ -925,33 +925,63 @@ def get_lab_ward_requests(request):
 
     try:
 
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+
         uhid = request.GET.get("uhid")
 
         ip_number = request.GET.get("ipNumber")
 
         query = {
-
-            "is_active": True,
-
             "is_ward_request": True,
-
             "ward_request_type": "LAB"
-
         }
 
         if uhid:
-
             query["uhid"] = uhid
 
         if ip_number:
-
             query["ipNumber"] = ip_number
 
-        # Fetch from the centralized investbilling collection
+        # Fetch records from hospital_investbilling
+        inv_coll = mongo_db["hospital_investbilling"]
+        inv_query = dict(query)
+        inv_query["is_active"] = True
+        inv_requests = list(inv_coll.find(inv_query).sort("created_date", -1))
 
-        ward_req_collection = mongo_db["hospital_investbilling"]
+        # Track all estimate numbers that have already been converted to an investigation bill
+        converted_est_numbers = set()
+        for inv in inv_requests:
+            est_num = inv.get("fromEstBillNo") or inv.get("EstBillNo")
+            if est_num:
+                converted_est_numbers.add(str(est_num).strip())
 
-        requests_data = list(ward_req_collection.find(query).sort("created_date", -1))
+        # Primary source for pending requests: hospital_estimatebilling
+        est_coll = mongo_db["hospital_estimatebilling"]
+        est_requests = list(est_coll.find(query).sort("created_date", -1))
+
+        requests_data = []
+        # Add investigation billing records first
+        for r in inv_requests:
+            requests_data.append(r)
+
+        # Add estimate records ONLY if they have not been converted to an investigation bill
+        for r in est_requests:
+            est_no = str(r.get("EstBillNo") or "").strip()
+            conv_bill = str(r.get("converted_to_invest_bill") or "").strip()
+            if est_no and est_no in converted_est_numbers:
+                continue
+            if conv_bill and any(str(inv.get("investBillNo", "")).strip() == conv_bill for inv in inv_requests):
+                continue
+            requests_data.append(r)
+
+        def get_req_dt(d):
+            dt = d.get("EstBillDate") or d.get("created_date") or d.get("investBillDate")
+            if dt and hasattr(dt, "tzinfo") and dt.tzinfo:
+                dt = dt.replace(tzinfo=None)
+            return dt or datetime.min
+
+        requests_data.sort(key=get_req_dt, reverse=True)
 
         # Enrich and format for the frontend component
 
@@ -1013,14 +1043,52 @@ def get_lab_ward_requests(request):
                     "status": it_st
                 })
             
+            created_dt = doc.get("EstBillDate") or doc.get("created_date") or doc.get("investBillDate")
+            req_date = ""
+            req_time = ""
+            if created_dt and hasattr(created_dt, "strftime"):
+                try:
+                    if hasattr(created_dt, "tzinfo") and created_dt.tzinfo is not None:
+                        ist_dt = created_dt.astimezone(ist)
+                    else:
+                        ist_dt = pytz.utc.localize(created_dt).astimezone(ist)
+                    req_date = ist_dt.strftime("%d/%m/%Y")
+                    req_time = ist_dt.strftime("%I:%M %p")
+                except Exception:
+                    req_date = created_dt.strftime("%d/%m/%Y")
+                    req_time = created_dt.strftime("%I:%M %p")
+
+            # Determine bill number and source:
+            # - If document has investBillNo, it's an Investigation Bill
+            # - If document has EstBillNo and no investBillNo, it's an Estimate Bill
+            invest_bill_no = doc.get("investBillNo")
+            est_bill_no = doc.get("EstBillNo") or doc.get("fromEstBillNo")
+
+            if invest_bill_no:
+                bill_no = str(invest_bill_no)
+                bill_source = "Invest Billing"
+            elif est_bill_no:
+                bill_no = str(est_bill_no)
+                bill_source = "Estimate"
+            else:
+                bill_no = ""
+                bill_source = ""
+
+            doc_status = doc.get("status") or "Result Pending"
+            if doc.get("converted_to_invest_bill") or doc.get("billing_status") == "Billed":
+                doc_status = "Billed"
+
             formatted_doc = {
                 "id": str(doc.get("_id")),
-                "status": doc.get("status", "Result Pending"),
+                "status": doc_status,
                 "cancelReason": doc.get("cancel_reason", ""),
-                "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
-                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
+                "reqDate": req_date,
+                "reqTime": req_time,
                 "userName": doc.get("created_by", ""),
-                "billNo": doc.get("investBillNo", ""),
+                "billNo": bill_no,
+                "billSource": bill_source,
+                "investBillNo": str(invest_bill_no or ""),
+                "estBillNo": str(est_bill_no or ""),
                 "billType": (items[0].get("billTypeNo") if items and isinstance(items[0], dict) else "") or doc.get("billTypeName", "") or doc.get("billTypeNo", "") or str(doc.get("bill_type", "")),
                 "billTypeNo": doc.get("billTypeNo", ""),
                 
@@ -1195,70 +1263,103 @@ def save_lab_ward_request(request):
         total_float = float(total_price)
         total_int = int(total_float) if total_float.is_integer() else round(total_float, 2)
 
-        # Financial Year & Bill Number Generation
-        today = datetime.now()
-        if today.month < 4:
-            financial_year = f"{(today.year - 1) % 100:02d}{today.year % 100:02d}"
-        else:
-            financial_year = f"{today.year % 100:02d}{(today.year + 1) % 100:02d}"
+        # Resolve patient demographics for hospital_estimatebilling
+        salutation = ""
+        first_name = ""
+        last_name = ""
+        gender = ""
+        if pt_doc:
+            salutation = pt_doc.get("salutation") or ""
+            first_name = pt_doc.get("firstName") or pt_doc.get("patient_name") or ""
+            last_name = pt_doc.get("lastName") or ""
+            gender = pt_doc.get("gender") or ""
+        elif adm_doc:
+            salutation = adm_doc.get("salutation") or ""
+            first_name = adm_doc.get("firstName") or adm_doc.get("patient_name") or ""
+            last_name = adm_doc.get("lastName") or ""
+            gender = adm_doc.get("gender") or ""
 
-        prefix_key = f"{financial_year}{bill_type_val}"
-        counters_collection = mongo_db["counters"]
-        counter = counters_collection.find_one_and_update(
-            {"_id": prefix_key},
-            {"$inc": {"seq": 1}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER
-        )
-        next_number = counter["seq"]
-        invest_bill_no = f"{financial_year}{bill_type_val}{next_number:06d}"
+        # Sequential EstBillNo Generation (aligned with EstimateBilling)
+        from hospital.models import EstimateBilling
+        from django.db import transaction
+
+        with transaction.atomic():
+            last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
+            if last_bill and last_bill.EstBillNo:
+                try:
+                    last_number = int(last_bill.EstBillNo)
+                except (ValueError, TypeError):
+                    last_number = 0
+                next_number = last_number + 1
+            else:
+                highest_mongo = mongo_db["hospital_estimatebilling"].find_one(
+                    {"EstBillNo": {"$regex": "^[0-9]+$"}},
+                    sort=[("EstBillNo", -1)]
+                )
+                if highest_mongo and highest_mongo.get("EstBillNo"):
+                    try:
+                        next_number = int(highest_mongo["EstBillNo"]) + 1
+                    except (ValueError, TypeError):
+                        next_number = 1
+                else:
+                    next_number = 1
+
+            est_bill_no = f"{next_number:06d}"
+            while EstimateBilling.objects.filter(EstBillNo=est_bill_no).exists() or mongo_db["hospital_estimatebilling"].find_one({"EstBillNo": est_bill_no}):
+                next_number += 1
+                est_bill_no = f"{next_number:06d}"
 
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
 
         request_doc = {
+            "EstBillNo": est_bill_no,
+            "EstBillDate": now_ist,
             "uhid": uhid,
             "ipNumber": ip_number,
-            "doctor": doctor_id,
-            "bill_type": bill_type_val,
+            "salutation": salutation,
+            "firstName": first_name,
+            "lastName": last_name,
+            "gender": gender,
+            "age": age,
+            "age_type": age_type,
+            "roomNo": room_no,
+            "bill_type": str(bill_type_val),
             "billTypeNo": bill_type_no,
+            "doctor": doctor_id,
             "referredBy": doctor_id,
+            "item": enriched_tests,
+            "total": total_int,
             "discountPercent": 0,
             "discount": 0,
             "discountRemarks": "",
-            "total": total_int,
             "finalPrice": total_int,
             "paymentMethod": "Credit",
             "paymentStatus": "Pending",
-            "item": enriched_tests,
             "is_emergency": bool(data.get("is_emergency", False)),
-            "roomNo": room_no,
-            "age": age,
-            "age_type": age_type,
-            "investBillDate": now_ist,
-            "investBillNo": invest_bill_no,
+            "is_active": True,
+            "is_ward_request": True,
+            "ward_request_type": "LAB",
+            "status": "Result Pending",
             "created_by": str(current_user),
             "branch_code": str(branch_code),
             "outlet_code": str(outlet_code),
             "hospital_code": str(hospital_code),
             "created_date": now_ist,
             "lastmodified_by": None,
-            "lastmodified_date": now_ist,
-            "is_active": True,
-            "is_ward_request": True,
-            "ward_request_type": "LAB",
-            "status": "Result Pending"
+            "lastmodified_date": now_ist
         }
 
-        collection = mongo_db["hospital_investbilling"]
+        collection = mongo_db["hospital_estimatebilling"]
         result = collection.insert_one(request_doc)
 
         return Response({
             "success": True,
-            "message": "Lab Ward Request saved successfully",
+            "message": "Lab Ward Request saved successfully to Estimate Billing",
             "data": {
                 "id": str(result.inserted_id),
-                "investBillNo": invest_bill_no
+                "EstBillNo": est_bill_no,
+                "investBillNo": est_bill_no
             }
         })
     except Exception as e:
@@ -1290,13 +1391,20 @@ def cancel_lab_ward_request(request):
 
         from bson import ObjectId
 
-        collection = mongo_db["hospital_investbilling"]
+        collection = mongo_db["hospital_estimatebilling"]
+        doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
+        if not doc:
+            collection = mongo_db["hospital_investbilling"]
+            doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
+
+        if not doc:
+            return Response({"success": False, "error": "Request not found or already cancelled"}, status=404)
 
         cancelled_by = str(getattr(request.user, "username", None) or getattr(request.user, "user_id", None) or data.get("user") or "system")
 
         result = collection.update_one(
 
-            {"_id": ObjectId(request_id), "is_ward_request": True},
+            {"_id": doc["_id"]},
 
             {"$set": {
                 "is_active": False,
@@ -1343,10 +1451,15 @@ def cancel_individual_ward_request_item(request):
         if test_id is None and not test_name:
             return Response({"success": False, "error": "test_id or test_name is required"}, status=400)
 
-        collection = mongo_db["hospital_investbilling"]
+        collection = mongo_db["hospital_estimatebilling"]
         doc = collection.find_one({"_id": ObjectId(bill_id)})
         if not doc:
-            return Response({"success": False, "error": "Invest billing request not found"}, status=404)
+            collection = mongo_db["hospital_investbilling"]
+            doc = collection.find_one({"_id": ObjectId(bill_id)})
+        if not doc:
+            return Response({"success": False, "error": "Billing request not found"}, status=404)
+        if doc.get("status") == "Cancelled" or doc.get("is_active") is False:
+            return Response({"success": False, "error": "Cannot update status on a cancelled ward request"}, status=400)
 
         raw_items = doc.get("item", [])
         if isinstance(raw_items, str):
@@ -1444,10 +1557,15 @@ def update_ward_request_item_status(request):
         if not new_status:
             return Response({"success": False, "error": "Status is required"}, status=400)
 
-        collection = mongo_db["hospital_investbilling"]
+        collection = mongo_db["hospital_estimatebilling"]
         doc = collection.find_one({"_id": ObjectId(bill_id)})
         if not doc:
-            return Response({"success": False, "error": "Invest billing request not found"}, status=404)
+            collection = mongo_db["hospital_investbilling"]
+            doc = collection.find_one({"_id": ObjectId(bill_id)})
+        if not doc:
+            return Response({"success": False, "error": "Billing request not found"}, status=404)
+        if doc.get("status") == "Cancelled" or doc.get("is_active") is False:
+            return Response({"success": False, "error": "Cannot update status on a cancelled ward request"}, status=400)
 
         raw_items = doc.get("item", [])
         if isinstance(raw_items, str):
@@ -1539,8 +1657,11 @@ def remove_individual_test_from_lab_ward_request(request):
         if test_id is None and not test_name:
             return Response({"success": False, "error": "test_id or test_name is required"}, status=400)
 
-        collection = mongo_db["hospital_investbilling"]
+        collection = mongo_db["hospital_estimatebilling"]
         doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
+        if not doc:
+            collection = mongo_db["hospital_investbilling"]
+            doc = collection.find_one({"_id": ObjectId(request_id), "is_ward_request": True})
         if not doc:
             return Response({"success": False, "error": "Request not found"}, status=404)
 
@@ -1615,6 +1736,7 @@ def get_medicine_ward_requests(request):
         query_params = {
             "uhid": uhid,
             "is_deleted": {"$ne": True},
+            "source_ward_request_id": {"$exists": False},
         }
 
         if ip_number and str(ip_number).strip() not in ["-", "null", "undefined", ""]:
@@ -1657,17 +1779,17 @@ def get_medicine_ward_requests(request):
 
                     all_bill_types.add(str(bt_val))
 
-            for itm in (doc.get("medicine_particulars") or []):
+            items_to_scan = doc.get("medicine_particulars") or doc.get("items") or []
 
-                if isinstance(itm, dict) and itm.get("item_id"):
+            for itm in items_to_scan:
 
-                    try:
-
-                        all_item_ids.add(int(itm["item_id"]))
-
-                    except (ValueError, TypeError):
-
-                        pass
+                if isinstance(itm, dict):
+                    iid = itm.get("item_id") or itm.get("item_code")
+                    if iid:
+                        try:
+                            all_item_ids.add(int(iid))
+                        except (ValueError, TypeError):
+                            pass
 
         item_name_map = {}
 
@@ -1717,13 +1839,15 @@ def get_medicine_ward_requests(request):
 
             import json
 
-            raw_st = str(doc.get("billing_status") or doc.get("status") or "Pending").strip()
-            if doc.get("is_dispatched") and raw_st in ["Pending", "Processing", "Draft", ""]:
+            raw_st = str(doc.get("billing_status") or doc.get("status") or "").strip()
+            if doc.get("paymentStatus") == "Paid" or doc.get("is_dispatched") or raw_st in ["Completed", "Paid"]:
                 raw_st = "Billed"
-            elif raw_st in ["Completed", "Paid"]:
-                raw_st = "Billed"
+            elif not raw_st:
+                raw_st = "Pending"
 
-            items = doc.get("medicine_particulars", [])
+            items = doc.get("medicine_particulars")
+            if not items:
+                items = doc.get("items", [])
 
             if isinstance(items, str):
 
@@ -1755,27 +1879,39 @@ def get_medicine_ward_requests(request):
 
                 try:
 
-                    item_id_int = int(itm.get("item_id", 0))
+                    item_id_int = int(itm.get("item_id") or itm.get("item_code") or 0)
 
                 except (ValueError, TypeError):
 
                     item_id_int = 0
 
+                resolved_name = (
+                    item_name_map.get(item_id_int)
+                    or itm.get("item_name")
+                    or itm.get("itemName")
+                    or itm.get("medicine_name")
+                    or itm.get("name")
+                    or (f"Item {item_id_int}" if item_id_int else "")
+                )
+                orig_qty = float(itm.get("quantity") or itm.get("qty") or 0)
+                is_billed_or_paid = (raw_st == "Billed" or doc.get("paymentStatus") == "Paid")
+                disp_qty = float(itm.get("dispatched_qty") if itm.get("dispatched_qty") is not None else (orig_qty if is_billed_or_paid else 0))
+
                 medicines.append({
 
-                    "item_id": itm.get("item_id", ""),
+                    "item_id": itm.get("item_id") or itm.get("item_code", ""),
 
-                    "item_name": item_name_map.get(item_id_int, itm.get("item_name", itm.get("itemName", ""))),
+                    "item_name": resolved_name,
 
-                    "name": item_name_map.get(item_id_int, itm.get("item_name", itm.get("itemName", ""))),
+                    "name": resolved_name,
 
                     "batch_number": itm.get("batch_number", ""),
 
-                    "quantity": itm.get("quantity", itm.get("qty", 0)),
-                    "qty": itm.get("qty", itm.get("quantity", 0)),
-                    "requested_qty": itm.get("qty", itm.get("quantity", 0)),
-                    "dispatched_qty": itm.get("dispatched_qty", 0),
-                    "pending_qty": max(0, float(itm.get("qty", itm.get("quantity", 0)) or 0) - float(itm.get("dispatched_qty", 0) or 0)),
+                    "quantity": orig_qty,
+                    "qty": orig_qty,
+                    "requested_qty": orig_qty,
+                    "dispatched_qty": disp_qty,
+                    "pending_qty": max(0.0, orig_qty - disp_qty),
                     "dosage": itm.get("dosage", ""),
 
                     "noOfDays": itm.get("noOfDays", ""),
@@ -1790,7 +1926,7 @@ def get_medicine_ward_requests(request):
 
                     "remark": itm.get("remark", ""),
 
-                    "price": itm.get("price", itm.get("mrp", 0)),
+                    "price": itm.get("price") or itm.get("rate") or itm.get("amount") or itm.get("mrp", 0),
 
                     "instruction": itm.get("instruction", ""),
 
@@ -1854,15 +1990,37 @@ def get_medicine_ward_requests(request):
 
             resolved_bill_name = bill_name_map.get(raw_bt) or bill_name_map.get(str(raw_bt)) or doc.get("bill_type_no") or ""
 
+            # Resolve Request No & Final Bill No:
+            # - If converted to bill: display the final bill number (e.g. 262701000013 or 2627/036542)
+            # - If pending: display the request number (e.g. MRIP001)
+            final_bill_no = (
+                doc.get("billed_bill_no")
+                or doc.get("converted_bill_no")
+                or (doc.get("dispatch_history") and doc.get("dispatch_history")[-1].get("bill_no"))
+                or (doc.get("bill_no") if raw_st == "Billed" and not str(doc.get("bill_no", "")).startswith("MR") else None)
+                or doc.get("bill_number")
+            )
+            raw_req_no = doc.get("request_no") or (doc.get("bill_no") if str(doc.get("bill_no", "")).startswith("MR") else None)
+            if not raw_req_no and not final_bill_no:
+                raw_req_no = f"MRIP{str(doc.get('Bill_id') or str(doc.get('_id'))[-4:]).zfill(3)}"
+
+            active_display_no = final_bill_no if (raw_st == "Billed" and final_bill_no) else (raw_req_no or final_bill_no or "")
+
             formatted_data.append({
 
                 "id": str(doc.get("_id")),
 
                 "Bill_id": doc.get("Bill_id"),
 
-                "bill_no": doc.get("bill_no", "") or str(doc.get("Bill_id") or ""),
+                "bill_no": active_display_no,
 
-                "reqId": str(doc.get("Bill_id") or doc.get("_id")),
+                "request_no": raw_req_no or "",
+
+                "billed_bill_no": final_bill_no or "",
+
+                "is_converted": bool(final_bill_no and raw_st == "Billed"),
+
+                "reqId": active_display_no or str(doc.get("Bill_id") or doc.get("_id")),
 
                 "uhid": doc.get("uhid", ""),
 
@@ -2258,60 +2416,61 @@ def save_medicine_ward_request(request):
             }
             cleaned_particulars.append(cleaned_item)
 
+        # Determine whether this is an Inpatient or Outpatient request
+        raw_ip = str(data.get("ipNumber") or data.get("inpatient_number") or "").strip()
+        is_ip = bool(raw_ip and raw_ip not in ["-", "null", "undefined", "None", ""])
+        bt_val = data.get("bill_type")
+        bt_name = str(data.get("billTypeName") or "").upper()
+        if bt_val == 18 or "IP" in bt_name:
+            is_ip = True
+        elif bt_val == 42 or "OP" in bt_name:
+            is_ip = False
+
+        from ..counter_service import get_next_medicine_ward_request_no
+        req_no = get_next_medicine_ward_request_no(is_ip=is_ip)
+
         # Create Bill via Django Model (Handles auto-increment and defaults)
-
         bill = PharmacyBilling(
-
             uhid=data.get("uhid"),
-
             inpatient_number=data.get("ipNumber"),
-
+            bill_no=req_no,
             bill_type=data.get("bill_type"),
-
             # bill_type_no=data.get("billTypeNo"),
-
             doctor_id=doctor_id,
-
             medicine_particulars=cleaned_particulars,
-
             total_amount=total_amount,
-
             net_amount=total_amount,
-
             billing_status="Pending",
-
             billing_mode="DISCHARGE MEDICINE" if data.get("is_discharge") else "WARD REQUEST",
-
             payment_details={},
-
             outlet_code=outlet_code,
-
             hospital_code=hospital_code,
-
             branch_code=branch_code,
-
             created_by=current_user,
-
             is_ward_request=True,
-
             room_no=room_no,
-
             ward_request_date=timezone.now() if 'timezone' in globals() else datetime.now()
-
         )
-
         bill.save()
 
-        
+        # Ensure request_no and bill_no are explicitly updated in MongoDB collection as well
+        mongo_db["hospital_pharmacybilling"].update_one(
+            {"Bill_id": bill.Bill_id},
+            {"$set": {
+                "request_no": req_no,
+                "bill_no": req_no,
+                "is_ward_request": True,
+                "room_no": room_no,
+                "ward_name": room_no
+            }}
+        )
 
         return Response({
-
             "success": True,
-
             "message": "Medicine ward request saved successfully",
-
-            "id": bill.Bill_id
-
+            "id": bill.Bill_id,
+            "request_no": req_no,
+            "bill_no": req_no,
         })
 
         
@@ -2715,12 +2874,29 @@ def get_radiology_ward_requests(request):
                     "status": it_st
                 })
             
+            created_dt = doc.get("created_date") or doc.get("investBillDate")
+            req_date = ""
+            req_time = ""
+            if created_dt and hasattr(created_dt, "strftime"):
+                try:
+                    import pytz
+                    ist = pytz.timezone("Asia/Kolkata")
+                    if hasattr(created_dt, "tzinfo") and created_dt.tzinfo is not None:
+                        ist_dt = created_dt.astimezone(ist)
+                    else:
+                        ist_dt = pytz.utc.localize(created_dt).astimezone(ist)
+                    req_date = ist_dt.strftime("%d/%m/%Y")
+                    req_time = ist_dt.strftime("%I:%M %p")
+                except Exception:
+                    req_date = created_dt.strftime("%d/%m/%Y")
+                    req_time = created_dt.strftime("%I:%M %p")
+
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "status": doc.get("status", "Result Pending"),
                 "cancelReason": doc.get("cancel_reason", ""),
-                "reqDate": doc.get("created_date").strftime("%d/%m/%Y") if doc.get("created_date") else "",
-                "reqTime": doc.get("created_date").strftime("%I:%M %p") if doc.get("created_date") else "",
+                "reqDate": req_date,
+                "reqTime": req_time,
                 "userName": doc.get("created_by", ""),
                 "billNo": doc.get("investBillNo", ""),
                 "billType": (items[0].get("billTypeNo") if items and isinstance(items[0], dict) else "") or doc.get("billTypeName", "") or doc.get("billTypeNo", "") or str(doc.get("bill_type", "")),
@@ -3535,8 +3711,8 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     diet_count = len(diet_bills)
     laundry_count = len(laundry_bills)
 
-    # Diet is excluded from billing clearance verification per requirement
-    pending_total = lab_count + rad_count + pharm_count + implant_count + laundry_count
+    # Diet and Radiology are excluded from billing clearance verification per requirement
+    pending_total = lab_count + pharm_count + implant_count + laundry_count
     is_clear = (pending_total == 0)
 
     return {
@@ -3552,10 +3728,11 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                 "items": lab_pending_items,
             },
             "radiology": {
-                "name": "Radiology",
+                "name": "Radiology (Exempt)",
                 "icon": "bi-camera",
-                "is_cleared": rad_count == 0,
-                "pending_count": rad_count,
+                "is_cleared": True,
+                "pending_count": 0,
+                "order_count": rad_count,
                 "bills": rad_bills,
                 "items": rad_pending_items,
             },

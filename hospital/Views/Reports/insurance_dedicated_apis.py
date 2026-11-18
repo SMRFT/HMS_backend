@@ -163,11 +163,25 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     wr_dispatch_map[bno] = item_ids
 
         # 3. Query Dispatched / Direct IP pharmacy bills
+        all_adms = list(hms_db['hospital_admission'].find({
+            "$or": [
+                {"uhid": target_uhid},
+                {"uhid": target_ip},
+                {"ipNumber": target_ip},
+                {"ipNumber": target_uhid}
+            ]
+        }))
+        all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
+        all_ips.add(target_ip)
+        all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
+        all_uhids.add(target_uhid)
+
         bill_query_or = [
-            {"uhid": target_ip},
-            {"uhid": target_uhid},
-            {"inpatient_number": target_ip}
+            {"uhid": {"$in": list(all_uhids)}},
+            {"inpatient_number": {"$in": list(all_ips)}}
         ]
+        for ip in all_ips:
+            bill_query_or.append({"uhid": ip})
         if wr_dispatch_map:
             bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
 
@@ -196,6 +210,35 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 "items": [],
                 "summary": {}
             }, status=status.HTTP_200_OK)
+
+        # Pre-cache all item master details and stock details (expiry, GST) for all items in ip_bills
+        all_item_ids = set()
+        for b in ip_bills:
+            for itm in (b.get('medicine_particulars') or b.get('items') or []):
+                iid = itm.get('item_id')
+                if iid is not None:
+                    try:
+                        all_item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+
+        item_master_map = {}
+        if all_item_ids:
+            for doc in hms_db['hospital_pharmacyitem'].find(
+                {'item_id': {'$in': list(all_item_ids)}},
+                {'item_id': 1, 'item_name': 1, 'hsn': 1, 'brand_name': 1}
+            ):
+                item_master_map[doc['item_id']] = doc
+
+        stock_map = {}
+        if all_item_ids:
+            for s in hms_db['hospital_pharmacystock'].find(
+                {'item_id': {'$in': list(all_item_ids)}},
+                {'item_id': 1, 'batch_number': 1, 'expiry_date': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1}
+            ):
+                k = (s.get('item_id'), str(s.get('batch_number') or '').strip())
+                if k not in stock_map or s.get('expiry_date'):
+                    stock_map[k] = s
 
         bills_output = []
         all_flattened_items = []
@@ -245,20 +288,36 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 if allowed_ids and it_id not in allowed_ids:
                     continue
 
-                part_name = itm.get('item_name') or itm.get('name') or "MEDICINE"
+                try:
+                    it_id_int = int(it_id) if it_id is not None else None
+                except (ValueError, TypeError):
+                    it_id_int = None
+
+                im_doc = item_master_map.get(it_id_int, {})
+                batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
+                stk_doc = stock_map.get((it_id_int, batch), {})
+
+                part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
                 qty = clean_num(itm.get('qty') or 1)
                 price = clean_num(itm.get('price') or 0)
                 calc_price = clean_num(itm.get('calculated_price') or (price * qty))
-                batch = itm.get('batch_number') or itm.get('batch') or ""
-                exp = itm.get('expiry_date') or itm.get('expiry') or ""
-                hsn = str(itm.get('hsn_code') or itm.get('hsn') or "300490")
+
+                # Expiry resolution from item, or stock batch
+                exp_raw = itm.get('expiry_date') or itm.get('expiry') or stk_doc.get('expiry_date')
+                exp_str = "-"
+                if isinstance(exp_raw, datetime):
+                    exp_str = exp_raw.strftime("%m/%Y")
+                elif exp_raw:
+                    exp_str = str(exp_raw)[:10]
+
+                hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip() or "300490"
 
                 # In Hospital Pharmacy Bills: calculated_price is the taxable base amount
                 taxable = calc_price
 
-                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST
-                cgst_pct = clean_num(itm.get('cgst_pct') or 2.5)
-                sgst_pct = clean_num(itm.get('sgst_pct') or 2.5)
+                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or from stock / itm)
+                cgst_pct = clean_num(itm.get('cgst_pct') or stk_doc.get('CGST_Percentage') or 2.5)
+                sgst_pct = clean_num(itm.get('sgst_pct') or stk_doc.get('SGST_Percentage') or 2.5)
 
                 cgst = round(taxable * (cgst_pct / 100.0), 2)
                 sgst = round(taxable * (sgst_pct / 100.0), 2)
@@ -285,7 +344,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     "qty": int(qty),
                     "particulars": part_name,
                     "batch": batch,
-                    "expiry": exp,
+                    "expiry": exp_str,
                     "amount": item_amt,
                     "hsn": hsn,
                     "cgst_pct": cgst_pct,
@@ -1470,15 +1529,36 @@ def prescription_details_api(request):
         prescriptions = []
 
         if pharm_bills:
+            # Pre-cache item master details
+            p_item_ids = set()
+            for b in pharm_bills:
+                for it in (b.get('medicine_particulars') or b.get('items') or []):
+                    iid = it.get('item_id')
+                    if iid is not None:
+                        try: p_item_ids.add(int(iid))
+                        except (ValueError, TypeError): pass
+
+            p_item_map = {}
+            if p_item_ids:
+                for doc in hms_db['hospital_pharmacyitem'].find(
+                    {'item_id': {'$in': list(p_item_ids)}},
+                    {'item_id': 1, 'item_name': 1}
+                ):
+                    p_item_map[doc['item_id']] = doc.get('item_name')
+
             for b in pharm_bills:
                 b_date = b.get('bill_date') or b.get('created_date')
                 b_date_str = b_date.strftime("%d/%m/%Y") if isinstance(b_date, datetime) else str(b_date)[:10]
 
                 items = []
                 for idx, it in enumerate(b.get('medicine_particulars') or b.get('items') or []):
+                    try: iid_int = int(it.get('item_id')) if it.get('item_id') is not None else None
+                    except (ValueError, TypeError): iid_int = None
+                    master_name = p_item_map.get(iid_int) if iid_int else None
+
                     items.append({
                         "sl_no": idx + 1,
-                        "item_name": it.get('item_name') or it.get('name') or f"MEDICINE {idx+1}",
+                        "item_name": it.get('item_name') or it.get('name') or master_name or f"MEDICINE {idx+1}",
                         "qty": int(clean_num(it.get('qty') or it.get('quantity') or 1))
                     })
 

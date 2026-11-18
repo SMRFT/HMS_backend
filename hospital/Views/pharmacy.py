@@ -2977,6 +2977,8 @@ def pharmacy_medicinechart(request):
             "hospital_code": hospital_code,
             "branch_code": branch_code,
             "billing_status": {"$in": ["Pending", "Processing"]},
+            "is_cancelled": {"$ne": True},
+            "is_deleted": {"$ne": True},
             "is_ward_request": True
         }
         if target_outlet:
@@ -3843,6 +3845,12 @@ def convert_to_bill(request):
             b_id_int = None
         id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
 
+        existing_bill = bill_collection.find_one({"Bill_id": id_clause})
+        if not existing_bill:
+            return Response({"error": "Bill not found"}, status=404)
+        if existing_bill.get("billing_status") == "Cancelled" or existing_bill.get("is_cancelled") is True or existing_bill.get("is_deleted") is True:
+            return Response({"error": "Cannot convert a cancelled ward request / bill to Processing"}, status=400)
+
         result = bill_collection.update_one(
             {"Bill_id": id_clause},
             {
@@ -3947,6 +3955,12 @@ def finalize_bill(request):
             return Response(
                 {"error": "Bill not found"},
                 status=404
+            )
+
+        if bill.get("billing_status") == "Cancelled" or bill.get("is_cancelled") is True or bill.get("is_deleted") is True:
+            return Response(
+                {"error": "Cannot finalize or update status of a cancelled ward request / bill"},
+                status=400
             )
 
         bill_outlet = bill.get("outlet_code") or (

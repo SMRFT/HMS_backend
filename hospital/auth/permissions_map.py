@@ -65,6 +65,10 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/get-reference-doctors/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/patient-registration-stats/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/patient-visit-list/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-master-list/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-master-update(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-op-visits(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-bill-update(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-pending-qr-registrations/?(\?.*)?$': 'HMS-P-AIN',
     '/_b_a_c_k_e_n_d/HMS/get-last-uhid/': 'HMS-P-AIN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-providers/?(\?.*)?$': 'HMS-P-AIN',
@@ -767,7 +771,9 @@ PAGE_MAPPING = DynamicPageMapping({
         r'^/_b_a_c_k_e_n_d/HMS/ip-advance-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/discount-bills-report/?(\?.*)?$': 'HMS-P-CCC',
         r'^/_b_a_c_k_e_n_d/HMS/purchase-gst-report/?(\?.*)?$': 'HMS-P-CCC',
-        r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-sales-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/op-pharmacy-sales-report/?(\?.*)?$': 'HMS-P-CCC',   
+        r'^/_b_a_c_k_e_n_d/HMS/unified-accounts-report/?(\?.*)?$': 'HMS-P-CCC',
+        r'^/_b_a_c_k_e_n_d/HMS/master-accounts/.*$': 'HMS-P-CCC',
 
         #complaints and Tickets
         '/_b_a_c_k_e_n_d/HMS/complaints/': 'HMS-P-CTI',

@@ -3,8 +3,30 @@ import re
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+from bson.decimal128 import Decimal128
 from pyauth.auth import HasRoleAndDataPermission
 from .dbcollection import hms_db, pharmacy_stock_collection, pharmacy_item_collection
+
+
+def _safe_float(val, default=0.0):
+    if val is None or val == "":
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, Decimal128):
+        try:
+            return float(val.to_decimal())
+        except Exception:
+            return float(str(val))
+    if hasattr(val, "to_decimal"):
+        try:
+            return float(val.to_decimal())
+        except Exception:
+            pass
+    try:
+        return float(str(val).strip())
+    except (ValueError, TypeError):
+        return default
 
 
 @api_view(["GET"])
@@ -104,17 +126,14 @@ def outlet_wise_stock_report(request):
                     if b and b in active_batches and b not in batch_info:
                         pc = it.get("purchase_cost") or it.get("purchase_cost_display")
                         if pc:
-                            try:
-                                pc = float(pc)
-                            except (ValueError, TypeError):
-                                pc = 0.0
+                            pc = _safe_float(pc, 0.0)
                         else:
-                            up = float(it.get("unit_price") or it.get("rate") or 0.0)
-                            tax = float(it.get("purchase_tax_rate") or it.get("tax_percentage") or 0.0)
+                            up = _safe_float(it.get("unit_price") or it.get("rate"), 0.0)
+                            tax = _safe_float(it.get("purchase_tax_rate") or it.get("tax_percentage"), 0.0)
                             pc = round(up * (1 + tax / 100), 4)
 
-                        sp = float(it.get("selling_price") or it.get("Selling_Price") or 0.0)
-                        mrp = float(it.get("mrp") or 0.0)
+                        sp = _safe_float(it.get("selling_price") or it.get("Selling_Price"), 0.0)
+                        mrp = _safe_float(it.get("mrp"), 0.0)
                         batch_info[b] = {
                             "purchase_cost": pc,
                             "selling_price": sp,
@@ -148,12 +167,12 @@ def outlet_wise_stock_report(request):
             cat_name = cat_map.get(str(cat_id)) or cat_map.get(cat_id) or str(cat_id or "General")
 
             bno = str(s.get("batch_number") or "").strip()
-            qty = float(s.get("avail_stock") or 0.0)
+            qty = _safe_float(s.get("avail_stock"), 0.0)
 
             b_data = batch_info.get(bno, {})
-            mrp = float(s.get("mrp") or b_data.get("mrp") or it_meta.get("mrp") or 0.0)
-            sp = float(s.get("Selling_Price") or b_data.get("selling_price") or mrp)
-            pc = float(b_data.get("purchase_cost") or it_meta.get("purchase_rate") or (mrp * 0.7))
+            mrp = _safe_float(s.get("mrp") or b_data.get("mrp") or it_meta.get("mrp"), 0.0)
+            sp = _safe_float(s.get("Selling_Price") or b_data.get("selling_price"), mrp)
+            pc = _safe_float(b_data.get("purchase_cost") or it_meta.get("purchase_rate"), round(mrp * 0.7, 4))
 
             exp_str = ""
             exp_val = s.get("expiry_date")

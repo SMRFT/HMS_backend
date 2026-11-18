@@ -198,6 +198,18 @@ def patientCreateView(request):
         uhid = post_data.get('uhid')
         patient = None
 
+        # If customer type is not insurance, explicitly reset company_code
+        cust_type = str(post_data.get('customer_type') or post_data.get('customerType') or '').strip().lower()
+        if not cust_type and uhid:
+            try:
+                temp_p = Patient.objects.get(uhid=uhid)
+                cust_type = str(getattr(temp_p, 'customer_type', '')).strip().lower()
+            except Patient.DoesNotExist:
+                pass
+
+        if cust_type != 'insurance':
+            post_data['company_code'] = ''
+
         if uhid:
             try:
                 patient = Patient.objects.get(uhid=uhid)
@@ -228,6 +240,26 @@ def patientCreateView(request):
                     
                 patient = serializer.save(**save_kwargs)
                 print("Patient Saved:", patient)
+
+                # Explicitly clear company_code / company_name in both ORM and MongoDB when customer_type is not insurance
+                if cust_type != 'insurance':
+                    if getattr(patient, 'company_code', None):
+                        patient.company_code = ''
+                        Patient.objects.filter(uhid=patient.uhid).update(company_code='')
+                    try:
+                        from .Views.dbcollection import patient_collection
+                        patient_collection.update_one(
+                            {"uhid": patient.uhid},
+                            {"$set": {
+                                "company_code": "",
+                                "company_name": "",
+                                "companyName": "",
+                                "customer_type": patient.customer_type,
+                                "customerType": patient.customer_type
+                            }}
+                        )
+                    except Exception as mongo_err:
+                        print("MongoDB patient company_code clear error in patientCreateView:", mongo_err)
             except Exception as e:
                 print("Error saving patient:", e)
                 import traceback

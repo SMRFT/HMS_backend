@@ -133,7 +133,15 @@ def bill_wise_report(request):
         total_return = 0
         
         for r in report_data:
-            r["patient_name"] = patient_map.get(r["uhid"], "N/A") if r["uhid"] else "N/A"
+            uhid_str = str(r.get("uhid") or "").strip()
+            ip_str = str(r.get("ip_number") or "").strip()
+            if ip_str == uhid_str:
+                ip_str = ""
+            r["uhid"] = uhid_str
+            r["ip_number"] = ip_str
+            r["mr_no"] = uhid_str if uhid_str else "—"
+            if not r.get("patient_name") or r.get("patient_name") in ["N/A", "General / Cash Patient", ""]:
+                r["patient_name"] = patient_map.get(uhid_str) or r.get("patient_name") or "N/A"
             r["cashier_name"] = cashier_name_map.get(r["cashier_id"], r["cashier_id"])
             
             if r["type"] == "Sales Return":

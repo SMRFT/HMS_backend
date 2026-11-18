@@ -1551,6 +1551,19 @@ def get_printsummary(request, ip_no):
             if bc and bc not in barcodes:
                 barcodes.append(bc)
 
+            # also include suffixed per-test barcodes (e.g. 262743012804-R, -F)
+            raw_td = br.get('testdetails', [])
+            if isinstance(raw_td, str):
+                try:
+                    raw_td = json.loads(raw_td)
+                except (json.JSONDecodeError, ValueError):
+                    raw_td = []
+            if isinstance(raw_td, list):
+                for t in raw_td:
+                    tb = t.get('barcode') if isinstance(t, dict) else None
+                    if tb and tb not in barcodes:
+                        barcodes.append(tb)
+
         if not barcodes:
             client.close()
             return JsonResponse(serialize_mongo(summary), safe=False)

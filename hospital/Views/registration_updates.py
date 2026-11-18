@@ -141,7 +141,20 @@ def process_registration_refund(request):
             return Response({"success": False, "message": "Missing required fields"}, status=400)
 
         # Check if bill exists and is paid
-        bill = Billing.objects.get(bill_number=bill_no)
+        bill = None
+        try:
+            bill = Billing.objects.get(bill_number=bill_no)
+        except Billing.DoesNotExist:
+            clean_b = str(bill_no).replace('/', '')
+            bill = Billing.objects.filter(
+                Q(bill_number=clean_b) |
+                Q(bill_number__iexact=bill_no) |
+                Q(bill_no=bill_no) |
+                Q(bill_no=clean_b)
+            ).first()
+            if not bill:
+                return Response({"success": False, "message": f"Bill '{bill_no}' not found"}, status=404)
+
         if bill.payment_status != 'Paid':
             return Response({"success": False, "message": "Only paid bills can be refunded"}, status=400)
 

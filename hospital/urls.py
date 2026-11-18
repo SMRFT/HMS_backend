@@ -1,4 +1,4 @@
-from django.urls import path, re_path
+from django.urls import path, re_path, include
 from . import views
 from .Views import (
     admission,
@@ -67,6 +67,7 @@ from .Views import (
     tumourboard,
     ward_geo_verification,
     outlet_stock_report,
+    patient_master,
 )
 from .auth import permissions_map
 from .Views.AccountsReport import (
@@ -77,6 +78,7 @@ from .Views.AccountsReport import (
     purchase_gst_report,
     op_pharmacy_sales_report,
     cashcounter_rollover_service,
+    unified_accounts_report,
 )
 from .Views.Stores import stores, cathlab_intent
 from .Views.Assets import assets
@@ -300,6 +302,10 @@ urlpatterns = [
     path('get-last-uhid/', views.get_last_uhid, name='get_last_uhid'),
     path('patient-registration-stats/', views.patient_registration_stats, name='patient_registration_stats'),
     path('patient-visit-list/', views.patient_visit_list, name='patient_visit_list'),
+    path('patient-master-list/', patient_master.patient_master_list, name='patient_master_list'),
+    path('patient-master-update/<path:uhid>/', patient_master.patient_master_update, name='patient_master_update'),
+    path('patient-op-visits/<path:uhid>/', patient_master.patient_op_visits, name='patient_op_visits'),
+    path('patient-bill-update/<path:bill_number>/', patient_master.patient_bill_update, name='patient_bill_update'),
     path('generate-qr-session/', views.generate_qr_session, name='generate_qr_session'),
     path('submit-qr-registration/', views.submit_qr_registration, name='submit_qr_registration'),
     path('check-qr-status/', views.check_qr_status, name='check_qr_status'),
@@ -395,8 +401,7 @@ urlpatterns = [
     re_path(r'^op-patient/(?P<uhid>[\w%/-]+)/$', departmentBilling.op_patient_detail_by_uhid, name='op-patient-detail-by-uhid'),
     re_path(r'^ip-patient/(?P<ipNumber>[\w%/-]+)/$', departmentBilling.ip_patient_detail_by_ipNumber, name='ip-patient-detail-by-ipNumber'),  
     path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
-    path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),  
-    path('invest-bill-types/', departmentBilling.get_invest_bill_types, name='get_invest_bill_types'),  
+    path('bill-types/', departmentBilling.get_bill_types, name='get_bill_types'),     
     path('packages/', departmentBilling.get_packages, name='get_packages'),
     path('package-items/', departmentBilling.get_package_items, name='get_package_items'),
     path('investigation-items/', departmentBilling.get_investigation_items, name='get_investigation_items'),
@@ -740,6 +745,8 @@ urlpatterns = [
     path('bill-cancel-report/', accounting_reports.bill_cancel_report, name='bill_cancel_report'),
     path('credit-card-report/', accounting_reports.credit_card_report, name='credit_card_report'),
     path('cash-bills-report/', accounting_reports.cash_bills_report, name='cash_bills_report'),
+    path('unified-accounts-report/', unified_accounts_report.unified_accounts_report_api, name='unified_accounts_report'),
+    path('master-accounts/', include('hospital.Views.MasterAccountsReport.master_urls')),
     path('date_wise_collection_summary_report/', accounting_reports.date_wise_collection_summary_report, name='date_wise_collection_summary_report'),
     path('miscellaneous-payment-report/', accounting_reports.miscellaneous_payment_report, name='miscellaneous_payment_report'),
     path('daily-cash-report/', accounting_reports.daily_cash_report, name='daily_cash_report'),

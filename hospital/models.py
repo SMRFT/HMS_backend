@@ -91,7 +91,7 @@ class Patient(AuditModel):
     firstName = models.CharField(max_length=100)
     lastName = models.CharField(max_length=100)
     dob = models.DateField()
-    age = models.IntegerField()
+    age = models.FloatField(blank=True, null=True)
     gender = models.CharField(max_length=10)
     permanent_address = models.TextField(blank=True, null=True)
     area = models.CharField(max_length=100, blank=True, null=True)
@@ -619,8 +619,9 @@ class PharmacyBilling(AuditModel):
     # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
         if not self.Bill_id:
-            last = PharmacyBilling.objects.order_by('-Bill_id').first()
-            self.Bill_id = (last.Bill_id + 1) if last else 1
+            last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
+            last_id = last.Bill_id if (last and last.Bill_id is not None) else 0
+            self.Bill_id = last_id + 1
 
         super().save(*args, **kwargs)
 

@@ -122,6 +122,7 @@ def create_bill_type(request):
             'is_allowAdvance':   bool(data.get('is_allowAdvance', False)),
             'is_active':         bool(data.get('is_active', True)),
             'is_allowDiscount':  bool(data.get('is_allowDiscount', False)),
+            'is_edit':           bool(data.get('is_edit', False)),
             'sales_return':      bool(data.get('sales_return', False)),
             'GST_export':        bool(data.get('GST_export', False)),
             'IP_billType':       bool(data.get('IP_billType', False)),
@@ -171,6 +172,7 @@ def update_bill_type(request, bill_type_int):
         allowed_keys = [
             'bill_name', 'payment_mode',
             'centralCash', 'is_allowAdvance', 'is_active', 'is_allowDiscount',
+            'is_edit',                                               # ← NEW
             'sales_return', 'GST_export', 'IP_billType', 'ward_request',
             'ward_medicine', 'ward_lab', 'ward_radiology',
             'med_wise_discount', 'med_dispatch', 'outlet_code', 'billTypeNo',
