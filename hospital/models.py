@@ -619,9 +619,20 @@ class PharmacyBilling(AuditModel):
     # :white_check_mark: AUTO-INCREMENT LOGIC
     def save(self, *args, **kwargs):
         if not self.Bill_id:
-            last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
-            last_id = last.Bill_id if (last and last.Bill_id is not None) else 0
-            self.Bill_id = last_id + 1
+            try:
+                from .counter_service import get_next_sequence_value
+                def _seed_pharmacy_bill_id(db):
+                    last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
+                    return last.Bill_id if (last and last.Bill_id is not None) else 0
+
+                self.Bill_id = get_next_sequence_value(
+                    "pharmacy_billing_bill_id",
+                    seed_resolver=_seed_pharmacy_bill_id
+                )
+            except Exception:
+                last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
+                last_id = last.Bill_id if (last and last.Bill_id is not None) else 0
+                self.Bill_id = last_id + 1
 
         super().save(*args, **kwargs)
 
