@@ -1993,10 +1993,14 @@ def get_medicine_ward_requests(request):
             # Resolve Request No & Final Bill No:
             # - If converted to bill: display the final bill number (e.g. 262701000013 or 2627/036542)
             # - If pending: display the request number (e.g. MRIP001)
+            last_disp_no = (doc.get("dispatch_history") and doc.get("dispatch_history")[-1].get("bill_no"))
+            if last_disp_no and str(last_disp_no).startswith("MR"):
+                last_disp_no = None
+
             final_bill_no = (
                 doc.get("billed_bill_no")
                 or doc.get("converted_bill_no")
-                or (doc.get("dispatch_history") and doc.get("dispatch_history")[-1].get("bill_no"))
+                or last_disp_no
                 or (doc.get("bill_no") if raw_st == "Billed" and not str(doc.get("bill_no", "")).startswith("MR") else None)
                 or doc.get("bill_number")
             )
@@ -2426,14 +2430,42 @@ def save_medicine_ward_request(request):
         elif bt_val == 42 or "OP" in bt_name:
             is_ip = False
 
+        # --- Idempotency & Duplicate Prevention Guard ---
+        # If an identical pending ward request was created for this patient within the last 10 seconds,
+        # return the existing record to prevent accidental multi-click duplicates.
+        recent_cutoff = timezone.now() - timedelta(seconds=10)
+        recent_existing = mongo_db["hospital_pharmacybilling"].find_one({
+            "uhid": data.get("uhid"),
+            "is_ward_request": True,
+            "billing_status": "Pending",
+            "is_deleted": {"$ne": True},
+            "ward_request_date": {"$gte": recent_cutoff}
+        }, sort=[("ward_request_date", -1)])
+
+        if recent_existing:
+            existing_meds = recent_existing.get("medicine_particulars") or []
+            existing_ids = sorted([str(m.get("item_id")) for m in existing_meds if isinstance(m, dict) and m.get("item_id")])
+            new_ids = sorted([str(m.get("item_id")) for m in cleaned_particulars if m.get("item_id")])
+            if existing_ids == new_ids and len(existing_ids) > 0:
+                print(f"Duplicate ward request detected within 10s for UHID {data.get('uhid')}. Returning existing: {recent_existing.get('request_no') or recent_existing.get('bill_no')}")
+                return Response({
+                    "success": True,
+                    "message": "Medicine ward request already received",
+                    "id": recent_existing.get("Bill_id"),
+                    "request_no": recent_existing.get("request_no") or recent_existing.get("bill_no"),
+                    "bill_no": recent_existing.get("bill_no") if not str(recent_existing.get("bill_no", "")).startswith("MR") else None,
+                    "duplicate_suppressed": True
+                })
+
         from ..counter_service import get_next_medicine_ward_request_no
         req_no = get_next_medicine_ward_request_no(is_ip=is_ip)
 
         # Create Bill via Django Model (Handles auto-increment and defaults)
+        # Note: Do NOT save request number into bill_no! bill_no will be generated when billed in IP Pharmacy
         bill = PharmacyBilling(
             uhid=data.get("uhid"),
             inpatient_number=data.get("ipNumber"),
-            bill_no=req_no,
+            bill_no=None,
             bill_type=data.get("bill_type"),
             # bill_type_no=data.get("billTypeNo"),
             doctor_id=doctor_id,
@@ -2453,12 +2485,12 @@ def save_medicine_ward_request(request):
         )
         bill.save()
 
-        # Ensure request_no and bill_no are explicitly updated in MongoDB collection as well
+        # Save request_no and keep bill_no as None in MongoDB collection
         mongo_db["hospital_pharmacybilling"].update_one(
             {"Bill_id": bill.Bill_id},
             {"$set": {
                 "request_no": req_no,
-                "bill_no": req_no,
+                "bill_no": None,
                 "is_ward_request": True,
                 "room_no": room_no,
                 "ward_name": room_no
@@ -2470,7 +2502,7 @@ def save_medicine_ward_request(request):
             "message": "Medicine ward request saved successfully",
             "id": bill.Bill_id,
             "request_no": req_no,
-            "bill_no": req_no,
+            "bill_no": None,
         })
 
         

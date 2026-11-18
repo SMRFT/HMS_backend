@@ -1110,12 +1110,14 @@ def save_pharmacy_bill(request):
 
         # 🔥 CONVERT TO BILL
         elif status == "Billed":
-            if not record.get("bill_no"):
+            if not record.get("bill_no") or str(record.get("bill_no", "")).startswith("MR"):
                 update_data["bill_no"] = get_next_pharmacy_bill_no(
                     outlet_code=current_outlet_code,
                     fy=get_financial_year(),
                     db_instance=mongo_db
                 )
+            update_data["billed_bill_no"] = update_data.get("bill_no") or record.get("bill_no")
+            update_data["converted_bill_no"] = update_data.get("bill_no") or record.get("bill_no")
 
             update_data["billing_status"] = "Billed"
             update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
@@ -4192,7 +4194,7 @@ def finalize_bill(request):
         fy = get_financial_year()
         new_bill_no = bill.get("bill_no")
         bill_date   = bill.get("bill_date")
-        if not new_bill_no:
+        if not new_bill_no or str(new_bill_no).startswith("MR"):
             new_bill_no = get_next_pharmacy_bill_no(
                 outlet_code=bill_outlet,
                 fy=fy,
@@ -4461,6 +4463,8 @@ def finalize_bill(request):
         sanitized_meds = sanitize_medicines(medicines_to_use)
 
         set_payload["bill_no"]              = new_bill_no
+        set_payload["billed_bill_no"]       = new_bill_no
+        set_payload["converted_bill_no"]    = new_bill_no
         set_payload["bill_date"]            = bill_date
         set_payload["billing_status"]       = "Billed"
         set_payload["billed_id"]            = employee_id
