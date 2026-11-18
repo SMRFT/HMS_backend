@@ -4487,6 +4487,8 @@ def finalize_bill(request):
                 "is_ward_request":          True,
                 "bill_type":                ward_bill_type,
                 "source_ward_request_id":   bill.get("Bill_id"),
+                "source_ward_request_no":   bill.get("request_no") or bill.get("bill_no"),
+                "request_no":               bill.get("request_no") or bill.get("bill_no"),
                 "is_dispatched":            True,
                 "hospital_code":            hospital_code,
                 "branch_code":              branch_code,
@@ -4558,6 +4560,11 @@ def finalize_bill(request):
             new_ward_status = "Billed" if all_items_fully_dispatched else ("Processing" if has_any_disp else "Pending")
             update_req["billing_status"] = new_ward_status
             update_req["is_dispatched"]  = bool(all_items_fully_dispatched)
+            if new_bill_no:
+                update_req["billed_bill_no"] = new_bill_no
+                update_req["converted_bill_no"] = new_bill_no
+                if all_items_fully_dispatched:
+                    update_req["bill_no"] = new_bill_no
 
             bill_collection.update_one(
                 {"_id": bill["_id"]},
@@ -4568,11 +4575,14 @@ def finalize_bill(request):
             )
 
             try:
-                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
-                    billing_status=new_ward_status,
-                    lastmodified_by=employee_id,
-                    lastmodified_date=now_ts
-                )
+                update_kwargs = {
+                    "billing_status": new_ward_status,
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": now_ts,
+                }
+                if new_bill_no and all_items_fully_dispatched:
+                    update_kwargs["bill_no"] = new_bill_no
+                PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(**update_kwargs)
             except Exception:
                 pass
 
