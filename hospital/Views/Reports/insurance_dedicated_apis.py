@@ -226,7 +226,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
             "$and": [
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
-                {"billing_status": {"$nin": ["Paid", "Completed", "Cancelled", "deleted"]}},
+                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
@@ -275,7 +275,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     continue
 
             b_status = str(b.get('billing_status') or '').strip()
-            if b_status in ('Paid', 'Completed'):
+            if b_status == 'Paid':
                 continue
 
             b_mode = str(b.get('billing_mode') or '').upper()
@@ -1970,7 +1970,7 @@ def medicine_abstract_api(request):
             "$and": [
                 {"$or": bill_query_or},
                 {"is_ward_request": {"$ne": True}},
-                {"billing_status": {"$nin": ["Paid", "Completed", "Cancelled", "deleted"]}}
+                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}}
             ]
         }).sort("created_date", 1))
 
@@ -1984,7 +1984,7 @@ def medicine_abstract_api(request):
                     continue
 
                 b_status = str(b.get('billing_status') or '').strip()
-                if b_status in ('Paid', 'Completed'):
+                if b_status == 'Paid':
                     continue
 
                 b_mode = str(b.get('billing_mode') or '').upper()
