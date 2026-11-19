@@ -94,22 +94,49 @@ def outlet_wise_stock_report(request):
 
         stocks = list(pharmacy_stock_collection.aggregate(pipeline))
 
-        # Collect unique batch numbers and item IDs
-        active_batches = set()
-        item_ids = set()
-        for s in stocks:
-            b = str(s.get("batch_number") or "").strip()
-            if b:
-                active_batches.add(b)
-            iid = s.get("item_id")
-            if iid:
-                item_ids.add(iid)
+        # 2. Strict Active Pharmacy Item Master Map (hospital_pharmacyitem)
+        candidate_item_ids = list({s.get("item_id") for s in stocks if s.get("item_id")})
+        items_map = {}
+        if candidate_item_ids:
+            active_items_cursor = pharmacy_item_collection.find(
+                {
+                    "item_id": {"$in": candidate_item_ids},
+                    "is_active": True,
+                    "is_blocked": False
+                },
+                {
+                    "item_id": 1,
+                    "item_name": 1,
+                    "category": 1,
+                    "purchase_rate": 1,
+                    "mrp": 1,
+                    "is_active": 1,
+                    "is_blocked": 1
+                }
+            )
+            for it in active_items_cursor:
+                name = str(it.get("item_name") or "").strip()
+                if name:
+                    items_map[it.get("item_id")] = it
 
-        # 2. Build GRN batch pricing lookup (batch -> purchase_cost, selling_price, mrp)
+        # Collect unique batch numbers and specific GRN numbers ONLY for matched active pharmacy items
+        active_batches = set()
+        active_grn_numbers = set()
+        for s in stocks:
+            iid = s.get("item_id")
+            if iid in items_map:
+                b = str(s.get("batch_number") or "").strip()
+                if b:
+                    active_batches.add(b)
+                grn_no = str(s.get("grn_number") or "").strip()
+                if grn_no:
+                    active_grn_numbers.add(grn_no)
+
+        # 3. Targeted GRN batch pricing lookup (batch -> purchase_cost, selling_price, mrp)
         batch_info = {}
-        if active_batches:
+        if active_grn_numbers and active_batches:
             grn_cursor = hms_db["hospital_grn"].find(
-                {"items": {"$exists": True, "$ne": []}},
+                {"grn_number": {"$in": list(active_grn_numbers)}},
                 {"items": 1, "grn_number": 1}
             )
             for g in grn_cursor:
@@ -140,12 +167,6 @@ def outlet_wise_stock_report(request):
                             "mrp": mrp
                         }
 
-        # 3. Item Master Map (item_name, category)
-        items_map = {}
-        if item_ids:
-            for it in pharmacy_item_collection.find({"item_id": {"$in": list(item_ids)}}):
-                items_map[it.get("item_id")] = it
-
         # Category mapping helper
         cat_map = {}
         try:
@@ -157,12 +178,20 @@ def outlet_wise_stock_report(request):
         except Exception:
             pass
 
-        # 4. Item-level Aggregation
+        # 4. Item-level Aggregation (Pure read-time filter: Only verified active pharmacy items)
         item_rollup = {}
         for s in stocks:
             iid = s.get("item_id")
-            it_meta = items_map.get(iid, {})
-            iname = str(it_meta.get("item_name") or f"Item {iid}").strip()
+
+            # 🎯 STRICT FILTER: Only show items existing in active pharmacy master (No DB delete needed)
+            if iid not in items_map:
+                continue
+
+            it_meta = items_map[iid]
+            iname = str(it_meta.get("item_name") or "").strip()
+            if not iname:
+                continue
+
             cat_id = it_meta.get("category")
             cat_name = cat_map.get(str(cat_id)) or cat_map.get(cat_id) or str(cat_id or "General")
 
