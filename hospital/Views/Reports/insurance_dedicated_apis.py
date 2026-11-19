@@ -230,7 +230,8 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
-                        {"billing_status": "Billed"}
+                        {"dispatch_history": {"$in": [None, []]}},
+                        {"billing_status": {"$in": ["Billed", "Completed"]}}
                     ]
                 }
             ]
@@ -416,25 +417,21 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
                 qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
 
-                raw_price = itm.get('price')
+                raw_price = itm.get('mrp') or itm.get('price')
                 if raw_price is not None and str(raw_price).strip() != "":
                     price = clean_num(raw_price)
-                elif stk_doc and stk_doc.get('Selling_Price') is not None:
-                    price = clean_num(stk_doc.get('Selling_Price'))
-                elif stk_fallback.get('Selling_Price') is not None:
-                    price = clean_num(stk_fallback.get('Selling_Price'))
                 elif stk_doc and stk_doc.get('mrp') is not None:
                     price = clean_num(stk_doc.get('mrp'))
                 elif stk_fallback.get('mrp') is not None:
                     price = clean_num(stk_fallback.get('mrp'))
+                elif stk_doc and stk_doc.get('Selling_Price') is not None:
+                    price = clean_num(stk_doc.get('Selling_Price'))
+                elif stk_fallback.get('Selling_Price') is not None:
+                    price = clean_num(stk_fallback.get('Selling_Price'))
                 else:
                     price = 0.0
 
-                raw_calc = itm.get('calculated_price') or itm.get('total') or itm.get('amount')
-                if raw_calc is not None and str(raw_calc).strip() != "":
-                    calc_price = clean_num(raw_calc)
-                else:
-                    calc_price = round(price * qty, 2)
+                calc_price = round(price * qty, 2)
 
                 # Expiry resolution from item, or stock batch, or fallback
                 exp_raw = itm.get('expiry_date') or itm.get('expiry') or (stk_doc.get('expiry_date') if stk_doc else None) or stk_fallback.get('expiry_date')
@@ -1969,10 +1966,43 @@ def medicine_abstract_api(request):
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
             "$and": [
                 {"$or": bill_query_or},
-                {"is_ward_request": {"$ne": True}},
-                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}}
+                {"bill_no": {"$nin": [None, ""]}},
+                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}},
+                {
+                    "$or": [
+                        {"is_ward_request": {"$ne": True}},
+                        {"dispatch_history": {"$in": [None, []]}},
+                        {"billing_status": {"$in": ["Billed", "Completed"]}}
+                    ]
+                }
             ]
         }).sort("created_date", 1))
+
+        # Pre-cache stock details for items that might be missing explicit prices
+        abs_item_ids = set()
+        for b in raw_bills:
+            for itm in (b.get('medicine_particulars') or b.get('items') or []):
+                iid = itm.get('item_id')
+                if iid is not None:
+                    try:
+                        abs_item_ids.add(int(iid))
+                    except (ValueError, TypeError):
+                        pass
+
+        abs_stock_map = {}
+        abs_stock_fallback = {}
+        if abs_item_ids:
+            for s in hms_db['hospital_pharmacystock'].find(
+                {'item_id': {'$in': list(abs_item_ids) + [str(x) for x in abs_item_ids]}},
+                {'item_id': 1, 'batch_number': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1, 'mrp': 1, 'Selling_Price': 1}
+            ):
+                try:
+                    iid_key = int(s.get('item_id'))
+                except (ValueError, TypeError):
+                    iid_key = s.get('item_id')
+                b_key = str(s.get('batch_number') or '').strip()
+                abs_stock_map[(iid_key, b_key)] = s
+                abs_stock_fallback[iid_key] = s
 
         # Helper to process bills with date filter
         def collect_bills(apply_dates=True):
@@ -2033,18 +2063,30 @@ def medicine_abstract_api(request):
                     if allowed_ids and it_id not in allowed_ids:
                         continue
 
-                    raw_price = itm.get('price')
+                    try:
+                        it_id_int = int(it_id) if it_id is not None else None
+                    except (ValueError, TypeError):
+                        it_id_int = None
+                    batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
+                    stk_doc = abs_stock_map.get((it_id_int, batch))
+                    stk_fallback = abs_stock_fallback.get(it_id_int, {})
+
+                    raw_price = itm.get('mrp') or itm.get('price')
                     qty = clean_num(itm.get('qty') or itm.get('quantity') or 1)
                     if raw_price is not None and str(raw_price).strip() != "":
                         price = clean_num(raw_price)
+                    elif stk_doc and stk_doc.get('mrp') is not None:
+                        price = clean_num(stk_doc.get('mrp'))
+                    elif stk_fallback.get('mrp') is not None:
+                        price = clean_num(stk_fallback.get('mrp'))
+                    elif stk_doc and stk_doc.get('Selling_Price') is not None:
+                        price = clean_num(stk_doc.get('Selling_Price'))
+                    elif stk_fallback.get('Selling_Price') is not None:
+                        price = clean_num(stk_fallback.get('Selling_Price'))
                     else:
                         price = 0.0
 
-                    raw_calc = itm.get('calculated_price') or itm.get('total') or itm.get('amount')
-                    if raw_calc is not None and str(raw_calc).strip() != "":
-                        calc_price = clean_num(raw_calc)
-                    else:
-                        calc_price = round(price * qty, 2)
+                    calc_price = round(price * qty, 2)
 
                     stored_taxable = itm.get('taxable_value') or itm.get('product_value')
                     stored_cgst = itm.get('CGST_Amt')
@@ -2052,8 +2094,8 @@ def medicine_abstract_api(request):
                     stored_total = itm.get('total') or itm.get('total_amount')
 
                     # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or exact batch stock / itm)
-                    cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or 2.5)
-                    sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or 2.5)
+                    cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or (stk_doc.get('CGST_Percentage') if stk_doc else None) or 2.5)
+                    sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or (stk_doc.get('SGST_Percentage') if stk_doc else None) or 2.5)
                     tot_tax_pct = (cgst_pct + sgst_pct) / 100.0
 
                     if stored_taxable is not None and stored_total is not None:
