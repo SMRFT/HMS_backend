@@ -2179,35 +2179,33 @@ def update_medicine_ward_request(request):
 
         existing = list(bill.medicine_particulars or [])
 
-        # Build a lookup map keyed by (item_id, batch_number)
-
+        # Build a lookup map keyed by (item_id, batch_number) with fallback to item_id
         existing_map = {}
 
         for idx, itm in enumerate(existing):
-
             if not isinstance(itm, dict):
-
                 continue
-
-            key = (str(itm.get("item_id", "")), str(itm.get("batch_number", "")))
-
-            existing_map[key] = (idx, itm)
+            iid_str = str(itm.get("item_id", ""))
+            batch_str = str(itm.get("batch_number", ""))
+            existing_map[(iid_str, batch_str)] = (idx, itm)
+            if iid_str not in existing_map:
+                existing_map[iid_str] = (idx, itm)
 
         changed_at = timezone.now().isoformat()
 
         for incoming in updated_medicines:
-
             if not isinstance(incoming, dict):
-
                 continue
 
-            key = (str(incoming.get("item_id", "")), str(incoming.get("batch_number", "")))
-
-            if key not in existing_map:
-
+            iid_str = str(incoming.get("item_id", ""))
+            batch_str = str(incoming.get("batch_number", ""))
+            lookup_key = (iid_str, batch_str)
+            if lookup_key not in existing_map and iid_str in existing_map:
+                lookup_key = iid_str
+            if lookup_key not in existing_map:
                 continue
 
-            idx, current = existing_map[key]
+            idx, current = existing_map[lookup_key]
 
             audit_entry = {}
 
@@ -2409,7 +2407,7 @@ def save_medicine_ward_request(request):
                 patient_name = f"{fname} {lname}".strip()
 
         # Strip item names from particulars before saving as per user request
-
+        # Batch number is NOT saved during ward request creation (batch allocation is done at Pharmacy dispatch/billing)
         cleaned_particulars = []
 
         for item in (medicine_particulars or []):
@@ -2424,7 +2422,7 @@ def save_medicine_ward_request(request):
                 "noOfDays": item.get("noOfDays", ""),
                 "dose": item.get("dose", ""),
                 "doseunit": item.get("doseunit", ""),
-                "batch_number": item.get("batch_number", ""),
+                "batch_number": "",
                 "instruction": item.get("instruction", "")
             }
             cleaned_particulars.append(cleaned_item)
