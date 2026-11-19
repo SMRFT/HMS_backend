@@ -311,7 +311,9 @@ class AccountsLedgerEngine:
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
                         "card": b_val, "card_amount": b_val, "payment_mode": pm,
-                        "particulars": d.get("items") or d.get("medicine_particulars") or []
+                        "particulars": d.get("items") or d.get("medicine_particulars") or [],
+                        "created_by": d.get("created_by") or "",
+                        "lastmodified_by": d.get("pharmacist_id") or d.get("lastmodified_by") or ""
                     })
                     
                 elif cat in ["Investigation", "InvestigationBills"] and b_no in invest_map:
@@ -341,7 +343,13 @@ class AccountsLedgerEngine:
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
                         "card": b_val, "card_amount": b_val, "payment_mode": pm,
-                        "particulars": d.get("item") or []
+                        "particulars": d.get("item") or [],
+                        "bill_type": bt_no or "INVEST",
+                        "bill_type_name": bt_name or disp_type,
+                        "is_investigation": True,
+                        "doctor": d.get("doctor") or d.get("referredBy") or "",
+                        "created_by": d.get("created_by") or "",
+                        "lastmodified_by": d.get("CashierID") or d.get("lastmodified_by") or ""
                     })
                     
                 elif cat in ["Billing", "Registration", "RegistrationBills"] and b_no in billing_map:
@@ -357,7 +365,9 @@ class AccountsLedgerEngine:
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
                         "card": b_val, "card_amount": b_val, "payment_mode": pm,
-                        "particulars": d.get("items") or []
+                        "particulars": d.get("items") or [],
+                        "created_by": d.get("created_by") or "",
+                        "lastmodified_by": d.get("lastmodified_by") or ""
                     })
                     
                 elif cat in ["Discharge", "DischargeBills"] and b_no in discharge_map:
