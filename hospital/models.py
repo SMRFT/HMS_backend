@@ -540,6 +540,7 @@ class PurchaseRequisition(AuditModel):
  
     # ── Header ───────────────────────────────────────────────────────────────
     status = models.CharField(max_length=30, default="Draft", choices=PR_STATUS_CHOICES)
+    outlet_name = models.CharField(max_length=100, blank=True, default="")
  
     # ── Approval ─────────────────────────────────────────────────────────────
     approved_by   = models.CharField(max_length=100, blank=True, default="")

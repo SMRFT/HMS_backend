@@ -134,8 +134,7 @@ def _read_items_from_instance(pr) -> list:
 def _items_to_store(items: list) -> list:
     """
     Clean and normalise a list of medicine items before writing to MongoDB.
-    A Purchase Requisition line only carries the medicine reference — no
-    quantity — per the simplified PR workflow.
+    Stores medicine reference and requested quantity.
     Returns a plain Python list (stored as a BSON array).
     """
     cleaned = []
@@ -143,9 +142,15 @@ def _items_to_store(items: list) -> list:
         name = str(item.get("medicine_name", "")).strip()
         if not name:
             continue
+        qty_raw = item.get("quantity") or item.get("qty") or 1
+        try:
+            qty = max(1, int(qty_raw))
+        except (ValueError, TypeError):
+            qty = 1
         cleaned.append({
             "item_id":       item.get("item_id") or None,
             "medicine_name": name.upper(),
+            "quantity":      qty,
         })
     return cleaned
 
@@ -159,6 +164,13 @@ def _validate_items(items: list) -> list:
     for idx, item in enumerate(items):
         if not str(item.get("medicine_name", "")).strip():
             errors.append(f"Item {idx + 1}: medicine_name is required.")
+        qty = item.get("quantity") or item.get("qty")
+        if qty is not None:
+            try:
+                if int(qty) <= 0:
+                    errors.append(f"Item {idx + 1}: quantity must be greater than 0.")
+            except (ValueError, TypeError):
+                errors.append(f"Item {idx + 1}: quantity must be a valid number.")
     return errors
 
 
@@ -181,8 +193,9 @@ def _enrich_pr_list_batch(pr_list: list) -> list:
     if not pr_list:
         return pr_list
 
-    client, _ = get_hms_db()
+    client, hms_db = get_hms_db()
     emp_ids = set()
+    outlet_codes = set()
     for item in pr_list:
         if not isinstance(item.get("items"), list):
             item["items"] = []
@@ -190,6 +203,9 @@ def _enrich_pr_list_batch(pr_list: list) -> list:
             eid = str(item.get(field, "") or "").strip()
             if eid and eid != "system":
                 emp_ids.add(eid)
+        oc = str(item.get("outlet_code", "") or "").strip()
+        if oc:
+            outlet_codes.add(oc)
 
     emp_map = {}
     if emp_ids:
@@ -200,10 +216,22 @@ def _enrich_pr_list_batch(pr_list: list) -> list:
         except Exception:
             pass
 
+    outlet_map = {}
+    if outlet_codes:
+        try:
+            for o in hms_db["hospital_outlets"].find({"outlet_code": {"$in": list(outlet_codes)}}, {"outlet_code": 1, "outlet_name": 1}):
+                outlet_map[str(o.get("outlet_code"))] = o.get("outlet_name", "")
+        except Exception:
+            pass
+
     for item in pr_list:
         for field in _EMPLOYEE_FIELDS:
             eid = str(item.get(field, "") or "").strip()
             item[f"{field}_name"] = emp_map.get(eid, eid) if eid else ""
+
+        oc = str(item.get("outlet_code", "") or "").strip()
+        if oc and not item.get("outlet_name"):
+            item["outlet_name"] = outlet_map.get(oc, oc)
 
         if isinstance(item.get("items"), list):
             for it in item["items"]:
@@ -270,11 +298,32 @@ def purchase_requisition_view(request, pk=None):
             if status_filter:
                 filter_q["status"] = status_filter
 
+            outlet_filter = request.GET.get("outlet", "") or request.GET.get("outlet_code", "")
+            outlet_filter = str(outlet_filter).strip()
+            if outlet_filter and outlet_filter.upper() != "ALL":
+                if outlet_filter.upper() == "IP":
+                    filter_q["$or"] = [
+                        {"outlet_code": "OLET001"},
+                        {"outlet_name": {"$regex": r"IP\b|_IP", "$options": "i"}},
+                    ]
+                elif outlet_filter.upper() == "OP":
+                    filter_q["$or"] = [
+                        {"outlet_code": "OLET002"},
+                        {"outlet_name": {"$regex": r"OP\b|_OP", "$options": "i"}},
+                    ]
+                else:
+                    filter_q["$or"] = [
+                        {"outlet_code": outlet_filter},
+                        {"outlet_name": {"$regex": f"^{re.escape(outlet_filter)}$", "$options": "i"}},
+                    ]
+
             search = request.GET.get("search", "").strip()
             if search:
                 reg = {"$regex": re.escape(search), "$options": "i"}
                 filter_q["$or"] = [
                     {"pr_number": reg},
+                    {"outlet_name": reg},
+                    {"outlet_code": reg},
                     {"rejected_reason": reg},
                     {"edited_reason": reg}
                 ]
@@ -306,10 +355,28 @@ def purchase_requisition_view(request, pk=None):
             # Store as a plain Python list — DRF/djongo persists as BSON array
             clean_items = _items_to_store(items)
 
+            outlet_code = str(
+                data.get("outlet_code")
+                or request.headers.get("outlet-code")
+                or request.headers.get("Outlet-Code")
+                or ""
+            ).strip()
+            outlet_name = str(data.get("outlet_name") or "").strip()
+            if outlet_code and not outlet_name:
+                try:
+                    _, hms_db = get_hms_db()
+                    o_doc = hms_db["hospital_outlets"].find_one({"outlet_code": outlet_code})
+                    if o_doc:
+                        outlet_name = o_doc.get("outlet_name", "")
+                except Exception:
+                    pass
+
             payload = {
                 "pr_number": _next_pr_number(),
                 "items":     clean_items,            # ← native list, not JSON string
                 "status":    "Draft",
+                "outlet_code": outlet_code,
+                "outlet_name": outlet_name,
 
                 "approved_by": "", "approved_date": None,
                 "rejected_by": "", "rejected_reason": "", "rejected_date": None,
@@ -382,6 +449,20 @@ def purchase_requisition_view(request, pk=None):
                     return Response({"success": False, "error": item_errors}, status=400)
                 new_items = _items_to_store(items)
                 incoming["items"] = new_items   # ← native list
+
+            if "outlet_code" in data:
+                o_code = str(data.get("outlet_code") or "").strip()
+                o_name = str(data.get("outlet_name") or "").strip()
+                if o_code and not o_name:
+                    try:
+                        _, hms_db = get_hms_db()
+                        o_doc = hms_db["hospital_outlets"].find_one({"outlet_code": o_code})
+                        if o_doc:
+                            o_name = o_doc.get("outlet_name", "")
+                    except Exception:
+                        pass
+                incoming["outlet_code"] = o_code
+                incoming["outlet_name"] = o_name
 
             incoming["edited_by"]     = employee_id
             incoming["edited_reason"] = edited_reason
