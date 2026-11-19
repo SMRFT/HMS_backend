@@ -1363,6 +1363,11 @@ def invest_billing_create(request):
                     {"error": f"No record found with investBillNo: {existing_invest_bill_no}"},
                     status=drf_status.HTTP_404_NOT_FOUND
                 )
+            if existing_record.get("is_delete_requested"):
+                return Response(
+                    {"error": "Delete is pending approval for this bill."},
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
 
             # ── editRemarks is required for every edit ────────────────────────
             edit_remarks = data.get("editRemarks", "").strip()
@@ -1388,12 +1393,16 @@ def invest_billing_create(request):
                 "modified_date": timezone.now(),
                 "modified_by": current_user,
                 "editRemarks": edit_remarks,
-                "changes": changed_fields
+                "changes": changed_fields,
+                "is_approved": False,
             }
 
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
-            data.pop("editRemarks", None)   # ← remove from top-level
+            data["is_approved"] = False
+            data["approved_by"] = None
+            data["approved_date"] = None
+            data["editRemarks"] = edit_remarks
             data.pop("investBillNo", None)
 
             invest_collection.update_one(
@@ -1673,14 +1682,16 @@ def billing_report_view(request):
                     "billTypeNo": bt.get("billTypeNo", "")
                 }
 
-        # ── Batch Doctor / ReferredBy Cache ────────────────────
+        # ── Batch Doctor / ReferredBy / Approver Cache ────────────────────
         # Collect all employee IDs that are NOT "SELF"
-        doctor_ids     = set()
+        doctor_ids      = set()
         referred_by_ids = set()
+        approved_by_ids = set()
 
         for doc in data:
             doc_val = doc.get("doctor", "")
             ref_val = doc.get("referredBy", "")
+            app_val = doc.get("approved_by")
 
             if doc_val and doc_val.upper() != "SELF":
                 doctor_ids.add(str(doc_val))
@@ -1688,8 +1699,11 @@ def billing_report_view(request):
             if ref_val and ref_val.upper() != "SELF":
                 referred_by_ids.add(str(ref_val))
 
-        # One query covers both sets — union of all IDs needed
-        all_profile_ids = doctor_ids | referred_by_ids
+            if app_val:
+                approved_by_ids.add(str(app_val).strip())
+
+        # One query covers all sets — union of all IDs needed
+        all_profile_ids = doctor_ids | referred_by_ids | approved_by_ids
         diagnostics_profile_cache = {}   # employeeId → full name string
 
         if all_profile_ids:
@@ -1785,7 +1799,23 @@ def billing_report_view(request):
             # ← NEW: attach refund details to the bill
             bill_no = doc.get("investBillNo", "")
             doc["refunds"] = refund_details.get(bill_no, [])
+            doc["is_delete_requested"] = bool(doc.get("is_delete_requested", False))
 
+            # Approved By Name
+            app_val = str(doc.get("approved_by")or "").strip()
+            if app_val:
+                doc["approved_by_name"] = diagnostics_profile_cache.get(app_val, app_val)
+                doc["approvedByName"] = doc["approved_by_name"]
+            else:
+                doc["approved_by_name"] = ""
+                doc["approvedByName"] = ""
+
+            # Ensure latest editRemarks is populated on doc
+            if not doc.get("editRemarks") and isinstance(doc.get("history"), list) and doc["history"]:
+                for h in reversed(doc["history"]):
+                    if h.get("editRemarks"):
+                        doc["editRemarks"] = h["editRemarks"]
+                        break
 
             result.append(serialize_doc(doc))
 
@@ -1807,43 +1837,115 @@ def billing_report_view(request):
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
 def delete_bill_view(request):
+    client = None
     try:
-        investBillNo  = request.data.get('investBillNo')
-        delete_remarks = request.data.get('deleteRemarks', '').strip()
-        employeeId    = request.data.get('auth-user-id', 'system')
+        investBillNo   = request.data.get('investBillNo')
+        delete_remarks = (request.data.get('deleteRemarks') or '').strip()
+        employeeId     = request.data.get('auth-user-id', 'system')
 
         if not investBillNo:
             return JsonResponse({'error': 'Missing investBillNo'}, status=400)
-
         if not delete_remarks:
             return JsonResponse({'error': 'deleteRemarks is required'}, status=400)
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
         db = client['HMS']
-        collection = db['hospital_investbilling']
+        now = timezone.now()
 
-        result = collection.update_one(
-            {"investBillNo": investBillNo, "is_active": True},
+        # Invest bill: only REQUEST the delete. is_active stays True until approval.
+        result = db['hospital_investbilling'].update_one(
             {
-                "$set": {
+                "$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}],
+                "is_active": True,
+                "is_delete_requested": {"$ne": True},
+            },
+            {"$set": {
+                "is_delete_requested": True,
+                "deletedBy":     employeeId,
+                "deletedAt":     now,
+                "deleteRemarks": delete_remarks,
+                "is_approved":   False,
+                "approved_by":   None,
+                "approved_date": None,
+            }}
+        )
+
+        if result.matched_count == 0:
+            # Estimate bills have no approval flow in the audit report -> keep old behaviour
+            result = db['hospital_estimatebilling'].update_one(
+                {"EstBillNo": investBillNo, "is_active": True},
+                {"$set": {
                     "is_active":     False,
                     "deletedBy":     employeeId,
-                    "deletedAt":     datetime.now(),
-                    "deleteRemarks": delete_remarks,   # ← stored on the document
+                    "deletedAt":     now,
+                    "deleteRemarks": delete_remarks,
+                }}
+            )
+
+        if result.matched_count == 0:
+            return JsonResponse({'error': 'Bill not found or delete already requested'}, status=404)
+
+        return JsonResponse({'message': 'Delete request submitted for approval'}, status=200)
+
+    except Exception as e:
+        return JsonResponse({'error': 'Failed to delete bill', 'details': str(e)}, status=500)
+    finally:
+        if client:
+            client.close()
+
+            
+@api_view(['PATCH', 'POST'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
+def request_bill_edit_view(request):
+    try:
+        investBillNo = request.data.get('investBillNo')
+        edit_remarks = request.data.get('editRemarks', '').strip()
+        employeeId   = request.data.get('auth-user-id', 'system')
+
+        if not investBillNo:
+            return JsonResponse({'error': 'Missing investBillNo'}, status=400)
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        collection = db['hospital_investbilling']
+
+        now = timezone.now()
+        result = collection.update_one(
+            {"$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}], "is_active": True},
+            {
+                "$set": {
+                    "is_approved":       False,
+                    "editRemarks":       edit_remarks,
+                    "lastmodified_by":   employeeId,
+                    "lastmodified_date": now,
+                    "approved_by":       None,
+                    "approved_date":     None,
                 }
             }
         )
 
-        client.close()
-
         if result.matched_count == 0:
-            return JsonResponse({'error': 'Bill not found or already deleted'}, status=404)
+            est_col = db['hospital_estimatebilling']
+            est_col.update_one(
+                {"EstBillNo": investBillNo, "is_active": True},
+                {
+                    "$set": {
+                        "is_approved":       False,
+                        "editRemarks":       edit_remarks,
+                        "lastmodified_by":   employeeId,
+                        "lastmodified_date": now,
+                        "approved_by":       None,
+                        "approved_date":     None,
+                    }
+                }
+            )
 
-        return JsonResponse({'message': 'Bill deleted successfully'}, status=200)
+        client.close()
+        return JsonResponse({'message': 'Edit request recorded successfully', 'success': True}, status=200)
 
     except Exception as e:
-        return JsonResponse({'error': 'Failed to delete bill', 'details': str(e)}, status=500)
-    
+        return JsonResponse({'error': 'Failed to record edit request', 'details': str(e)}, status=500)
     
     
 @api_view(['GET'])
@@ -1864,15 +1966,22 @@ def dept_budr_view(request):
         return doc
 
     try:
-        report_type = request.GET.get('report_type', '').strip().lower()
-        if report_type not in ('deleted', 'edited'):
+        raw_type = request.GET.get('report_type', '').strip().lower()
+        if raw_type in ('delete', 'deleted'):
+            report_type = 'deleted'
+        elif raw_type in ('edit', 'edited'):
+            report_type = 'edited'
+        elif raw_type in ('refund', 'refunds'):
+            report_type = 'refund'
+        else:
             return JsonResponse(
-                {"error": "report_type must be 'deleted' or 'edited'"},
+                {"error": "report_type must be 'deleted', 'edited', or 'refund'"},
                 status=400,
             )
 
         start_date = (request.GET.get('start_date') or request.GET.get('fromDate') or '').strip()
         end_date   = (request.GET.get('end_date') or request.GET.get('toDate') or '').strip()
+        approval_status = (request.GET.get('approval_status') or '').strip().lower()
 
         client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
 
@@ -1880,30 +1989,54 @@ def dept_budr_view(request):
         hms_db     = client['HMS']
         global_db  = client['Global']
 
-        collection           = hms_db['hospital_investbilling']
+        invest_collection    = hms_db['hospital_investbilling']
+        refund_collection    = hms_db['hospital_investrefund']
         bill_type_collection = hms_db['hospital_billtype']
-        outlet_collection    = hms_db['hospital_outlets']   # ✅ NEW
+        outlet_collection    = hms_db['hospital_outlets']
 
         profile_collection   = global_db['backend_diagnostics_profile']
 
         # ── Query setup ─────────────────────────────
         if report_type == 'deleted':
+            target_collection = invest_collection
             query = {
-                "is_active": False,
-                "deletedAt": {"$exists": True},
-            }
+                    "deletedAt": {"$exists": True},
+                    "$or": [
+                        {"is_delete_requested": True},   # pending + approved (new flow)
+                        {"is_active": False},            # legacy docs deleted before this change
+                    ],
+                }
             date_field      = "deletedAt"
             actor_id_field  = "deletedBy"
             actor_name_out  = "deletedByName"
-        else:
+        elif report_type == 'edited':
+            target_collection = invest_collection
             query = {
-                "is_active": True,
-                "lastmodified_by": {"$ne": None, "$exists": True},
-                "history": {"$exists": True},
+            "is_active": True,
+            "is_delete_requested": {"$ne": True}, 
+                "$or": [
+                    {"history": {"$exists": True, "$ne": []}},
+                    {"editRemarks": {"$exists": True, "$ne": ""}},
+                    {"is_approved": False, "lastmodified_by": {"$ne": None}},
+                ]
             }
             date_field      = "lastmodified_date"
             actor_id_field  = "lastmodified_by"
             actor_name_out  = "lastmodified_by_name"
+        else:  # 'refund'
+            target_collection = refund_collection
+            query = {
+                "is_active": True,
+            }
+            date_field      = "refundBillDate"
+            actor_id_field  = "created_by"
+            actor_name_out  = "created_by_name"
+
+        # ── Approval status filter ──────────────────
+        if approval_status == 'approved':
+            query["is_approved"] = True
+        elif approval_status == 'pending':
+            query["is_approved"] = {"$ne": True}
 
         # ── Date filter (IST-aware) ─────────────────────────
         date_q = {}
@@ -1928,19 +2061,28 @@ def dept_budr_view(request):
         if date_q:
             query[date_field] = date_q
 
-        data = list(collection.find(query))
+        data = list(target_collection.find(query))
 
-        # ── Employee mapping ───────────────────────
-        actor_ids = {
-            str(doc.get(actor_id_field, "")).strip()
-            for doc in data
-            if doc.get(actor_id_field)
-        }
+        # ── Employee mapping (both actors & approvers) ───────────────────────
+        user_ids_to_fetch = set()
+        for doc in data:
+            if doc.get(actor_id_field):
+                user_ids_to_fetch.add(str(doc[actor_id_field]).strip())
+            if doc.get("approved_by"):
+                user_ids_to_fetch.add(str(doc["approved_by"]).strip())
+            if doc.get("approvedBy"):
+                user_ids_to_fetch.add(str(doc["approvedBy"]).strip())
+            if doc.get("created_by"):
+                user_ids_to_fetch.add(str(doc["created_by"]).strip())
+            if isinstance(doc.get("history"), list):
+                for h in doc["history"]:
+                    if h.get("modified_by"):
+                        user_ids_to_fetch.add(str(h["modified_by"]).strip())
 
         employee_cache = {}
-        if actor_ids:
+        if user_ids_to_fetch:
             profiles = profile_collection.find(
-                {"employeeId": {"$in": list(actor_ids)}},
+                {"employeeId": {"$in": list(user_ids_to_fetch)}},
                 {"_id": 0, "employeeId": 1, "employeeName": 1},
             )
             for p in profiles:
@@ -1949,7 +2091,7 @@ def dept_budr_view(request):
         # ── Bill type cache ────────────────────────
         bill_type_cache = {}
 
-        # ── Outlet mapping (NEW) ───────────────────
+        # ── Outlet mapping ───────────────────
         outlet_codes = {
             str(doc.get("outlet_code", "")).strip()
             for doc in data
@@ -1965,11 +2107,33 @@ def dept_budr_view(request):
             for o in outlets:
                 outlet_cache[str(o.get("outlet_code", "")).strip()] = o.get("outlet_name", "")
 
+        # ── Patient mapping ───────────────────
+        uhids = {
+            str(doc.get("uhid", "")).strip()
+            for doc in data
+            if doc.get("uhid")
+        }
+
+        patient_cache = {}
+        if uhids:
+            try:
+                patient_coll = hms_db['hospital_patient']
+                patients = patient_coll.find(
+                    {"uhid": {"$in": list(uhids)}},
+                    {"_id": 0, "uhid": 1, "salutation": 1, "firstName": 1, "middleName": 1, "lastName": 1, "patientName": 1}
+                )
+                for p in patients:
+                    pname = p.get("patientName")
+                    if not pname:
+                        pname = f"{p.get('salutation', '')} {p.get('firstName', '')} {p.get('middleName', '') or ''} {p.get('lastName', '')}".strip()
+                    patient_cache[str(p.get("uhid", "")).strip()] = pname
+            except Exception as pe:
+                print("Patient lookup error:", pe)
+
         # ── Process data ───────────────────────────
         result = []
 
         for doc in data:
-
             # Bill type
             bill_type = doc.get("bill_type")
             if bill_type:
@@ -1992,27 +2156,189 @@ def dept_budr_view(request):
                 doc["bill_name"]  = ""
                 doc["billTypeNo"] = ""
 
-            # Employee name
+            # Actor name (deletedByName, lastmodified_by_name, created_by_name)
             actor_id = str(doc.get(actor_id_field, "")).strip()
             doc[actor_name_out] = employee_cache.get(actor_id, actor_id or "")
 
-            # ✅ Outlet name (NEW)
+            # Approver name and is_approved status
+            approved_by_id = str(doc.get("approved_by") or doc.get("approvedBy") or "").strip()
+            app_name = employee_cache.get(approved_by_id, approved_by_id)
+            doc["approved_by"] = approved_by_id
+            doc["approvedBy"] = approved_by_id
+            doc["approved_by_name"] = app_name
+            doc["approvedByName"] = app_name
+
+            app_date = doc.get("approved_date") or doc.get("approvedDate")
+            doc["approved_date"] = app_date
+            doc["approvedDate"] = app_date
+
+            doc["is_approved"] = bool(doc.get("is_approved", False))
+
+            # Patient name
+            uhid_str = str(doc.get("uhid", "")).strip()
+            if not doc.get("patientName") or doc.get("patientName") == "—":
+                doc["patientName"] = patient_cache.get(uhid_str, "—")
+
+            # Outlet name
             outlet_code = str(doc.get("outlet_code", "")).strip()
             doc["outlet_name"] = outlet_cache.get(outlet_code, "")
+
+            # History modified by name
+            if isinstance(doc.get("history"), list):
+                for h in doc["history"]:
+                    mid = str(h.get("modified_by", "")).strip()
+                    h["modified_by_name"] = employee_cache.get(mid, mid)
+
+            # Ensure latest editRemarks is populated on doc
+            if not doc.get("editRemarks") and isinstance(doc.get("history"), list) and doc["history"]:
+                for h in reversed(doc["history"]):
+                    if h.get("editRemarks"):
+                        doc["editRemarks"] = h["editRemarks"]
+                        break
 
             result.append(serialize_doc(doc))
 
         client.close()
 
-        result.sort(key=lambda x: x.get(date_field, ""), reverse=True)
+        result.sort(key=lambda x: x.get(date_field, "") or "", reverse=True)
 
         return JsonResponse(result, safe=False)
 
     except Exception as e:
+        traceback.print_exc()
         return JsonResponse(
             {"error": "Failed to fetch report", "details": str(e)},
             status=500,
         )
+
+
+@api_view(['POST', 'PATCH'])
+@csrf_exempt
+@permission_classes([HasRoleAndDataPermission])
+def dept_budr_approve_view(request):
+    """
+    Approve requested Edit, Delete, or Refund in hospital_investbilling / hospital_investrefund.
+    Sets is_approved: True, approved_by: user_id, approved_date: now.
+    """
+    try:
+        user_id     = request.data.get('auth-user-id', 'system')
+        action_type = (request.data.get('action_type') or request.data.get('report_type') or '').strip().lower()
+        bill_no     = (
+            request.data.get('investBillNo') or
+            request.data.get('refundBillNo') or
+            request.data.get('billNo') or
+            ''
+        ).strip()
+        doc_id      = request.data.get('_id')
+
+        if not action_type or (not bill_no and not doc_id):
+            return JsonResponse({'error': 'action_type and bill_no (or _id) are required'}, status=400)
+
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        db = client['HMS']
+        global_db = client['Global']
+        now = timezone.now()
+
+        if action_type in ('refund', 'refunds'):
+            collection = db['hospital_investrefund']
+            q = {}
+            if doc_id:
+                try:
+                    q = {"_id": ObjectId(doc_id)}
+                except:
+                    q = {"refundBillNo": bill_no}
+            else:
+                q = {"refundBillNo": bill_no}
+
+            res = collection.update_one(
+                q,
+                {"$set": {
+                    "is_approved":       True,
+                    "approved_by":       user_id,
+                    "approved_date":     now,
+                    "lastmodified_by":   user_id,
+                    "lastmodified_date": now,
+                }}
+            )
+        elif action_type in ('delete', 'deleted'):
+            collection = db['hospital_investbilling']
+            if doc_id:
+                try:
+                    q = {"_id": ObjectId(doc_id)}
+                except Exception:
+                    q = {"$or": [{"investBillNo": bill_no}, {"EstBillNo": bill_no}]}
+            else:
+                q = {"$or": [{"investBillNo": bill_no}, {"EstBillNo": bill_no}]}
+
+            q["is_delete_requested"] = True      # only approve real delete requests
+
+            res = collection.update_one(
+                q,
+                {"$set": {
+                    "is_active":     False,      # <-- only here
+                    "is_approved":   True,
+                    "approved_by":   user_id,
+                    "approved_date": now,
+                }}
+            )
+        elif action_type in ('edit', 'edited'):
+            collection = db['hospital_investbilling']
+            q = {}
+            if doc_id:
+                try:
+                    q = {"_id": ObjectId(doc_id)}
+                except:
+                    q = {"$or": [{"investBillNo": bill_no}, {"EstBillNo": bill_no}]}
+            else:
+                q = {"$or": [{"investBillNo": bill_no}, {"EstBillNo": bill_no}]}
+
+            res = collection.update_one(
+                q,
+                {"$set": {
+                    "is_approved":   True,
+                    "approved_by":   user_id,                   
+                    "approved_date": now,
+                  
+                }}
+            )
+            if res.matched_count == 0:
+                est_col = db['hospital_estimatebilling']
+                res = est_col.update_one(
+                    q,
+                    {"$set": {
+                        "is_approved":   True,
+                        "approved_by":   user_id,                      
+                        "approved_date": now,
+                       
+                    }}
+                )
+        else:
+            client.close()
+            return JsonResponse({'error': f'Unsupported action_type: {action_type}'}, status=400)
+
+        # Lookup approver name
+        prof = global_db['backend_diagnostics_profile'].find_one(
+            {"employeeId": str(user_id).strip()},
+            {"_id": 0, "employeeName": 1}
+        )
+        approved_by_name = prof.get("employeeName", user_id) if prof else user_id
+
+        client.close()
+
+        if res.matched_count == 0:
+            return JsonResponse({'error': f'Record not found for {bill_no or doc_id}'}, status=404)
+
+        return JsonResponse({
+            'success': True,
+            'message': f'{action_type.capitalize()} request approved successfully!',
+            'approved_by': user_id,
+            'approved_by_name': approved_by_name,
+            'approved_date': now.isoformat(),
+        }, status=200)
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({'error': 'Approval failed', 'details': str(e)}, status=500)
 @api_view(['POST'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
@@ -2071,6 +2397,11 @@ def invest_refund_create(request):
             return Response(
                 {'error': f'Active invest bill not found: {invest_bill_no}'},
                 status=drf_status.HTTP_404_NOT_FOUND
+            )
+        if source_bill.get("is_delete_requested"):
+            return Response(
+                {'error': 'Delete is pending approval for this bill.'},
+                status=drf_status.HTTP_400_BAD_REQUEST
             )
 
         # ── Financial year prefix ────────────────────────────────────────────
@@ -2138,6 +2469,9 @@ def invest_refund_create(request):
             'created_date':     now,
             'lastmodified_by':  None,
             'lastmodified_date':now,
+            'is_approved':      False,
+            'approved_by':      None,          
+            'approved_date':    None,           
             'is_active':        True,
         }
 

@@ -490,6 +490,8 @@ urlpatterns = [
 
     # Reports
     path('dept-budr/', departmentBilling.dept_budr_view, name='dept_budr_view'),
+    path('dept-budr-approve/', departmentBilling.dept_budr_approve_view, name='dept_budr_approve_view'),
+    path('request-bill-edit/', departmentBilling.request_bill_edit_view, name='request_bill_edit_view'),
     path('doctor-report/', doctor_reports.doctor_report_view, name='doctor_report_view'),
     path('front-office-reports/', front_office_reports.front_office_report_view, name='front_office_reports'),
     path('RoomOccupencyReport/', roomoccupencyreport.room_occupancy_report_view, name='room_occupancy_report'),

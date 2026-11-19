@@ -17,6 +17,7 @@ from bson.decimal128 import Decimal128
 from django.http import JsonResponse
 from ..models import Admission, Patient, InsuranceProvider
 from .dbcollection import resolve_created_by_name, get_employee_name_by_id
+from pymongo import MongoClient, ReturnDocument
 
 logger = logging.getLogger(__name__)
 
@@ -1112,6 +1113,19 @@ def get_medicine_packages(request):
             status=500,
         )
 
+def generate_ot_request_no():
+    """
+    Atomic, concurrency-safe counter in HMS.counters.
+    Document: { _id: "OT_MEDICINE_REQUEST", seq: <int> }
+    Returns "OT1", "OT2", ...
+    """
+    counter = hms_db["counters"].find_one_and_update(
+        {"_id": "OT_MEDICINE_REQUEST"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return f"OT{counter['seq']}"
 
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
@@ -1228,11 +1242,20 @@ def save_ot_medicine_ward_request(request):
             Package_id=package_id,
         )
 
+                # Generate OT request no from counters and store it on the bill.
+        # Raw pymongo write so no model migration is needed.
+        request_no = generate_ot_request_no()
+        hms_db["hospital_pharmacybilling"].update_one(
+            {"Bill_id": bill.Bill_id},
+            {"$set": {"request_no": request_no}},
+        )
+
         return Response(
             {
                 "success": True,
                 "message": "OT medicine ward request saved successfully",
                 "bill_id": bill.Bill_id,
+                "request_no": request_no,          # ← new
                 "billing_status": bill.billing_status,
                 "package_id": bill.Package_id,
             },
@@ -1491,7 +1514,7 @@ def get_ot_medicine_ward_requests(request):
                 "userName": resolve_created_by_name(doc.get("created_by", "")) or doc.get("created_by", ""),
                 "created_by": doc.get("created_by", ""),
                 "created_by_name": resolve_created_by_name(doc.get("created_by", "")),
-                "requestNo": doc.get("estimate_no", ""),
+                "requestNo": doc.get("request_no"),
                 "doctorName": doctor_name,          # ✅ Resolved from Global DB
                 "doctor_id": doctor_id,
                 "wardName": doc.get("room_no", ""),
