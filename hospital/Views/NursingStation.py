@@ -1839,10 +1839,19 @@ def get_medicine_ward_requests(request):
 
             import json
 
-            raw_st = str(doc.get("billing_status") or doc.get("status") or "").strip()
-            if doc.get("paymentStatus") == "Paid" or doc.get("is_dispatched") or raw_st in ["Completed", "Paid"]:
+            # Priority 1: Strict Cancellation Check
+            is_doc_cancelled = (
+                doc.get("is_cancelled") is True
+                or str(doc.get("status") or "").strip().lower() == "cancelled"
+                or str(doc.get("billing_status") or "").strip().lower() == "cancelled"
+            )
+            if is_doc_cancelled:
+                raw_st = "Cancelled"
+            elif doc.get("paymentStatus") == "Paid" or doc.get("is_dispatched") or str(doc.get("billing_status") or "").strip().lower() in ["completed", "paid", "billed"] or str(doc.get("status") or "").strip().lower() in ["completed", "paid", "billed"]:
                 raw_st = "Billed"
-            elif not raw_st:
+            elif str(doc.get("billing_status") or doc.get("status") or "").strip():
+                raw_st = str(doc.get("billing_status") or doc.get("status")).strip()
+            else:
                 raw_st = "Pending"
 
             items = doc.get("medicine_particulars")
