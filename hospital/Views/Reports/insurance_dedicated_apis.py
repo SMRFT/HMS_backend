@@ -186,12 +186,22 @@ def patient_wise_pharmacy_ip_bill_api(request):
         }))
 
         wr_dispatch_map = {}
+        dispatch_dates = {}
         for wr in wr_docs:
             for dh in (wr.get('dispatch_history') or []):
                 bno = dh.get('bill_no')
                 if bno:
                     item_ids = {it.get('item_id') for it in (dh.get('items') or []) if it.get('item_id')}
-                    wr_dispatch_map[bno] = item_ids
+                    if bno in wr_dispatch_map:
+                        wr_dispatch_map[bno].update(item_ids)
+                    else:
+                        wr_dispatch_map[bno] = item_ids
+                    ts = dh.get('timestamp')
+                    if ts and bno not in dispatch_dates:
+                        try:
+                            dispatch_dates[bno] = datetime.fromisoformat(ts[:19])
+                        except Exception:
+                            pass
 
         # 3. Query Dispatched / Direct IP pharmacy bills
         bill_query_or = [
@@ -223,7 +233,20 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     ]
                 }
             ]
-        }).sort("created_date", 1))
+        }))
+
+        # Prioritize patient-matching documents when bill numbers are shared/duplicated
+        def doc_priority(doc):
+            u = str(doc.get('uhid') or '').strip()
+            ip = str(doc.get('inpatient_number') or '').strip()
+            p = str(doc.get('patient_name') or doc.get('patientname') or '').strip()
+            score = 0
+            if u in (target_uhid, target_ip): score += 10
+            if ip in (target_ip, target_uhid): score += 10
+            if p and patient_name and patient_name.lower() in p.lower(): score += 5
+            return score
+
+        raw_bills.sort(key=doc_priority, reverse=True)
 
         # Filter to IP, Credit, Insurance, and linked ward request bills
         ip_bills = []
@@ -233,12 +256,21 @@ def patient_wise_pharmacy_ip_bill_api(request):
             if not b_no or b_no in seen_bill_nos:
                 continue
 
+            # Determine bill date respecting ward request dispatch timestamp
+            b_dt_check = dispatch_dates.get(b_no)
+            if not b_dt_check:
+                raw_d = b.get('created_date') or b.get('bill_date')
+                if isinstance(raw_d, datetime):
+                    b_dt_check = raw_d
+                elif raw_d:
+                    try:
+                        b_dt_check = datetime.fromisoformat(str(raw_d).replace('Z', '+00:00'))
+                    except Exception:
+                        b_dt_check = parse_date(str(raw_d)[:10])
+
             # Ensure bill date is not prior to admission date
-            b_dt_check = b.get('created_date') or b.get('bill_date')
             if adm_day_start and b_dt_check:
-                if isinstance(b_dt_check, str):
-                    b_dt_check = parse_date(b_dt_check[:10])
-                if b_dt_check and hasattr(b_dt_check, 'date') and b_dt_check.date() < adm_day_start.date():
+                if hasattr(b_dt_check, 'date') and b_dt_check.date() < adm_day_start.date():
                     continue
 
             b_mode = str(b.get('billing_mode') or '').upper()
@@ -330,14 +362,15 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 continue
 
             raw_date = b.get('bill_date') or b.get('created_date')
-            b_dt = None
-            if isinstance(raw_date, datetime):
-                b_dt = raw_date
-            elif isinstance(raw_date, str):
-                try:
-                    b_dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
-                except Exception:
-                    b_dt = parse_date(raw_date[:10])
+            b_dt = dispatch_dates.get(b_no)
+            if not b_dt:
+                if isinstance(raw_date, datetime):
+                    b_dt = raw_date
+                elif isinstance(raw_date, str):
+                    try:
+                        b_dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+                    except Exception:
+                        b_dt = parse_date(raw_date[:10])
 
             # Apply date filters
             if dt_start and b_dt:
@@ -428,9 +461,11 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     # In Hospital Pharmacy MRP billing, calc_price is the tax-inclusive retail price
                     # Back out the taxable base without double taxation
                     if tot_tax_pct > 0:
-                        taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
-                        cgst = round(taxable * (cgst_pct / 100.0), 2)
-                        sgst = round(taxable * (sgst_pct / 100.0), 2)
+                        approx_taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
+                        cgst = round(approx_taxable * (cgst_pct / 100.0), 2)
+                        sgst = round(approx_taxable * (sgst_pct / 100.0), 2)
+                        gst = round(cgst + sgst, 2)
+                        taxable = round(calc_price - gst, 2)
                         item_amt = calc_price
                     else:
                         taxable = calc_price
@@ -486,13 +521,12 @@ def patient_wise_pharmacy_ip_bill_api(request):
             b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
             stored_net = clean_num(b.get('net_amount'))
 
-            # Net amount reflects any discount applied
-            if b_disc > 0:
-                bill_final_net = round(b_net_tot - b_disc, 2)
-            elif stored_net > 0:
+            # Net amount reflects any discount applied; only use stored_net if consistent with item totals within round-off
+            expected_net = round(b_net_tot - b_disc, 2)
+            if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
                 bill_final_net = stored_net
             else:
-                bill_final_net = b_net_tot
+                bill_final_net = expected_net
 
             tot_taxable_grand += b_taxable_tot
             tot_cgst_grand += b_cgst_tot
@@ -513,8 +547,14 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 "discount_amount": b_disc,
                 "net_amount": bill_final_net,
                 "bill_total": b_net_tot,
-                "bill_net": bill_final_net
+                "bill_net": bill_final_net,
+                "sort_key": b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo) else (b_dt or datetime.min)
             })
+
+        bills_output.sort(key=lambda x: (x["sort_key"], x["bill_no"]))
+        for bo in bills_output:
+            if "sort_key" in bo:
+                del bo["sort_key"]
 
         tot_taxable_grand = round(tot_taxable_grand, 2)
         tot_cgst_grand = round(tot_cgst_grand, 2)
@@ -1971,35 +2011,99 @@ def medicine_abstract_api(request):
                 allowed_ids = wr_dispatch_map.get(b_no)
                 items = b.get('medicine_particulars') or b.get('items') or []
 
-                b_taxable = 0.0
+                b_taxable_tot = 0.0
+                b_cgst_tot = 0.0
+                b_sgst_tot = 0.0
+                b_net_tot = 0.0
+
                 for itm in items:
                     it_id = itm.get('item_id')
                     if allowed_ids and it_id not in allowed_ids:
                         continue
-                    calc_price = clean_num(itm.get('calculated_price') or (clean_num(itm.get('price')) * clean_num(itm.get('qty', 1))))
-                    b_taxable += calc_price
 
-                if b_taxable <= 0:
+                    raw_price = itm.get('price')
+                    qty = clean_num(itm.get('qty') or itm.get('quantity') or 1)
+                    if raw_price is not None and str(raw_price).strip() != "":
+                        price = clean_num(raw_price)
+                    else:
+                        price = 0.0
+
+                    raw_calc = itm.get('calculated_price') or itm.get('total') or itm.get('amount')
+                    if raw_calc is not None and str(raw_calc).strip() != "":
+                        calc_price = clean_num(raw_calc)
+                    else:
+                        calc_price = round(price * qty, 2)
+
+                    stored_taxable = itm.get('taxable_value') or itm.get('product_value')
+                    stored_cgst = itm.get('CGST_Amt')
+                    stored_sgst = itm.get('SGST_Amt')
+                    stored_total = itm.get('total') or itm.get('total_amount')
+
+                    # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or exact batch stock / itm)
+                    cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or 2.5)
+                    sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or 2.5)
+                    tot_tax_pct = (cgst_pct + sgst_pct) / 100.0
+
+                    if stored_taxable is not None and stored_total is not None:
+                        taxable = round(clean_num(stored_taxable), 2)
+                        cgst = round(clean_num(stored_cgst) if stored_cgst is not None else (taxable * (cgst_pct / 100.0)), 2)
+                        sgst = round(clean_num(stored_sgst) if stored_sgst is not None else (taxable * (sgst_pct / 100.0)), 2)
+                        item_amt = round(clean_num(stored_total), 2)
+                    else:
+                        # In Hospital Pharmacy MRP billing, calc_price is the tax-inclusive retail price
+                        # Back out the taxable base without double taxation
+                        if tot_tax_pct > 0:
+                            approx_taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
+                            cgst = round(approx_taxable * (cgst_pct / 100.0), 2)
+                            sgst = round(approx_taxable * (sgst_pct / 100.0), 2)
+                            gst = round(cgst + sgst, 2)
+                            taxable = round(calc_price - gst, 2)
+                            item_amt = calc_price
+                        else:
+                            taxable = calc_price
+                            cgst = 0.0
+                            sgst = 0.0
+                            item_amt = calc_price
+
+                    b_taxable_tot += taxable
+                    b_cgst_tot += cgst
+                    b_sgst_tot += sgst
+                    b_net_tot += item_amt
+
+                if b_net_tot <= 0:
                     continue
 
                 seen_bids.add(b_no)
 
-                # Standard 5% GST on pharmacy medicines (2.5% CGST + 2.5% SGST)
-                gst = round(b_taxable * 0.05, 2)
-                cgst = round(gst / 2.0, 2)
-                sgst = round(gst / 2.0, 2)
-                bill_amt = round(b_taxable + gst, 2)
+                b_taxable_tot = round(b_taxable_tot, 2)
+                b_cgst_tot = round(b_cgst_tot, 2)
+                b_sgst_tot = round(b_sgst_tot, 2)
+                b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
+                b_net_tot = round(b_net_tot, 2)
+
+                # Check for bill-level discount and stored net amount
+                b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
+                stored_net = clean_num(b.get('net_amount'))
+
+                # Use net_amount for Bill Amount; only take stored_net if consistent with item totals within round-off
+                expected_net = round(b_net_tot - b_disc, 2)
+                if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
+                    bill_final_net = stored_net
+                else:
+                    bill_final_net = expected_net
 
                 naive_dt = b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo is not None) else (b_dt or datetime.min)
                 out_bills.append({
                     "bill_date": b_date_str,
                     "bill_number": b_no,
                     "credit_status": "IP CREDITS",
-                    "taxable_amt": round(b_taxable, 2),
-                    "cgst": cgst,
-                    "sgst": sgst,
-                    "gst": gst,
-                    "bill_amount": bill_amt,
+                    "taxable_amt": b_taxable_tot,
+                    "cgst": b_cgst_tot,
+                    "sgst": b_sgst_tot,
+                    "gst": b_gst_tot,
+                    "discount_amount": b_disc,
+                    "bill_amount": bill_final_net,
+                    "net_amount": bill_final_net,
                     "sort_key": naive_dt
                 })
 
@@ -2017,6 +2121,7 @@ def medicine_abstract_api(request):
         total_cgst = round(sum(b['cgst'] for b in bills), 2)
         total_sgst = round(sum(b['sgst'] for b in bills), 2)
         total_gst = round(sum(b['gst'] for b in bills), 2)
+        total_discount = round(sum(b.get('discount_amount', 0) for b in bills), 2)
         total_bill_amount = round(sum(b['bill_amount'] for b in bills), 2)
 
         return Response({
@@ -2037,6 +2142,7 @@ def medicine_abstract_api(request):
                 "total_cgst": total_cgst,
                 "total_sgst": total_sgst,
                 "total_gst": total_gst,
+                "total_discount": total_discount,
                 "total_bill_amount": total_bill_amount
             }
         }, status=status.HTTP_200_OK)
