@@ -1077,14 +1077,11 @@ def admission_view(request):
             if hospital_code and hospital_code != "system":
                 query["hospital_code"] = hospital_code
 
-            # For general listing, scope by branch and outlet;
-            # but if searching for a specific patient by UHID or IP Number, do NOT scope by outlet/branch
-            # so that hospital-wide admission history and active status are correctly retrieved.
+            # For general listing, scope by branch (if branch_code != "system");
+            # Admissions are common across all outlets, so do NOT scope by outlet_code on GET.
             if not ip_filter and not uhid_filter:
                 if branch_code and branch_code != "system":
                     query["branch_code"] = branch_code
-                if outlet_code and outlet_code != "system":
-                    query["outlet_code"] = outlet_code
 
             if ip_filter:
                 if "/" in ip_filter:
@@ -1250,6 +1247,7 @@ def admission_view(request):
                     "high_risk_date":        hr_dt_iso,
                     "room_details":      _normalize_ist_timestamps(_safe_list(adm.get("room_details"))),
                     "roomShitingDetails":_normalize_ist_timestamps(_safe_list(adm.get("roomShitingDetails"))),
+                    "room_category":     adm.get("room_category") or (adm.get("room_details") and isinstance(adm.get("room_details"), list) and len(adm.get("room_details")) > 0 and adm.get("room_details")[0].get("room_category")) or "",
                     "advance_payments":  _normalize_ist_timestamps(_safe_list(adm.get("advance_payments"))),
                     # ── Cancellation status & Edit history ───────────────────
                     "is_cancelled":      bool(adm.get("is_cancelled", False)),
@@ -1407,10 +1405,21 @@ def admission_view(request):
 
             admission_dt = _to_ist_dt(str(data.get('admissionDateTime') or '')) or _now_ist()
             now_iso   = _now_ist_iso()
+            r_no_val  = str(data.get("roomNo") or "").strip()
+            r_cat_val = str(data.get("room_category") or data.get("roomCategory") or "").strip()
+            if not r_cat_val and r_no_val:
+                try:
+                    r_obj = Room.objects.filter(room_number__iexact=r_no_val).first()
+                    if r_obj and r_obj.room_category:
+                        r_cat_val = str(r_obj.room_category).strip()
+                except Exception:
+                    pass
+
             room_details = [{
                 "room_entry_id": 1,
-                "roomNo": str(data.get("roomNo") or ""),
+                "roomNo": r_no_val,
                 "bedNo":  str(data.get("bedNo")  or ""),
+                "room_category": r_cat_val,
                 "is_roomActive":  True,
                 "is_roomCleaned": False,
                 "startDateTime":  now_iso,
@@ -1526,6 +1535,7 @@ def admission_view(request):
                 lastmodified_by=employee_id, lastmodified_date=_now_ist(),
             )
             _sync_to_mongo(ip_number, room_details, [], [], {
+                "room_category": r_cat_val,
                 "customer_type": customer_type,
                 "company_code": company_code,
                 "insurance_company": insurance_company,
@@ -2049,13 +2059,7 @@ def admission_advance(request, ipNumber=None):
                 and_clauses.append({"hospital_code": hospital_code})
             if branch_code and branch_code != "system":
                 and_clauses.append({"branch_code": branch_code})
-            if outlet_code and outlet_code.lower() not in ("system", "all"):
-                and_clauses.append({
-                    "$or": [
-                        {"outlet_code": outlet_code},
-                        {"advance_payments.outlet_code": outlet_code}
-                    ]
-                })
+            # IP advances are displayed commonly across all outlets; do not filter by outlet_code on GET
 
             if ip_number:
                 and_clauses.append({"ipNumber": ip_number})
@@ -2131,9 +2135,6 @@ def admission_advance(request, ipNumber=None):
                         payment_mode = p["payment_details"].get("method", "")
                     paid_date = _to_ist_iso(p.get("paid_datetime")) or ""
                     p_outlet = str(p.get("outlet_code") or adm.get("outlet_code") or "").strip()
-                    if outlet_code and outlet_code.lower() not in ("system", "all"):
-                        if p_outlet and p_outlet != outlet_code:
-                            continue
                     p["ip_number"]    = adm.get("ipNumber")
                     p["uhid"]         = adm.get("uhid")
                     p["room"]         = room_str
@@ -2507,8 +2508,7 @@ def ip_advance_refunds_list(request):
         q = {}
         if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
         if branch_code and branch_code != "system":     q["branch_code"]   = branch_code
-        if outlet_code and outlet_code.lower() not in ("system", "all"):
-            q["outlet_code"] = outlet_code
+        # IP refunds are displayed commonly across all outlets; do not filter by outlet_code on GET
 
         if from_date and to_date:
             try:

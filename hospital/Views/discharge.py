@@ -1940,9 +1940,10 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
             except Exception:
                 pass
 
-        # ── 6. Update Cathlab Intent (hospital_cathlabintent) ─────────────────
-        # Criteria: matching IP Number / uhid, is_approved: True, is_billed != True
-        # Update: is_billed -> True
+        # ── 6. Update Cathlab Intent (hospital_cathlabintent) & hospital_itemmaster ──
+        # Criteria: matching ONLY IP Number, is_approved: True, is_active: True, is_billed: False / != True
+        # Update: hospital_cathlabintent.is_billed -> True
+        # Update: hospital_itemmaster.approved_quantity -> decremented using item_id
         cathlab_ip_filter = []
         if ip_number:
             raw_ip = str(ip_number).strip()
@@ -1956,52 +1957,106 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                 {"ipNumber": raw_ip},
                 {"ipNumber": clean_ip},
             ])
-        if uhid:
-            cathlab_ip_filter.append({"uhid": str(uhid).strip()})
 
         if cathlab_ip_filter:
             cathlab_match = {
                 "$and": [
                     {"$or": cathlab_ip_filter},
                     {"is_approved": True},
+                    {"is_active": True},
                     {"is_billed": {"$ne": True}},
                 ]
             }
-            db["hospital_cathlabintent"].update_many(
-                cathlab_match,
-                {"$set": {
-                    "is_billed": True,
-                    "lastmodified_by": user_str,
-                    "lastmodified_date": now_dt,
-                }}
-            )
-
-        # Also update by bill_object_id if discharge items reference specific cathlab intent records
-        if ip_number:
             try:
-                disch_doc = db["hospital_dischargebilling"].find_one({
-                    "ip_number": str(ip_number),
-                    "status": "Billed",
-                    "is_cancelled": {"$ne": True}
-                }, sort=[("bill_date", -1)])
-                if disch_doc:
-                    for itm in disch_doc.get("items") or []:
-                        if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
-                            obj_id_str = itm.get("bill_object_id")
-                            if obj_id_str:
-                                try:
-                                    db["hospital_cathlabintent"].update_one(
-                                        {"_id": ObjectId(obj_id_str)},
-                                        {"$set": {
-                                            "is_billed": True,
-                                            "lastmodified_by": user_str,
-                                            "lastmodified_date": now_dt,
-                                        }}
-                                    )
-                                except Exception:
-                                    pass
-            except Exception:
-                pass
+                # 1. Fetch matching unbilled cathlab intent records
+                matching_intents = list(db["hospital_cathlabintent"].find(cathlab_match))
+
+                # Also include any intent referenced by bill_object_id in the discharge bill items
+                try:
+                    disch_doc = db["hospital_dischargebilling"].find_one({
+                        "ip_number": str(ip_number),
+                        "status": "Billed",
+                        "is_cancelled": {"$ne": True}
+                    }, sort=[("bill_date", -1)])
+                    if disch_doc:
+                        for itm in disch_doc.get("items") or []:
+                            if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                                obj_id_str = itm.get("bill_object_id")
+                                if obj_id_str:
+                                    try:
+                                        extra_doc = db["hospital_cathlabintent"].find_one({
+                                            "_id": ObjectId(obj_id_str),
+                                            "is_approved": True,
+                                            "is_active": True,
+                                            "is_billed": {"$ne": True}
+                                        })
+                                        if extra_doc and not any(str(d.get("_id")) == str(extra_doc.get("_id")) for d in matching_intents):
+                                            matching_intents.append(extra_doc)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
+
+                # 2. Update approved_quantity in hospital_itemmaster using item_id
+                for intent_doc in matching_intents:
+                    raw_items = intent_doc.get("items") or []
+                    if isinstance(raw_items, str):
+                        try:
+                            raw_items = _json.loads(raw_items)
+                        except Exception:
+                            raw_items = []
+                    for itm in (raw_items if isinstance(raw_items, list) else []):
+                        if not isinstance(itm, dict):
+                            continue
+                        item_id = itm.get("item_id")
+                        if not item_id:
+                            continue
+                        qty = _to_float(itm.get("approved_quantity") or itm.get("quantity") or 0)
+                        if qty > 0:
+                            qty_int = int(qty)
+                            try:
+                                db["hospital_itemmaster"].update_one(
+                                    {"item_id": str(item_id).strip()},
+                                    {"$inc": {"approved_quantity": -qty_int}}
+                                )
+                                db["hospital_itemmaster"].update_one(
+                                    {"item_id": str(item_id).strip(), "approved_quantity": {"$lt": 0}},
+                                    {"$set": {"approved_quantity": 0}}
+                                )
+                            except Exception as ex:
+                                logger.error(f"Error decrementing hospital_itemmaster approved_quantity for {item_id}: {ex}")
+
+                            try:
+                                from hospital.Views.Stores.models import ItemMaster
+                                it_obj = ItemMaster.objects.filter(item_id=str(item_id).strip()).first()
+                                if it_obj:
+                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - qty_int)
+                                    it_obj.save()
+                            except Exception:
+                                pass
+
+                # 3. Update is_billed: false -> true in hospital_cathlabintent
+                matched_ids = [d["_id"] for d in matching_intents if "_id" in d]
+                if matched_ids:
+                    db["hospital_cathlabintent"].update_many(
+                        {"_id": {"$in": matched_ids}},
+                        {"$set": {
+                            "is_billed": True,
+                            "lastmodified_by": user_str,
+                            "lastmodified_date": now_dt,
+                        }}
+                    )
+                else:
+                    db["hospital_cathlabintent"].update_many(
+                        cathlab_match,
+                        {"$set": {
+                            "is_billed": True,
+                            "lastmodified_by": user_str,
+                            "lastmodified_date": now_dt,
+                        }}
+                    )
+            except Exception as e:
+                logger.error(f"Error in updating cathlab intent and itemmaster for IP {ip_number}: {e}")
 
     except Exception as e:
         import traceback
@@ -2959,7 +3014,7 @@ def search_discharge_patient(request):
         patient_info["implant_amount"] = round(total_implant_amt, 2)
 
         # ── 7b. hospital_cathlabintent (Approved Cathlab Intent Items) ─────────
-        # Criteria: matching IP Number / uhid, is_approved: True, is_billed != True, is_active != False
+        # Criteria: matching ONLY ipnumber, is_approved: True, is_active: True, is_billed != True
         cathlab_ip_filter = []
         if effective_ip:
             raw_ip = str(effective_ip).strip()
@@ -2973,16 +3028,14 @@ def search_discharge_patient(request):
                 {"ipNumber": raw_ip},
                 {"ipNumber": clean_ip},
             ])
-        if effective_uhid:
-            cathlab_ip_filter.append({"uhid": str(effective_uhid).strip()})
 
         if cathlab_ip_filter:
             cathlab_q = {
                 "$and": [
                     {"$or": cathlab_ip_filter},
                     {"is_approved": True},
+                    {"is_active": True},
                     {"is_billed": {"$ne": True}},
-                    {"is_active": {"$ne": False}},
                 ]
             }
             try:
