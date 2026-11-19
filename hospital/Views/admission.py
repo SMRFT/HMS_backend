@@ -1076,10 +1076,12 @@ def admission_view(request):
             query = {}
             if hospital_code and hospital_code != "system":
                 query["hospital_code"] = hospital_code
-            if branch_code and branch_code != "system":
-                query["branch_code"] = branch_code
-            if outlet_code and outlet_code != "system":
-                query["outlet_code"] = outlet_code
+
+            # For general listing, scope by branch (if branch_code != "system");
+            # Admissions are common across all outlets, so do NOT scope by outlet_code on GET.
+            if not ip_filter and not uhid_filter:
+                if branch_code and branch_code != "system":
+                    query["branch_code"] = branch_code
 
             if ip_filter:
                 if "/" in ip_filter:
@@ -1245,6 +1247,7 @@ def admission_view(request):
                     "high_risk_date":        hr_dt_iso,
                     "room_details":      _normalize_ist_timestamps(_safe_list(adm.get("room_details"))),
                     "roomShitingDetails":_normalize_ist_timestamps(_safe_list(adm.get("roomShitingDetails"))),
+                    "room_category":     adm.get("room_category") or (adm.get("room_details") and isinstance(adm.get("room_details"), list) and len(adm.get("room_details")) > 0 and adm.get("room_details")[0].get("room_category")) or "",
                     "advance_payments":  _normalize_ist_timestamps(_safe_list(adm.get("advance_payments"))),
                     # ── Cancellation status & Edit history ───────────────────
                     "is_cancelled":      bool(adm.get("is_cancelled", False)),
@@ -1332,31 +1335,61 @@ def admission_view(request):
         try:
             data = {k: request.data.get(k) for k in request.data}
             uhid = str(data.get('uhid', '')).strip()
-            if not uhid:
+            clean_uhid = str(uhid).strip()
+            if not clean_uhid:
                 return JsonResponse({"error": "UHID is required"}, status=400)
 
             client, hms_db = _get_hms_db()
             try:
                 # ── Fast check for existing active admission with index ──
-                existing_adm = hms_db["hospital_admission"].find_one({
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code,
-                    "outlet_code": outlet_code,
-                    "uhid": uhid,
-                    "is_admitted": True,
-                    "is_discharged": False,
-                    "is_cancelled": {"$ne": True}
-                })
+                # A patient identified by UHID cannot be physically admitted more than once across the hospital!
+                # Do NOT restrict by outlet_code or branch_code so multi-outlet active admissions are caught.
+                active_adm_q = {
+                    "uhid": {"$in": [clean_uhid, clean_uhid.upper(), clean_uhid.lower()]},
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"is_admitted": True, "is_discharged": {"$ne": True}},
+                        {"is_discharged": False}
+                    ]
+                }
+                if hospital_code and hospital_code != "system":
+                    active_adm_q["hospital_code"] = hospital_code
+
+                existing_adm = hms_db["hospital_admission"].find_one(active_adm_q)
+                if not existing_adm:
+                    # Secondary safety check in Django ORM
+                    existing_orm = Admission.objects.filter(
+                        uhid__iexact=clean_uhid,
+                        is_cancelled=False
+                    ).filter(
+                        Q(is_admitted=True, is_discharged=False) | Q(is_discharged=False)
+                    ).first()
+                    if existing_orm:
+                        existing_adm = {
+                            "ipNumber": existing_orm.ipNumber,
+                            "admissionDateTime": existing_orm.admissionDateTime,
+                            "room_details": existing_orm.room_details,
+                            "roomShitingDetails": getattr(existing_orm, "roomShitingDetails", []),
+                        }
+
                 if existing_adm:
                     adm_dt_iso = _to_ist_iso(existing_adm.get("admissionDateTime"))
                     cur_room = _get_current_room(existing_adm)
+                    ip_no = str(existing_adm.get("ipNumber") or "").strip()
+                    r_no = cur_room.get("roomNo") or ""
+                    b_no = cur_room.get("bedNo") or ""
+                    loc_details = []
+                    if r_no: loc_details.append(f"Room {r_no}")
+                    if b_no: loc_details.append(f"Bed {b_no}")
+                    loc_str = f" ({', '.join(loc_details)})" if loc_details else ""
+
                     return JsonResponse({
-                        "error": "Patient already admitted",
+                        "error": f"Patient with UHID {clean_uhid} is currently admitted under IP Number {ip_no}{loc_str}. Patient cannot be admitted again until discharged.",
                         "already_admitted": True,
-                        "ipNumber": existing_adm.get("ipNumber"),
+                        "ipNumber": ip_no,
                         "admissionDateTime": adm_dt_iso,
-                        "roomNo": cur_room.get("roomNo", ""),
-                        "bedNo":  cur_room.get("bedNo",  ""),
+                        "roomNo": r_no,
+                        "bedNo":  b_no,
                     }, status=400)
 
                 # ── Patient info lookup ──
@@ -1372,10 +1405,21 @@ def admission_view(request):
 
             admission_dt = _to_ist_dt(str(data.get('admissionDateTime') or '')) or _now_ist()
             now_iso   = _now_ist_iso()
+            r_no_val  = str(data.get("roomNo") or "").strip()
+            r_cat_val = str(data.get("room_category") or data.get("roomCategory") or "").strip()
+            if not r_cat_val and r_no_val:
+                try:
+                    r_obj = Room.objects.filter(room_number__iexact=r_no_val).first()
+                    if r_obj and r_obj.room_category:
+                        r_cat_val = str(r_obj.room_category).strip()
+                except Exception:
+                    pass
+
             room_details = [{
                 "room_entry_id": 1,
-                "roomNo": str(data.get("roomNo") or ""),
+                "roomNo": r_no_val,
                 "bedNo":  str(data.get("bedNo")  or ""),
+                "room_category": r_cat_val,
                 "is_roomActive":  True,
                 "is_roomCleaned": False,
                 "startDateTime":  now_iso,
@@ -1491,6 +1535,7 @@ def admission_view(request):
                 lastmodified_by=employee_id, lastmodified_date=_now_ist(),
             )
             _sync_to_mongo(ip_number, room_details, [], [], {
+                "room_category": r_cat_val,
                 "customer_type": customer_type,
                 "company_code": company_code,
                 "insurance_company": insurance_company,
@@ -2014,13 +2059,7 @@ def admission_advance(request, ipNumber=None):
                 and_clauses.append({"hospital_code": hospital_code})
             if branch_code and branch_code != "system":
                 and_clauses.append({"branch_code": branch_code})
-            if outlet_code and outlet_code.lower() not in ("system", "all"):
-                and_clauses.append({
-                    "$or": [
-                        {"outlet_code": outlet_code},
-                        {"advance_payments.outlet_code": outlet_code}
-                    ]
-                })
+            # IP advances are displayed commonly across all outlets; do not filter by outlet_code on GET
 
             if ip_number:
                 and_clauses.append({"ipNumber": ip_number})
@@ -2096,9 +2135,6 @@ def admission_advance(request, ipNumber=None):
                         payment_mode = p["payment_details"].get("method", "")
                     paid_date = _to_ist_iso(p.get("paid_datetime")) or ""
                     p_outlet = str(p.get("outlet_code") or adm.get("outlet_code") or "").strip()
-                    if outlet_code and outlet_code.lower() not in ("system", "all"):
-                        if p_outlet and p_outlet != outlet_code:
-                            continue
                     p["ip_number"]    = adm.get("ipNumber")
                     p["uhid"]         = adm.get("uhid")
                     p["room"]         = room_str
@@ -2472,8 +2508,7 @@ def ip_advance_refunds_list(request):
         q = {}
         if hospital_code and hospital_code != "system": q["hospital_code"] = hospital_code
         if branch_code and branch_code != "system":     q["branch_code"]   = branch_code
-        if outlet_code and outlet_code.lower() not in ("system", "all"):
-            q["outlet_code"] = outlet_code
+        # IP refunds are displayed commonly across all outlets; do not filter by outlet_code on GET
 
         if from_date and to_date:
             try:
@@ -2807,15 +2842,18 @@ def today_registered_patients(request):
             if uhids_list:
                 adm_cursor = hms_db["hospital_admission"].find({
                     "uhid": {"$in": uhids_list},
-                    "is_admitted": True,
-                    "is_discharged": False,
-                    "is_cancelled": False,
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"is_admitted": True, "is_discharged": {"$ne": True}},
+                        {"is_discharged": False}
+                    ]
                 })
                 for adm in adm_cursor:
                     adm_u = str(adm.get("uhid") or "").strip()
-                    if adm_u in patient_map:
-                        patient_map[adm_u]["is_admitted"] = True
-                        patient_map[adm_u]["ipNumber"] = adm.get("ipNumber") or ""
+                    for k in patient_map:
+                        if k.lower() == adm_u.lower():
+                            patient_map[k]["is_admitted"] = True
+                            patient_map[k]["ipNumber"] = adm.get("ipNumber") or ""
 
             results = list(patient_map.values())
 

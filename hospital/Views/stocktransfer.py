@@ -482,11 +482,12 @@ def stock_transfer_view(request, pk=None):
         # ── SINGLE RECORD ─────────────────────────────────────────────────────
         if pk:
             try:
-                st = StockTransfer.objects.get(
-                    transfer_ref_number=pk,
-                    hospital_code=hospital_code,
-                    branch_code=branch_code
-                )
+                st_q = Q(transfer_ref_number=pk)
+                if hospital_code and hospital_code != "system":
+                    st_q &= Q(hospital_code=hospital_code)
+                if branch_code and branch_code != "system":
+                    st_q &= Q(branch_code=branch_code)
+                st = StockTransfer.objects.get(st_q)
                 data = StockTransferSerializer(st).data
                 raw_items = data.get("items", [])
                 parsed_items = parse_transfer_items(raw_items)
@@ -697,30 +698,37 @@ def stock_transfer_view(request, pk=None):
 
             # Find source stock record from candidates
             source = None
-            for s in candidate_stocks:
-                if (
-                    str(getattr(s, "hospital_code", "")) != str(hospital_code)
-                    or str(getattr(s, "branch_code",  "")) != str(branch_code)
-                ):
-                    continue
+            # 1. Primary match: exact stock_id
+            if stock_id:
+                for s in candidate_stocks:
+                    if hospital_code and hospital_code != "system" and str(getattr(s, "hospital_code", "")) != str(hospital_code):
+                        continue
+                    if branch_code and branch_code != "system" and str(getattr(s, "branch_code", "")) != str(branch_code):
+                        continue
+                    if str(getattr(s, "stock_id", "")) == stock_id:
+                        source = s
+                        break
 
-                # Match by stock_id (primary) or item_id+batch+outlet (fallback)
-                if stock_id and str(getattr(s, "stock_id", "")) == stock_id:
-                    source = s
-                    break
+            # 2. Fallback match: item_id + batch_number + outlet
+            if source is None:
+                for s in candidate_stocks:
+                    if hospital_code and hospital_code != "system" and str(getattr(s, "hospital_code", "")) != str(hospital_code):
+                        continue
+                    if branch_code and branch_code != "system" and str(getattr(s, "branch_code", "")) != str(branch_code):
+                        continue
 
-                row_outlet = str(getattr(s, "outlet_code", "") or "")
-                outlet_matches = (
-                    row_outlet == outlet_code_item or
-                    (row_outlet in ("", "OLET006") and outlet_code_item in ("", "OLET006"))
-                )
-                if (
-                    str(getattr(s, "item_id",      "")) == item_id
-                    and str(getattr(s, "batch_number", "")).strip() == batch_number
-                    and outlet_matches
-                ):
-                    source = s
-                    break
+                    row_outlet = str(getattr(s, "outlet_code", "") or "")
+                    outlet_matches = (
+                        row_outlet == outlet_code_item or
+                        (row_outlet in ("", "OLET006") and outlet_code_item in ("", "OLET006"))
+                    )
+                    if (
+                        str(getattr(s, "item_id", "")) == item_id
+                        and str(getattr(s, "batch_number", "")).strip() == batch_number
+                        and outlet_matches
+                    ):
+                        source = s
+                        break
 
             if source is None:
                 errors.append(
@@ -754,6 +762,17 @@ def stock_transfer_view(request, pk=None):
         if errors:
             return Response({"success": False, "error": errors}, status=400)
 
+        actual_hosp = hospital_code if (hospital_code and hospital_code != "system") else None
+        actual_branch = branch_code if (branch_code and branch_code != "system") else None
+        if not actual_hosp or not actual_branch:
+            for s in candidate_stocks:
+                if not actual_hosp:
+                    actual_hosp = getattr(s, "hospital_code", None)
+                if not actual_branch:
+                    actual_branch = getattr(s, "branch_code", None)
+                if actual_hosp and actual_branch:
+                    break
+
         transfer_payload = {
             "outlet_code":         from_outlet,
             "to_outlet":           to_outlet,
@@ -761,8 +780,8 @@ def stock_transfer_view(request, pk=None):
             "items":               processed_items,
             "is_verified":         "Draft",
             "remarks":             remarks,          # ← NEW
-            "hospital_code":       hospital_code,
-            "branch_code":         branch_code,
+            "hospital_code":       actual_hosp or "SH001",
+            "branch_code":         actual_branch or "SHB001",
             "source_deducted":     True,
         }
 
@@ -876,10 +895,9 @@ def stock_transfer_action_view(request):
     except StockTransfer.DoesNotExist:
         return Response({"success": False, "error": "Transfer not found"}, status=404)
 
-    if (
-        str(getattr(obj, "hospital_code", "")) != str(hospital_code)
-        or str(getattr(obj, "branch_code",  "")) != str(branch_code)
-    ):
+    if hospital_code and hospital_code != "system" and str(getattr(obj, "hospital_code", "")) != str(hospital_code):
+        return Response({"success": False, "error": "Transfer not found"}, status=404)
+    if branch_code and branch_code != "system" and str(getattr(obj, "branch_code", "")) != str(branch_code):
         return Response({"success": False, "error": "Transfer not found"}, status=404)
 
     current_status = str(getattr(obj, "is_verified", ""))
@@ -959,23 +977,32 @@ def stock_transfer_action_view(request):
 
             # Find source stock from candidates
             source = None
-            for s in candidate_stocks:
-                if (
-                    str(getattr(s, "hospital_code", "")) != str(hospital_code)
-                    or str(getattr(s, "branch_code",  "")) != str(branch_code)
-                ):
-                    continue
-                if stock_id and str(getattr(s, "stock_id", "")) == stock_id:
-                    source = s
-                    break
-                row_outlet = str(getattr(s, "outlet_code", "") or "")
-                if (
-                    str(getattr(s, "item_id",      "")) == item_id
-                    and str(getattr(s, "batch_number", "")).strip() == batch_number
-                    and row_outlet == from_outlet
-                ):
-                    source = s
-                    break
+            # 1. Primary match: exact stock_id
+            if stock_id:
+                for s in candidate_stocks:
+                    if hospital_code and hospital_code != "system" and str(getattr(s, "hospital_code", "")) != str(hospital_code):
+                        continue
+                    if branch_code and branch_code != "system" and str(getattr(s, "branch_code", "")) != str(branch_code):
+                        continue
+                    if str(getattr(s, "stock_id", "")) == stock_id:
+                        source = s
+                        break
+
+            # 2. Fallback match: item_id + batch_number + outlet
+            if source is None:
+                for s in candidate_stocks:
+                    if hospital_code and hospital_code != "system" and str(getattr(s, "hospital_code", "")) != str(hospital_code):
+                        continue
+                    if branch_code and branch_code != "system" and str(getattr(s, "branch_code", "")) != str(branch_code):
+                        continue
+                    row_outlet = str(getattr(s, "outlet_code", "") or "")
+                    if (
+                        str(getattr(s, "item_id", "")) == item_id
+                        and str(getattr(s, "batch_number", "")).strip() == batch_number
+                        and row_outlet == from_outlet
+                    ):
+                        source = s
+                        break
 
             if source is None:
                 errors.append(
