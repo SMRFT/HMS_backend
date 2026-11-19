@@ -973,36 +973,230 @@ def discount_bills_api(request):
 def bill_cancellation_register_api(request):
     """
     Dedicated Bill Cancellation Register API.
-    Audit log of cancelled invoices, refunded receipts, and void vouchers.
+    Audit log of cancelled invoices, refunded receipts, and void vouchers across
+    Pharmacy, Investigations, IP Billing, Consultation Refunds, and Advance Refunds.
     """
+    client = None
     try:
         data = request.data if request.method == "POST" else request.query_params
+        from_f = data.get("from_date") or data.get("start_date")
+        to_f = data.get("to_date") or data.get("end_date")
+
+        f_date = parse_date(from_f) if from_f else None
+        t_date = parse_date(to_f, is_end=True) if to_f else None
+
         client, db, g_db = get_db()
-        try:
-            cancels = list(db["hospital_billing"].find({
-                "$or": [{"status": "Cancelled"}, {"is_cancelled": True}]
-            }, {"bill_number": 1, "uhid": 1, "patient_name": 1, "total_fees": 1, "cancellation_reason": 1, "cancelled_date": 1, "cancelled_by": 1}))
-            
-            rows = []
-            for c in cancels:
-                rows.append({
-                    "bill_no": c.get("bill_number"),
-                    "uhid": c.get("uhid"),
-                    "patient_name": c.get("patient_name") or "Patient",
-                    "amount": clean_num(c.get("total_fees")),
-                    "reason": c.get("cancellation_reason") or "Cancelled by operator",
-                    "cancelled_by": c.get("cancelled_by") or "STAFF",
-                    "date": format_ist_date(c.get("cancelled_date"))
-                })
-                
-            return Response({
-                "success": True,
-                "report_title": "Bill Cancellation Register",
-                "count": len(rows),
-                "total_cancelled_amount": round(sum(r["amount"] for r in rows), 2),
-                "data": rows
-            }, status=status.HTTP_200_OK)
-        finally:
-            client.close()
+
+        def make_date_clauses(date_fields):
+            if not f_date and not t_date:
+                return []
+            clauses = []
+            if f_date and t_date:
+                f_utc = f_date - timedelta(hours=5, minutes=30)
+                t_utc = t_date - timedelta(hours=5, minutes=30)
+                f_str = f_date.strftime("%Y-%m-%d")
+                t_str = t_date.strftime("%Y-%m-%d")
+                for f in date_fields:
+                    clauses.append({f: {"$gte": f_utc, "$lte": t_utc}})
+                    clauses.append({f: {"$gte": f_str, "$lte": t_str + " 23:59:59"}})
+            elif f_date:
+                f_utc = f_date - timedelta(hours=5, minutes=30)
+                f_str = f_date.strftime("%Y-%m-%d")
+                for f in date_fields:
+                    clauses.append({f: {"$gte": f_utc}})
+                    clauses.append({f: {"$gte": f_str}})
+            elif t_date:
+                t_utc = t_date - timedelta(hours=5, minutes=30)
+                t_str = t_date.strftime("%Y-%m-%d")
+                for f in date_fields:
+                    clauses.append({f: {"$lte": t_utc}})
+                    clauses.append({f: {"$lte": t_str + " 23:59:59"}})
+            return clauses
+
+        rows = []
+        uhid_set = set()
+
+        # 1. Pharmacy Cancelled Bills & Estimates
+        ph_date_clauses = make_date_clauses(["cancelled_date", "bill_date", "created_date"])
+        q_ph = {
+            "$or": [{"billing_status": "Cancelled"}, {"status": "Cancelled"}, {"is_cancelled": True}]
+        }
+        if ph_date_clauses:
+            q_ph = {"$and": [q_ph, {"$or": ph_date_clauses}]}
+
+        for p in db["hospital_pharmacybilling"].find(q_ph):
+            amt = clean_num(p.get("total_amount") or p.get("net_amount"))
+            dt = p.get("cancelled_date") or p.get("bill_date") or p.get("created_date")
+            bno = p.get("bill_no") or p.get("estimate_no") or str(p.get("Bill_id") or "")
+            u = str(p.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "Pharmacy",
+                "mr_no": u or "-",
+                "patient_name": p.get("patientname") or p.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": p.get("cancelled_by") or p.get("deleted_by") or p.get("created_by") or "Staff",
+                "reason": p.get("cancel_reason") or p.get("edit_reason") or p.get("delete_reason") or "Cancelled Pharmacy Bill"
+            })
+
+        # 2. Investigation Cancelled Bills
+        inv_date_clauses = make_date_clauses(["cancelled_date", "date", "created_date"])
+        q_inv = {
+            "$or": [{"status": "Cancelled"}, {"billing_status": "Cancelled"}, {"is_cancelled": True}]
+        }
+        if inv_date_clauses:
+            q_inv = {"$and": [q_inv, {"$or": inv_date_clauses}]}
+
+        for inv in db["hospital_investbilling"].find(q_inv):
+            amt = clean_num(inv.get("total_amount") or inv.get("net_amount") or inv.get("final_amount"))
+            dt = inv.get("cancelled_date") or inv.get("date") or inv.get("created_date")
+            bno = inv.get("bill_no") or inv.get("bill_number") or str(inv.get("_id"))
+            u = str(inv.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "Investigation",
+                "mr_no": u or "-",
+                "patient_name": inv.get("patient_name") or inv.get("patientName") or "",
+                "amount": amt,
+                "cancelled_by": inv.get("cancelled_by") or "Supervisor",
+                "reason": inv.get("cancellation_reason") or inv.get("remarks") or "Investigation Cancelled"
+            })
+
+        # 3. Investigation Refunds (Lab, USG, Radiology)
+        ir_date_clauses = make_date_clauses(["refundBillDate", "paid_date", "created_date"])
+        q_ir = {"$or": ir_date_clauses} if ir_date_clauses else {}
+        for ir in db["hospital_investrefund"].find(q_ir):
+            amt = clean_num(ir.get("refund_finalPrice") or ir.get("refund_amount") or ir.get("amount"))
+            dt = ir.get("refundBillDate") or ir.get("paid_date") or ir.get("created_date")
+            bno = ir.get("refundBillNo") or ir.get("investBillNo") or str(ir.get("_id"))
+            u = str(ir.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": f"Refund ({ir.get('billTypeNo') or 'Investigation'})",
+                "mr_no": u or "-",
+                "patient_name": ir.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": ir.get("CashierID") or ir.get("created_by") or "Cashier",
+                "reason": ir.get("refundRemarks") or ir.get("remarks") or "Investigation Refund"
+            })
+
+        # 4. General / OP Consultation Refunds
+        ref_date_clauses = make_date_clauses(["refund_date", "paid_date", "created_date"])
+        q_ref = {"$or": ref_date_clauses} if ref_date_clauses else {}
+        for ref in db["hospital_refund"].find(q_ref):
+            amt = clean_num(ref.get("refund_amount") or ref.get("amount"))
+            dt = ref.get("refund_date") or ref.get("paid_date") or ref.get("created_date")
+            bno = ref.get("refund_bill_no") or ref.get("bill_no") or str(ref.get("_id"))
+            u = str(ref.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "OP Refund",
+                "mr_no": u or "-",
+                "patient_name": ref.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": ref.get("CashierID") or ref.get("created_by") or "Cashier",
+                "reason": ref.get("remarks") or "Consultation / Service Refund"
+            })
+
+        # 5. IP Advance Refunds
+        ar_date_clauses = make_date_clauses(["refund_date", "created_date"])
+        q_ar = {"$or": ar_date_clauses} if ar_date_clauses else {}
+        for ar in db["hospital_ipadvance_refund"].find(q_ar):
+            amt = clean_num(ar.get("refund_amount") or ar.get("advance_amount"))
+            dt = ar.get("refund_date") or ar.get("created_date")
+            bno = ar.get("refund_bill_no") or ar.get("bill_no") or str(ar.get("_id"))
+            u = str(ar.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "IP Advance Refund",
+                "mr_no": u or "-",
+                "patient_name": ar.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": ar.get("created_by") or "Cashier",
+                "reason": ar.get("remarks") or "IP Advance Refund"
+            })
+
+        # 6. Legacy / Other Hospital Billing
+        leg_date_clauses = make_date_clauses(["cancelled_date", "created_date"])
+        q_leg = {"$or": [{"status": "Cancelled"}, {"is_cancelled": True}]}
+        if leg_date_clauses:
+            q_leg = {"$and": [q_leg, {"$or": leg_date_clauses}]}
+        for c in db["hospital_billing"].find(q_leg):
+            amt = clean_num(c.get("total_fees") or c.get("amount"))
+            dt = c.get("cancelled_date") or c.get("created_date")
+            bno = c.get("bill_number") or c.get("bill_no") or str(c.get("_id"))
+            u = str(c.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "Hospital Billing",
+                "mr_no": u or "-",
+                "patient_name": c.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": c.get("cancelled_by") or "Staff",
+                "reason": c.get("cancellation_reason") or "Cancelled by operator"
+            })
+
+        # Enrich missing patient names
+        if uhid_set:
+            patient_name_map = {}
+            for p in db["hospital_patient"].find({"uhid": {"$in": list(uhid_set)}}, {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1}):
+                fn = (p.get("firstName") or "").strip()
+                ln = (p.get("lastName") or "").strip()
+                nm = " ".join([x for x in [fn, ln] if x]).strip() or p.get("patient_name") or ""
+                patient_name_map[str(p.get("uhid")).strip()] = nm
+            for r in rows:
+                if not r["patient_name"] and r["mr_no"] in patient_name_map:
+                    r["patient_name"] = patient_name_map[r["mr_no"]]
+                if not r["patient_name"]:
+                    r["patient_name"] = "Patient"
+
+        # Sort by date descending
+        rows.sort(key=lambda x: str(x.get("date_raw") or ""), reverse=True)
+        for r in rows:
+            r.pop("date_raw", None)
+
+        total_val = round(sum(r["amount"] for r in rows), 2)
+
+        return Response({
+            "success": True,
+            "report_title": "Bill Cancellation Register",
+            "count": len(rows),
+            "total_cancelled_amount": total_val,
+            "data": rows,
+            "summary": {
+                "total_count": len(rows),
+                "total_cancelled_amount": total_val
+            }
+        }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass

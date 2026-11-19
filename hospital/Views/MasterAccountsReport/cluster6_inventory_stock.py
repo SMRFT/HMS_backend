@@ -200,8 +200,21 @@ def sales_return_report_api(request):
         if outlet_code and outlet_code.lower() != "all":
             q["outlet_code"] = outlet_code
 
-        # Only display records with status "Paid"
-        q["status"] = {"$regex": "^paid$", "$options": "i"}
+        # Status filter (default includes all valid returns; if explicitly requested)
+        status_filter = data.get("status")
+        if status_filter and status_filter.lower() == "paid":
+            q["$or"] = q.get("$or", []) + [
+                {"status": {"$regex": "^paid$", "$options": "i"}},
+                {"status": None},
+                {"status": {"$exists": False}},
+                {"status": ""},
+                {"status": "Completed"}
+            ]
+        elif status_filter and status_filter.lower() == "pending":
+            q["status"] = {"$regex": "^pending$", "$options": "i"}
+        else:
+            # Exclude only cancelled if any
+            q["status"] = {"$ne": "Cancelled"}
 
         returns_list = list(db["hospital_salesreturn"].find(q))
         
@@ -270,7 +283,7 @@ def sales_return_report_api(request):
                 "amount": ret_amt,
                 "payment_type": pmode,
                 "pharmacist_id": r.get("pharmacist_id") or r.get("created_by") or "",
-                "status": r.get("status") or "Completed",
+                "status": r.get("status") or "Paid",
                 "outlet_code": r.get("outlet_code") or "OLET002",
                 "items_count": len(particulars),
                 "medicine_particulars": particulars
