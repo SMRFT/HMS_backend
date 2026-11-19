@@ -2873,6 +2873,7 @@ def get_mainblock_pendingbills(request):
         # ✅ 2. INVESTIGATION BILLING (payment_method: 'Cash' alone)
         # =========================================================
         invest_query = build_module_query("paymentStatus", status_inv, "investBillDate")
+        invest_query["$and"].append({"is_active": True})
         invest_docs = list(invest_col.find(invest_query).sort("investBillDate", -1).limit(200 if not date_query else 500))
 
         for inv in invest_docs:

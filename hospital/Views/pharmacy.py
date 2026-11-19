@@ -113,9 +113,21 @@ def resolve_request_outlet(request, data=None):
 def get_pharmacy_stock(request):
     try:
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
-        hospital_code = data.get("auth-hospital-code") or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
-        branch_code   = data.get("auth-branch-code") or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-        outlet_code   = resolve_request_outlet(request, data)
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
+            or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
+            or "SH001"
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
+            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
+            or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
+            or "SHB001"
+        )
+        outlet_code = resolve_request_outlet(request, data) or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None) or "OLET001"
         if isinstance(outlet_code, (list, tuple)):
             if len(outlet_code) == 1:
                 outlet_code = outlet_code[0]
@@ -165,7 +177,7 @@ def get_pharmacy_stock(request):
                 {
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
-                    "item_name": {"$regex": f"^{escaped_q}", "$options": "i"},
+                    "item_name": re.compile(f"^{escaped_q}", re.IGNORECASE),
                     "is_active": True,
                     "is_blocked": False
                 },
@@ -178,7 +190,20 @@ def get_pharmacy_stock(request):
                     {
                         "hospital_code": hospital_code,
                         "branch_code": branch_code,
-                        "item_name": {"$regex": f"(?:^|\\s){escaped_q}", "$options": "i"},
+                        "item_name": re.compile(f"(?:^|\\s){escaped_q}", re.IGNORECASE),
+                        "is_active": True,
+                        "is_blocked": False
+                    },
+                    {"item_id": 1, "item_name": 1, "_id": 0}
+                ).sort("item_name", 1).limit(60))
+
+            # Fallback: substring match anywhere
+            if not search_items:
+                search_items = list(mongo_db.hospital_pharmacyitem.find(
+                    {
+                        "hospital_code": hospital_code,
+                        "branch_code": branch_code,
+                        "item_name": re.compile(escaped_q, re.IGNORECASE),
                         "is_active": True,
                         "is_blocked": False
                     },
@@ -747,6 +772,11 @@ def sanitize_medicines(medicines):
             clean_item["total"] = float(med.get("total"))
         if med_is_consumable:
             clean_item["is_consumable_items"] = True
+        if med.get("dispatched_qty") is not None:
+            try:
+                clean_item["dispatched_qty"] = float(med.get("dispatched_qty"))
+            except Exception:
+                clean_item["dispatched_qty"] = med.get("dispatched_qty")
 
         clean.append(clean_item)
 
@@ -3926,30 +3956,69 @@ def finalize_bill(request):
         # =====================================================
         # ✅ FETCH BILL
         # =====================================================
-        try:
-            b_id_int = int(Bill_id)
-        except (ValueError, TypeError):
-            b_id_int = None
-        id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
+        bill = None
 
-        bill_query = {
-            "Bill_id":       id_clause,
-            "hospital_code": hospital_code,
-            "branch_code":   branch_code,
-        }
-        if outlet_code:
-            if isinstance(outlet_code, (list, tuple)):
-                bill_query["outlet_code"] = {"$in": list(outlet_code)}
-            else:
-                bill_query["outlet_code"] = outlet_code
+        # 1. Exact lookup by MongoDB _id (avoids collision if duplicate Bill_id exists)
+        mongo_id = data.get("_id") or data.get("record_id") or data.get("mongo_id")
+        if mongo_id:
+            try:
+                from bson import ObjectId
+                m_str = str(mongo_id).strip()
+                if ObjectId.is_valid(m_str):
+                    bill = bill_collection.find_one({"_id": ObjectId(m_str)})
+            except Exception:
+                pass
 
-        bill = bill_collection.find_one(bill_query)
         if not bill:
-            bill = bill_collection.find_one({
+            try:
+                b_id_int = int(Bill_id)
+            except (ValueError, TypeError):
+                b_id_int = None
+            id_clause = {"$in": [b_id_int, str(Bill_id)]} if b_id_int is not None else str(Bill_id)
+
+            bill_query = {
                 "Bill_id":       id_clause,
                 "hospital_code": hospital_code,
                 "branch_code":   branch_code,
-            })
+            }
+            if outlet_code:
+                if isinstance(outlet_code, (list, tuple)):
+                    bill_query["outlet_code"] = {"$in": list(outlet_code)}
+                else:
+                    bill_query["outlet_code"] = outlet_code
+
+            # 2. Prioritize currently active ("Pending" or "Processing") bill
+            active_q = dict(bill_query)
+            active_q["billing_status"] = {"$in": ["Pending", "Processing"]}
+            if data.get("is_ward_request"):
+                active_q["is_ward_request"] = True
+            if data.get("uhid"):
+                active_q["uhid"] = str(data.get("uhid")).strip()
+
+            bill = bill_collection.find_one(active_q, sort=[("created_date", -1)])
+
+            # 3. If no active pending bill found with outlet match, check across outlets with status active
+            if not bill:
+                fallback_active_q = {
+                    "Bill_id":       id_clause,
+                    "hospital_code": hospital_code,
+                    "branch_code":   branch_code,
+                    "billing_status": {"$in": ["Pending", "Processing"]}
+                }
+                if data.get("uhid"):
+                    fallback_active_q["uhid"] = str(data.get("uhid")).strip()
+                bill = bill_collection.find_one(fallback_active_q, sort=[("created_date", -1)])
+
+            # 4. Standard fallback
+            if not bill:
+                bill = bill_collection.find_one(bill_query, sort=[("created_date", -1)])
+
+            if not bill:
+                bill = bill_collection.find_one({
+                    "Bill_id":       id_clause,
+                    "hospital_code": hospital_code,
+                    "branch_code":   branch_code,
+                }, sort=[("created_date", -1)])
 
         if not bill:
             return Response(
@@ -4183,7 +4252,9 @@ def finalize_bill(request):
                 if "quantity" in u_item:
                     del u_item["quantity"]
                 u_item["dispatched_qty"] = new_disp     # Actual cumulative dispatched quantity
-                u_item["pending_qty"] = pending_qty     # Remaining quantity
+                u_item.pop("pending_qty", None)
+                u_item.pop("requested_qty", None)
+                u_item.pop("last_billed_qty", None)
                 updated_orig_meds.append(u_item)
 
         # =====================================================
@@ -4460,14 +4531,90 @@ def finalize_bill(request):
         # Sanitize medicines so ALL normal billing fields are stored (taxable_value, product_value, CGST, SGST, discount, total, etc.)
         sanitized_meds = sanitize_medicines(medicines_to_use)
 
+        if is_ward:
+            # Build lookup of billed items from sanitized_meds
+            billed_map = {}
+            for sm in sanitized_meds:
+                m_iid = sm.get("item_id")
+                if m_iid is not None:
+                    billed_map[str(m_iid)] = sm
+                    try:
+                        billed_map[int(m_iid)] = sm
+                    except Exception:
+                        pass
+
+            final_particulars = []
+            handled_iids = set()
+
+            for orig_m in orig_particulars:
+                if not isinstance(orig_m, dict):
+                    continue
+                m_iid = orig_m.get("item_id")
+                handled_iids.add(str(m_iid))
+                try:
+                    handled_iids.add(int(m_iid))
+                except Exception:
+                    pass
+
+                orig_req_qty = float(orig_m.get("requested_qty") or orig_m.get("qty") or orig_m.get("quantity") or 0)
+                prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
+
+                billed_sm = billed_map.get(m_iid) or billed_map.get(str(m_iid))
+                billed_qty = float(billed_sm.get("qty", 0)) if billed_sm else 0.0
+
+                new_disp = min(orig_req_qty, prev_disp + billed_qty) if orig_req_qty > 0 else (prev_disp + billed_qty)
+                pending_qty = max(0.0, orig_req_qty - new_disp)
+
+                if billed_sm:
+                    # Item was billed: copy full billing fields (pricing, batch, tax) and set quantities
+                    item_entry = dict(billed_sm)
+                    item_entry["qty"] = orig_req_qty if orig_req_qty > 0 else billed_qty
+                    item_entry["dispatched_qty"] = new_disp
+                else:
+                    # Item was NOT billed in this transaction: preserve original request item with updated dispatch
+                    item_entry = dict(orig_m)
+                    item_entry["qty"] = orig_req_qty
+                    item_entry["dispatched_qty"] = prev_disp
+
+                # Ensure unwanted intermediate fields are not stored
+                item_entry.pop("requested_qty", None)
+                item_entry.pop("pending_qty", None)
+                item_entry.pop("last_billed_qty", None)
+
+                final_particulars.append(item_entry)
+
+            # Also include any newly added items (e.g. substitutes or additional items) not in orig_particulars
+            for sm in sanitized_meds:
+                sm_iid = sm.get("item_id")
+                if sm_iid not in handled_iids and str(sm_iid) not in handled_iids:
+                    item_entry = dict(sm)
+                    b_qty = float(sm.get("qty", 0))
+                    item_entry["qty"] = b_qty
+                    item_entry["dispatched_qty"] = b_qty
+                    item_entry.pop("requested_qty", None)
+                    item_entry.pop("pending_qty", None)
+                    item_entry.pop("last_billed_qty", None)
+                    final_particulars.append(item_entry)
+
+            set_payload["medicine_particulars"] = final_particulars
+            set_payload["billing_status"]       = "Billed" if all_items_fully_dispatched else "Processing"
+            set_payload["is_dispatched"]        = True if all_items_fully_dispatched else False
+        else:
+            for sm in sanitized_meds:
+                b_qty = float(sm.get("qty", 0))
+                sm["dispatched_qty"] = b_qty
+                sm.pop("requested_qty", None)
+                sm.pop("pending_qty", None)
+                sm.pop("last_billed_qty", None)
+            set_payload["medicine_particulars"] = sanitized_meds
+            set_payload["billing_status"]       = "Billed"
+            set_payload["is_dispatched"]        = True
+
         set_payload["bill_no"]              = new_bill_no
         set_payload["bill_date"]            = bill_date
-        set_payload["billing_status"]       = "Billed"
         set_payload["billed_id"]            = employee_id
-        set_payload["is_dispatched"]        = True
         set_payload["lastmodified_date"]    = now_ts
         set_payload["lastmodified_by"]      = employee_id
-        set_payload["medicine_particulars"] = sanitized_meds
         set_payload["total_amount"]         = total_amount_to_use
         set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
         if resolved_p_name:
@@ -4501,7 +4648,7 @@ def finalize_bill(request):
 
         try:
             PharmacyBilling.objects.filter(Bill_id=int(bill.get("Bill_id"))).update(
-                billing_status="Billed",
+                billing_status=set_payload.get("billing_status", "Billed"),
                 billed_id=employee_id,
                 bill_no=new_bill_no,
                 bill_date=bill_date,
