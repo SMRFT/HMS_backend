@@ -968,6 +968,57 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
     uhid = str(doc.get("uhid") or "").strip()
     ip_number = str(doc.get("ip_number") or "").strip()
 
+    # Pre-resolve admission if ip_number exists
+    adm = (adm_map.get(ip_number) if adm_map else None) if ip_number else None
+    if not adm and ip_number:
+        try:
+            _, db = get_hms_db()
+            adm = db["hospital_admission"].find_one({"ipNumber": ip_number})
+        except Exception:
+            adm = None
+
+    adm_str, current_room = _extract_adm_room_and_date(adm)
+
+    adm_cust_raw = (adm.get("customer_type") or adm.get("patient_type") or "") if adm else ""
+    bill_is_ins = bool(doc.get("is_insurance_bill", False)) or ("INSURANCE" in str(adm_cust_raw).upper())
+    bill_cust_type = str(doc.get("customer_type") or adm_cust_raw or ("INSURANCE" if bill_is_ins else "GENERAL")).strip()
+
+    raw_comp = (adm.get("insurance_company") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
+    company_name_p = ""
+    if raw_comp and bill_is_ins:
+        if ins_map and str(raw_comp) in ins_map:
+            company_name_p = ins_map[str(raw_comp)]
+        else:
+            try:
+                _, db_conn = get_hms_db()
+                ins_doc = db_conn["hospital_insuranceprovider"].find_one({
+                    "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
+                })
+                company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
+            except Exception:
+                company_name_p = str(raw_comp)
+
+    eff_claim = doc.get("claim_number") or ""
+    eff_id_card = doc.get("id_card_number") or ""
+    eff_company = (doc.get("company_name") or company_name_p or str(raw_comp)) if bill_is_ins else ""
+
+    # Discharge date resolution
+    disch_dt = (
+        doc.get("discharge_date") or
+        doc.get("dischargeDateTime") or
+        (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
+        doc.get("bill_date")
+    )
+    disch_str = ""
+    if isinstance(disch_dt, _datetime):
+        ist_d = _to_ist_dt(disch_dt)
+        disch_str = ist_d.strftime("%d-%m-%Y") if ist_d else disch_dt.strftime("%d-%m-%Y")
+    elif isinstance(disch_dt, _date):
+        disch_str = disch_dt.strftime("%d-%m-%Y")
+    elif isinstance(disch_dt, str) and disch_dt:
+        parsed_s = _parse_dt(disch_dt)
+        disch_str = parsed_s.strftime("%d-%m-%Y") if parsed_s else disch_dt[:10]
+
     patient_details = {}
     if uhid:
         p = patient_map.get(uhid) if patient_map else None
@@ -982,16 +1033,6 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             addr_parts = [p.get("permanent_address"), p.get("area"), p.get("city"), p.get("state"), p.get("zipcode")]
             full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
 
-            adm = (adm_map.get(ip_number) if adm_map else None) if ip_number else None
-            if not adm and ip_number:
-                try:
-                    _, db = get_hms_db()
-                    adm = db["hospital_admission"].find_one({"ipNumber": ip_number})
-                except Exception:
-                    adm = None
-
-            adm_str, current_room = _extract_adm_room_and_date(adm)
-
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
             if emp_map and doc_id in emp_map:
                 doc_name = emp_map[doc_id]
@@ -1003,49 +1044,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 if not dept_name and adm:
                     dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
-            target_b = locals().get("doc") if "doc" in locals() else locals().get("obj")
-            disch_dt = (
-                (target_b.get("discharge_date") if isinstance(target_b, dict) else getattr(target_b, "discharge_date", None)) or
-                (target_b.get("dischargeDateTime") if isinstance(target_b, dict) else getattr(target_b, "dischargeDateTime", None)) or
-                (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
-                (target_b.get("bill_date") if isinstance(target_b, dict) else getattr(target_b, "bill_date", None))
-            ) if target_b else (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None)
-            disch_str = ""
-            if isinstance(disch_dt, _datetime):
-                ist_d = _to_ist_dt(disch_dt)
-                disch_str = ist_d.strftime("%d-%m-%Y") if ist_d else disch_dt.strftime("%d-%m-%Y")
-            elif isinstance(disch_dt, _date):
-                disch_str = disch_dt.strftime("%d-%m-%Y")
-            elif isinstance(disch_dt, str) and disch_dt:
-                parsed_s = _parse_dt(disch_dt)
-                disch_str = parsed_s.strftime("%d-%m-%Y") if parsed_s else disch_dt[:10]
-
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
-
-            adm_cust_raw = (adm.get("customer_type") or adm.get("patient_type") or "") if adm else ""
-            bill_is_ins = bool(doc.get("is_insurance_bill", False)) or ("INSURANCE" in str(adm_cust_raw).upper())
-            bill_cust_type = str(adm_cust_raw or doc.get("customer_type") or ("INSURANCE" if bill_is_ins else "GENERAL")).strip()
-
-            raw_comp = (adm.get("insurance_company") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
-            company_name_p = ""
-            if raw_comp and bill_is_ins:
-                if ins_map and str(raw_comp) in ins_map:
-                    company_name_p = ins_map[str(raw_comp)]
-                else:
-                    try:
-                        _, db_conn = get_hms_db()
-                        ins_doc = db_conn["hospital_insuranceprovider"].find_one({
-                            "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
-                        })
-                        company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
-                    except Exception:
-                        company_name_p = str(raw_comp)
-
-            # For print bill alone: resolve insurance details from member master if it is an insurance bill
-            eff_claim = doc.get("claim_number") or ""
-            eff_id_card = doc.get("id_card_number") or ""
-            eff_company = (doc.get("company_name") or company_name_p or str(raw_comp)) if bill_is_ins else ""
 
             if bill_is_ins and (not eff_claim or not eff_id_card or not eff_company):
                 p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() if p else ""
@@ -1943,7 +1943,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
         # ── 6. Update Cathlab Intent (hospital_cathlabintent) & hospital_itemmaster ──
         # Criteria: matching ONLY IP Number, is_approved: True, is_active: True, is_billed: False / != True
         # Update: hospital_cathlabintent.is_billed -> True
-        # Update: hospital_itemmaster.approved_quantity -> decremented using item_id
+        # Update: hospital_itemmaster.approved_quantity -> increased using item_id
         cathlab_ip_filter = []
         if ip_number:
             raw_ip = str(ip_number).strip()
@@ -2017,20 +2017,16 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                             try:
                                 db["hospital_itemmaster"].update_one(
                                     {"item_id": str(item_id).strip()},
-                                    {"$inc": {"approved_quantity": -qty_int}}
-                                )
-                                db["hospital_itemmaster"].update_one(
-                                    {"item_id": str(item_id).strip(), "approved_quantity": {"$lt": 0}},
-                                    {"$set": {"approved_quantity": 0}}
+                                    {"$inc": {"approved_quantity": qty_int}}
                                 )
                             except Exception as ex:
-                                logger.error(f"Error decrementing hospital_itemmaster approved_quantity for {item_id}: {ex}")
+                                logger.error(f"Error incrementing hospital_itemmaster approved_quantity for {item_id}: {ex}")
 
                             try:
                                 from hospital.Views.Stores.models import ItemMaster
                                 it_obj = ItemMaster.objects.filter(item_id=str(item_id).strip()).first()
                                 if it_obj:
-                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - qty_int)
+                                    it_obj.approved_quantity = int(it_obj.approved_quantity or 0) + qty_int
                                     it_obj.save()
                             except Exception:
                                 pass
@@ -4008,7 +4004,7 @@ def cancel_discharge_billing(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
-        # Revert cathlab intent is_billed if bill items had cathlab intent
+        # Revert cathlab intent is_billed and approved_quantity if bill items had cathlab intent
         for itm in billing.items or []:
             if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
                 obj_id_str = itm.get("bill_object_id")
@@ -4019,6 +4015,25 @@ def cancel_discharge_billing(request, pk):
                             {"_id": ObjectId(obj_id_str)},
                             {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
                         )
+                        c_item_id = itm.get("test_id") or itm.get("item_id")
+                        c_qty = int(_to_float(itm.get("quantity") or 0))
+                        if c_item_id and c_qty > 0:
+                            c_db["hospital_itemmaster"].update_one(
+                                {"item_id": str(c_item_id).strip()},
+                                {"$inc": {"approved_quantity": -c_qty}}
+                            )
+                            c_db["hospital_itemmaster"].update_one(
+                                {"item_id": str(c_item_id).strip(), "approved_quantity": {"$lt": 0}},
+                                {"$set": {"approved_quantity": 0}}
+                            )
+                            try:
+                                from hospital.Views.Stores.models import ItemMaster
+                                it_obj = ItemMaster.objects.filter(item_id=str(c_item_id).strip()).first()
+                                if it_obj:
+                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - c_qty)
+                                    it_obj.save()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
     except Exception as e:
@@ -4075,7 +4090,7 @@ def convert_bill_to_insurance(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
-        # Revert cathlab intent is_billed if bill items had cathlab intent
+        # Revert cathlab intent is_billed and approved_quantity if bill items had cathlab intent
         for itm in billing.items or []:
             if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
                 obj_id_str = itm.get("bill_object_id")
@@ -4086,6 +4101,25 @@ def convert_bill_to_insurance(request, pk):
                             {"_id": ObjectId(obj_id_str)},
                             {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
                         )
+                        c_item_id = itm.get("test_id") or itm.get("item_id")
+                        c_qty = int(_to_float(itm.get("quantity") or 0))
+                        if c_item_id and c_qty > 0:
+                            c_db["hospital_itemmaster"].update_one(
+                                {"item_id": str(c_item_id).strip()},
+                                {"$inc": {"approved_quantity": -c_qty}}
+                            )
+                            c_db["hospital_itemmaster"].update_one(
+                                {"item_id": str(c_item_id).strip(), "approved_quantity": {"$lt": 0}},
+                                {"$set": {"approved_quantity": 0}}
+                            )
+                            try:
+                                from hospital.Views.Stores.models import ItemMaster
+                                it_obj = ItemMaster.objects.filter(item_id=str(c_item_id).strip()).first()
+                                if it_obj:
+                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - c_qty)
+                                    it_obj.save()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
     except Exception as e:
