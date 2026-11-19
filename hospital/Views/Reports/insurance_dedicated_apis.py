@@ -226,6 +226,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
             "$and": [
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
+                {"billing_status": {"$nin": ["Paid", "Completed", "Cancelled", "deleted"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
@@ -272,6 +273,10 @@ def patient_wise_pharmacy_ip_bill_api(request):
             if adm_day_start and b_dt_check:
                 if hasattr(b_dt_check, 'date') and b_dt_check.date() < adm_day_start.date():
                     continue
+
+            b_status = str(b.get('billing_status') or '').strip()
+            if b_status in ('Paid', 'Completed'):
+                continue
 
             b_mode = str(b.get('billing_mode') or '').upper()
             b_pmode = str(b.get('payment_mode') or '').upper()
@@ -1962,8 +1967,11 @@ def medicine_abstract_api(request):
             bill_query_or.append({"patientname": patient_name})
 
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
-            "$or": bill_query_or,
-            "is_ward_request": {"$ne": True}
+            "$and": [
+                {"$or": bill_query_or},
+                {"is_ward_request": {"$ne": True}},
+                {"billing_status": {"$nin": ["Paid", "Completed", "Cancelled", "deleted"]}}
+            ]
         }).sort("created_date", 1))
 
         # Helper to process bills with date filter
@@ -1973,6 +1981,10 @@ def medicine_abstract_api(request):
             for b in raw_bills:
                 b_no = b.get('bill_no')
                 if not b_no or b_no in seen_bids:
+                    continue
+
+                b_status = str(b.get('billing_status') or '').strip()
+                if b_status in ('Paid', 'Completed'):
                     continue
 
                 b_mode = str(b.get('billing_mode') or '').upper()
