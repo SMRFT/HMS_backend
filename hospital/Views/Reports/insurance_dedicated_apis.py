@@ -4,7 +4,7 @@ from rest_framework import status
 from pyauth.auth import HasRoleAndDataPermission
 from pymongo import MongoClient
 from bson import Decimal128, ObjectId
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from collections import defaultdict
 import os
 import re
@@ -43,7 +43,7 @@ def get_db():
                 for line in f:
                     if line.startswith('GLOBAL_DB_HOST'):
                         mongo_uri = line.split('=', 1)[1].strip()
-    client = MongoClient(mongo_uri)
+    client = MongoClient(mongo_uri, connectTimeoutMS=20000, socketTimeoutMS=60000, serverSelectionTimeoutMS=20000)
     return client, client['HMS'], client['Global']
 
 
@@ -131,26 +131,57 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 active_r = room_details[-1].get('roomNo')
             room_no = active_r or adm_doc.get('roomNumber', '') or ''
 
+        admitted_date_str = ''
+        adm_dt = adm_doc.get('admissionDateTime') if adm_doc else None
+        if isinstance(adm_dt, datetime):
+            admitted_date_str = adm_dt.strftime("%d/%m/%Y")
+        elif adm_dt:
+            admitted_date_str = str(adm_dt)[:10]
+
+        discharge_date_str = ''
+        dis_dt = adm_doc.get('dischargeDateTime') if adm_doc else None
+        if isinstance(dis_dt, datetime):
+            discharge_date_str = dis_dt.strftime("%d/%m/%Y")
+        elif dis_dt:
+            discharge_date_str = str(dis_dt)[:10]
+
         patient_info = {
             "uhid": target_uhid,
             "op_number": target_uhid,
             "ip_number": target_ip,
             "patient_name": patient_name,
             "age_gender": f"{age_val}/{str(gender_val).upper()}",
-            "admitted_date": str(adm_doc.get('admissionDateTime', ''))[:10] if adm_doc else '',
-            "discharge_date": str(adm_doc.get('dischargeDateTime', ''))[:10] if adm_doc else '',
+            "admitted_date": admitted_date_str,
+            "discharge_date": discharge_date_str,
             "room_no": room_no,
             "doctor_name": doc_name
         }
 
-        # 2. Find linked Ward Requests for this patient to map dispatched bill items accurately
+        # Resolve admission date boundary to prevent cross-admission or past historical contamination
+        adm_day_start = None
+        if isinstance(adm_dt, datetime):
+            adm_day_start = datetime.combine(adm_dt.date(), time.min)
+        elif adm_dt:
+            parsed_d = parse_date(str(adm_dt)[:10])
+            if parsed_d:
+                adm_day_start = datetime.combine(parsed_d.date(), time.min)
+
+        # 2. Find linked Ward Requests for this patient and admission
+        wr_query_or = [
+            {"inpatient_number": target_ip},
+            {"uhid": target_ip}
+        ]
+        if target_uhid:
+            if adm_day_start:
+                wr_query_or.extend([
+                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start}},
+                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}}
+                ])
+            else:
+                wr_query_or.append({"uhid": target_uhid})
+
         wr_docs = list(hms_db['hospital_pharmacybilling'].find({
-            "$or": [
-                {"uhid": target_uhid},
-                {"uhid": target_ip},
-                {"inpatient_number": target_ip},
-                {"inpatient_number": target_uhid}
-            ],
+            "$or": wr_query_or,
             "is_ward_request": True
         }))
 
@@ -163,40 +194,67 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     wr_dispatch_map[bno] = item_ids
 
         # 3. Query Dispatched / Direct IP pharmacy bills
-        all_adms = list(hms_db['hospital_admission'].find({
-            "$or": [
-                {"uhid": target_uhid},
-                {"uhid": target_ip},
-                {"ipNumber": target_ip},
-                {"ipNumber": target_uhid}
-            ]
-        }))
-        all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
-        all_ips.add(target_ip)
-        all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
-        all_uhids.add(target_uhid)
-
         bill_query_or = [
-            {"uhid": {"$in": list(all_uhids)}},
-            {"inpatient_number": {"$in": list(all_ips)}}
+            {"inpatient_number": target_ip},
+            {"uhid": target_ip}
         ]
-        for ip in all_ips:
-            bill_query_or.append({"uhid": ip})
+        if target_uhid:
+            if adm_day_start:
+                bill_query_or.extend([
+                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start}},
+                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}},
+                    {"uhid": target_uhid, "bill_date": {"$gte": adm_day_start}},
+                    {"uhid": target_uhid, "bill_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}}
+                ])
+            else:
+                bill_query_or.append({"uhid": target_uhid})
+
         if wr_dispatch_map:
             bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
 
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
-            "$or": bill_query_or,
-            "is_ward_request": {"$ne": True}
+            "$and": [
+                {"$or": bill_query_or},
+                {"bill_no": {"$nin": [None, ""]}},
+                {
+                    "$or": [
+                        {"is_ward_request": {"$ne": True}},
+                        {"billing_status": "Billed"}
+                    ]
+                }
+            ]
         }).sort("created_date", 1))
 
-        # Filter to only IP CREDIT / IP mode bills
+        # Filter to IP, Credit, Insurance, and linked ward request bills
         ip_bills = []
+        seen_bill_nos = set()
         for b in raw_bills:
-            b_mode = str(b.get('billing_mode') or '').upper()
-            b_type = b.get('bill_type')
             b_no = b.get('bill_no')
-            if b_no in wr_dispatch_map or 'IP' in b_mode or b_type == 18:
+            if not b_no or b_no in seen_bill_nos:
+                continue
+
+            # Ensure bill date is not prior to admission date
+            b_dt_check = b.get('created_date') or b.get('bill_date')
+            if adm_day_start and b_dt_check:
+                if isinstance(b_dt_check, str):
+                    b_dt_check = parse_date(b_dt_check[:10])
+                if b_dt_check and hasattr(b_dt_check, 'date') and b_dt_check.date() < adm_day_start.date():
+                    continue
+
+            b_mode = str(b.get('billing_mode') or '').upper()
+            b_pmode = str(b.get('payment_mode') or '').upper()
+            b_type = b.get('bill_type')
+            b_ip = b.get('inpatient_number')
+            is_ins = b.get('is_insurance') or str(b.get('customer_type') or '').upper() == 'INSURANCE'
+            
+            if (b_no in wr_dispatch_map or 
+                'IP' in b_mode or 
+                'CREDIT' in b_mode or 
+                'CREDIT' in b_pmode or 
+                b_type == 18 or 
+                is_ins or 
+                (b_ip and b_ip == target_ip)):
+                seen_bill_nos.add(b_no)
                 ip_bills.append(b)
 
         if not ip_bills:
@@ -211,7 +269,14 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 "summary": {}
             }, status=status.HTTP_200_OK)
 
-        # Pre-cache all item master details and stock details (expiry, GST) for all items in ip_bills
+        # Fallback room_no if missing in admission doc
+        if not patient_info.get('room_no'):
+            for b in ip_bills:
+                if b.get('room_no'):
+                    patient_info['room_no'] = b.get('room_no')
+                    break
+
+        # Pre-cache all item master details and stock details (expiry, GST, prices) for all items in ip_bills
         all_item_ids = set()
         for b in ip_bills:
             for itm in (b.get('medicine_particulars') or b.get('items') or []):
@@ -225,20 +290,32 @@ def patient_wise_pharmacy_ip_bill_api(request):
         item_master_map = {}
         if all_item_ids:
             for doc in hms_db['hospital_pharmacyitem'].find(
-                {'item_id': {'$in': list(all_item_ids)}},
+                {'item_id': {'$in': list(all_item_ids) + [str(x) for x in all_item_ids]}},
                 {'item_id': 1, 'item_name': 1, 'hsn': 1, 'brand_name': 1}
             ):
-                item_master_map[doc['item_id']] = doc
+                try:
+                    item_master_map[int(doc['item_id'])] = doc
+                except Exception:
+                    pass
+                item_master_map[str(doc.get('item_id'))] = doc
 
         stock_map = {}
+        stock_item_fallback = {}
         if all_item_ids:
             for s in hms_db['hospital_pharmacystock'].find(
-                {'item_id': {'$in': list(all_item_ids)}},
-                {'item_id': 1, 'batch_number': 1, 'expiry_date': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1}
+                {'item_id': {'$in': list(all_item_ids) + [str(x) for x in all_item_ids]}},
+                {'item_id': 1, 'batch_number': 1, 'expiry_date': 1, 'CGST_Percentage': 1, 'SGST_Percentage': 1, 'mrp': 1, 'Selling_Price': 1}
             ):
-                k = (s.get('item_id'), str(s.get('batch_number') or '').strip())
+                try:
+                    iid_key = int(s.get('item_id'))
+                except (ValueError, TypeError):
+                    iid_key = s.get('item_id')
+                b_key = str(s.get('batch_number') or '').strip()
+                k = (iid_key, b_key)
                 if k not in stock_map or s.get('expiry_date'):
                     stock_map[k] = s
+                if iid_key not in stock_item_fallback or s.get('expiry_date'):
+                    stock_item_fallback[iid_key] = s
 
         bills_output = []
         all_flattened_items = []
@@ -293,17 +370,36 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 except (ValueError, TypeError):
                     it_id_int = None
 
-                im_doc = item_master_map.get(it_id_int, {})
+                im_doc = item_master_map.get(it_id_int) or item_master_map.get(str(it_id), {})
                 batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
-                stk_doc = stock_map.get((it_id_int, batch), {})
+                stk_doc = stock_map.get((it_id_int, batch))
+                stk_fallback = stock_item_fallback.get(it_id_int, {})
 
                 part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
-                qty = clean_num(itm.get('qty') or 1)
-                price = clean_num(itm.get('price') or 0)
-                calc_price = clean_num(itm.get('calculated_price') or (price * qty))
+                qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
 
-                # Expiry resolution from item, or stock batch
-                exp_raw = itm.get('expiry_date') or itm.get('expiry') or stk_doc.get('expiry_date')
+                raw_price = itm.get('price')
+                if raw_price is not None and str(raw_price).strip() != "":
+                    price = clean_num(raw_price)
+                elif stk_doc and stk_doc.get('Selling_Price') is not None:
+                    price = clean_num(stk_doc.get('Selling_Price'))
+                elif stk_fallback.get('Selling_Price') is not None:
+                    price = clean_num(stk_fallback.get('Selling_Price'))
+                elif stk_doc and stk_doc.get('mrp') is not None:
+                    price = clean_num(stk_doc.get('mrp'))
+                elif stk_fallback.get('mrp') is not None:
+                    price = clean_num(stk_fallback.get('mrp'))
+                else:
+                    price = 0.0
+
+                raw_calc = itm.get('calculated_price') or itm.get('total') or itm.get('amount')
+                if raw_calc is not None and str(raw_calc).strip() != "":
+                    calc_price = clean_num(raw_calc)
+                else:
+                    calc_price = round(price * qty, 2)
+
+                # Expiry resolution from item, or stock batch, or fallback
+                exp_raw = itm.get('expiry_date') or itm.get('expiry') or (stk_doc.get('expiry_date') if stk_doc else None) or stk_fallback.get('expiry_date')
                 exp_str = "-"
                 if isinstance(exp_raw, datetime):
                     exp_str = exp_raw.strftime("%m/%Y")
@@ -312,16 +408,35 @@ def patient_wise_pharmacy_ip_bill_api(request):
 
                 hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip() or "300490"
 
-                # In Hospital Pharmacy Bills: calculated_price is the taxable base amount
-                taxable = calc_price
+                # Check if item has explicitly stored taxable_value and total
+                stored_taxable = itm.get('taxable_value') or itm.get('product_value')
+                stored_cgst = itm.get('CGST_Amt')
+                stored_sgst = itm.get('SGST_Amt')
+                stored_total = itm.get('total') or itm.get('total_amount')
 
-                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or from stock / itm)
-                cgst_pct = clean_num(itm.get('cgst_pct') or stk_doc.get('CGST_Percentage') or 2.5)
-                sgst_pct = clean_num(itm.get('sgst_pct') or stk_doc.get('SGST_Percentage') or 2.5)
+                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or exact batch stock / itm)
+                cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or (stk_doc.get('CGST_Percentage') if stk_doc else None) or 2.5)
+                sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or (stk_doc.get('SGST_Percentage') if stk_doc else None) or 2.5)
+                tot_tax_pct = (cgst_pct + sgst_pct) / 100.0
 
-                cgst = round(taxable * (cgst_pct / 100.0), 2)
-                sgst = round(taxable * (sgst_pct / 100.0), 2)
-                item_amt = round(taxable + cgst + sgst, 2)
+                if stored_taxable is not None and stored_total is not None:
+                    taxable = round(clean_num(stored_taxable), 2)
+                    cgst = round(clean_num(stored_cgst) if stored_cgst is not None else (taxable * (cgst_pct / 100.0)), 2)
+                    sgst = round(clean_num(stored_sgst) if stored_sgst is not None else (taxable * (sgst_pct / 100.0)), 2)
+                    item_amt = round(clean_num(stored_total), 2)
+                else:
+                    # In Hospital Pharmacy MRP billing, calc_price is the tax-inclusive retail price
+                    # Back out the taxable base without double taxation
+                    if tot_tax_pct > 0:
+                        taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
+                        cgst = round(taxable * (cgst_pct / 100.0), 2)
+                        sgst = round(taxable * (sgst_pct / 100.0), 2)
+                        item_amt = calc_price
+                    else:
+                        taxable = calc_price
+                        cgst = 0.0
+                        sgst = 0.0
+                        item_amt = calc_price
 
                 b_taxable_tot += taxable
                 b_cgst_tot += cgst
@@ -367,23 +482,38 @@ def patient_wise_pharmacy_ip_bill_api(request):
             b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
             b_net_tot = round(b_net_tot, 2)
 
+            # Check for bill-level discount and stored net amount
+            b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
+            stored_net = clean_num(b.get('net_amount'))
+
+            # Net amount reflects any discount applied
+            if b_disc > 0:
+                bill_final_net = round(b_net_tot - b_disc, 2)
+            elif stored_net > 0:
+                bill_final_net = stored_net
+            else:
+                bill_final_net = b_net_tot
+
             tot_taxable_grand += b_taxable_tot
             tot_cgst_grand += b_cgst_tot
             tot_sgst_grand += b_sgst_tot
-            tot_net_grand += b_net_tot
+            tot_net_grand += bill_final_net
 
             bills_output.append({
                 "bill_no": b_no,
                 "bill_date": b_date_str,
+                "payment_mode": b.get('payment_mode') or "Credit",
+                "billing_mode": b.get('billing_mode') or "IP CREDIT",
                 "items": items_list,
                 "tax_summary": list(tax_slab_map.values()),
                 "taxable_amt": b_taxable_tot,
                 "cgst_amt": b_cgst_tot,
                 "sgst_amt": b_sgst_tot,
                 "total_gst": b_gst_tot,
-                "net_amount": b_net_tot,
+                "discount_amount": b_disc,
+                "net_amount": bill_final_net,
                 "bill_total": b_net_tot,
-                "bill_net": b_net_tot
+                "bill_net": bill_final_net
             })
 
         tot_taxable_grand = round(tot_taxable_grand, 2)

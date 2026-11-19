@@ -65,6 +65,7 @@ def get_vendor_map(hms_db):
             }
             v_map[vid] = v_info
             v_list.append(v_info)
+    v_list.sort(key=lambda x: str(x.get('name') or '').lower())
     return v_map, v_list
 
 def filter_grn_by_scope(grn, scope):
@@ -73,21 +74,24 @@ def filter_grn_by_scope(grn, scope):
     - 'OP PHARMACY': grn_number starting with 'OP/' or outlet_code == 'OLET002' / 'OLET004'
     - 'IP PHARMACY': grn_number starting with 'IP/' or outlet_code == 'OLET001' / 'OLET003'
     - 'DRUG PURCHASE': all drug purchase records
+    - 'ALL ...' or 'CONSOLIDATED': all drug purchase records across outlets
     """
-    if not scope or scope == 'DRUG PURCHASE' or scope == 'ALL':
+    if not scope:
+        return True
+    sc = str(scope).upper().strip()
+    if 'ALL' in sc or 'CONSOLIDATED' in sc or sc == 'DRUG PURCHASE':
         return True
     
     grn_no = str(grn.get('grn_number') or grn.get('draft_number') or '').upper()
     cat = str(grn.get('purchase_category') or '').upper()
     outlet = str(grn.get('outlet_code') or '').upper()
 
-    if scope == 'OP PHARMACY':
+    if 'OP' in sc:
         if grn_no.startswith('OP/') or 'OP' in cat or outlet in ['OLET002', 'OLET004']:
             return True
-        # If not IP specific, consider general drug records
         return not grn_no.startswith('IP/')
     
-    if scope == 'IP PHARMACY':
+    if 'IP' in sc:
         if grn_no.startswith('IP/') or 'IP' in cat or outlet in ['OLET001', 'OLET003']:
             return True
         return False
@@ -146,11 +150,11 @@ def get_drug_supplier_grn_report_data(hms_db, params):
     query = {"is_active": {"$ne": False}}
     grns = list(hms_db['hospital_grn'].find(query).sort("created_date", -1))
 
-    records = []
-    tot_taxable = 0.0
-    tot_cgst = 0.0
-    tot_sgst = 0.0
-    tot_net = 0.0
+    supplier_groups = {}
+    total_grns_count = 0
+    grand_taxable = 0.0
+    grand_tax = 0.0
+    grand_net = 0.0
     sno = 1
 
     for g in grns:
@@ -161,8 +165,8 @@ def get_drug_supplier_grn_report_data(hms_db, params):
 
         vid = str(g.get('vendor_id') or '').strip()
         v_info = v_map.get(vid, {})
-        v_name = v_info.get('name') or f"Vendor #{vid}"
-        v_gstin = v_info.get('gstin') or "33AAACH1234F1Z5"
+        v_name = v_info.get('name') or g.get('vendor_name') or f"Vendor #{vid}"
+        v_gstin = v_info.get('gstin') or g.get('vendor_gstin') or ""
 
         if vendor_filter and vendor_filter != 'all' and vid != vendor_filter:
             continue
@@ -176,69 +180,99 @@ def get_drug_supplier_grn_report_data(hms_db, params):
         taxable = clean_num(g.get('taxable_amount') or (clean_num(g.get('net_invoice_amount') or g.get('total_amount')) * 0.95))
         cgst = clean_num(g.get('cgst') or (taxable * 0.025))
         sgst = clean_num(g.get('sgst') or (taxable * 0.025))
+        tax_amt = cgst + sgst
         disc = clean_num(g.get('total_discount', 0))
-        net = clean_num(g.get('net_invoice_amount') or g.get('total_amount') or (taxable + cgst + sgst))
+        net = clean_num(g.get('net_invoice_amount') or g.get('total_amount') or (taxable + tax_amt))
 
         items_list = parse_items_json(g.get('items'))
+        item_qty = 0
+        for it in items_list:
+            if isinstance(it, dict):
+                item_qty += int(clean_num(it.get('quantity') or it.get('qty') or 1))
 
-        row = {
-            "sno": sno,
+        if search_q and search_q not in f"{grn_no} {inv_no} {v_name} {v_gstin} {vid}".lower():
+            continue
+
+        if vid not in supplier_groups:
+            supplier_groups[vid] = {
+                "sno": sno,
+                "vendor_id": vid,
+                "vendor_name": v_name,
+                "vendor_gstin": v_gstin,
+                "total_grns": 0,
+                "taxable_amount": 0.0,
+                "tax_amount": 0.0,
+                "total_discount": 0.0,
+                "total_amount": 0.0,
+                "net_amount": 0.0,
+                "total_items_qty": 0,
+                "grns": []
+            }
+            sno += 1
+
+        sg = supplier_groups[vid]
+        sg["total_grns"] += 1
+        sg["taxable_amount"] += taxable
+        sg["tax_amount"] += tax_amt
+        sg["total_discount"] += disc
+        sg["total_amount"] += net
+        sg["net_amount"] += net
+        sg["total_items_qty"] += item_qty
+
+        sg["grns"].append({
             "grn_number": grn_no,
+            "date": str(inv_dt)[:10],
             "invoice_no": inv_no,
             "invoice_date": str(inv_dt)[:10],
-            "vendor_id": vid,
-            "vendor_name": v_name,
-            "vendor_gstin": v_gstin,
-            "payment_mode": g.get('payment_mode') or 'Credit',
             "taxable_amount": round(taxable, 2),
             "cgst": round(cgst, 2),
             "sgst": round(sgst, 2),
-            "total_discount": round(disc, 2),
+            "tax_amount": round(tax_amt, 2),
+            "total_amount": round(net, 2),
             "net_amount": round(net, 2),
-            "item_count": len(items_list),
-            "payment_status": g.get('payment_status') or 'Pending',
-            "scope": scope
-        }
+            "items_count": len(items_list),
+            "items": items_list,
+            "payment_mode": g.get('payment_mode') or 'Credit',
+            "is_approved": g.get('status') == 'Approved' or bool(g.get('grn_number'))
+        })
 
-        if search_q and search_q not in f"{grn_no} {inv_no} {v_name} {v_gstin}".lower():
-            continue
+        total_grns_count += 1
+        grand_taxable += taxable
+        grand_tax += tax_amt
+        grand_net += net
 
-        tot_taxable += taxable
-        tot_cgst += cgst
-        tot_sgst += sgst
-        tot_net += net
-        records.append(row)
-        sno += 1
+    for sg in supplier_groups.values():
+        sg["taxable_amount"] = round(sg["taxable_amount"], 2)
+        sg["tax_amount"] = round(sg["tax_amount"], 2)
+        sg["total_discount"] = round(sg["total_discount"], 2)
+        sg["total_amount"] = round(sg["total_amount"], 2)
+        sg["net_amount"] = round(sg["net_amount"], 2)
+
+    suppliers_list = list(supplier_groups.values())
 
     columns = [
-        {"key": "sno", "label": "S/No", "width": "60px"},
-        {"key": "grn_number", "label": "GRN Number", "width": "140px"},
-        {"key": "invoice_no", "label": "Invoice No", "width": "130px"},
-        {"key": "invoice_date", "label": "Invoice Date", "width": "110px"},
-        {"key": "vendor_name", "label": "Drug Supplier (Vendor)", "width": "220px"},
-        {"key": "vendor_gstin", "label": "Vendor GSTIN", "width": "150px"},
-        {"key": "payment_mode", "label": "Payment Mode", "width": "120px"},
-        {"key": "taxable_amount", "label": "Taxable Value", "width": "120px", "align": "right"},
-        {"key": "cgst", "label": "CGST", "width": "100px", "align": "right"},
-        {"key": "sgst", "label": "SGST", "width": "100px", "align": "right"},
-        {"key": "total_discount", "label": "Discount", "width": "100px", "align": "right"},
-        {"key": "net_amount", "label": "Net Invoice Amount", "width": "140px", "align": "right"},
-        {"key": "payment_status", "label": "Status", "width": "100px"}
+        {"key": "vendor_name", "label": "Supplier / Vendor", "width": "240px"},
+        {"key": "total_grns", "label": "Total GRNs", "width": "110px", "align": "center"},
+        {"key": "taxable_amount", "label": "Taxable Amount", "width": "130px", "align": "right"},
+        {"key": "tax_amount", "label": "Tax Paid", "width": "110px", "align": "right"},
+        {"key": "total_amount", "label": "Total Invoice Amount", "width": "150px", "align": "right"},
+        {"key": "total_items_qty", "label": "Items Recd", "width": "110px", "align": "center"}
     ]
 
     summary = {
-        "total_grns": len(records),
-        "total_taxable_amount": round(tot_taxable, 2),
-        "total_tax_itc": round(tot_cgst + tot_sgst, 2),
-        "total_net_purchases": round(tot_net, 2)
+        "total_suppliers": len(suppliers_list),
+        "total_grns": total_grns_count,
+        "grand_taxable_amount": round(grand_taxable, 2),
+        "grand_tax_amount": round(grand_tax, 2),
+        "grand_total_amount": round(grand_net, 2)
     }
 
     return {
         "title": f"Supplier-Based GRN Report ({scope})",
         "columns": columns,
-        "data": records,
+        "data": suppliers_list,
         "summary": summary,
-        "vendors": v_list[:100]
+        "vendors": v_list
     }
 
 
@@ -1178,7 +1212,7 @@ def _handle_report_request(request, data_fetcher):
         res_data = data_fetcher(hms_db, params)
         if 'vendors' not in res_data or not res_data.get('vendors'):
             _, v_list = get_vendor_map(hms_db)
-            res_data['vendors'] = v_list[:200]
+            res_data['vendors'] = v_list
         
         res_data['departments'] = [
             {"id": "ALL (IP PHARMACY, OP PHARMACY, DRUG PURCHASE)", "name": "CONSOLIDATED (ALL: IP, OP, DRUG PURCHASE)"},
@@ -1365,13 +1399,13 @@ def drug_purchase_reports_dashboard_view(request):
                     "total_purchase_spend": round(tot_purchase, 2),
                     "active_inventory_batches": hms_db['hospital_pharmacystock'].count_documents({})
                 },
-                "vendors": v_list[:100]
+                "vendors": v_list
             }
 
         # Always provide vendors & departments for frontend filter controls
         if 'vendors' not in res_data or not res_data.get('vendors'):
             _, v_list = get_vendor_map(hms_db)
-            res_data['vendors'] = v_list[:200]
+            res_data['vendors'] = v_list
         
         res_data['departments'] = [
             {"id": "ALL (IP PHARMACY, OP PHARMACY, DRUG PURCHASE)", "name": "CONSOLIDATED (ALL: IP, OP, DRUG PURCHASE)"},

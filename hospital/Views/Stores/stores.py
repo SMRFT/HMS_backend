@@ -1,4 +1,5 @@
 import json
+import re
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -1160,22 +1161,49 @@ def stores_grn_list_create(request):
             serializer = StoresGRNSerializer(queryset, many=True, context={'employee_map': emp_map, 'department_map': dept_map})
             return Response(serializer.data)
 
-        # Auto-generate GRN number in format: 2627/000001 (6 digits after /)
+        # Auto-generate department-based GRN number (e.g. 27/2627/000001 for Cath Lab, 36/2627/000001 for General Store)
         if not data.get('grn_number'):
+            dept_val = str(data.get('department') or '').strip()
+            dept_name_val = str(data.get('department_name') or '').strip().lower()
+
+            name_to_code = {
+                'cath lab': '27',
+                'cathlab': '27',
+                'general purchase & store': '36',
+                'general store': '36',
+                'general': '36',
+                'stores': '36',
+                'ot': '43',
+                'operation theatre': '43',
+                'lab': '02',
+                'laboratory': '02',
+                'pharmacy': '21',
+                'drug purchase': '19',
+            }
+            if dept_val.lower() in name_to_code:
+                dept_code = name_to_code[dept_val.lower()]
+            elif dept_name_val in name_to_code:
+                dept_code = name_to_code[dept_name_val]
+            else:
+                m_dept = re.search(r'(\d+)', dept_val)
+                if m_dept:
+                    dept_code = f"{int(m_dept.group(1)):02d}"
+                else:
+                    dept_code = "36"
+
             fy_str = get_financial_year_string()
-            prefix = f"{fy_str}/"
-            
+            prefix = f"{dept_code}/{fy_str}/"
+
             try:
                 from ..dbcollection import hms_db
                 col = hms_db['hospital_storesgrn']
-                
-                # Check for highest 6-digit sequence in current FY
-                # Supports both new format ("2627/000001") and legacy format ("SGRN26272627000001_xx", "SGRN2627000001")
-                pattern = rf'^(?:{fy_str}/|SGRN.*{fy_str})'
+
+                # Look for highest 6-digit sequence matching this department prefix (e.g. 27/2627/000001)
+                pattern = rf'^{dept_code}/{fy_str}/(\d{{6}})$'
                 max_seq = 0
-                for doc in col.find({'grn_number': {'$regex': pattern}}, {'grn_number': 1}):
+                for doc in col.find({'grn_number': {'$regex': f'^{dept_code}/{fy_str}/'}}, {'grn_number': 1}):
                     grn_no = str(doc.get('grn_number') or '')
-                    m = re.search(rf'(?:{fy_str}/|{fy_str})(\d{{6}})(?:_\d+)?$', grn_no)
+                    m = re.search(pattern, grn_no)
                     if m:
                         try:
                             seq = int(m.group(1))
@@ -1183,19 +1211,19 @@ def stores_grn_list_create(request):
                                 max_seq = seq
                         except ValueError:
                             pass
-                
+
                 new_sequence = max_seq + 1
                 new_grn_number = f"{prefix}{new_sequence:06d}"
                 while col.find_one({'grn_number': new_grn_number}):
                     new_sequence += 1
                     new_grn_number = f"{prefix}{new_sequence:06d}"
-                
+
                 data['grn_number'] = new_grn_number
             except Exception:
                 last_record = storesGRN.objects.filter(grn_number__startswith=prefix).order_by('-created_date').first()
                 if last_record and last_record.grn_number:
                     try:
-                        last_sequence = int(last_record.grn_number.split('/')[1])
+                        last_sequence = int(last_record.grn_number.split('/')[-1])
                         new_sequence = last_sequence + 1
                     except (IndexError, ValueError):
                         new_sequence = 1
@@ -1557,30 +1585,6 @@ def get_stores_intents(request):
     }
 
     data = list(intent_collection.find(query).sort("created_date", -1))
-
-    # Also include Cath Lab indents
-    try:
-        cathlab_collection = db["hospital_cathlabintent"]
-        cathlab_query = dict(query)
-        if "department" in cathlab_query:
-            dept_filt = cathlab_query["department"]
-            if isinstance(dept_filt, dict) and "$in" in dept_filt:
-                in_list = [str(x).lower() for x in dept_filt["$in"]]
-                if not any(x in in_list for x in ["dept027", "cath lab"]):
-                    cathlab_query = None
-            else:
-                if str(dept_filt).lower() not in ["dept027", "cath lab"]:
-                    cathlab_query = None
-        if cathlab_query is not None:
-            cathlab_data = list(cathlab_collection.find(cathlab_query).sort("created_date", -1))
-            for cd in cathlab_data:
-                cd["is_cathlab"] = True
-                cd.setdefault("department", "DEPT027")
-                cd.setdefault("department_name", "Cath lab")
-            data = data + cathlab_data
-            data.sort(key=lambda x: str(x.get("created_date") or ""), reverse=True)
-    except Exception:
-        pass
     emp_map = get_employee_name_map()
 
     ns_map = {}
@@ -2870,6 +2874,8 @@ def stores_grn_supplier_report(request):
     # Get all active vendors
     vendors_qs = GeneralStoreVendor.objects.filter(is_active__in=[True])
     vendor_map = {str(v.vendor_id): v.name for v in vendors_qs}
+    all_vendors = [{'vendor_id': str(v.vendor_id), 'name': v.name} for v in vendors_qs if v.vendor_id and v.name]
+    all_vendors.sort(key=lambda x: str(x['name']).lower())
 
     # Fetch GRNs
     grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
@@ -2991,7 +2997,8 @@ def stores_grn_supplier_report(request):
     return Response({
         "success": True,
         "summary": summary,
-        "data": supplier_list
+        "data": supplier_list,
+        "vendors": all_vendors
     }, status=status.HTTP_200_OK)
 
 

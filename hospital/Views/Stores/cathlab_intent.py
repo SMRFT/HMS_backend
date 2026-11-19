@@ -181,6 +181,16 @@ def get_cathlab_items(request):
 
         formatted = []
         for it in items:
+            try:
+                tot = int(float(str(it.get("total_quantity") or 0)))
+            except Exception:
+                tot = 0
+            try:
+                appr = int(float(str(it.get("approved_quantity") or 0)))
+            except Exception:
+                appr = 0
+            avail = max(0, tot - appr)
+
             formatted.append({
                 "item_id": it.get("item_id"),
                 "itemName": it.get("itemName") or "",
@@ -188,7 +198,10 @@ def get_cathlab_items(request):
                 "hsn": it.get("hsn") or "-",
                 "department": it.get("department") or "DEPT027",
                 "unit_price": it.get("unit_price") or 0,
-                "available_stock": it.get("total_quantity", 0) - it.get("approved_quantity", 0)
+                "total_quantity": tot,
+                "approved_quantity": appr,
+                "available_stock": avail,
+                "stock": avail
             })
 
         return Response(clean_mongo_value({"status": "success", "count": len(formatted), "data": formatted}), status=status.HTTP_200_OK)
@@ -401,4 +414,318 @@ def get_cathlab_intents(request):
         return Response(clean_mongo_value({"status": "success", "count": len(formatted), "data": formatted}), status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PUT', 'POST'])
+@permission_classes([AllowAny])
+def update_cathlab_intent(request, pk=None):
+    """
+    Update an existing Cath Lab Intent requisition.
+    Only allowed before is_billed == True and is_approved == True.
+    """
+    try:
+        intent_pk = pk or request.data.get("intent_id")
+        if not intent_pk:
+            return Response({"error": "Intent ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        employee_id, branch_code, outlet_code, hospital_code = extract_auth_info_from_token(request)
+
+        col = hms_db["hospital_cathlabintent"]
+        or_conds = [{"intent_id": str(intent_pk).strip()}]
+        if ObjectId.is_valid(str(intent_pk).strip()):
+            or_conds.append({"_id": ObjectId(str(intent_pk).strip())})
+
+        doc = col.find_one({"$or": or_conds, "is_active": True})
+        if not doc:
+            return Response({"error": "Cath Lab requisition not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Restrict editing only if already billed
+        if doc.get("is_billed") is True:
+            return Response(
+                {"error": "Cannot edit requisition: It has already been billed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        raw_date = request.data.get("date")
+        if raw_date:
+            try:
+                parsed_date = datetime.strptime(str(raw_date)[:10], "%Y-%m-%d")
+            except Exception:
+                parsed_date = doc.get("date")
+        else:
+            parsed_date = doc.get("date")
+
+        ipnumber = str(request.data.get("ipnumber") or "").strip()
+        department = request.data.get("department") or doc.get("department", "DEPT027")
+
+        raw_items = request.data.get("items") or []
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+            except Exception:
+                raw_items = []
+
+        if not raw_items:
+            return Response({"error": "Items list cannot be empty"}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_items = []
+        for it in raw_items:
+            qty = int(it.get("quantity") or 1)
+            clean_items.append({
+                "item_id": str(it.get("item_id", "")),
+                "name": str(it.get("name") or it.get("itemName") or ""),
+                "hsn": str(it.get("hsn") or "-"),
+                "batch": str(it.get("batch") or ""),
+                "mrp": it.get("mrp") if it.get("mrp") is not None else "",
+                "quantity": qty,
+                "status": it.get("status") or "Pending",
+                "approved_quantity": int(it.get("approved_quantity") or 0)
+            })
+
+        now_dt = timezone.now()
+        update_fields = {
+            "date": parsed_date,
+            "ipnumber": ipnumber,
+            "department": department,
+            "items": clean_items,
+            "lastmodified_by": str(employee_id),
+            "lastmodified_date": now_dt
+        }
+
+        col.update_one({"_id": doc["_id"]}, {"$set": update_fields})
+
+        try:
+            cathlabIntent.objects.filter(intent_id=doc.get("intent_id")).update(
+                date=parsed_date.date() if isinstance(parsed_date, datetime) else parsed_date,
+                ipnumber=ipnumber,
+                items=clean_items,
+                lastmodified_by=str(employee_id),
+                lastmodified_date=now_dt
+            )
+        except Exception:
+            pass
+
+        return Response(clean_mongo_value({
+            "status": "success",
+            "message": "Cath Lab Intent requisition updated successfully",
+            "intent_id": doc.get("intent_id")
+        }), status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([AllowAny])
+def delete_cathlab_intent(request, pk=None):
+    """
+    Soft-delete a Cath Lab Intent requisition by setting is_active = False.
+    Only allowed before is_billed == True and is_approved == True.
+    """
+    try:
+        intent_pk = pk or request.data.get("intent_id")
+        if not intent_pk:
+            return Response({"error": "Intent ID is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        employee_id, _, _, _ = extract_auth_info_from_token(request)
+
+        col = hms_db["hospital_cathlabintent"]
+        or_conds = [{"intent_id": str(intent_pk).strip()}]
+        if ObjectId.is_valid(str(intent_pk).strip()):
+            or_conds.append({"_id": ObjectId(str(intent_pk).strip())})
+
+        doc = col.find_one({"$or": or_conds, "is_active": True})
+        if not doc:
+            return Response({"error": "Cath Lab requisition not found or already deleted"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Restrict deletion only if already billed
+        if doc.get("is_billed") is True:
+            return Response(
+                {"error": "Cannot delete requisition: It has already been billed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        now_dt = timezone.now()
+        col.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {
+                "is_active": False,
+                "lastmodified_by": str(employee_id),
+                "lastmodified_date": now_dt
+            }}
+        )
+
+        try:
+            cathlabIntent.objects.filter(intent_id=doc.get("intent_id")).update(
+                is_active=False,
+                lastmodified_by=str(employee_id),
+                lastmodified_date=now_dt
+            )
+        except Exception:
+            pass
+
+        return Response(clean_mongo_value({
+            "status": "success",
+            "message": "Cath Lab Intent requisition deleted successfully",
+            "intent_id": doc.get("intent_id")
+        }), status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def get_cathlab_stock_report(request):
+    """
+    Returns Cath Lab department items with their current stocks, batches,
+    GRN dates for each batch, and MRP.
+    """
+    try:
+        items_col = hms_db["hospital_itemmaster"]
+        grn_col = hms_db["hospital_storesgrn"]
+
+        # Fetch all active Cath Lab items
+        items = list(items_col.find(
+            {
+                "is_active": True,
+                "$or": [
+                    {"department": "DEPT027"},
+                    {"department": {"$regex": "^cath", "$options": "i"}},
+                    {"department_name": {"$regex": "^cath", "$options": "i"}}
+                ]
+            },
+            {
+                "item_id": 1,
+                "itemName": 1,
+                "total_quantity": 1,
+                "approved_quantity": 1,
+                "unit_price": 1,
+                "hsn": 1,
+                "department": 1,
+                "department_name": 1
+            }
+        ).sort("itemName", 1))
+
+        item_map = {str(it.get("item_id", "")).strip(): it for it in items if it.get("item_id")}
+        all_item_ids = list(item_map.keys())
+
+        # Fetch GRNs containing these items
+        grns = list(grn_col.find(
+            {
+                "items.item_id": {"$in": all_item_ids},
+                "is_cancelled": {"$ne": True}
+            },
+            {
+                "grn_number": 1,
+                "date": 1,
+                "items": 1
+            }
+        ).sort("date", -1))
+
+        # Group batches by item_id
+        item_batches = {}
+        for g in grns:
+            grn_no = g.get("grn_number") or ""
+            grn_date = g.get("date")
+            formatted_date = (
+                grn_date.strftime("%Y-%m-%d")
+                if hasattr(grn_date, "strftime")
+                else str(grn_date)[:10] if grn_date else ""
+            )
+
+            for gi in (g.get("items") or []):
+                iid = str(gi.get("item_id", "")).strip()
+                if iid in item_map:
+                    b_val = str(gi.get("batch") or "").strip()
+                    mrp_val = gi.get("mrp")
+                    if mrp_val is None or mrp_val == "":
+                        mrp_val = gi.get("unitPrice") or 0
+                    p_rate = gi.get("unitPrice") or gi.get("purchaseRate") or 0
+                    p_cost = gi.get("purchaseCost") or 0
+                    qty_val = gi.get("quantity") or 0
+
+                    if iid not in item_batches:
+                        item_batches[iid] = []
+
+                    # Keep unique batches (most recent GRN date first)
+                    existing = next((b for b in item_batches[iid] if b["batch"] == b_val), None)
+                    if not existing and b_val:
+                        item_batches[iid].append({
+                            "batch": b_val,
+                            "grn_number": grn_no,
+                            "grn_date": formatted_date,
+                            "mrp": float(str(mrp_val)) if mrp_val else 0,
+                            "purchase_rate": float(str(p_rate)) if p_rate else 0,
+                            "purchase_cost": float(str(p_cost)) if p_cost else 0,
+                            "quantity": float(str(qty_val)) if qty_val else 0,
+                            "expiry": gi.get("expiry") or ""
+                        })
+
+        # Build clean item-wise report rows with multiple batches
+        report_data = []
+        for iid, it in item_map.items():
+            tot_stock = it.get("total_quantity", 0) or 0
+            appr_stock = it.get("approved_quantity", 0) or 0
+            avail_stock = max(0, tot_stock - appr_stock)
+            item_name = it.get("itemName") or ""
+            hsn = it.get("hsn") or "-"
+            unit_price = it.get("unit_price") or 0
+
+            batches = item_batches.get(iid, [])
+            latest_b = batches[0] if batches else None
+            
+            top_mrp = latest_b["mrp"] if (latest_b and latest_b.get("mrp")) else (float(str(unit_price)) if unit_price else 0)
+            top_prate = latest_b["purchase_rate"] if (latest_b and latest_b.get("purchase_rate")) else 0
+            top_batch = latest_b["batch"] if latest_b else "-"
+            top_grn_no = latest_b["grn_number"] if latest_b else "-"
+            top_grn_date = latest_b["grn_date"] if latest_b else "-"
+
+            report_data.append({
+                "item_id": iid,
+                "item_name": item_name,
+                "hsn": hsn,
+                "stock": avail_stock,
+                "total_stock": tot_stock,
+                "approved_stock": appr_stock,
+                "batch": top_batch,
+                "grn_number": top_grn_no,
+                "grn_date": top_grn_date,
+                "mrp": top_mrp,
+                "purchase_rate": top_prate,
+                "expiry": latest_b.get("expiry") if latest_b else "-",
+                "has_batch": bool(batches),
+                "batches": batches,
+                "batch_count": len(batches)
+            })
+
+        # Optional filters
+        search = (request.data.get("search") or request.GET.get("search") or "").strip().lower()
+        in_stock_only = request.data.get("in_stock_only") or request.GET.get("in_stock_only")
+        if isinstance(in_stock_only, str):
+            in_stock_only = in_stock_only.lower() in ["true", "1", "yes"]
+
+        filtered = report_data
+        if in_stock_only:
+            filtered = [r for r in filtered if r["stock"] > 0]
+
+        if search:
+            filtered = [
+                r for r in filtered
+                if search in r["item_name"].lower()
+                or search in r["item_id"].lower()
+                or search in str(r["batch"]).lower()
+                or search in str(r["grn_number"]).lower()
+            ]
+
+        return Response(clean_mongo_value({
+            "status": "success",
+            "count": len(filtered),
+            "total_items": len(item_map),
+            "data": filtered
+        }), status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({"status": "error", "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
