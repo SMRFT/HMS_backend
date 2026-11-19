@@ -1356,22 +1356,17 @@ def admission_view(request):
                 if hospital_code and hospital_code != "system":
                     active_adm_q["hospital_code"] = hospital_code
 
-                existing_adm = hms_db["hospital_admission"].find_one(active_adm_q)
-                if not existing_adm:
-                    # Secondary safety check in Django ORM
-                    existing_orm = Admission.objects.filter(
-                        uhid__iexact=clean_uhid,
-                        is_cancelled=False
-                    ).filter(
-                        Q(is_admitted=True, is_discharged=False) | Q(is_discharged=False)
-                    ).first()
-                    if existing_orm:
-                        existing_adm = {
-                            "ipNumber": existing_orm.ipNumber,
-                            "admissionDateTime": existing_orm.admissionDateTime,
-                            "room_details": existing_orm.room_details,
-                            "roomShitingDetails": getattr(existing_orm, "roomShitingDetails", []),
-                        }
+                existing_adm = hms_db["hospital_admission"].find_one(active_adm_q) if hms_db is not None else None
+                if not existing_adm and hms_db is not None:
+                    # Case-insensitive regex check in PyMongo (avoids Djongo SQL2Mongo compound Q bugs)
+                    existing_adm = hms_db["hospital_admission"].find_one({
+                        "uhid": {"$regex": f"^{re.escape(clean_uhid)}$", "$options": "i"},
+                        "is_cancelled": {"$ne": True},
+                        "$or": [
+                            {"is_admitted": True, "is_discharged": {"$ne": True}},
+                            {"is_discharged": False}
+                        ]
+                    })
 
                 if existing_adm:
                     adm_dt_iso = _to_ist_iso(existing_adm.get("admissionDateTime"))
