@@ -302,31 +302,40 @@ def purchase_requisition_view(request, pk=None):
             outlet_filter = str(outlet_filter).strip()
             if outlet_filter and outlet_filter.upper() != "ALL":
                 if outlet_filter.upper() == "IP":
-                    filter_q["$or"] = [
-                        {"outlet_code": "OLET001"},
-                        {"outlet_name": {"$regex": r"IP\b|_IP", "$options": "i"}},
-                    ]
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"outlet_code": "OLET001"},
+                            {"outlet_name": {"$regex": r"IP\b|_IP", "$options": "i"}},
+                        ]
+                    })
                 elif outlet_filter.upper() == "OP":
-                    filter_q["$or"] = [
-                        {"outlet_code": "OLET002"},
-                        {"outlet_name": {"$regex": r"OP\b|_OP", "$options": "i"}},
-                    ]
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"outlet_code": "OLET002"},
+                            {"outlet_name": {"$regex": r"OP\b|_OP", "$options": "i"}},
+                        ]
+                    })
                 else:
-                    filter_q["$or"] = [
-                        {"outlet_code": outlet_filter},
-                        {"outlet_name": {"$regex": f"^{re.escape(outlet_filter)}$", "$options": "i"}},
-                    ]
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"outlet_code": outlet_filter},
+                            {"outlet_name": {"$regex": f"^{re.escape(outlet_filter)}$", "$options": "i"}},
+                        ]
+                    })
 
             search = request.GET.get("search", "").strip()
             if search:
                 reg = {"$regex": re.escape(search), "$options": "i"}
-                filter_q["$or"] = [
-                    {"pr_number": reg},
-                    {"outlet_name": reg},
-                    {"outlet_code": reg},
-                    {"rejected_reason": reg},
-                    {"edited_reason": reg}
-                ]
+                filter_q.setdefault("$and", []).append({
+                    "$or": [
+                        {"pr_number": reg},
+                        {"outlet_name": reg},
+                        {"outlet_code": reg},
+                        {"rejected_reason": reg},
+                        {"edited_reason": reg},
+                        {"items": {"$regex": reg}}
+                    ]
+                })
 
             filter_q = apply_date_filter(filter_q, request, "created_date")
 

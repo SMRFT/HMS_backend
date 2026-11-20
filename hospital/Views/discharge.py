@@ -468,13 +468,35 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "cancelled_date", None): update_dict["cancelled_date"] = obj.cancelled_date
             if getattr(obj, "cancelled_reason", None): update_dict["cancelled_reason"] = str(obj.cancelled_reason)
             if getattr(obj, "edit_history", None) is not None: update_dict["edit_history"] = obj.edit_history
-            if getattr(obj, "is_insurance_bill", None) is not None:
-                update_dict["is_insurance_bill"] = bool(obj.is_insurance_bill)
-                update_dict["customer_type"] = "INSURANCE" if bool(obj.is_insurance_bill) else "GENERAL"
-            if getattr(obj, "claim_number", None) is not None: update_dict["claim_number"] = str(obj.claim_number)
-            if getattr(obj, "id_card_number", None) is not None: update_dict["id_card_number"] = str(obj.id_card_number)
-            if getattr(obj, "insurance_bill_number", None) is not None: update_dict["insurance_bill_number"] = str(obj.insurance_bill_number)
-            if getattr(obj, "company_name", None) is not None: update_dict["company_name"] = str(obj.company_name)
+            
+            # Resolve Customer Type strictly from Admission
+            adm_rec = None
+            if getattr(obj, "ip_number", None):
+                try:
+                    adm_rec = db["hospital_admission"].find_one({"ipNumber": str(obj.ip_number).strip()})
+                except Exception:
+                    adm_rec = None
+            if not adm_rec and getattr(obj, "uhid", None):
+                try:
+                    adm_rec = db["hospital_admission"].find_one(
+                        {"uhid": str(obj.uhid).strip(), "is_cancelled": {"$ne": True}},
+                        sort=[("admissionDateTime", -1)]
+                    )
+                except Exception:
+                    adm_rec = None
+
+            if adm_rec:
+                eff_cust = str(adm_rec.get("customer_type") or adm_rec.get("customerType") or adm_rec.get("patient_type") or "").strip() or "GENERAL"
+            else:
+                eff_cust = str(getattr(obj, "customer_type", None) or "GENERAL").strip()
+
+            is_ins = "INSURANCE" in eff_cust.upper()
+            update_dict["customer_type"] = eff_cust
+            update_dict["is_insurance_bill"] = is_ins
+            update_dict["claim_number"] = str(getattr(obj, "claim_number", "") or "") if is_ins else ""
+            update_dict["id_card_number"] = str(getattr(obj, "id_card_number", "") or "") if is_ins else ""
+            update_dict["insurance_bill_number"] = str(getattr(obj, "insurance_bill_number", "") or "") if is_ins else ""
+            update_dict["company_name"] = str(getattr(obj, "company_name", "") or "") if is_ins else ""
             if getattr(obj, "implant_amount", None) is not None: update_dict["implant_amount"] = _to_float(obj.implant_amount)
             if getattr(obj, "payment_method", None) is not None: update_dict["payment_method"] = str(obj.payment_method)
             update_dict["billTypeNo"] = str(getattr(obj, "billTypeNo", None) or "DIS01")
@@ -645,6 +667,7 @@ def _resolve_employee_name(emp_id):
                 return name
     except Exception:
         pass
+    _employee_name_cache[emp_str] = emp_str
     return emp_str
 
 
@@ -702,6 +725,7 @@ def _resolve_employee_designation(emp_id):
     except Exception as e:
         logger.error(f"Error resolving employee designation for {emp_id}: {e}")
 
+    _employee_designation_cache[emp_str] = "INSURANCE EXECUTIVE"
     return "INSURANCE EXECUTIVE"
 
 
@@ -830,12 +854,19 @@ def _resolve_items_doctor_names(items):
 
 
 
+_insurance_member_cache = {}
+
+
 def _resolve_insurance_member_details(uhid=None, patient_name=None, member_number=None, card_no=None):
     """
     Lookup Claim number (referral_number) and ID card number (card_no)
     from hospital_insurancemember (and hospital_insurancemembervisit).
     card_no is id card no, and referral_number is Claim number.
     """
+    cache_key = (str(uhid).strip() if uhid else "") or (str(card_no).strip() if card_no else "") or (str(member_number).strip() if member_number else "") or (str(patient_name).strip() if patient_name else "")
+    if cache_key and cache_key in _insurance_member_cache:
+        return _insurance_member_cache[cache_key]
+
     claim_number = ""
     id_card_number = ""
     member_doc = None
@@ -847,7 +878,9 @@ def _resolve_insurance_member_details(uhid=None, patient_name=None, member_numbe
 
         # 1. By member_number if provided
         if member_number:
-            m = mem_col.find_one({"member_number": {"$regex": f"^{re.escape(str(member_number).strip())}$", "$options": "i"}})
+            m = mem_col.find_one({"member_number": str(member_number).strip()})
+            if not m:
+                m = mem_col.find_one({"member_number": {"$regex": f"^{re.escape(str(member_number).strip())}$", "$options": "i"}})
             if m:
                 member_doc = m
                 id_card_number = str(m.get("card_no") or m.get("echs_card") or "").strip()
@@ -855,19 +888,24 @@ def _resolve_insurance_member_details(uhid=None, patient_name=None, member_numbe
 
         # 2. By card_no if provided
         if not id_card_number and card_no:
-            rgx = re.compile(f"^{re.escape(str(card_no).strip())}$", re.IGNORECASE)
-            m = mem_col.find_one({"$or": [{"card_no": rgx}, {"echs_card": rgx}]})
+            c_str = str(card_no).strip()
+            m = mem_col.find_one({"$or": [{"card_no": c_str}, {"echs_card": c_str}]})
+            if not m:
+                rgx = re.compile(f"^{re.escape(c_str)}$", re.IGNORECASE)
+                m = mem_col.find_one({"$or": [{"card_no": rgx}, {"echs_card": rgx}]})
             if m:
                 member_doc = m
                 id_card_number = str(m.get("card_no") or m.get("echs_card") or "").strip()
                 claim_number = str(m.get("referral_number") or "").strip()
 
-        # 3. By UHID directly in hospital_insurancemember
+        # 3. By UHID directly in hospital_insurancemember (try exact index lookup first!)
         if (not id_card_number or not claim_number) and uhid:
             u_clean = str(uhid).strip()
             if u_clean:
-                rgx = re.compile(f"^{re.escape(u_clean)}$", re.IGNORECASE)
-                m = mem_col.find_one({"uhid": rgx})
+                m = mem_col.find_one({"uhid": u_clean})
+                if not m:
+                    rgx = re.compile(f"^{re.escape(u_clean)}$", re.IGNORECASE)
+                    m = mem_col.find_one({"uhid": rgx})
                 if m:
                     member_doc = member_doc or m
                     if not id_card_number:
@@ -879,8 +917,10 @@ def _resolve_insurance_member_details(uhid=None, patient_name=None, member_numbe
         if (not id_card_number or not claim_number) and uhid:
             u_clean = str(uhid).strip()
             if u_clean:
-                rgx = re.compile(f"^{re.escape(u_clean)}$", re.IGNORECASE)
-                v = visit_col.find_one({"uhid": rgx}, sort=[("visit_date", -1), ("created_date", -1)])
+                v = visit_col.find_one({"uhid": u_clean}, sort=[("visit_date", -1), ("created_date", -1)])
+                if not v:
+                    rgx = re.compile(f"^{re.escape(u_clean)}$", re.IGNORECASE)
+                    v = visit_col.find_one({"uhid": rgx}, sort=[("visit_date", -1), ("created_date", -1)])
                 if v:
                     if not claim_number and v.get("referral_number"):
                         claim_number = str(v.get("referral_number")).strip()
@@ -921,13 +961,19 @@ def _resolve_insurance_member_details(uhid=None, patient_name=None, member_numbe
     except Exception as e:
         print(f"Error resolving insurance member details: {e}")
 
-    return {
+    res = {
         "claim_number": claim_number,
         "id_card_number": id_card_number,
         "card_no": id_card_number,
         "referral_number": claim_number,
         "member_number": member_doc.get("member_number", "") if member_doc else "",
+        "company_name": member_doc.get("company_name", "") if member_doc else "",
     }
+    if cache_key:
+        _insurance_member_cache[cache_key] = res
+    if uhid:
+        _insurance_member_cache[str(uhid).strip()] = res
+    return res
 
 
 def _extract_adm_room_and_date(adm):
@@ -959,7 +1005,7 @@ def _extract_adm_room_and_date(adm):
     return adm_str, current_room
 
 
-def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_map=None, dept_map=None, desig_map=None, mgr_info=None):
+def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_map=None, dept_map=None, desig_map=None, mgr_info=None, ins_member_map=None):
     """
     Ultra-fast in-memory serializer for DischargeBilling raw MongoDB document.
     Uses pre-fetched lookup maps for zero additional database queries.
@@ -970,7 +1016,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
 
     # Pre-resolve admission if ip_number exists
     adm = (adm_map.get(ip_number) if adm_map else None) if ip_number else None
-    if not adm and ip_number:
+    if not adm and ip_number and adm_map is None:
         try:
             _, db = get_hms_db()
             adm = db["hospital_admission"].find_one({"ipNumber": ip_number})
@@ -979,15 +1025,19 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
 
     adm_str, current_room = _extract_adm_room_and_date(adm)
 
-    adm_cust_raw = (adm.get("customer_type") or adm.get("patient_type") or "") if adm else ""
-    bill_is_ins = bool(doc.get("is_insurance_bill", False)) or ("INSURANCE" in str(adm_cust_raw).upper())
-    bill_cust_type = str(doc.get("customer_type") or adm_cust_raw or ("INSURANCE" if bill_is_ins else "GENERAL")).strip()
+    adm_cust_raw = (adm.get("customer_type") or adm.get("customerType") or adm.get("patient_type") or "").strip() if adm else ""
+    if adm_cust_raw:
+        bill_cust_type = adm_cust_raw
+        bill_is_ins = "INSURANCE" in adm_cust_raw.upper()
+    else:
+        bill_cust_type = str(doc.get("customer_type") or "GENERAL").strip()
+        bill_is_ins = "INSURANCE" in bill_cust_type.upper()
 
     raw_comp = (adm.get("insurance_company") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
     company_name_p = ""
     if raw_comp and bill_is_ins:
-        if ins_map and str(raw_comp) in ins_map:
-            company_name_p = ins_map[str(raw_comp)]
+        if ins_map is not None:
+            company_name_p = ins_map.get(str(raw_comp), str(raw_comp))
         else:
             try:
                 _, db_conn = get_hms_db()
@@ -998,8 +1048,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             except Exception:
                 company_name_p = str(raw_comp)
 
-    eff_claim = doc.get("claim_number") or ""
-    eff_id_card = doc.get("id_card_number") or ""
+    eff_claim = (doc.get("claim_number") or "") if bill_is_ins else ""
+    eff_id_card = (doc.get("id_card_number") or "") if bill_is_ins else ""
     eff_company = (doc.get("company_name") or company_name_p or str(raw_comp)) if bill_is_ins else ""
 
     # Discharge date resolution
@@ -1021,8 +1071,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
 
     patient_details = {}
     if uhid:
-        p = patient_map.get(uhid) if patient_map else None
-        if not p:
+        p = patient_map.get(uhid) if patient_map is not None else None
+        if not p and patient_map is None:
             try:
                 _, db = get_hms_db()
                 p = db["hospital_patient"].find_one({"uhid": uhid})
@@ -1034,8 +1084,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
 
             doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
-            if emp_map and doc_id in emp_map:
-                doc_name = emp_map[doc_id]
+            if emp_map is not None:
+                doc_name = emp_map.get(doc_id) or emp_map.get(re.sub(r'^(dr[.\s]*)+', '', doc_id, flags=re.IGNORECASE).strip()) or doc_id
                 dept_name = dept_map.get(doc_id, "") if dept_map else ""
             else:
                 doc_name, dept_name = _resolve_doctor_and_department(doc_id)
@@ -1048,14 +1098,23 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
 
             if bill_is_ins and (not eff_claim or not eff_id_card or not eff_company):
-                p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() if p else ""
-                ins_member = _resolve_insurance_member_details(uhid=uhid, patient_name=p_name)
-                if not eff_claim and ins_member.get("claim_number"):
-                    eff_claim = ins_member["claim_number"]
-                if not eff_id_card and ins_member.get("id_card_number"):
-                    eff_id_card = ins_member["id_card_number"]
-                if not eff_company and ins_member.get("company_name"):
-                    eff_company = ins_member["company_name"]
+                if ins_member_map is not None:
+                    ins_member = ins_member_map.get(uhid, {})
+                    if not eff_claim and ins_member.get("claim_number"):
+                        eff_claim = ins_member["claim_number"]
+                    if not eff_id_card and ins_member.get("id_card_number"):
+                        eff_id_card = ins_member["id_card_number"]
+                    if not eff_company and ins_member.get("company_name"):
+                        eff_company = ins_member["company_name"]
+                else:
+                    p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() if p else ""
+                    ins_member = _resolve_insurance_member_details(uhid=uhid, patient_name=p_name)
+                    if not eff_claim and ins_member.get("claim_number"):
+                        eff_claim = ins_member["claim_number"]
+                    if not eff_id_card and ins_member.get("id_card_number"):
+                        eff_id_card = ins_member["id_card_number"]
+                    if not eff_company and ins_member.get("company_name"):
+                        eff_company = ins_member["company_name"]
 
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
@@ -1086,13 +1145,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             }
 
     created_by_val = doc.get("created_by")
-    if emp_map and str(created_by_val) in emp_map:
-        created_by_name = emp_map[str(created_by_val)]
+    if emp_map is not None:
+        created_by_name = emp_map.get(str(created_by_val), str(created_by_val or ""))
     else:
         created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
 
-    if desig_map and str(created_by_val) in desig_map:
-        created_by_designation = desig_map[str(created_by_val)]
+    if desig_map is not None:
+        created_by_designation = desig_map.get(str(created_by_val), "")
     else:
         created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
 
@@ -1114,7 +1173,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         bd_str = str(bd) if bd else None
 
     raw_items = _parse_items(doc.get("items"))
-    if emp_map:
+    if emp_map is not None:
         formatted_items = []
         for it in (raw_items or []):
             if isinstance(it, dict):
@@ -1167,7 +1226,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         "is_insurance_bill":     bill_is_ins,
         "claim_number":          eff_claim if bill_is_ins else "",
         "id_card_number":        eff_id_card if bill_is_ins else "",
-        "insurance_bill_number": (str(doc.get("insurance_bill_number")).replace("/", "") if doc.get("insurance_bill_number") else ""),
+        "insurance_bill_number": (str(doc.get("insurance_bill_number")).replace("/", "") if doc.get("insurance_bill_number") else "") if bill_is_ins else "",
         "company_name":          eff_company if bill_is_ins else "",
         "customer_type":         bill_cust_type,
         "payment_method":        doc.get("payment_method") or "Cash",
@@ -1185,6 +1244,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         "shiftno":           doc.get("shiftno", "") or "",
         "discharge_date":    disch_str,
         "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
+        "patient_name":      patient_details.get("patient_name") or "",
+        "doctor":            doc.get("doctor") or patient_details.get("doctor") or "",
         "patient_details":   patient_details,
     }
 
@@ -1194,156 +1255,68 @@ def _obj_to_dict(obj):
     if isinstance(obj, dict):
         return _format_raw_bill_doc(obj)
 
-    discharge_id = obj.discharge_id
+    discharge_id = getattr(obj, "discharge_id", None)
+    uhid = str(getattr(obj, "uhid", "") or "").strip()
+    ip_number = str(getattr(obj, "ip_number", "") or "").strip()
 
-    patient_details = {}
-    if obj.uhid:
-        try:
-            _, db = get_hms_db()
-            p = db["hospital_patient"].find_one({"uhid": str(obj.uhid).strip()})
-            if not p:
-                p = Patient.objects.get(uhid=obj.uhid)
-                p = {
-                    "firstName": p.firstName, "lastName": p.lastName, "age": p.age,
-                    "gender": p.gender, "mobilePhone": p.mobilePhone,
-                    "permanent_address": p.permanent_address, "area": p.area,
-                    "city": p.city, "state": p.state, "zipcode": p.zipcode,
-                    "spouse_name": getattr(p, "spouse_name", ""),
-                    "emergency_contact": getattr(p, "emergency_contact", ""),
-                }
+    try:
+        _, db = get_hms_db()
+        p = db["hospital_patient"].find_one({"uhid": uhid}) if uhid else None
+        adm = db["hospital_admission"].find_one({"ipNumber": ip_number}) if ip_number else None
+    except Exception:
+        p = None
+        adm = None
 
-            addr_parts = [p.get("permanent_address"), p.get("area"), p.get("city"), p.get("state"), p.get("zipcode")]
-            full_address = ", ".join([str(x).strip() for x in addr_parts if x and str(x).strip()])
+    patient_map = {uhid: p} if p else {}
+    adm_map = {ip_number: adm} if adm else {}
 
-            adm = None
-            if obj.ip_number:
-                try:
-                    adm = db["hospital_admission"].find_one({"ipNumber": str(obj.ip_number).strip()})
-                except Exception:
-                    pass
-
-            adm_str, current_room = _extract_adm_room_and_date(adm)
-
-            doc_id = str(adm.get("admittingDoctor") or "") if adm else ""
-            doc_name, dept_name = _resolve_doctor_and_department(doc_id)
-            if not doc_name:
-                doc_name = _resolve_employee_name(doc_id) if doc_id else ""
-            if not dept_name and adm:
-                dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
-
-            target_b = locals().get("doc") if "doc" in locals() else locals().get("obj")
-            disch_dt = (
-                (target_b.get("discharge_date") if isinstance(target_b, dict) else getattr(target_b, "discharge_date", None)) or
-                (target_b.get("dischargeDateTime") if isinstance(target_b, dict) else getattr(target_b, "dischargeDateTime", None)) or
-                (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
-                (target_b.get("bill_date") if isinstance(target_b, dict) else getattr(target_b, "bill_date", None))
-            ) if target_b else (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None)
-            disch_str = ""
-            if isinstance(disch_dt, _datetime):
-                ist_d = _to_ist_dt(disch_dt)
-                disch_str = ist_d.strftime("%d-%m-%Y") if ist_d else disch_dt.strftime("%d-%m-%Y")
-            elif isinstance(disch_dt, _date):
-                disch_str = disch_dt.strftime("%d-%m-%Y")
-            elif isinstance(disch_dt, str) and disch_dt:
-                parsed_s = _parse_dt(disch_dt)
-                disch_str = parsed_s.strftime("%d-%m-%Y") if parsed_s else disch_dt[:10]
-
-            guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
-            guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
-
-            raw_comp = (adm.get("company_code") or p.get("company_code") or adm.get("insurance_company") or p.get("company_name") or "") if adm else (p.get("company_code") or p.get("company_name") or "")
-            company_name_p = ""
-            if raw_comp:
-                try:
-                    _, db_conn = get_hms_db()
-                    ins_doc = db_conn["hospital_insuranceprovider"].find_one({
-                        "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
-                    })
-                    company_name_p = ins_doc.get("company_name") if ins_doc else str(raw_comp)
-                except Exception:
-                    company_name_p = str(raw_comp)
-
-            patient_details = {
-                "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
-                "age":            p.get("age", ""),
-                "gender":         p.get("gender", ""),
-                "mobile":         p.get("mobilePhone", ""),
-                "mobilePhone":    p.get("mobilePhone", ""),
-                "phone":          p.get("mobilePhone", ""),
-                "address":        full_address,
-                "guardian":       f"{guardian_type_val} {guardian_val}".strip() if guardian_val and not str(guardian_val).startswith(("W/o", "S/o", "D/o", "C/o")) else guardian_val,
-                "guardian_type":  guardian_type_val,
-                "guardian_name":  guardian_val,
-                "spouse_name":    p.get("spouse_name", ""),
-                "father_name":    p.get("father_name", ""),
-                "doctor":         doc_name or p.get("doctorName") or doc_id,
-                "doctor_id":      doc_id,
-                "department":     dept_name,
-                "admission_date": adm_str,
-                "discharge_date": disch_str,
-                "room_no":        current_room,
-                "company":        getattr(obj, "company_name", None) or company_name_p or str(raw_comp),
-                "company_code":   str(raw_comp),
-            }
-        except Exception:
-            pass
-
-    created_by_val = getattr(obj, "created_by", None)
-    created_by_name = _resolve_employee_name(created_by_val) if created_by_val else ""
-    created_by_designation = _resolve_employee_designation(created_by_val) if created_by_val else ""
-    mgr = _resolve_insurance_manager()
-    manager_name = mgr.get("name", "")
-    manager_designation = mgr.get("designation", "GENERAL INSURANCE MANAGER")
-
-    return {
-        "id":                discharge_id,
-        "discharge_id":      discharge_id,
-        "status":            obj.status,
-        "estimate_number":   obj.estimate_number,
-        "bill_no":           obj.bill_no,
-        "uhid":              obj.uhid,
-        "ip_number":         obj.ip_number,
-        "bill_date":         _safe_isoformat(_to_ist_dt(obj.bill_date) if isinstance(obj.bill_date, _datetime) else obj.bill_date),
-        "items":             _resolve_items_doctor_names(_parse_items(obj.items)),
-        "total_amount":      _to_float(obj.total_amount),
-        "advance_amount":    _to_float(obj.advance_amount),
-        "sales_return":      _to_float(obj.sales_return),
-        "medicines_amount":  _to_float(obj.medicines_amount),
-        "implant_amount":    _to_float(getattr(obj, "implant_amount", 0)),
-        "taxable_amount":    _to_float(obj.taxable_amount),
-        "non_tax_amount":    _to_float(obj.non_tax_amount),
-        "gst_amount":        _to_float(obj.gst_amount),
-        "room_tax":          _to_float(getattr(obj, "room_tax", 0)),
-        "discount_percent":  _to_float(obj.discount_percent),
-        "discount_amount":   _to_float(obj.discount_amount),
-        "disc_reason":       obj.disc_reason or "",
-        "net_amount":        _to_float(obj.net_amount),
-        "remarks":           obj.remarks or "",
-        "next_visit_date":   _safe_isoformat(getattr(obj, "next_visit_date", None)),
-        "is_insurance_bill":     bool(getattr(obj, "is_insurance_bill", False)),
-        "claim_number":          getattr(obj, "claim_number", "") or "",
-        "id_card_number":        getattr(obj, "id_card_number", "") or "",
-        "insurance_bill_number": getattr(obj, "insurance_bill_number", "") or "",
-        "company_name":          getattr(obj, "company_name", "") or "",
-        "payment_method":        getattr(obj, "payment_method", "Cash") or "Cash",
-        "billTypeNo":            getattr(obj, "billTypeNo", None) or "DIS01",
-        "bill_type":             getattr(obj, "bill_type") if getattr(obj, "bill_type", None) is not None else 2,
-        "created_by":             created_by_val,
-        "created_by_name":        created_by_name,
-        "created_by_designation": created_by_designation,
-        "manager_name":           manager_name,
-        "manager_designation":    manager_designation,
-        "created_date":      _safe_isoformat(getattr(obj, "created_date", None)),
-        "lastmodified_by":   getattr(obj, "lastmodified_by", None),
-        "lastmodified_date": _safe_isoformat(getattr(obj, "lastmodified_date", None)),
-        "branch_code":       getattr(obj, "branch_code", None),
-        "outlet_code":       getattr(obj, "outlet_code", None),
-        "hospital_code":     getattr(obj, "hospital_code", None),
-        "shiftno":           getattr(obj, "shiftno", "") or "",
-        "discharge_date":    disch_str,
-        "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
-        "patient_details":   patient_details,
+    doc = {
+        "id": discharge_id,
+        "discharge_id": discharge_id,
+        "status": getattr(obj, "status", None),
+        "estimate_number": getattr(obj, "estimate_number", None),
+        "bill_no": getattr(obj, "bill_no", None),
+        "uhid": getattr(obj, "uhid", None),
+        "ip_number": getattr(obj, "ip_number", None),
+        "bill_date": getattr(obj, "bill_date", None),
+        "items": getattr(obj, "items", None),
+        "total_amount": getattr(obj, "total_amount", None),
+        "advance_amount": getattr(obj, "advance_amount", None),
+        "sales_return": getattr(obj, "sales_return", None),
+        "medicines_amount": getattr(obj, "medicines_amount", None),
+        "pharmacy_medicines": getattr(obj, "pharmacy_medicines", None) or [],
+        "implant_amount": getattr(obj, "implant_amount", 0),
+        "taxable_amount": getattr(obj, "taxable_amount", None),
+        "non_tax_amount": getattr(obj, "non_tax_amount", None),
+        "gst_amount": getattr(obj, "gst_amount", None),
+        "room_tax": getattr(obj, "room_tax", 0),
+        "discount_percent": getattr(obj, "discount_percent", None),
+        "discount_amount": getattr(obj, "discount_amount", None),
+        "disc_reason": getattr(obj, "disc_reason", ""),
+        "net_amount": getattr(obj, "net_amount", None),
+        "remarks": getattr(obj, "remarks", ""),
+        "next_visit_date": getattr(obj, "next_visit_date", None),
+        "is_insurance_bill": getattr(obj, "is_insurance_bill", False),
+        "claim_number": getattr(obj, "claim_number", ""),
+        "id_card_number": getattr(obj, "id_card_number", ""),
+        "insurance_bill_number": getattr(obj, "insurance_bill_number", ""),
+        "company_name": getattr(obj, "company_name", ""),
+        "customer_type": getattr(obj, "customer_type", ""),
+        "payment_method": getattr(obj, "payment_method", "Cash"),
+        "billTypeNo": getattr(obj, "billTypeNo", "DIS01"),
+        "bill_type": getattr(obj, "bill_type", 2),
+        "created_by": getattr(obj, "created_by", None),
+        "created_date": getattr(obj, "created_date", None),
+        "lastmodified_by": getattr(obj, "lastmodified_by", None),
+        "lastmodified_date": getattr(obj, "lastmodified_date", None),
+        "branch_code": getattr(obj, "branch_code", None),
+        "outlet_code": getattr(obj, "outlet_code", None),
+        "hospital_code": getattr(obj, "hospital_code", None),
+        "shiftno": getattr(obj, "shiftno", ""),
+        "discharge_date": getattr(obj, "discharge_date", None),
+        "dischargeDateTime": getattr(obj, "dischargeDateTime", None),
     }
+    return _format_raw_bill_doc(doc, patient_map=patient_map, adm_map=adm_map)
 
 
 def _apply_fields(obj, data, existing=None, request=None):
@@ -1449,46 +1422,76 @@ def _apply_fields(obj, data, existing=None, request=None):
     elif not existing or getattr(existing, "bill_type", None) is None:
         obj.bill_type = 2
 
-    # ── Insurance Fields ─────────────────────────────────────────────────────
-    if "is_insurance_bill" in data:
-        obj.is_insurance_bill = bool(data.get("is_insurance_bill"))
-    elif existing and hasattr(existing, "is_insurance_bill"):
-        obj.is_insurance_bill = existing.is_insurance_bill
+    # ── Customer Type & Insurance Fields (Strictly from Admission) ───────────
+    client, db = get_hms_db()
+    ip_num_val = str(getattr(obj, "ip_number", None) or s("ip_number") or "").strip()
+    uhid_val = str(getattr(obj, "uhid", None) or s("uhid") or "").strip()
 
-    if "claim_number" in data and s("claim_number"):
-        obj.claim_number = s("claim_number")
-    elif existing and getattr(existing, "claim_number", None):
-        obj.claim_number = existing.claim_number
+    adm_doc = None
+    if ip_num_val:
+        try:
+            adm_doc = db["hospital_admission"].find_one({"ipNumber": ip_num_val})
+        except Exception:
+            adm_doc = None
+    if not adm_doc and uhid_val:
+        try:
+            adm_doc = db["hospital_admission"].find_one(
+                {"uhid": uhid_val, "is_cancelled": {"$ne": True}},
+                sort=[("admissionDateTime", -1)]
+            )
+        except Exception:
+            adm_doc = None
 
-    if "id_card_number" in data and s("id_card_number"):
-        obj.id_card_number = s("id_card_number")
-    elif existing and getattr(existing, "id_card_number", None):
-        obj.id_card_number = existing.id_card_number
+    if adm_doc:
+        eff_cust_type = str(adm_doc.get("customer_type") or adm_doc.get("customerType") or adm_doc.get("patient_type") or "").strip() or "GENERAL"
+    else:
+        eff_cust_type = str(data.get("customer_type") or (data.get("patient_details") or {}).get("customer_type") or getattr(existing, "customer_type", None) or "GENERAL").strip()
 
-    if getattr(obj, "is_insurance_bill", False):
-        if not getattr(obj, "claim_number", None) or not getattr(obj, "id_card_number", None):
+    is_insurance = "INSURANCE" in eff_cust_type.upper()
+    obj.customer_type = eff_cust_type
+    obj.is_insurance_bill = is_insurance
+
+    if is_insurance:
+        # Resolve company
+        raw_comp = (adm_doc.get("insurance_company") or adm_doc.get("company_code") or "") if adm_doc else ""
+        if not raw_comp:
+            raw_comp = data.get("company_name") or (data.get("patient_details") or {}).get("company") or (data.get("patient_details") or {}).get("company_code") or ""
+        company_name = ""
+        if raw_comp:
+            try:
+                ins_doc = db["hospital_insuranceprovider"].find_one({
+                    "$or": [{"company_code": str(raw_comp)}, {"company_name": str(raw_comp)}]
+                })
+                company_name = ins_doc.get("company_name") if ins_doc else str(raw_comp)
+            except Exception:
+                company_name = str(raw_comp)
+        obj.company_name = company_name or str(raw_comp)
+
+        claim_no = s("claim_number") or (data.get("patient_details") or {}).get("claim_number") or ""
+        id_card = s("id_card_number") or (data.get("patient_details") or {}).get("id_card_number") or ""
+        if not claim_no or not id_card:
             pd_info = data.get("patient_details") or {}
-            uhid_val = getattr(obj, "uhid", "") or (pd_info.get("uhid") if isinstance(pd_info, dict) else "")
             pname_val = pd_info.get("patient_name", "") if isinstance(pd_info, dict) else ""
             auto_ins = _resolve_insurance_member_details(uhid=uhid_val, patient_name=pname_val)
-            if not getattr(obj, "claim_number", None) and auto_ins.get("claim_number"):
-                obj.claim_number = auto_ins["claim_number"]
-            if not getattr(obj, "id_card_number", None) and auto_ins.get("id_card_number"):
-                obj.id_card_number = auto_ins["id_card_number"]
+            if not claim_no and auto_ins.get("claim_number"):
+                claim_no = auto_ins["claim_number"]
+            if not id_card and auto_ins.get("id_card_number"):
+                id_card = auto_ins["id_card_number"]
+        obj.claim_number = claim_no
+        obj.id_card_number = id_card
 
-    if "company_name" in data and s("company_name"):
-        obj.company_name = s("company_name")
-    elif existing and getattr(existing, "company_name", None):
-        obj.company_name = existing.company_name
-
-    if "insurance_bill_number" in data and s("insurance_bill_number"):
-        obj.insurance_bill_number = s("insurance_bill_number")
-    elif existing and getattr(existing, "insurance_bill_number", None):
-        obj.insurance_bill_number = existing.insurance_bill_number
-    elif getattr(obj, "is_insurance_bill", False):
-        if not getattr(obj, "insurance_bill_number", None):
-            ins_name = getattr(obj, "company_name", None) or (data.get("patient_details") or {}).get("company") or (data.get("patient_details") or {}).get("company_code") or "INS"
-            obj.insurance_bill_number = generate_insurance_bill_number(ins_name)
+        ins_bill_no = s("insurance_bill_number")
+        if not ins_bill_no and existing and getattr(existing, "insurance_bill_number", None):
+            ins_bill_no = existing.insurance_bill_number
+        if not ins_bill_no:
+            ins_bill_no = generate_insurance_bill_number(obj.company_name or "INS")
+        obj.insurance_bill_number = ins_bill_no
+    else:
+        # Non-insurance patient (GENERAL, GENERAL IP, BAJAJ EMI, SELF PACKAGE, etc.)
+        obj.claim_number = ""
+        obj.id_card_number = ""
+        obj.insurance_bill_number = ""
+        obj.company_name = ""
 
     # Handle optional next_visit_date
     nv_date = data.get("next_visit_date")
@@ -1643,8 +1646,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
     user_str = str(user_id).strip() if user_id else "System"
 
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client[os.getenv("HMS_DB_NAME", "HMS")]
+        client, db = get_hms_db()
 
         # ── 1. Update Admission & Room Process ──────────────────────────────
         adm = None
@@ -1795,8 +1797,12 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
 
         # Also update in secondary pharmacy DB if present
         try:
-            pharm_client = MongoClient(os.getenv("PHARMACY_DB_HOST", os.getenv("GLOBAL_DB_HOST")))
-            pharm_db = pharm_client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
+            pharm_host = os.getenv("PHARMACY_DB_HOST")
+            if not pharm_host or pharm_host == os.getenv("GLOBAL_DB_HOST"):
+                pharm_db = client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
+            else:
+                pharm_client = MongoClient(pharm_host)
+                pharm_db = pharm_client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
             pharm_db["pharmacy_billing"].update_many(
                 pharm_match,
                 {"$set": {
@@ -2252,8 +2258,8 @@ def search_discharge_patient(request):
     guardian_type_val = patient_doc.get("guardian_type") or ("W/o" if str(patient_doc.get("gender", "")).lower() == "female" and patient_doc.get("spouse_name") else "S/o")
 
     # Strictly determine Billing Type from admission alone - NEVER fall back to patient_doc or member master
-    adm_cust_raw = admission_doc.get("customer_type") or admission_doc.get("patient_type") or "GENERAL"
-    cust_type = str(adm_cust_raw).strip()
+    adm_cust_raw = (admission_doc.get("customer_type") or admission_doc.get("customerType") or admission_doc.get("patient_type") or "").strip()
+    cust_type = adm_cust_raw if adm_cust_raw else "GENERAL"
     is_insurance = "INSURANCE" in cust_type.upper()
 
     # Resolve full insurance company name strictly from admission if insurance patient
@@ -2330,6 +2336,103 @@ def search_discharge_patient(request):
 
     effective_ip   = ip_number or admission_doc.get("ipNumber")
     effective_uhid = patient_doc.get("uhid") or uhid
+
+    if for_print:
+        # Fast path for print preview / modal: only fetch pharmacy medicines!
+        # Skip heavy calculation of room kit charges, lab NABH scan, all investigation bills,
+        # laundry, surgery schedules, implant stock lookups, cathlab intents, opd bills.
+        total_pharm_amt = 0.0
+        pharmacy_medicines = []
+        pharm_ip_filter = []
+        if effective_ip:
+            clean_ip = str(effective_ip).strip()
+            pharm_ip_filter.extend([
+                {"inpatient_number": clean_ip},
+                {"ipNumber": clean_ip},
+                {"ip_number": clean_ip},
+                {"ip_no": clean_ip},
+            ])
+        elif effective_uhid:
+            clean_uhid = str(effective_uhid).strip()
+            pharm_ip_filter.append({"uhid": clean_uhid})
+
+        if pharm_ip_filter:
+            pharm_q = {
+                "$and": [
+                    {"$or": pharm_ip_filter},
+                    {"is_deleted": {"$ne": True}},
+                    {
+                        "$or": [
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
+                            {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
+                        ]
+                    },
+                    {
+                        "$or": [
+                            {"payment_mode": {"$in": ["Credit", "credit"]}},
+                            {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                        ]
+                    }
+                ]
+            }
+            try:
+                pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
+                    "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
+                    "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1
+                }))
+                for doc in pharm_docs:
+                    tot_amt = _to_float(
+                        doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
+                    )
+                    meds = doc.get("medicine_particulars", [])
+                    bill_no = str(doc.get("bill_no") or doc.get("Bill_id") or "")
+                    calc_tot = 0.0
+                    for med in (meds if isinstance(meds, list) else []):
+                        if isinstance(med, dict):
+                            qty = float(med.get("qty") or med.get("quantity") or 1)
+                            iid = str(med.get("item_id") or "")
+                            rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or 0)
+                            d_val = _to_float(med.get("discount") or 0)
+                            amt = _to_float(med.get("amount") or med.get("calculated_price"))
+                            if amt == 0 and rate > 0:
+                                amt = max(0.0, rate * qty - d_val)
+                            calc_tot += amt
+                            iname = str(med.get("item_name") or med.get("name") or f"Medicine {iid}").strip()
+                            batch = str(med.get("batch_number") or "").strip()
+                            pharmacy_medicines.append({
+                                "item_id": iid,
+                                "itemName": iname,
+                                "name": iname,
+                                "item_name": iname,
+                                "batch_number": batch,
+                                "quantity": qty,
+                                "rate": rate,
+                                "price": rate,
+                                "discount": d_val,
+                                "amount": amt,
+                                "bill_no": bill_no,
+                                "category": "MEDICINE / PHARMACY CHARGES",
+                                "source": "pharmacy",
+                                "item_description": f"Batch: {batch}" if batch else "",
+                            })
+                    if tot_amt == 0:
+                        tot_amt = calc_tot
+                    total_pharm_amt += tot_amt
+            except Exception as e:
+                print(f"Error fetching pharmacy medicines for print: {e}")
+
+        patient_info["medicines_amount"] = total_pharm_amt
+        patient_info["pharmacy_medicines"] = pharmacy_medicines
+
+        return Response({
+            "success": True,
+            "data": {
+                "patient": patient_info,
+                "invest_items": [],
+                "pharmacy_medicines": pharmacy_medicines,
+            }
+        })
 
     invest_items = []
 
@@ -3582,36 +3685,46 @@ def discharge_billing_list_create(request):
         customer_type_f = request.GET.get("customer_type")
         insurance_type_f = request.GET.get("insurance_type") or request.GET.get("company_name")
 
-        q = {}
-        if status_f:
-            q["status"] = status_f
-            if status_f == "Estimate":
-                q["is_cancelled"] = {"$ne": True}
+        and_conditions = []
+
+        if status_f and str(status_f).lower() != "all":
+            sf = str(status_f).strip().lower()
+            if sf == "billed":
+                and_conditions.append({"$or": [{"status": {"$in": ["Billed", "billed"]}}, {"is_billed": True}]})
+            elif sf == "estimate":
+                and_conditions.append({"status": "Estimate", "is_cancelled": {"$ne": True}})
+            elif sf == "cancelled":
+                and_conditions.append({"is_cancelled": True})
+            else:
+                and_conditions.append({"status": status_f})
+        else:
+            and_conditions.append({"is_cancelled": {"$ne": True}})
+
         if uhid_f:
-            q["uhid"] = str(uhid_f).strip()
+            and_conditions.append({"uhid": str(uhid_f).strip()})
         if ip_f:
-            q["ip_number"] = str(ip_f).strip()
+            and_conditions.append({"ip_number": str(ip_f).strip()})
 
         if customer_type_f and str(customer_type_f).upper() != "ALL":
             ct = str(customer_type_f).strip().upper()
             if ct == "INSURANCE":
-                q["is_insurance_bill"] = True
+                and_conditions.append({"is_insurance_bill": True})
             elif ct == "GENERAL":
-                q["is_insurance_bill"] = {"$ne": True}
+                and_conditions.append({"is_insurance_bill": {"$ne": True}})
             else:
-                q["$or"] = [
+                and_conditions.append({"$or": [
                     {"customer_type": {"$regex": re.escape(ct), "$options": "i"}},
                     {"company_name": {"$regex": re.escape(ct), "$options": "i"}}
-                ]
+                ]})
 
         if insurance_type_f and str(insurance_type_f).upper() != "ALL":
             if insurance_type_f == "NON_INSURANCE":
-                q["is_insurance_bill"] = {"$ne": True}
+                and_conditions.append({"is_insurance_bill": {"$ne": True}})
             else:
-                q["company_name"] = {"$regex": re.escape(str(insurance_type_f).strip()), "$options": "i"}
+                and_conditions.append({"company_name": {"$regex": re.escape(str(insurance_type_f).strip()), "$options": "i"}})
 
+        date_conds = []
         if from_f or to_f:
-            date_conds = []
             f_str = str(from_f).strip() if from_f else ""
             t_str = str(to_f).strip() if to_f else ""
             from_dt_ist = _datetime.strptime(f_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=_IST_TZ) if f_str else None
@@ -3635,55 +3748,110 @@ def discharge_billing_list_create(request):
             if t_str: c_str["$lte"] = t_str + "\uffff"
             if c_str: date_conds.append({"bill_date": c_str})
 
-            if date_conds:
-                if len(date_conds) == 1:
-                    q.update(date_conds[0])
-                else:
-                    if "$or" in q:
-                        q["$and"] = [{"$or": q.pop("$or")}, {"$or": date_conds}]
-                    else:
-                        q["$or"] = date_conds
-
+        search_or = []
         if search_f:
             s = str(search_f).strip()
-            # Match patients by name or mobile or uhid
-            p_matches = list(db["hospital_patient"].find({
-                "$or": [
-                    {"patient_name": {"$regex": s, "$options": "i"}},
-                    {"mobile": {"$regex": s, "$options": "i"}},
-                    {"uhid": {"$regex": s, "$options": "i"}},
-                ]
-            }, {"uhid": 1}).limit(100))
+            s_rgx = {"$regex": re.escape(s), "$options": "i"}
+
+            # Search in hospital_patient by name, uhid, mobile
+            p_conds = [
+                {"firstName": s_rgx},
+                {"lastName": s_rgx},
+                {"uhid": s_rgx},
+                {"mobilePhone": s_rgx},
+                {"phone": s_rgx},
+            ]
+            parts = s.split()
+            if len(parts) > 1:
+                p_conds.append({
+                    "firstName": {"$regex": re.escape(parts[0]), "$options": "i"},
+                    "lastName": {"$regex": re.escape(parts[-1]), "$options": "i"}
+                })
+                p_conds.append({
+                    "firstName": {"$regex": re.escape(parts[-1]), "$options": "i"},
+                    "lastName": {"$regex": re.escape(parts[0]), "$options": "i"}
+                })
+            p_matches = list(db["hospital_patient"].find({"$or": p_conds}, {"uhid": 1}).limit(200))
             matched_uhids = [str(p["uhid"]).strip() for p in p_matches if p.get("uhid")]
 
-            or_clauses = [
-                {"bill_no": {"$regex": s, "$options": "i"}},
-                {"estimate_number": {"$regex": s, "$options": "i"}},
-                {"uhid": {"$regex": s, "$options": "i"}},
-                {"ip_number": {"$regex": s, "$options": "i"}},
-                {"doctor": {"$regex": s, "$options": "i"}},
+            # Search in hospital_admission by patient name, IP, doctor, mobile
+            a_conds = [
+                {"patientName": s_rgx},
+                {"firstName": s_rgx},
+                {"lastName": s_rgx},
+                {"uhid": s_rgx},
+                {"ipNumber": s_rgx},
+                {"admittingDoctorName": s_rgx},
+                {"consultingDoctorName": s_rgx},
+                {"mobilePhone": s_rgx},
+            ]
+            if len(parts) > 1:
+                a_conds.append({
+                    "firstName": {"$regex": re.escape(parts[0]), "$options": "i"},
+                    "lastName": {"$regex": re.escape(parts[-1]), "$options": "i"}
+                })
+            a_matches = list(db["hospital_admission"].find({"$or": a_conds}, {"uhid": 1, "ipNumber": 1}).limit(200))
+            for a in a_matches:
+                if a.get("uhid"):
+                    matched_uhids.append(str(a["uhid"]).strip())
+            matched_ips = [str(a["ipNumber"]).strip() for a in a_matches if a.get("ipNumber")]
+
+            matched_uhids = list(set(matched_uhids))
+            matched_ips = list(set(matched_ips))
+
+            # Direct fields in hospital_dischargebilling
+            search_or = [
+                {"bill_no": s_rgx},
+                {"estimate_number": s_rgx},
+                {"insurance_bill_number": s_rgx},
+                {"uhid": s_rgx},
+                {"ip_number": s_rgx},
+                {"doctor": s_rgx},
+                {"company_name": s_rgx},
             ]
             if s.isdigit() and 1990 <= int(s) <= 2100:
                 yr = int(s)
-                or_clauses.append({
+                search_or.append({
                     "bill_date": {
-                        "$gte": datetime(yr, 1, 1, 0, 0, 0),
-                        "$lte": datetime(yr, 12, 31, 23, 59, 59)
+                        "$gte": _datetime(yr, 1, 1, 0, 0, 0),
+                        "$lte": _datetime(yr, 12, 31, 23, 59, 59)
                     }
                 })
             if matched_uhids:
-                or_clauses.append({"uhid": {"$in": matched_uhids}})
-            q["$or"] = or_clauses
+                search_or.append({"uhid": {"$in": matched_uhids}})
+            if matched_ips:
+                search_or.append({"ip_number": {"$in": matched_ips}})
+
+        # Build query with date conditions
+        and_with_date = list(and_conditions)
+        if date_conds:
+            and_with_date.append(date_conds[0] if len(date_conds) == 1 else {"$or": date_conds})
+        if search_or:
+            and_with_date.append({"$or": search_or})
+
+        q = {"$and": and_with_date} if len(and_with_date) > 1 else (and_with_date[0] if and_with_date else {})
 
         # Limit to 300 if no date range and no search is specified for instant response
         limit_val = 0
         if not (from_f or to_f or search_f or uhid_f or ip_f):
             limit_val = 300
 
-        cursor = db["hospital_dischargebilling"].find(q).sort([("discharge_id", -1)])
+        cursor = db["hospital_dischargebilling"].find(q)
         if limit_val > 0:
             cursor = cursor.limit(limit_val)
         raw_bills = list(cursor)
+
+        # Fallback: if search was specified but returned 0 results because of date filtering,
+        # search across all dates so the user can easily find the patient/bill regardless of date
+        if not raw_bills and search_or and date_conds:
+            and_without_date = list(and_conditions) + [{"$or": search_or}]
+            q_fallback = {"$and": and_without_date} if len(and_without_date) > 1 else and_without_date[0]
+            cursor_fallback = db["hospital_dischargebilling"].find(q_fallback)
+            if limit_val > 0:
+                cursor_fallback = cursor_fallback.limit(limit_val)
+            raw_bills = list(cursor_fallback)
+
+        raw_bills.sort(key=lambda b: b.get("discharge_id") or 0, reverse=True)
 
         if not raw_bills:
             return Response({
@@ -3691,7 +3859,7 @@ def discharge_billing_list_create(request):
                 "data": []
             })
 
-        # Ultra-fast Batch prefetch: Patients, Admissions, Insurance Companies, and Employees!
+        # Ultra-fast Batch prefetch: Patients, Admissions, Insurance Members, Insurance Providers, and Employees!
         uhids = list({str(b.get("uhid")).strip() for b in raw_bills if b.get("uhid")})
         ip_numbers = list({str(b.get("ip_number")).strip() for b in raw_bills if b.get("ip_number")})
 
@@ -3700,6 +3868,22 @@ def discharge_billing_list_create(request):
 
         adm_docs = list(db["hospital_admission"].find({"ipNumber": {"$in": ip_numbers}})) if ip_numbers else []
         adm_map = {str(a.get("ipNumber")).strip(): a for a in adm_docs if a.get("ipNumber")}
+
+        # Single batch fetch for ALL insurance member details (Claim and ID card numbers)
+        ins_members = list(db["hospital_insurancemember"].find(
+            {"uhid": {"$in": uhids}},
+            {"uhid": 1, "card_no": 1, "echs_card": 1, "referral_number": 1, "company_name": 1, "member_number": 1}
+        )) if uhids else []
+        ins_member_map = {}
+        for m in ins_members:
+            u = str(m.get("uhid") or "").strip()
+            if u and u not in ins_member_map:
+                ins_member_map[u] = {
+                    "claim_number": str(m.get("referral_number") or "").strip(),
+                    "id_card_number": str(m.get("card_no") or m.get("echs_card") or "").strip(),
+                    "company_name": str(m.get("company_name") or "").strip(),
+                    "member_number": str(m.get("member_number") or "").strip(),
+                }
 
         emp_ids = set()
         raw_comps = set()
@@ -3715,9 +3899,17 @@ def discharge_billing_list_create(request):
                         c = re.sub(r'^(dr[.\s]*)+', '', d, flags=re.IGNORECASE).strip()
                         if c.isdigit() or (c.startswith("5") and len(c) == 5):
                             emp_ids.add(c)
+                    s_val = str(it.get("surgeon_id") or "").strip()
+                    if s_val and (s_val.isdigit() or (s_val.startswith("5") and len(s_val) == 5)):
+                        emp_ids.add(s_val)
+
         for a in adm_docs:
             if a.get("admittingDoctor"):
-                emp_ids.add(str(a.get("admittingDoctor")).strip())
+                doc_raw = str(a.get("admittingDoctor")).strip()
+                emp_ids.add(doc_raw)
+                c_doc = re.sub(r'^(dr[.\s]*)+', '', doc_raw, flags=re.IGNORECASE).strip()
+                if c_doc:
+                    emp_ids.add(c_doc)
             c = a.get("company_code") or a.get("insurance_company")
             if c:
                 raw_comps.add(str(c).strip())
@@ -3739,9 +3931,11 @@ def discharge_billing_list_create(request):
         desig_map = {}
         dept_map = {}
         if emp_ids:
+            int_ids = [int(x) for x in emp_ids if str(x).isdigit()]
+            all_emp_query = list(emp_ids) + int_ids
             g_db = client["Global"]
             profiles = list(g_db["backend_diagnostics_profile"].find(
-                {"employeeId": {"$in": list(emp_ids)}},
+                {"employeeId": {"$in": all_emp_query}},
                 {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1, "designation": 1, "department": 1}
             ))
             for p in profiles:
@@ -3758,7 +3952,7 @@ def discharge_billing_list_create(request):
 
         mgr_info = _resolve_insurance_manager()
 
-        results = [_format_raw_bill_doc(b, patient_map, adm_map, ins_map, emp_map, dept_map, desig_map, mgr_info) for b in raw_bills]
+        results = [_format_raw_bill_doc(b, patient_map, adm_map, ins_map, emp_map, dept_map, desig_map, mgr_info, ins_member_map) for b in raw_bills]
 
         return Response({
             "success": True,
@@ -4077,6 +4271,7 @@ def convert_bill_to_insurance(request, pk):
         insurance_bill_number = generate_insurance_bill_number(ins_name)
 
     billing.is_insurance_bill = True
+    billing.customer_type = "INSURANCE"
     billing.claim_number = claim_number
     billing.id_card_number = id_card_number
     billing.insurance_bill_number = insurance_bill_number
@@ -5760,7 +5955,8 @@ def get_discharge_requests(request):
             "doctorName": doc_name,
             "roomNo": room_no,
             "bedNo": bed_no,
-            "customerType": a.get("customer_type") or "General",
+            "customerType": a.get("customer_type") or a.get("customerType") or a.get("patient_type") or "General",
+            "customer_type": a.get("customer_type") or a.get("customerType") or a.get("patient_type") or "General",
             "insuranceCompany": a.get("insurance_company") or "",
             "wardStatus": a.get("ward_status") or "",
             "requestDate": req_date_str,
