@@ -58,6 +58,7 @@ def admission_vs_discharge_api(request):
         to_str = data.get("to_date") or data.get("end_date") or ""
         status_filter = (data.get("status") or data.get("patient_status") or "all").strip().lower()
         company_filter = (data.get("company") or data.get("company_name") or data.get("category") or data.get("bill_type") or "all").strip()
+        outlet_filter = (data.get("outlet_code") or data.get("outlet") or "all").strip()
         search_query = (data.get("search") or data.get("q") or "").strip().lower()
         sort_order = (data.get("sort_order") or "asc").strip().lower()
 
@@ -78,10 +79,15 @@ def admission_vs_discharge_api(request):
             if c_code:
                 ins_map[c_code] = c_name
 
+        all_known_companies = set(ins_map.values())
+        all_known_companies.add("Cash / Self")
+
         # 2. Identify relevant discharge bills in range
         dis_bill_query = {"is_cancelled": {"$ne": True}}
         if f_dt_utc and t_dt_utc:
             dis_bill_query["bill_date"] = {"$gte": f_dt_utc, "$lte": t_dt_utc}
+        if outlet_filter and outlet_filter.lower() != "all":
+            dis_bill_query["outlet_code"] = outlet_filter
         
         dis_bills_list = list(db["hospital_dischargebilling"].find(dis_bill_query))
         discharge_bills_by_ip = {}
@@ -92,6 +98,8 @@ def admission_vs_discharge_api(request):
 
         # 3. Build candidate admissions query
         adm_query = {"is_cancelled": {"$ne": True}}
+        if outlet_filter and outlet_filter.lower() != "all":
+            adm_query["outlet_code"] = outlet_filter
         
         if f_dt_utc and t_dt_utc:
             dis_ips = list(discharge_bills_by_ip.keys())
@@ -263,6 +271,11 @@ def admission_vs_discharge_api(request):
                 if search_query not in haystack:
                     continue
 
+            # Extract formatted date and time for hierarchical reporting
+            adm_date_disp = adm_dt.strftime("%d/%m/%Y") if adm_dt else "-"
+            adm_time_disp = adm_dt.strftime("%I:%M %p") if adm_dt else "-"
+            dis_date_disp = dis_dt.strftime("%d/%m/%Y %I:%M %p") if dis_dt else "Still Admitted"
+
             records.append({
                 "ip_number": ip,
                 "room": room_str,
@@ -270,8 +283,11 @@ def admission_vs_discharge_api(request):
                 "patient_name": pat_name,
                 "doctor_name": doc_name,
                 "admitting_date": format_ist_datetime(adm_dt) if adm_dt else "-",
+                "admitting_date_display": adm_date_disp,
+                "admitting_time_display": adm_time_disp,
                 "admitting_date_iso": adm_dt.isoformat() if adm_dt else "",
                 "discharge_date": format_ist_datetime(dis_dt) if dis_dt else "Still Admitted",
+                "discharge_date_display": dis_date_disp,
                 "discharge_date_iso": dis_dt.isoformat() if dis_dt else "",
                 "is_discharged": is_discharged,
                 "ward_status": "Discharged" if is_discharged else "Admitted",
@@ -279,7 +295,8 @@ def admission_vs_discharge_api(request):
                 "advance": round(total_advance, 2),
                 "gross_bill": round(gross_bill, 2),
                 "net_paid": round(net_paid, 2),
-                "company_name": resolved_comp
+                "company_name": resolved_comp,
+                "outlet_code": str(adm.get("outlet_code") or "")
             })
 
         # Sort strictly by IPNUMBER
@@ -308,6 +325,10 @@ def admission_vs_discharge_api(request):
             "avg_length_of_stay": avg_days
         }
 
+        # Merge all known companies for rich filter options
+        distinct_companies.update(all_known_companies)
+        all_comps = sorted([c for c in distinct_companies if c and str(c).strip() and str(c).lower() not in ["none", "nan"]])
+
         return Response({
             "success": True,
             "report_title": "Admission vs Discharge Report",
@@ -319,7 +340,7 @@ def admission_vs_discharge_api(request):
             },
             "count": len(records),
             "summary": summary,
-            "companies": sorted(list(distinct_companies)),
+            "companies": all_comps,
             "data": records
         }, status=status.HTTP_200_OK)
 
