@@ -1170,6 +1170,8 @@ def save_ot_medicine_ward_request(request):
             "itemName",
             "item_name",
             "name",
+            "quantity",
+            "pending_qty",
         }
 
         cleaned_medicines = []
@@ -1189,7 +1191,9 @@ def save_ot_medicine_ward_request(request):
             cleaned.setdefault("route", "")
             cleaned.setdefault("dosage", "")
             cleaned.setdefault("noOfDays", "")
-            cleaned.setdefault("qty", cleaned.get("quantity", 0))
+            cleaned["qty"] = float(med.get("qty", med.get("quantity", 0)) or 0)
+            cleaned.pop("quantity", None)
+            cleaned.pop("pending_qty", None)
 
             cleaned_medicines.append(cleaned)
 
