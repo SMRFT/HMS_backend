@@ -4548,28 +4548,29 @@ def ipadvance_bills(request):
         # =========================================
         data = request.data if isinstance(request.data, dict) else {}
         employee_id = (
-            data.get("auth-user-id") or
-            request.headers.get("auth-user-id") or
-            request.headers.get("User-Id") or
-            request.GET.get("auth-user-id")
+            data.get("auth-user-id")
+            or request.headers.get("auth-user-id")
+            or request.headers.get("User-Id")
+            or request.GET.get("auth-user-id")
+            or extract_aud_employee_id(request)
         )
         hospital_code = (
-            data.get("auth-hospital-code") or
-            request.headers.get("auth-hospital-code") or
-            request.headers.get("Hospital-Code") or
-            request.GET.get("auth-hospital-code")
+            data.get("auth-hospital-code")
+            or request.headers.get("auth-hospital-code")
+            or request.GET.get("auth-hospital-code")
         )
         branch_code = (
-            data.get("auth-branch-code") or
-            request.headers.get("auth-branch-code") or
-            request.headers.get("Branch-Code") or
-            request.GET.get("auth-branch-code")
+            data.get("auth-branch-code")
+            or request.headers.get("auth-branch-code")
+            or request.GET.get("auth-branch-code")
         )
         outlet_code = (
-            data.get("auth-outlet-code") or
-            request.headers.get("auth-outlet-code") or
-            request.headers.get("Outlet-Code") or
-            request.GET.get("auth-outlet-code")
+            data.get("auth-outlet-code")
+            or request.headers.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("outlet-code")
+            or request.GET.get("auth-outlet-code")
+            or request.GET.get("outlet_code")
         )
         cashier_id = employee_id
 
@@ -4699,7 +4700,20 @@ def ipadvance_bills(request):
                 "is_discharged": False
             }
             if target_outlet:
-                adm_filter["outlet_code"] = target_outlet
+                if isinstance(target_outlet, (list, tuple)):
+                    adm_filter["$or"] = [
+                        {"advance_payments.outlet_code": {"$in": list(target_outlet)}},
+                        {"advance_payments.outlet_code": {"$exists": False}, "outlet_code": {"$in": list(target_outlet)}},
+                        {"advance_payments.outlet_code": None, "outlet_code": {"$in": list(target_outlet)}},
+                        {"advance_payments.outlet_code": "", "outlet_code": {"$in": list(target_outlet)}}
+                    ]
+                else:
+                    adm_filter["$or"] = [
+                        {"advance_payments.outlet_code": target_outlet},
+                        {"advance_payments.outlet_code": {"$exists": False}, "outlet_code": target_outlet},
+                        {"advance_payments.outlet_code": None, "outlet_code": target_outlet},
+                        {"advance_payments.outlet_code": "", "outlet_code": target_outlet}
+                    ]
 
             raw_admissions = list(
                 admission_collection.find(
@@ -4801,6 +4815,28 @@ def ipadvance_bills(request):
                         # ✅ Only bills whose bill_type is allowed for this cash counter
                         if _payment_bill_type(p_copy) not in allowed_bill_types:
                             continue
+
+                        # ✅ Match outlet code inside each payment array item (not outside admission root outlet)
+                        p_outlet = str(p_copy.get("outlet_code") or "").strip()
+                        if target_outlet:
+                            if isinstance(target_outlet, (list, tuple)):
+                                allowed_outlets = {str(o).strip().upper() for o in target_outlet if o}
+                                if p_outlet:
+                                    if p_outlet.upper() not in allowed_outlets:
+                                        continue
+                                else:
+                                    adm_out = str(admission.get("outlet_code") or "").strip().upper()
+                                    if adm_out and adm_out not in allowed_outlets:
+                                        continue
+                            else:
+                                target_out_str = str(target_outlet).strip().upper()
+                                if p_outlet:
+                                    if p_outlet.upper() != target_out_str:
+                                        continue
+                                else:
+                                    adm_out = str(admission.get("outlet_code") or "").strip().upper()
+                                    if adm_out and adm_out != target_out_str:
+                                        continue
 
                         # Check is_advanceActive
                         if not p_copy.get("is_advanceActive", True):
@@ -5018,6 +5054,16 @@ def ipadvance_bills(request):
                 # ✅ Skip payments whose bill_type this counter is not allowed to collect
                 if _payment_bill_type(p) not in allowed_bill_types:
                     continue
+
+                # ✅ Match outlet code inside payment array item
+                p_out = str(p.get("outlet_code") or "").strip()
+                if target_outlet and p_out:
+                    if isinstance(target_outlet, (list, tuple)):
+                        if p_out.upper() not in {str(o).strip().upper() for o in target_outlet if o}:
+                            continue
+                    else:
+                        if p_out.upper() != str(target_outlet).strip().upper():
+                            continue
 
                 # ✅ CASE 1: Specific advance_id
                 if advance_id:

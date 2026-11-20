@@ -2420,16 +2420,13 @@ def save_medicine_ward_request(request):
             cleaned_item = {
                 "item_id": item.get("item_id"),
                 "qty": orig_q,
-                "dispatched_qty": 0.0,
+                "dispatched_qty": None,
                 "dosage": item.get("dosage", ""),
                 "noOfDays": item.get("noOfDays", ""),
-                "dose": item.get("dose", ""),
-                "doseunit": item.get("doseunit", item.get("doseUnit", "")),
-                "doseUnit": item.get("doseUnit", item.get("doseunit", "")),
-                "route": item.get("route", ""),
                 "remark": item.get("remark", ""),
-                "batch_number": "",
-                "instruction": item.get("instruction", "")
+                "dose": item.get("dose", ""),
+                "doseUnit": item.get("doseUnit") or item.get("doseunit") or "",
+                "route": item.get("route", "")
             }
             cleaned_particulars.append(cleaned_item)
 
