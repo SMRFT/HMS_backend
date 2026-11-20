@@ -1605,7 +1605,8 @@ def billing_report_view(request):
                     "is_active": True
                 },
                 {"_id": 0, "investBillNo": 1, "item": 1,
-         "refundBillNo": 1, "refundBillDate": 1, "refundRemarks": 1}
+         "refundBillNo": 1, "refundBillDate": 1, "refundRemarks": 1,
+         "is_approved": 1, "approved_by": 1, "approved_date": 1}
             )
 
             for rdoc in refund_docs:
@@ -1636,6 +1637,9 @@ def billing_report_view(request):
                         "refundBillNo":   rdoc.get("refundBillNo", ""),
                         "refundBillDate": rdoc.get("refundBillDate", ""),
                         "refundRemarks":  rdoc.get("refundRemarks", ""),
+                        "is_approved":    rdoc.get("is_approved", False),
+                        "approved_by":    rdoc.get("approved_by", None),
+                        "approved_date":  rdoc.get("approved_date", None),
                         "item":           items,
                     })
 
@@ -1793,9 +1797,14 @@ def billing_report_view(request):
             else:
                 doc["item"] = items
 
-            # Skip the bill entirely if all items have been refunded
+            # Skip the bill entirely if all items have been refunded AND all refunds approved
             if not doc["item"]:
-                continue
+                bill_no_check = doc.get("investBillNo", "")
+                bill_refunds_check = refund_details.get(bill_no_check, [])
+                has_pending_refund = any(not r.get("is_approved", False) for r in bill_refunds_check)
+                if not has_pending_refund:
+                    continue  # all refunds approved — hide the bill
+                # else: keep visible with empty items — pending refund approval
             # ← NEW: attach refund details to the bill
             bill_no = doc.get("investBillNo", "")
             doc["refunds"] = refund_details.get(bill_no, [])
