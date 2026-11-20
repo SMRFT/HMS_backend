@@ -501,6 +501,8 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "payment_method", None) is not None: update_dict["payment_method"] = str(obj.payment_method)
             update_dict["billTypeNo"] = str(getattr(obj, "billTypeNo", None) or "DIS01")
             update_dict["bill_type"] = int(getattr(obj, "bill_type")) if getattr(obj, "bill_type", None) is not None else 2
+            if getattr(obj, "pharmacy_medicines", None) is not None:
+                update_dict["pharmacy_medicines"] = obj.pharmacy_medicines
 
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
@@ -1357,6 +1359,12 @@ def _apply_fields(obj, data, existing=None, request=None):
     obj.ip_number        = s("ip_number")
     obj.items            = items
 
+    raw_pm = data.get("pharmacy_medicines")
+    if raw_pm is not None:
+        obj.pharmacy_medicines = raw_pm
+    elif existing and getattr(existing, "pharmacy_medicines", None):
+        obj.pharmacy_medicines = existing.pharmacy_medicines
+
     items_sum = sum(_to_float(it.get("amount", 0)) for it in items)
     meds_val  = flt("medicines_amount")
     imp_val   = flt("implant_amount") if data.get("implant_amount") is not None else flt("implants")
@@ -2085,6 +2093,147 @@ def _revert_admission_discharge(ip_number):
         print(f"Failed to revert admission status for {ip_number}: {e}")
 
 
+def _build_pharmacy_medicines(pharm_docs, db):
+    """
+    Extract itemized medicines from pharmacy billing documents, resolving medicine
+    names and unit prices from hospital_pharmacyitem collection.
+    """
+    missing_ids = set()
+    for doc in pharm_docs:
+        for med in (doc.get("medicine_particulars") or []):
+            if isinstance(med, dict):
+                iid = med.get("item_id")
+                if iid:
+                    try:
+                        missing_ids.add(int(iid))
+                    except Exception:
+                        pass
+                    missing_ids.add(str(iid).strip())
+
+    name_cache = {}
+    price_cache = {}
+    if missing_ids:
+        try:
+            int_ids = [x for x in missing_ids if isinstance(x, int)]
+            str_ids = [str(x) for x in missing_ids]
+            or_clauses = []
+            if int_ids:
+                or_clauses.append({"item_id": {"$in": int_ids}})
+            if str_ids:
+                or_clauses.append({"item_id": {"$in": str_ids}})
+            query = {"$or": or_clauses} if len(or_clauses) > 1 else (or_clauses[0] if or_clauses else {})
+            if query:
+                for pi in db["hospital_pharmacyitem"].find(
+                    query,
+                    {"item_id": 1, "item_name": 1, "name": 1, "brand_name": 1, "medicine_name": 1, "unit_price": 1, "packing_price": 1, "mrp": 1}
+                ):
+                    sid = str(pi.get("item_id"))
+                    rname = str(pi.get("item_name") or pi.get("name") or pi.get("brand_name") or pi.get("medicine_name") or "").strip()
+                    if rname:
+                        name_cache[sid] = rname
+                        try:
+                            name_cache[int(sid)] = rname
+                        except Exception:
+                            pass
+                    p_val = _to_float(pi.get("unit_price") or pi.get("mrp") or pi.get("packing_price") or 0)
+                    price_cache[sid] = p_val
+                    try:
+                        price_cache[int(sid)] = p_val
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Error querying hospital_pharmacyitem: {e}")
+
+        # Secondary fallback if any still missing
+        still_missing = [mid for mid in missing_ids if str(mid) not in name_cache and mid not in name_cache]
+        if still_missing:
+            try:
+                int_sm = [x for x in still_missing if isinstance(x, int)]
+                str_sm = [str(x) for x in still_missing]
+                sm_clauses = []
+                if int_sm: sm_clauses.append({"medicine_particulars.item_id": {"$in": int_sm}})
+                if str_sm: sm_clauses.append({"medicine_particulars.item_id": {"$in": str_sm}})
+                sm_q = {"$or": sm_clauses} if len(sm_clauses) > 1 else (sm_clauses[0] if sm_clauses else {})
+                if sm_q:
+                    for pb in db["hospital_pharmacybilling"].find(
+                        {"$and": [sm_q, {"medicine_particulars.item_name": {"$exists": True, "$ne": ""}}]},
+                        {"medicine_particulars": 1}
+                    ).limit(50):
+                        for m in (pb.get("medicine_particulars") or []):
+                            mid = m.get("item_id")
+                            m_name = m.get("item_name") or m.get("name") or m.get("itemName")
+                            if m_name:
+                                smid = str(mid)
+                                if smid not in name_cache:
+                                    name_cache[smid] = str(m_name).strip()
+                                if smid not in price_cache and m.get("price"):
+                                    price_cache[smid] = _to_float(m.get("price"))
+            except Exception:
+                pass
+
+    pharmacy_medicines = []
+    total_pharm_amt = 0.0
+    for doc in pharm_docs:
+        tot_amt = _to_float(
+            doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
+        )
+        disp_hist = doc.get("dispatch_history") or []
+        last_disp_bno = disp_hist[-1].get("bill_no") if (isinstance(disp_hist, list) and disp_hist and isinstance(disp_hist[-1], dict)) else ""
+        bill_no = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
+        meds = doc.get("medicine_particulars", [])
+        calc_tot = 0.0
+        if isinstance(meds, list):
+            for med in meds:
+                if isinstance(med, dict):
+                    qty = float(med.get("qty") or med.get("quantity") or 1)
+                    iid = str(med.get("item_id") or "")
+                    iid_int = int(iid) if iid.isdigit() else None
+                    rate = _to_float(
+                        med.get("price") or med.get("rate") or med.get("mrp") or
+                        price_cache.get(iid) or (price_cache.get(iid_int) if iid_int is not None else None) or 0
+                    )
+                    d_val = _to_float(med.get("discount") or 0)
+                    amt = _to_float(med.get("amount") or med.get("calculated_price"))
+                    if amt == 0:
+                        if rate > 0:
+                            amt = max(0.0, rate * qty - d_val)
+                        elif len(meds) == 1 and tot_amt > 0:
+                            amt = tot_amt
+                            rate = round(tot_amt / max(qty, 1), 2)
+                    calc_tot += amt
+                    resolved_name = (
+                        med.get("item_name") or
+                        med.get("name") or
+                        med.get("itemName") or
+                        name_cache.get(iid) or
+                        (name_cache.get(iid_int) if iid_int is not None else None) or
+                        f"Medicine {iid}"
+                    )
+                    iname = str(resolved_name).strip()
+                    batch = str(med.get("batch_number") or "").strip()
+                    pharmacy_medicines.append({
+                        "item_id": iid,
+                        "itemName": iname,
+                        "name": iname,
+                        "item_name": iname,
+                        "batch_number": batch,
+                        "quantity": qty,
+                        "rate": rate,
+                        "price": rate,
+                        "discount": d_val,
+                        "amount": amt,
+                        "bill_no": bill_no,
+                        "category": "MEDICINE / PHARMACY CHARGES",
+                        "source": "pharmacy",
+                        "item_description": f"Batch: {batch}" if batch else "",
+                    })
+        if tot_amt == 0:
+            tot_amt = calc_tot
+        total_pharm_amt += tot_amt
+
+    return pharmacy_medicines, total_pharm_amt
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Search Discharge Patient
 # GET /search-discharge-patient/?uhid=… OR ?ipNumber=…
@@ -2379,46 +2528,9 @@ def search_discharge_patient(request):
             try:
                 pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
                     "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
-                    "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1
+                    "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1, "dispatch_history": 1
                 }))
-                for doc in pharm_docs:
-                    tot_amt = _to_float(
-                        doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
-                    )
-                    meds = doc.get("medicine_particulars", [])
-                    bill_no = str(doc.get("bill_no") or doc.get("Bill_id") or "")
-                    calc_tot = 0.0
-                    for med in (meds if isinstance(meds, list) else []):
-                        if isinstance(med, dict):
-                            qty = float(med.get("qty") or med.get("quantity") or 1)
-                            iid = str(med.get("item_id") or "")
-                            rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or 0)
-                            d_val = _to_float(med.get("discount") or 0)
-                            amt = _to_float(med.get("amount") or med.get("calculated_price"))
-                            if amt == 0 and rate > 0:
-                                amt = max(0.0, rate * qty - d_val)
-                            calc_tot += amt
-                            iname = str(med.get("item_name") or med.get("name") or f"Medicine {iid}").strip()
-                            batch = str(med.get("batch_number") or "").strip()
-                            pharmacy_medicines.append({
-                                "item_id": iid,
-                                "itemName": iname,
-                                "name": iname,
-                                "item_name": iname,
-                                "batch_number": batch,
-                                "quantity": qty,
-                                "rate": rate,
-                                "price": rate,
-                                "discount": d_val,
-                                "amount": amt,
-                                "bill_no": bill_no,
-                                "category": "MEDICINE / PHARMACY CHARGES",
-                                "source": "pharmacy",
-                                "item_description": f"Batch: {batch}" if batch else "",
-                            })
-                    if tot_amt == 0:
-                        tot_amt = calc_tot
-                    total_pharm_amt += tot_amt
+                pharmacy_medicines, total_pharm_amt = _build_pharmacy_medicines(pharm_docs, db)
             except Exception as e:
                 print(f"Error fetching pharmacy medicines for print: {e}")
 
@@ -2793,91 +2905,9 @@ def search_discharge_patient(request):
         if pharm_q:
             pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
                 "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
-                "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1
+                "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1, "dispatch_history": 1
             }))
-            # Gather item names if missing
-            missing_ids = set()
-            for doc in pharm_docs:
-                for med in (doc.get("medicine_particulars") or []):
-                    if isinstance(med, dict) and not med.get("item_name") and med.get("item_id"):
-                        try:
-                            missing_ids.add(int(med["item_id"]))
-                        except Exception:
-                            pass
-            name_cache = {}
-            price_cache = {}
-            if missing_ids:
-                try:
-                    for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1, "unit_price": 1, "packing_price": 1, "mrp": 1}):
-                        sid = str(pi.get("item_id"))
-                        name_cache[sid] = str(pi.get("item_name") or pi.get("name") or "").strip()
-                        price_cache[sid] = _to_float(pi.get("unit_price") or pi.get("mrp") or pi.get("packing_price") or 0)
-                except Exception:
-                    pass
-                # Secondary lookup in pharmacy billing if still missing
-                still_missing = [mid for mid in missing_ids if str(mid) not in name_cache]
-                if still_missing:
-                    try:
-                        for pb in db["hospital_pharmacybilling"].find(
-                            {"medicine_particulars.item_id": {"$in": still_missing}, "medicine_particulars.item_name": {"$exists": True, "$ne": ""}},
-                            {"medicine_particulars": 1}
-                        ).limit(50):
-                            for m in (pb.get("medicine_particulars") or []):
-                                mid = m.get("item_id")
-                                if mid in still_missing and m.get("item_name"):
-                                    smid = str(mid)
-                                    if smid not in name_cache:
-                                        name_cache[smid] = str(m.get("item_name")).strip()
-                                    if smid not in price_cache and m.get("price"):
-                                        price_cache[smid] = _to_float(m.get("price"))
-                    except Exception:
-                        pass
-
-            for doc in pharm_docs:
-                tot_amt = _to_float(
-                    doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
-                )
-                disp_hist = doc.get("dispatch_history") or []
-                last_disp_bno = disp_hist[-1].get("bill_no") if (isinstance(disp_hist, list) and disp_hist and isinstance(disp_hist[-1], dict)) else ""
-                bill_no = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
-                meds = doc.get("medicine_particulars", [])
-                calc_tot = 0.0
-                if isinstance(meds, list) and len(meds) > 0:
-                    for med in meds:
-                        if isinstance(med, dict):
-                            qty = float(med.get("qty") or med.get("quantity") or 1)
-                            iid = str(med.get("item_id") or "")
-                            rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or price_cache.get(iid) or 0)
-                            d_val = _to_float(med.get("discount") or 0)
-                            amt = _to_float(med.get("amount") or med.get("calculated_price"))
-                            if amt == 0:
-                                if rate > 0:
-                                    amt = max(0.0, rate * qty - d_val)
-                                elif len(meds) == 1 and tot_amt > 0:
-                                    amt = tot_amt
-                                    rate = round(tot_amt / max(qty, 1), 2)
-                            calc_tot += amt
-                            iname = str(med.get("item_name") or name_cache.get(iid) or f"Medicine {iid}").strip()
-                            batch = str(med.get("batch_number") or "").strip()
-                            pharmacy_medicines.append({
-                                "item_id": iid,
-                                "itemName": iname,
-                                "name": iname,
-                                "item_name": iname,
-                                "batch_number": batch,
-                                "quantity": qty,
-                                "rate": rate,
-                                "price": rate,
-                                "discount": d_val,
-                                "amount": amt,
-                                "bill_no": bill_no,
-                                "category": "MEDICINE / PHARMACY CHARGES",
-                                "source": "pharmacy",
-                                "item_description": f"Batch: {batch}" if batch else "",
-                            })
-                if tot_amt == 0:
-                    tot_amt = calc_tot
-                total_pharm_amt += tot_amt
+            pharmacy_medicines, total_pharm_amt = _build_pharmacy_medicines(pharm_docs, db)
 
         patient_info["medicines_amount"] = total_pharm_amt
         patient_info["pharmacy_medicines"] = pharmacy_medicines
@@ -3292,8 +3322,14 @@ def get_discharge_bill_medicines(request):
 
             meds = b_doc.get("pharmacy_medicines")
             if isinstance(meds, list) and len(meds) > 0:
-                if client: client.close()
-                return JsonResponse({"success": True, "pharmacy_medicines": meds})
+                # Check if medicines have valid names (not just fallback "Medicine <id>")
+                has_generic_only = all(
+                    re.match(r"^Medicine\s+\d+$", str(m.get("itemName") or m.get("name") or m.get("item_name") or ""), re.I)
+                    for m in meds if isinstance(m, dict)
+                )
+                if not has_generic_only:
+                    if client: client.close()
+                    return JsonResponse({"success": True, "pharmacy_medicines": meds})
 
         # 2. Query hospital_pharmacybilling
         # Inpatient discharge bills MUST only match pharmacy bills for this IP admission.
@@ -3335,86 +3371,10 @@ def get_discharge_bill_medicines(request):
         }
         pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
             "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
-            "medicine_particulars": 1, "bill_no": 1, "Bill_id": 1
+            "medicine_particulars": 1, "bill_no": 1, "Bill_id": 1, "dispatch_history": 1
         }))
 
-        missing_ids = set()
-        for doc in pharm_docs:
-            for med in (doc.get("medicine_particulars") or []):
-                if isinstance(med, dict) and not med.get("item_name") and med.get("item_id"):
-                    try:
-                        missing_ids.add(int(med["item_id"]))
-                    except Exception:
-                        pass
-        name_cache = {}
-        price_cache = {}
-        if missing_ids:
-            try:
-                for pi in db["hospital_pharmacyitem"].find({"item_id": {"$in": list(missing_ids)}}, {"item_id": 1, "item_name": 1, "name": 1, "unit_price": 1, "packing_price": 1, "mrp": 1}):
-                    sid = str(pi.get("item_id"))
-                    name_cache[sid] = str(pi.get("item_name") or pi.get("name") or "").strip()
-                    price_cache[sid] = _to_float(pi.get("unit_price") or pi.get("mrp") or pi.get("packing_price") or 0)
-            except Exception:
-                pass
-            still_missing = [mid for mid in missing_ids if str(mid) not in name_cache]
-            if still_missing:
-                try:
-                    for pb in db["hospital_pharmacybilling"].find(
-                        {"medicine_particulars.item_id": {"$in": still_missing}, "medicine_particulars.item_name": {"$exists": True, "$ne": ""}},
-                        {"medicine_particulars": 1}
-                    ).limit(50):
-                        for m in (pb.get("medicine_particulars") or []):
-                            mid = m.get("item_id")
-                            if mid in still_missing and m.get("item_name"):
-                                smid = str(mid)
-                                if smid not in name_cache:
-                                    name_cache[smid] = str(m.get("item_name")).strip()
-                                if smid not in price_cache and m.get("price"):
-                                    price_cache[smid] = _to_float(m.get("price"))
-                except Exception:
-                    pass
-
-        pharmacy_medicines = []
-        for doc in pharm_docs:
-            tot_amt = _to_float(
-                doc.get("netAmount") or doc.get("net_amount") or doc.get("totalAmount") or doc.get("total_amount") or 0
-            )
-            disp_hist = doc.get("dispatch_history") or []
-            last_disp_bno = disp_hist[-1].get("bill_no") if (isinstance(disp_hist, list) and disp_hist and isinstance(disp_hist[-1], dict)) else ""
-            b_num = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
-            meds = doc.get("medicine_particulars", [])
-            if isinstance(meds, list):
-                for med in meds:
-                    if isinstance(med, dict):
-                        qty = float(med.get("qty") or med.get("quantity") or 1)
-                        iid = str(med.get("item_id") or "")
-                        rate = _to_float(med.get("price") or med.get("rate") or med.get("mrp") or price_cache.get(iid) or 0)
-                        d_val = _to_float(med.get("discount") or 0)
-                        amt = _to_float(med.get("amount") or med.get("calculated_price"))
-                        if amt == 0:
-                            if rate > 0:
-                                amt = max(0.0, rate * qty - d_val)
-                            elif len(meds) == 1 and tot_amt > 0:
-                                amt = tot_amt
-                                rate = round(tot_amt / max(qty, 1), 2)
-                        iname = str(med.get("item_name") or name_cache.get(iid) or f"Medicine {iid}").strip()
-                        batch = str(med.get("batch_number") or "").strip()
-                        pharmacy_medicines.append({
-                            "item_id": iid,
-                            "itemName": iname,
-                            "name": iname,
-                            "item_name": iname,
-                            "batch_number": batch,
-                            "quantity": qty,
-                            "rate": rate,
-                            "price": rate,
-                            "discount": d_val,
-                            "amount": amt,
-                            "bill_no": b_num,
-                            "category": "MEDICINE / PHARMACY CHARGES",
-                            "source": "pharmacy",
-                            "item_description": f"Batch: {batch}" if batch else "",
-                        })
+        pharmacy_medicines, _ = _build_pharmacy_medicines(pharm_docs, db)
 
         # Cache on discharge bill if found
         if b_doc and pharmacy_medicines:
