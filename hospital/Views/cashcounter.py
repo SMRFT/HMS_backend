@@ -2092,10 +2092,14 @@ def get_receipt_payments(request):
                 pass
         else:
             # ✅ Default main screen: display current date alone
-            today = timezone.localdate()
-            today_start = datetime.combine(today, time.min)
-            today_end   = today_start + timedelta(days=1)
-            query["voucher_date"] = {"$gte": today_start, "$lt": today_end}
+            import pytz
+            ist_cc = pytz.timezone("Asia/Kolkata")
+            today_ist_cc = datetime.now(ist_cc).date()
+            today_start_ist = ist_cc.localize(datetime.combine(today_ist_cc, time.min))
+            today_end_ist = ist_cc.localize(datetime.combine(today_ist_cc + timedelta(days=1), time.min))
+            today_start_utc = today_start_ist.astimezone(pytz.utc).replace(tzinfo=None)
+            today_end_utc = today_end_ist.astimezone(pytz.utc).replace(tzinfo=None)
+            query["voucher_date"] = {"$gte": today_start_utc, "$lt": today_end_utc}
 
         # ✅ FETCH DATA (strictly for this outlet, branch, hospital)
         transactions = list(transaction_col.find(query).sort("voucher_no", -1).limit(200))
@@ -2577,9 +2581,26 @@ def get_mainblock_pendingbills(request):
         from_date_param = request.GET.get("from_date") or (data.get("from_date") if data else None)
         to_date_param = request.GET.get("to_date") or (data.get("to_date") if data else None)
 
-        today = timezone.localdate() if hasattr(timezone, "localdate") else timezone.now().date()
-        d_start = datetime.combine(today, datetime.min.time())
-        d_end = d_start + timedelta(days=1)
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+        today_ist = datetime.now(ist).date()
+
+        def ist_date_to_utc_range(target_date):
+            dt_start_ist = ist.localize(datetime.combine(target_date, datetime.min.time()))
+            utc_start = dt_start_ist.astimezone(pytz.utc).replace(tzinfo=None)
+            dt_end_ist = ist.localize(datetime.combine(target_date + timedelta(days=1), datetime.min.time()))
+            utc_end = dt_end_ist.astimezone(pytz.utc).replace(tzinfo=None)
+            return utc_start, utc_end
+
+        def ist_start_to_utc(target_date):
+            dt_start_ist = ist.localize(datetime.combine(target_date, datetime.min.time()))
+            return dt_start_ist.astimezone(pytz.utc).replace(tzinfo=None)
+
+        def ist_end_to_utc(target_date):
+            dt_end_ist = ist.localize(datetime.combine(target_date + timedelta(days=1), datetime.min.time()))
+            return dt_end_ist.astimezone(pytz.utc).replace(tzinfo=None)
+
+        d_start, d_end = ist_date_to_utc_range(today_ist)
 
         date_query = {}
         if dt_param:
@@ -2587,7 +2608,7 @@ def get_mainblock_pendingbills(request):
             dt_str = str(dt_param).strip()
             if "T" in dt_str:
                 try:
-                    parsed_d = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).date()
+                    parsed_d = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(ist).date()
                 except Exception:
                     pass
             if not parsed_d:
@@ -2599,8 +2620,7 @@ def get_mainblock_pendingbills(request):
                     except Exception:
                         continue
             if parsed_d:
-                p_start = datetime.combine(parsed_d, datetime.min.time())
-                p_end = p_start + timedelta(days=1)
+                p_start, p_end = ist_date_to_utc_range(parsed_d)
                 date_query = {"$gte": p_start, "$lt": p_end}
         elif from_date_param or to_date_param:
             range_q = {}
@@ -2608,7 +2628,8 @@ def get_mainblock_pendingbills(request):
                 f_str = str(from_date_param).strip().split(" ")[0]
                 for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
                     try:
-                        range_q["$gte"] = datetime.strptime(f_str, fmt)
+                        p_f = datetime.strptime(f_str, fmt).date()
+                        range_q["$gte"] = ist_start_to_utc(p_f)
                         break
                     except Exception:
                         pass
@@ -2616,7 +2637,8 @@ def get_mainblock_pendingbills(request):
                 t_str = str(to_date_param).strip().split(" ")[0]
                 for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
                     try:
-                        range_q["$lt"] = datetime.strptime(t_str, fmt) + timedelta(days=1)
+                        p_t = datetime.strptime(t_str, fmt).date()
+                        range_q["$lt"] = ist_end_to_utc(p_t)
                         break
                     except Exception:
                         pass
@@ -2635,12 +2657,13 @@ def get_mainblock_pendingbills(request):
         # - Pending Bills: strictly Cash alone (no Credit / Insurance)
         # - Received Bills: allow all counter payments (Cash, Multiple Payment, Card, UPI, etc.)
         # =========================================================
+        cash_variants = ["Cash", "cash", "CASH", "PAY CASH", "pay cash", "Pay Cash"]
         pending_cash_filter = {
             "$or": [
-                {"payment_method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
-                {"paymentMethod": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
-                {"payment_details.method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
-                {"payment_details.payment_mode": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"payment_method": {"$in": cash_variants}},
+                {"paymentMethod": {"$in": cash_variants}},
+                {"payment_details.method": {"$in": cash_variants}},
+                {"payment_details.payment_mode": {"$in": cash_variants}},
             ]
         }
 
@@ -2649,7 +2672,7 @@ def get_mainblock_pendingbills(request):
                 {"payment_method": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
                 {"paymentMethod": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
                 {"payment_details.method": {"$in": ["Cash", "cash", "CASH", "Multiple Payment", "multiple payment", "Multiple payment", "Card", "card", "UPI", "upi", "Cheque", "cheque"]}},
-                {"payment_details.breakdown.method": {"$regex": r"^\s*cash\s*$", "$options": "i"}},
+                {"payment_details.breakdown.method": {"$in": cash_variants}},
                 {"shiftno": {"$ne": None}},
                 {"CashierID": {"$ne": None}},
             ]
@@ -2662,13 +2685,13 @@ def get_mainblock_pendingbills(request):
                 return True
             for fld in ("payment_method", "paymentMethod"):
                 val = doc.get(fld)
-                if isinstance(val, str) and val.strip().lower() == "cash":
+                if isinstance(val, str) and val.strip().lower() in ["cash", "pay cash"]:
                     return True
             pd = doc.get("payment_details")
             if isinstance(pd, dict):
                 for fld in ("method", "payment_mode"):
                     val = pd.get(fld)
-                    if isinstance(val, str) and val.strip().lower() == "cash":
+                    if isinstance(val, str) and val.strip().lower() in ["cash", "pay cash"]:
                         return True
             return False
 
@@ -2732,9 +2755,143 @@ def get_mainblock_pendingbills(request):
         except Exception:
             pass
 
-        # Doctor name resolver helper
+        # =========================================================
+        # ✅ FETCH RAW DOCUMENTS IN PARALLEL / BATCH
+        # =========================================================
+        billing_query = build_module_query("payment_status", status_op, "billed_date")
+        billing_docs = list(billing_col.find(billing_query).sort("billed_date", -1).limit(250))
+
+        invest_query = build_module_query("paymentStatus", status_inv, "investBillDate")
+        invest_query["$and"].append({"is_active": True})
+        invest_docs = list(invest_col.find(invest_query).sort("investBillDate", -1).limit(150))
+
+        discharge_allowed_types = {
+            btd.get("bill_type")
+            for btd in allowed_bill_type_details
+            if isinstance(btd, dict) and "discharge" in str(btd.get("bill_name", "")).lower()
+        }
+        discharge_allowed_types.update({
+            str(x) for x in discharge_allowed_types if x is not None
+        })
+        is_discharge_allowed = bool(discharge_allowed_types) or any(
+            str(b).strip() == "2" for b in allowed_bill_type_ids
+        )
+
+        discharge_query = build_module_query("status", status_dis, "bill_date")
+        discharge_docs = list(discharge_col.find(discharge_query).sort("bill_date", -1).limit(150))
+
+        # =========================================================
+        # ✅ ULTRA-FAST BATCH PREFETCHING (Patients & Doctors)
+        # Eliminates thousands of sequential N+1 network DB round-trips
+        # =========================================================
+        all_raw_docs = billing_docs + invest_docs + discharge_docs
+        batch_uhids = set()
+        batch_pids = set()
+        batch_doctor_ids = set()
+
+        for doc in all_raw_docs:
+            u = doc.get("uhid") or doc.get("patient_uhid")
+            if u:
+                batch_uhids.add(str(u).strip())
+            pid = doc.get("patient_id") or doc.get("patientId")
+            if pid is not None:
+                batch_pids.add(pid)
+                try:
+                    batch_pids.add(int(pid))
+                except (ValueError, TypeError):
+                    pass
+                batch_pids.add(str(pid))
+
+            d_val = (
+                doc.get("doctor_id") or doc.get("doctor") or doc.get("doctor_name") or
+                doc.get("referedDoctor") or doc.get("prescribedBy") or
+                doc.get("admittingDoctor") or doc.get("consultingDoctor")
+            )
+            if d_val:
+                d_str = str(d_val).strip()
+                if d_str.isdigit():
+                    batch_doctor_ids.add(d_str)
+                    try:
+                        batch_doctor_ids.add(int(d_str))
+                    except (ValueError, TypeError):
+                        pass
+
+        # ── Bulk Prefetch Patients ──
+        patient_cache_by_uhid = {}
+        patient_cache_by_pid = {}
+        p_or = []
+        if batch_uhids:
+            p_or.append({"uhid": {"$in": list(batch_uhids)}})
+        if batch_pids:
+            p_or.append({"id": {"$in": list(batch_pids)}})
+            p_or.append({"patient_id": {"$in": list(batch_pids)}})
+
+        if p_or:
+            try:
+                p_cursor = patient_col.find(
+                    {"$or": p_or},
+                    {
+                        "uhid": 1, "id": 1, "patient_id": 1, "salutation": 1,
+                        "firstName": 1, "lastName": 1, "patient_name": 1,
+                        "name": 1, "customer_type": 1, "mobile": 1, "phone_number": 1
+                    }
+                )
+                for p in p_cursor:
+                    u = p.get("uhid")
+                    if u:
+                        patient_cache_by_uhid[str(u).strip()] = p
+                    pid = p.get("id") or p.get("patient_id")
+                    if pid is not None:
+                        patient_cache_by_pid[str(pid)] = p
+                        try:
+                            patient_cache_by_pid[int(pid)] = p
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                pass
+
+        # ── Bulk Prefetch Doctors ──
         profile_col = global_db["backend_diagnostics_profile"]
         doc_name_cache = {}
+        if batch_doctor_ids:
+            try:
+                doc_cursor = profile_col.find(
+                    {"employeeId": {"$in": list(batch_doctor_ids)}},
+                    {"employeeId": 1, "employeeName": 1, "name": 1}
+                )
+                for doc_p in doc_cursor:
+                    emp_id = doc_p.get("employeeId")
+                    nm = doc_p.get("employeeName") or doc_p.get("name")
+                    if emp_id and nm:
+                        doc_name_cache[str(emp_id)] = nm
+                        try:
+                            doc_name_cache[int(emp_id)] = nm
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                pass
+
+        def _resolve_patient_fast(uhid_val, pid_val):
+            p = None
+            if uhid_val:
+                p = patient_cache_by_uhid.get(str(uhid_val).strip())
+            if not p and pid_val is not None:
+                p = patient_cache_by_pid.get(pid_val) or patient_cache_by_pid.get(str(pid_val))
+            if not p and (uhid_val or pid_val):
+                p = get_patient_info(
+                    patient_col,
+                    uhid=uhid_val,
+                    patient_id=pid_val,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code
+                )
+                if p:
+                    if p.get("uhid"):
+                        patient_cache_by_uhid[str(p["uhid"]).strip()] = p
+                    if p.get("id"):
+                        patient_cache_by_pid[str(p["id"])] = p
+            return p
+
         def _get_doctor_display(doc_val):
             if not doc_val:
                 return "-"
@@ -2743,6 +2900,11 @@ def get_mainblock_pendingbills(request):
                 return "-"
             if d_str in doc_name_cache:
                 return doc_name_cache[d_str]
+            try:
+                if d_str.isdigit() and int(d_str) in doc_name_cache:
+                    return doc_name_cache[int(d_str)]
+            except Exception:
+                pass
             if any(d_str.lower().startswith(p) for p in ["dr.", "dr ", "doctor"]):
                 doc_name_cache[d_str] = d_str
                 return d_str
@@ -2768,9 +2930,6 @@ def get_mainblock_pendingbills(request):
         # =========================================================
         # ✅ 1. OP BILLING (payment_method: 'Cash' alone)
         # =========================================================
-        billing_query = build_module_query("payment_status", status_op, "billed_date")
-        billing_docs = list(billing_col.find(billing_query).sort("billed_date", -1).limit(500 if not date_query else 1000))
-
         for bill in billing_docs:
             if not is_allowed_bill_doc(bill):
                 continue
@@ -2784,12 +2943,9 @@ def get_mainblock_pendingbills(request):
             if allowed_bill_type_ids and bill_type not in allowed_bill_type_ids and bt_num not in allowed_bill_type_ids:
                 continue
 
-            patient = get_patient_info(
-                patient_col,
-                uhid=bill.get("uhid") or bill.get("patient_uhid"),
-                patient_id=bill.get("patient_id"),
-                hospital_code=hospital_code,
-                branch_code=branch_code
+            patient = _resolve_patient_fast(
+                bill.get("uhid") or bill.get("patient_uhid"),
+                bill.get("patient_id")
             )
 
             resolved_uhid = (patient.get("uhid") if patient else None) or bill.get("uhid") or bill.get("patient_uhid")
@@ -2814,23 +2970,9 @@ def get_mainblock_pendingbills(request):
             except (ValueError, TypeError):
                 tf_num = 0.0
 
-            # Customer type lookup
             p_cust_type = ""
             if patient and patient.get("customer_type"):
                 p_cust_type = str(patient.get("customer_type")).strip()
-            else:
-                u_val = bill.get("uhid") or bill.get("patient_uhid")
-                pid_val = bill.get("patient_id")
-                if u_val:
-                    p_doc = patient_col.find_one({"uhid": str(u_val).strip()}, {"customer_type": 1})
-                    if p_doc and p_doc.get("customer_type"):
-                        p_cust_type = str(p_doc.get("customer_type")).strip()
-                if not p_cust_type and pid_val:
-                    p_doc = patient_col.find_one({"id": pid_val}, {"customer_type": 1})
-                    if not p_doc and str(pid_val).isdigit():
-                        p_doc = patient_col.find_one({"id": int(pid_val)}, {"customer_type": 1})
-                    if p_doc and p_doc.get("customer_type"):
-                        p_cust_type = str(p_doc.get("customer_type")).strip()
             if not p_cust_type:
                 p_cust_type = str(bill.get("customer_type") or "").strip()
 
@@ -2872,10 +3014,6 @@ def get_mainblock_pendingbills(request):
         # =========================================================
         # ✅ 2. INVESTIGATION BILLING (payment_method: 'Cash' alone)
         # =========================================================
-        invest_query = build_module_query("paymentStatus", status_inv, "investBillDate")
-        invest_query["$and"].append({"is_active": True})
-        invest_docs = list(invest_col.find(invest_query).sort("investBillDate", -1).limit(200 if not date_query else 500))
-
         for inv in invest_docs:
             if not is_allowed_bill_doc(inv):
                 continue
@@ -2889,11 +3027,9 @@ def get_mainblock_pendingbills(request):
             if allowed_bill_type_ids and bill_type not in allowed_bill_type_ids and bt_num not in allowed_bill_type_ids:
                 continue
 
-            patient = get_patient_info(
-                patient_col,
-                uhid=inv.get("uhid"),
-                hospital_code=hospital_code,
-                branch_code=branch_code
+            patient = _resolve_patient_fast(
+                inv.get("uhid"),
+                inv.get("patient_id")
             )
 
             resolved_uhid = (patient.get("uhid") if patient else None) or inv.get("uhid")
@@ -2939,21 +3075,6 @@ def get_mainblock_pendingbills(request):
         # =========================================================
         # ✅ 3. DISCHARGE BILLING (payment_method: 'Cash' alone)
         # =========================================================
-        discharge_allowed_types = {
-            btd.get("bill_type")
-            for btd in allowed_bill_type_details
-            if isinstance(btd, dict) and "discharge" in str(btd.get("bill_name", "")).lower()
-        }
-        discharge_allowed_types.update({
-            str(x) for x in discharge_allowed_types if x is not None
-        })
-        is_discharge_allowed = bool(discharge_allowed_types) or any(
-            str(b).strip() == "2" for b in allowed_bill_type_ids
-        )
-
-        discharge_query = build_module_query("status", status_dis, "bill_date")
-        discharge_docs = list(discharge_col.find(discharge_query).sort("bill_date", -1).limit(100 if not date_query else 500))
-
         for dis in discharge_docs:
             if not is_allowed_bill_doc(dis):
                 continue
@@ -2979,11 +3100,9 @@ def get_mainblock_pendingbills(request):
             if not matched_items:
                 continue
 
-            patient = get_patient_info(
-                patient_col,
-                uhid=dis.get("uhid"),
-                hospital_code=hospital_code,
-                branch_code=branch_code
+            patient = _resolve_patient_fast(
+                dis.get("uhid"),
+                dis.get("patient_id")
             )
 
             resolved_uhid = (patient.get("uhid") if patient else None) or dis.get("uhid")
@@ -4387,6 +4506,12 @@ def collectpayment_return_bills(request):
             })
 
         if doc:
+            if doc.get("is_approved") not in [True, "true", "True"]:
+                return Response(
+                    {"status": "error", "message": "This investigation refund bill has not been approved yet."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             investrefund_collection.update_one(
                 {"_id": doc["_id"]},
                 {"$set": _payment_set(clean_cashier, payment_details, shiftno, pending_amount, new_status)},
@@ -4659,6 +4784,21 @@ def ipadvance_bills(request):
             d_start = datetime.combine(today_date_ist, datetime.min.time())
             d_end = datetime.combine(today_date_ist + timedelta(days=1), datetime.min.time())
 
+            req_from = request.GET.get("from_date") or request.GET.get("fromDate")
+            req_to = request.GET.get("to_date") or request.GET.get("toDate")
+            if req_from:
+                try:
+                    f_d = datetime.strptime(str(req_from).strip().split("T")[0], "%Y-%m-%d").date()
+                    d_start = datetime.combine(f_d, datetime.min.time())
+                except Exception:
+                    pass
+            if req_to:
+                try:
+                    t_d = datetime.strptime(str(req_to).strip().split("T")[0], "%Y-%m-%d").date()
+                    d_end = datetime.combine(t_d + timedelta(days=1), datetime.min.time())
+                except Exception:
+                    pass
+
             def _parse_bill_dt(payment):
                 bd = payment.get("bill_date") or payment.get("date") or payment.get("created_date")
                 if not bd:
@@ -4850,18 +4990,17 @@ def ipadvance_bills(request):
                         if adv_unique_key:
                             seen_adv_keys.add(adv_unique_key)
 
-                        # Payment method check: Cash only
-                        pm = ""
-                        p_det = p_copy.get("payment_details")
-                        if isinstance(p_det, dict):
-                            pm = str(p_det.get("method") or p_det.get("payment_mode") or "").strip().lower()
-                        if not pm:
-                            pm = str(p_copy.get("payment_method") or p_copy.get("paymentMethod") or "cash").strip().lower()
-
-                        if is_received_req and pm not in ["cash"]:
-                            continue
-                        elif not is_received_req and pm not in ["cash", ""]:
-                            continue
+                        # Optional payment method filter (only if explicitly requested by client)
+                        req_pm = (request.GET.get("payment_method") or request.GET.get("payment_mode") or "").strip().lower()
+                        if req_pm and req_pm not in ["all", "", "none"]:
+                            pm = ""
+                            p_det = p_copy.get("payment_details")
+                            if isinstance(p_det, dict):
+                                pm = str(p_det.get("method") or p_det.get("payment_mode") or "").strip().lower()
+                            if not pm:
+                                pm = str(p_copy.get("payment_method") or p_copy.get("paymentMethod") or "").strip().lower()
+                            if pm != req_pm:
+                                continue
 
                         p_status = str(p_copy.get("status") or "").strip().lower()
                         p_dt = _parse_bill_dt(p_copy)
