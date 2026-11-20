@@ -899,8 +899,39 @@ def grn_view(request, pk=None):
                 ]
 
             status_f = str(request.GET.get("status", "")).strip()
-            if status_f:
-                filter_q["status"] = status_f
+            if status_f and status_f.upper() != "ALL":
+                status_lower = status_f.lower()
+                if status_lower == "pending":
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": r"^pending$", "$options": "i"}},
+                            {"status": {"$regex": r"^draft$", "$options": "i"}},
+                            {"status": {"$in": [None, ""]}}
+                        ]
+                    })
+                elif status_lower == "verified":
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": r"^verified$", "$options": "i"}},
+                            {"status": {"$regex": r"^approved$", "$options": "i"}}
+                        ]
+                    })
+                else:
+                    filter_q["status"] = {"$regex": f"^{re.escape(status_f)}$", "$options": "i"}
+
+            vendor_f = str(request.GET.get("vendor", "") or request.GET.get("vendor_id", "")).strip()
+            if vendor_f and vendor_f.upper() != "ALL":
+                vendor_or = [
+                    {"vendor_name": {"$regex": f"^{re.escape(vendor_f)}$", "$options": "i"}}
+                ]
+                if vendor_f.isdigit():
+                    vendor_or.extend([
+                        {"vendor_id": int(vendor_f)},
+                        {"vendor_id": str(vendor_f)}
+                    ])
+                else:
+                    vendor_or.append({"vendor_id": vendor_f})
+                filter_q.setdefault("$and", []).append({"$or": vendor_or})
 
             cat_f = str(request.GET.get("purchase_category", "") or request.GET.get("type", "")).strip()
             if cat_f:
@@ -1873,8 +1904,13 @@ def pharmacy_item_purchase_history(request):
             id_list.append(int(item_id))
         id_list.append(str(item_id))
 
-        # Query GRNs containing this item
-        query = {"items.item_id": {"$in": id_list}}
+        # Query GRNs containing this item (supporting both embedded arrays and serialized JSON strings)
+        query = {
+            "$or": [
+                {"items.item_id": {"$in": id_list}},
+                {"items": {"$regex": f'"item_id":\\s*({item_id}\\b|"{item_id}")'}}
+            ]
+        }
         grns = list(db["hospital_grn"].find(
             query,
             {
@@ -1936,7 +1972,19 @@ def pharmacy_item_purchase_history(request):
                 else:
                     inv_date_str = str(inv_date_raw)[:10]
 
-            for itm in g.get("items", []):
+            raw_items = g.get("items", [])
+            if isinstance(raw_items, str):
+                try:
+                    import json
+                    raw_items = json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            if not isinstance(raw_items, list):
+                raw_items = []
+
+            for itm in raw_items:
+                if not isinstance(itm, dict):
+                    continue
                 cur_id = itm.get("item_id")
                 if cur_id in id_list or str(cur_id) in [str(x) for x in id_list]:
                     batch_no = str(itm.get("batch") or itm.get("batch_number") or "—").strip()
@@ -1960,6 +2008,40 @@ def pharmacy_item_purchase_history(request):
                     except (ValueError, TypeError):
                         mrp_fmt = str(mrp)
 
+                    free_val = str(itm.get("free") if itm.get("free") is not None else "0")
+                    p_cst_val = str(itm.get("p_cst") or itm.get("purchase_cst") or itm.get("cgst_percent") or "0")
+                    p_tps_val = str(itm.get("p_tps") or itm.get("purchase_tax_rate") or itm.get("purchase_tps") or itm.get("sgst_percent") or "0")
+
+                    p_cost = itm.get("purchase_cost") or itm.get("purchase_cost_display") or itm.get("packing_price") or p_rate
+                    try:
+                        p_cost_fmt = f"{float(p_cost):.2f}"
+                    except (ValueError, TypeError):
+                        p_cost_fmt = str(p_cost)
+
+                    cst_val = itm.get("cst_amt") or itm.get("cgst_amt") or "0.00"
+                    try:
+                        cst_fmt = f"{float(cst_val):.2f}"
+                    except (ValueError, TypeError):
+                        cst_fmt = str(cst_val)
+
+                    tps_val = itm.get("tps_amt") or itm.get("sgst_amt") or "0.00"
+                    try:
+                        tps_fmt = f"{float(tps_val):.2f}"
+                    except (ValueError, TypeError):
+                        tps_fmt = str(tps_val)
+
+                    selling_val = itm.get("selling_price") or itm.get("selling_rate") or itm.get("sellingratrcal") or ""
+                    try:
+                        selling_fmt = f"{float(selling_val):.2f}" if selling_val else ""
+                    except (ValueError, TypeError):
+                        selling_fmt = str(selling_val)
+
+                    margin_val = itm.get("margin") or ""
+                    try:
+                        margin_fmt = f"{float(margin_val):.2f}" if margin_val else ""
+                    except (ValueError, TypeError):
+                        margin_fmt = str(margin_val)
+
                     all_records.append({
                         "ref": grn_no,
                         "p_date": p_date_str,
@@ -1972,10 +2054,18 @@ def pharmacy_item_purchase_history(request):
                         "p_rate": p_rate_fmt,
                         "mrp": mrp_fmt,
                         "inv_date": inv_date_str,
-                        "order_number": g.get("po_number") or g.get("order_number") or "—",
+                        "order_number": g.get("po_number") or g.get("order_number") or "",
                         "type": g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE (IP)",
                         "expiry": exp or "—",
                         "packing": str(itm.get("packing") or "1"),
+                        "free": free_val,
+                        "p_cst": p_cst_val,
+                        "p_tps": p_tps_val,
+                        "p_cost": p_cost_fmt,
+                        "cst": cst_fmt,
+                        "tps": tps_fmt,
+                        "sellingratrcal": selling_fmt,
+                        "margin": margin_fmt,
                     })
 
         # Also enrich from hospital_pharmacystock if any batch was created outside GRN
@@ -2004,12 +2094,28 @@ def pharmacy_item_purchase_history(request):
                 exp_str = "—"
                 if exp_date:
                     if hasattr(exp_date, "strftime"):
-                        exp_str = exp_date.strftime("%m/%Y")
+                        exp_str = exp_date.strftime("%Y/%m")
                     else:
                         exp_str = str(exp_date)[:7]
 
                 p_rate = stk.get("packing_price") or stk.get("purchase_cost") or "0"
                 mrp = stk.get("mrp") or "0"
+                p_cost = stk.get("purchase_cost") or stk.get("packing_price") or p_rate
+                try:
+                    p_cost_fmt = f"{float(p_cost):.2f}"
+                except (ValueError, TypeError):
+                    p_cost_fmt = str(p_cost)
+
+                cst_val = stk.get("CGST_Amt") or "0.00"
+                tps_val = stk.get("SGST_Amt") or "0.00"
+                try:
+                    cst_fmt = f"{float(cst_val):.2f}"
+                except (ValueError, TypeError):
+                    cst_fmt = str(cst_val)
+                try:
+                    tps_fmt = f"{float(tps_val):.2f}"
+                except (ValueError, TypeError):
+                    tps_fmt = str(tps_val)
 
                 all_records.append({
                     "ref": stk_grn,
@@ -2022,11 +2128,19 @@ def pharmacy_item_purchase_history(request):
                     "batch": stk_batch,
                     "p_rate": f"{float(p_rate):.2f}" if str(p_rate).replace(".", "", 1).isdigit() else str(p_rate),
                     "mrp": f"{float(mrp):.2f}" if str(mrp).replace(".", "", 1).isdigit() else str(mrp),
-                    "inv_date": "—",
-                    "order_number": "—",
+                    "inv_date": "",
+                    "order_number": "",
                     "type": "MEDICINE PURCHASE (IP)",
                     "expiry": exp_str,
                     "packing": "1",
+                    "free": "0",
+                    "p_cst": str(stk.get("CGST_Percentage") or "0"),
+                    "p_tps": str(stk.get("SGST_Percentage") or "0"),
+                    "p_cost": p_cost_fmt,
+                    "cst": cst_fmt,
+                    "tps": tps_fmt,
+                    "sellingratrcal": "",
+                    "margin": "",
                 })
 
         # Sort descending by purchase date

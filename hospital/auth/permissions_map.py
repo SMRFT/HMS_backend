@@ -382,6 +382,8 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/get-estimate-billings/?(\?.*)?$': 'HMS-P-IB',                 
     '/_b_a_c_k_e_n_d/HMS/delete-bill/': 'HMS-P-IB',       
     '/_b_a_c_k_e_n_d/HMS/invest-refund/': 'HMS-P-IB',       
+    '/_b_a_c_k_e_n_d/HMS/request-bill-edit/': 'HMS-P-IB',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/request-bill-edit/?(\?.*)?$': 'HMS-P-IB',       
 
     #Investigation Reports (RD):
     r'^/_b_a_c_k_e_n_d/HMS/investigations/?(\?.*)?$': 'HMS-API-RD',                
@@ -525,7 +527,9 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/investigation-prices/delete_item(?:/[^/]+)+/$': 'HMS-P-IPD',  
 
     #Report:
-    r'^/_b_a_c_k_e_n_d/HMS/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',   
+    r'^(/_b_a_c_k_e_n_d/HMS)?/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',  
+    r'^(/_b_a_c_k_e_n_d/HMS)?/dept-budr-approve/?(\?.*)?$':   'HMS-P-DBUDR', 
+    r'^/_b_a_c_k_e_n_d/HMS/dept-budr-approve(?:/[^/]+)+/$': 'HMS-P-DBUDR',
 
     #Velavan Items:
     '/_b_a_c_k_e_n_d/HMS/velavan_items/list/': 'HMS-P-VI',               
@@ -885,6 +889,11 @@ PAGE_MAPPING = DynamicPageMapping({
  
 
 PAGE_ACTION_MAPPING = {
+    'HMS-P-DBUDR': {
+        'GET': 'R',
+        'POST': 'R',
+        'PATCH': 'R',
+    },
     'xxx': {
         'DELETE':'RWD',
     },
