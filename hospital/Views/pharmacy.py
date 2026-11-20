@@ -1151,10 +1151,21 @@ def save_pharmacy_bill(request):
             update_data.pop("converted_bill_no", None)
 
             update_data["billing_status"] = "Billed"
-            update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
+            existing_bm = str(record.get("billing_mode") or "").strip().upper()
+            req_no = str(record.get("request_no") or "").strip().upper()
+            if existing_bm in ["OT REQUEST", "WARD REQUEST", "DISCHARGE MEDICINE"] or req_no.startswith("OT") or record.get("is_ward_request"):
+                if existing_bm == "OT REQUEST" or req_no.startswith("OT"):
+                    update_data["billing_mode"] = "OT REQUEST"
+                elif "DISCHARGE" in existing_bm:
+                    update_data["billing_mode"] = "DISCHARGE MEDICINE"
+                else:
+                    update_data["billing_mode"] = "WARD REQUEST"
+            else:
+                update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
             update_data["payment_mode"]   = norm_pm or "Cash"
             update_data["bill_date"]      = datetime.utcnow()
             update_data["billed_id"]      = employee_id
+            update_data["is_active"]      = True
 
         # 🔥 CANCEL BILL / ESTIMATE
         elif status == "Cancelled":
@@ -1251,6 +1262,7 @@ def save_pharmacy_bill(request):
             "outlet_code":          outlet_code,
             "is_dispatched":        False,        
             "pending_returns":      [],     
+            "is_active":            True,
             **fields
         }
 
@@ -1280,6 +1292,7 @@ def save_pharmacy_bill(request):
                 "billing_mode": data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "DIRECT"),
                 "payment_mode": norm_pm or "Cash",
                 "billed_id":    employee_id,
+                "is_active":    True,
             })
 
             bill_collection.insert_one(record_doc)
@@ -1317,6 +1330,7 @@ def save_pharmacy_bill(request):
                 "bill_no":      None,
                 "estimate_no":  estimate_no,
                 "billing_mode": "ESTIMATE",
+                "is_active":    True,
             })
 
             bill_collection.insert_one(record_doc)
@@ -1597,6 +1611,7 @@ def save_oppharmacy_estimate(request):
         "created_by": employee_id,
         "created_date": now_ist,
         "bill_date": now_ist,
+        "is_active": True,
     }
 
     raw_pname = (
@@ -2354,6 +2369,8 @@ def collect_oppharmacy_payment(request):
 
         data = request.data
 
+        bill_mongo_id = data.get("_id") or data.get("id") or data.get("bill_mongo_id")
+        bill_no = data.get("bill_no") or data.get("bill_number")
         Bill_id = data.get("Bill_id")
         uhid = data.get("uhid")
         payment_details = data.get("payment_details")
@@ -2430,10 +2447,10 @@ def collect_oppharmacy_payment(request):
         # VALIDATIONS
         # =====================================================
 
-        if not Bill_id:
+        if not Bill_id and not bill_mongo_id and not bill_no:
             return Response({
                 "success": False,
-                "error": "Bill_id is required"
+                "error": "Bill_id, _id, or bill_no is required"
             })
 
         if not payment_details:
@@ -2478,7 +2495,11 @@ def collect_oppharmacy_payment(request):
         # TYPE CONVERSIONS
         # =====================================================
 
-        Bill_id = int(Bill_id)
+        if Bill_id:
+            try:
+                Bill_id = int(Bill_id)
+            except Exception:
+                pass
 
         uhid_clean = str(uhid).strip() if uhid and str(uhid).strip() not in ["-", "None", "null", ""] else None
 
@@ -2502,6 +2523,30 @@ def collect_oppharmacy_payment(request):
         # FIND BILL
         # =====================================================
 
+        bill = None
+
+        # 1. Highest priority: Search by MongoDB ObjectId if provided (100% unique guarantee)
+        if bill_mongo_id:
+            try:
+                from bson import ObjectId
+                bill = bill_collection.find_one({"_id": ObjectId(str(bill_mongo_id))})
+            except Exception:
+                pass
+
+        # 2. Second priority: Search by bill_no if provided
+        if not bill and bill_no:
+            b_query = {
+                "bill_no": str(bill_no).strip(),
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "$or": [
+                    {"is_deleted": False},
+                    {"is_deleted": {"$exists": False}}
+                ]
+            }
+            bill = bill_collection.find_one(b_query)
+
+        # 3. Third priority: Search by Bill_id (strictly prioritizing UNPAID bills to avoid collisions)
         query = {
             "Bill_id": Bill_id,
             "hospital_code": hospital_code,
@@ -2517,32 +2562,82 @@ def collect_oppharmacy_payment(request):
         elif len(parsed_outlets) > 1:
             query["outlet_code"] = {"$in": parsed_outlets}
 
-        bill = bill_collection.find_one(query)
-
-        if not bill:
-            # Fallback search without outlet_code constraint in case bill is in another authorized outlet
-            fallback_query = {
+        if not bill and Bill_id:
+            # 3a. Search UNPAID bill matching Bill_id (and uhid if passed)
+            unpaid_query = {
                 "Bill_id": Bill_id,
+                "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
                 "$or": [
                     {"is_deleted": False},
                     {"is_deleted": {"$exists": False}}
                 ]
             }
-            if hospital_code:
-                fallback_query["hospital_code"] = hospital_code
-            if branch_code:
-                fallback_query["branch_code"] = branch_code
-            bill = bill_collection.find_one(fallback_query)
+            if uhid_clean:
+                unpaid_query["uhid"] = uhid_clean
+            if len(parsed_outlets) == 1:
+                unpaid_query["outlet_code"] = parsed_outlets[0]
+            elif len(parsed_outlets) > 1:
+                unpaid_query["outlet_code"] = {"$in": parsed_outlets}
 
-        if not bill:
-            # Final fallback by Bill_id alone
-            bill = bill_collection.find_one({
-                "Bill_id": Bill_id,
+            bill = bill_collection.find_one(unpaid_query)
+
+            # 3b. Fallback: Search UNPAID bill without outlet constraint
+            if not bill:
+                unpaid_fb = {
+                    "Bill_id": Bill_id,
+                    "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                }
+                if uhid_clean:
+                    unpaid_fb["uhid"] = uhid_clean
+                bill = bill_collection.find_one(unpaid_fb)
+
+            # 3c. Fallback to standard Bill_id query
+            if not bill:
+                bill = bill_collection.find_one(query)
+
+            if not bill:
+                fallback_query = {
+                    "Bill_id": Bill_id,
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                }
+                if hospital_code:
+                    fallback_query["hospital_code"] = hospital_code
+                if branch_code:
+                    fallback_query["branch_code"] = branch_code
+                bill = bill_collection.find_one(fallback_query)
+
+            if not bill:
+                bill = bill_collection.find_one({
+                    "Bill_id": Bill_id,
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                })
+
+        # 4. Critical Safety: If found bill is Paid, but cashier provided uhid and UHID does not match
+        if bill and bill.get("billing_status") == "Paid" and uhid_clean and str(bill.get("uhid")).strip() != uhid_clean:
+            patient_pending_bill = bill_collection.find_one({
+                "uhid": uhid_clean,
+                "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
                 "$or": [
                     {"is_deleted": False},
                     {"is_deleted": {"$exists": False}}
                 ]
             })
+            if patient_pending_bill:
+                bill = patient_pending_bill
 
         if not bill:
             return Response({
@@ -3950,6 +4045,7 @@ def convert_to_bill(request):
             {
                 "$set": {
                     "billing_status": "Processing",
+                    "is_active": True,
                     "lastmodified_date": datetime.utcnow()
                 }
             }
