@@ -2105,7 +2105,7 @@ def update_medicine_ward_request(request):
 
         data = request.data
 
-        bill_id = data.get("Bill_id") or data.get("id") or data.get("reqId")
+        bill_id = data.get("_id") or data.get("record_id") or data.get("Bill_id") or data.get("id") or data.get("reqId")
 
         updated_medicines = data.get("medicine_particulars", [])
 
@@ -2261,7 +2261,7 @@ def update_medicine_ward_request(request):
 
                         audit_entry["new_qty"] = new_qty
 
-                        current["quantity"] = new_qty
+                        current["qty"] = new_qty
 
                     if dosage_changed:
 
@@ -2275,6 +2275,9 @@ def update_medicine_ward_request(request):
                     current["dispatched_qty"] = incoming.get("dispatched_qty")
                 elif "dispatched_qty" not in current:
                     current["dispatched_qty"] = None
+
+            current.pop("quantity", None)
+            current.pop("pending_qty", None)
 
             if audit_entry:
 
@@ -2411,17 +2414,18 @@ def save_medicine_ward_request(request):
         cleaned_particulars = []
 
         for item in (medicine_particulars or []):
-            orig_q = float(item.get("quantity", item.get("qty", 0)) or 0)
+            orig_q = float(item.get("qty", item.get("quantity", 0)) or 0)
             cleaned_item = {
                 "item_id": item.get("item_id"),
                 "qty": orig_q,
-                "quantity": orig_q,
                 "dispatched_qty": 0.0,
-                "pending_qty": orig_q,
                 "dosage": item.get("dosage", ""),
                 "noOfDays": item.get("noOfDays", ""),
                 "dose": item.get("dose", ""),
-                "doseunit": item.get("doseunit", ""),
+                "doseunit": item.get("doseunit", item.get("doseUnit", "")),
+                "doseUnit": item.get("doseUnit", item.get("doseunit", "")),
+                "route": item.get("route", ""),
+                "remark": item.get("remark", ""),
                 "batch_number": "",
                 "instruction": item.get("instruction", "")
             }
@@ -2582,7 +2586,7 @@ def cancel_medicine_ward_request(request):
 
         data = request.data
 
-        request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
+        request_id = data.get("_id") or data.get("record_id") or data.get("id") or data.get("Bill_id") or data.get("reqId")
 
         if not request_id:
 
@@ -2677,7 +2681,7 @@ def remove_individual_medicine_from_ward_request(request):
 
         data = request.data
 
-        request_id = data.get("id") or data.get("Bill_id") or data.get("reqId")
+        request_id = data.get("_id") or data.get("record_id") or data.get("id") or data.get("Bill_id") or data.get("reqId")
 
         item_id = data.get("item_id")
 

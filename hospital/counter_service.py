@@ -17,6 +17,14 @@ from pymongo import MongoClient, ReturnDocument
 
 
 def _get_db():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        backend_env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        if os.path.exists(backend_env):
+            load_dotenv(backend_env, override=True)
+    except Exception:
+        pass
     host = os.getenv("GLOBAL_DB_HOST")
     if not host:
         try:
