@@ -528,8 +528,8 @@ PAGE_MAPPING = DynamicPageMapping({
 
     #Report:
     r'^(/_b_a_c_k_e_n_d/HMS)?/dept-budr/?(\?.*)?$': 'HMS-P-DBUDR',  
-    r'^(/_b_a_c_k_e_n_d/HMS)?/dept-budr-approve/?(\?.*)?$':   'HMS-P-DBUDR', 
-    r'^/_b_a_c_k_e_n_d/HMS/dept-budr-approve(?:/[^/]+)+/$': 'HMS-P-DBUDR',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/dept-budr-approve/?(\?.*)?$':   'HMS-P-DBUDA', 
+    r'^/_b_a_c_k_e_n_d/HMS/dept-budr-approve(?:/[^/]+)+/$': 'HMS-P-DBUDA',
 
     #Velavan Items:
     '/_b_a_c_k_e_n_d/HMS/velavan_items/list/': 'HMS-P-VI',               
