@@ -194,16 +194,44 @@ def build_specialized_insurance_report(request, report_key):
                 company_map[ccode] = cname
                 companies_list.append({"code": ccode, "name": cname})
 
-        # Pre-load Doctors map from Global diagnostics profile
+        # Pre-load Doctors map from Global diagnostics profile (match all employee profiles)
         doctor_map = {}
         try:
-            for ddoc in global_db['backend_diagnostics_profile'].find({'isDoctor': True}, {'employeeId': 1, 'employeeName': 1}):
+            for ddoc in global_db['backend_diagnostics_profile'].find(
+                {},
+                {'employeeId': 1, 'employeeName': 1, 'name': 1, 'firstName': 1, 'lastName': 1, 'doctorName': 1}
+            ):
                 eid = str(ddoc.get('employeeId') or '').strip()
-                ename = (ddoc.get('employeeName') or '').strip()
+                ename = (
+                    ddoc.get('employeeName') or
+                    ddoc.get('name') or
+                    ddoc.get('doctorName') or
+                    f"{ddoc.get('firstName') or ''} {ddoc.get('lastName') or ''}".strip()
+                ).strip()
                 if eid and ename:
                     doctor_map[eid] = ename
+                    doctor_map[eid.lstrip('0')] = ename
+                    try:
+                        doctor_map[int(eid)] = ename
+                    except Exception:
+                        pass
         except Exception:
             pass
+
+        def resolve_doc(doc_val):
+            if not doc_val:
+                return "DR. CONSULTANT"
+            s = str(doc_val).strip()
+            if s in doctor_map:
+                return doctor_map[s]
+            if s.lstrip('0') in doctor_map:
+                return doctor_map[s.lstrip('0')]
+            try:
+                if int(s) in doctor_map:
+                    return doctor_map[int(s)]
+            except Exception:
+                pass
+            return s
 
         key = (report_key or 'insurance_bills_status').lower().strip()
 
@@ -365,7 +393,7 @@ def build_specialized_insurance_report(request, report_key):
             pname = pname or "Patient"
 
             doc_id = (adm.get('consultingDoctor') if adm else '') or (pat.get('doctorName') if pat else '') or (ph_bills[0].get('doctor_id') if ph_bills else '')
-            doc_name = doctor_map.get(str(doc_id)) or str(doc_id) or "DR. CONSULTANT"
+            doc_name = resolve_doc(doc_id)
 
             room_str = "-"
             if adm and adm.get('room_details'):
@@ -727,7 +755,7 @@ def build_specialized_insurance_report(request, report_key):
 
                 diag = str(mv.get('provisional_diagnosis') or 'CARDIO VASCULAR EVALUATION')
                 doc_raw = mv.get('consulting_doctor') or pat.get('doctorName')
-                doc = doctor_map.get(str(doc_raw)) or str(doc_raw or 'DR. CONSULTANT')
+                doc = resolve_doc(doc_raw)
 
                 c_type = "Emergency Admission Certificate" if mv.get('relationship') == 'Self' else "Referral Extension Slip"
                 stat = "APPROVED" if mv.get('referral_number') else "PENDING"
@@ -910,7 +938,7 @@ def build_specialized_insurance_report(request, report_key):
 
                 adm_dt_str = format_dt(a.get('admissionDateTime'))
                 doc_raw = a.get('consultingDoctor') or p.get('doctorName')
-                doc_name = doctor_map.get(str(doc_raw)) or str(doc_raw or 'DR. CONSULTANT')
+                doc_name = resolve_doc(doc_raw)
 
                 addr = str(p.get('permanent_address') or p.get('city') or p.get('district') or 'SALEM, TAMIL NADU')
                 age_gen = f"{p.get('age', '-')} / {p.get('gender', '-')}"
@@ -1002,7 +1030,7 @@ def build_specialized_insurance_report(request, report_key):
                 cname = company_map.get(ccode) or a.get('insurance_company') or clm.get('insurance_company') or "INSURANCE"
                 pname = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or a.get('patientName') or f"Patient {uh}"
                 doc_raw = a.get('consultingDoctor') or p.get('doctorName')
-                doc_name = doctor_map.get(str(doc_raw)) or str(doc_raw or 'DR. CONSULTANT')
+                doc_name = resolve_doc(doc_raw)
                 pol_no = str(a.get('policy_no') or clm.get('policy_no') or m.get('card_no') or m.get('service_number') or '-')
 
                 row = {
@@ -1041,7 +1069,7 @@ def build_specialized_insurance_report(request, report_key):
                 cname = company_map.get(ccode) or (m.get('insurance_type') and company_map.get(str(m.get('insurance_type')))) or ("ECHS" if m.get('echs_card') else "INSURANCE")
                 pname = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or f"Patient {uh}"
                 doc_raw = v.get('consulting_doctor') or p.get('doctorName')
-                doc_name = doctor_map.get(str(doc_raw)) or str(doc_raw or 'DR. CONSULTANT')
+                doc_name = resolve_doc(doc_raw)
                 pol_no = str(v.get('referral_number') or m.get('card_no') or m.get('service_number') or '-')
 
                 row = {
@@ -1350,7 +1378,7 @@ def build_specialized_insurance_report(request, report_key):
                 due_amt = max(0.0, b_amt - paid_amt)
                 cname = resolve_company(b.get('company_name'), b.get('company_code'))
                 doc_raw = b.get('doctor_name') or b.get('doctorName')
-                doc_name = doctor_map.get(str(doc_raw)) or str(doc_raw or 'DR. CONSULTANT')
+                doc_name = resolve_doc(doc_raw)
 
                 row = {
                     "sno": sno,

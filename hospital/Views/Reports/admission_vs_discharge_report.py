@@ -240,28 +240,15 @@ def build_admission_vs_discharge_report(start_date_str='', end_date_str='', sear
             client.close()
 
 
-@api_view(['GET'])
+from hospital.Views.MasterAccountsReport.admission_vs_discharge_api import admission_vs_discharge_api
+
+@api_view(['GET', 'POST'])
 @permission_classes([HasRoleAndDataPermission])
 def admission_vs_discharge_report_view(request):
     """
     Admission vs Discharge Report API endpoint.
+    Delegates to the high-performance, indexed admission_vs_discharge_api with
+    support for outlet, company, date ranges, doctor profile lookup, and hierarchical levels.
     """
-    start_date_str = request.GET.get('start_date', '').strip()
-    end_date_str = request.GET.get('end_date', '').strip()
-    search_query = request.GET.get('search', '').strip().lower()
-    status_filter = request.GET.get('status', 'all').strip().lower()
-    company_filter = request.GET.get('company', 'all').strip()
-    sort_order = request.GET.get('sort_order', 'asc').strip().lower()
-
-    result = build_admission_vs_discharge_report(
-        start_date_str=start_date_str,
-        end_date_str=end_date_str,
-        search_query=search_query,
-        status_filter=status_filter,
-        company_filter=company_filter,
-        sort_order=sort_order
-    )
-
-    if not result.get('success'):
-        return Response(result, status=500)
-    return Response(result)
+    django_req = request._request if hasattr(request, '_request') else request
+    return admission_vs_discharge_api(django_req)
