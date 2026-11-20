@@ -1347,7 +1347,8 @@ def save_lab_ward_request(request):
             "hospital_code": str(hospital_code),
             "created_date": now_ist,
             "lastmodified_by": None,
-            "lastmodified_date": now_ist
+            "lastmodified_date": now_ist,
+            "is_active": True
         }
 
         collection = mongo_db["hospital_estimatebilling"]
@@ -2490,6 +2491,7 @@ def save_medicine_ward_request(request):
             branch_code=branch_code,
             created_by=current_user,
             is_ward_request=True,
+            is_active=True,
             room_no=room_no,
             ward_request_date=timezone.now() if 'timezone' in globals() else datetime.now()
         )
@@ -2502,6 +2504,7 @@ def save_medicine_ward_request(request):
                 "request_no": req_no,
                 "bill_no": None,
                 "is_ward_request": True,
+                "is_active": True,
                 "room_no": room_no,
                 "ward_name": room_no
             }}
