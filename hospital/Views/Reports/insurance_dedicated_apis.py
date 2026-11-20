@@ -48,6 +48,110 @@ def get_db():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DOCTOR PROFILE RESOLUTION HELPER (Global['backend_diagnostics_profile'])
+# ─────────────────────────────────────────────────────────────────────────────
+_DOCTOR_CACHE = {}
+_DOCTOR_CACHE_EXPIRY = None
+
+def get_doctor_profile_map(global_db):
+    """
+    Builds / retrieves cached mapping from employeeId -> employeeName 
+    from global_db['backend_diagnostics_profile'].
+    """
+    global _DOCTOR_CACHE, _DOCTOR_CACHE_EXPIRY
+    now = datetime.now()
+    if _DOCTOR_CACHE and _DOCTOR_CACHE_EXPIRY and now < _DOCTOR_CACHE_EXPIRY:
+        return _DOCTOR_CACHE
+
+    try:
+        profile_col = global_db['backend_diagnostics_profile']
+        profiles = list(profile_col.find(
+            {},
+            {'employeeId': 1, 'employeeName': 1, 'firstName': 1, 'lastName': 1, 'name': 1, 'doctorName': 1, '_id': 0}
+        ))
+        mapping = {}
+        for p in profiles:
+            emp_id = str(p.get('employeeId') or '').strip()
+            name = (
+                p.get('employeeName') or 
+                p.get('doctorName') or
+                p.get('name') or 
+                f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or 
+                ''
+            ).strip()
+            if emp_id and name:
+                mapping[emp_id] = name
+                mapping[emp_id.lower()] = name
+                if emp_id.isdigit():
+                    mapping[str(int(emp_id))] = name
+        _DOCTOR_CACHE = mapping
+        _DOCTOR_CACHE_EXPIRY = now + timedelta(minutes=10)
+        return mapping
+    except Exception:
+        if _DOCTOR_CACHE:
+            return _DOCTOR_CACHE
+        return {}
+
+def resolve_doctor_display_name(doc_raw, global_db, fallback_name=''):
+    """
+    Resolves doctor identifier or raw doctor value into the full display name
+    from global_db['backend_diagnostics_profile'].
+    Matches employeeId directly, or parses digit-based IDs, or falls back gracefully.
+    """
+    if not doc_raw:
+        return (fallback_name or '').strip()
+    doc_str = str(doc_raw).strip()
+    if not doc_str or doc_str in ('-', 'None', 'null', 'undefined'):
+        return (fallback_name or '').strip()
+
+    doc_map = get_doctor_profile_map(global_db)
+
+    # 1. Direct match on string or case-insensitive
+    if doc_str in doc_map:
+        return doc_map[doc_str]
+    if doc_str.lower() in doc_map:
+        return doc_map[doc_str.lower()]
+
+    # 2. Check if doc_str is digits or contains employee ID
+    digits_match = re.search(r'\b\d{4,6}\b', doc_str)
+    if digits_match:
+        d_val = digits_match.group(0)
+        if d_val in doc_map:
+            return doc_map[d_val]
+
+    # 3. Direct DB lookup if not in cache
+    if doc_str.isdigit():
+        try:
+            profile = global_db['backend_diagnostics_profile'].find_one({
+                "$or": [
+                    {"employeeId": doc_str},
+                    {"employeeId": int(doc_str)}
+                ]
+            })
+            if profile:
+                resolved = (
+                    profile.get('employeeName') or 
+                    profile.get('doctorName') or
+                    profile.get('name') or 
+                    f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or 
+                    doc_str
+                ).strip()
+                doc_map[doc_str] = resolved
+                return resolved
+        except Exception:
+            pass
+        # If it was pure digits and still not resolved, check fallback_name
+        if fallback_name and not str(fallback_name).strip().isdigit():
+            return str(fallback_name).strip()
+
+    # 4. If doc_str is already a name string (contains non-digits), return as is
+    if not doc_str.isdigit():
+        return doc_str
+
+    return fallback_name or doc_str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. PATIENT WISE PHARMACY IP BILL DETAILED API
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['GET'])
@@ -120,7 +224,11 @@ def patient_wise_pharmacy_ip_bill_api(request):
         patient_name = f"{patient_doc.get('firstName', '')} {patient_doc.get('lastName', '')}".strip() if patient_doc else (adm_doc.get('patientName', '') if adm_doc else '')
         age_val = (patient_doc.get('age') if patient_doc else None) or (adm_doc.get('age') if adm_doc else '')
         gender_val = (patient_doc.get('gender') if patient_doc else 'FEMALE') or 'FEMALE'
-        doc_name = (adm_doc.get('admittingDoctor') if adm_doc else '') or (adm_doc.get('consultingDoctor') if adm_doc else '') or (patient_doc.get('doctorName') if patient_doc else '')
+        
+        fallback_doc = (patient_doc.get('doctorName') if patient_doc else '') or ''
+        doc_raw = (adm_doc.get('admittingDoctor') if adm_doc else '') or (adm_doc.get('consultingDoctor') if adm_doc else '') or fallback_doc
+        doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+        comp_name = (adm_doc.get('insurance_company') if adm_doc else '') or (patient_doc.get('company_name') if patient_doc else '') or ''
 
         # Resolve Room Number from room_details
         room_no = ''
@@ -154,7 +262,11 @@ def patient_wise_pharmacy_ip_bill_api(request):
             "admitted_date": admitted_date_str,
             "discharge_date": discharge_date_str,
             "room_no": room_no,
-            "doctor_name": doc_name
+            "doctor_name": doc_name,
+            "doctor": doc_name,
+            "company": comp_name,
+            "company_name": comp_name,
+            "insurance_company": comp_name
         }
 
         # Resolve admission date boundary to prevent cross-admission or past historical contamination
@@ -643,14 +755,21 @@ def lab_abstract_api(request):
         })
 
         pname = f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip() if pat else (adm.get('patientName', '') if adm else '')
-        doc_name = (adm.get('admittingDoctor') if adm else '') or (adm.get('consultingDoctor') if adm else '') or (pat.get('doctorName') if pat else '')
+        fallback_doc = (pat.get('doctorName') if pat else '') or ''
+        doc_raw = (adm.get('admittingDoctor') if adm else '') or (adm.get('consultingDoctor') if adm else '') or fallback_doc
+        doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+        comp_name = (adm.get('insurance_company') if adm else '') or (pat.get('company_name') if pat else '') or ''
 
         patient_info = {
             "patient_name": pname,
             "ip_number": target_ip,
             "op_number": target_uhid,
             "uhid": target_uhid,
-            "doctor_name": doc_name
+            "doctor_name": doc_name,
+            "doctor": doc_name,
+            "company": comp_name,
+            "company_name": comp_name,
+            "insurance_company": comp_name
         }
 
         # 2. Query Bills for this IP Admission
@@ -916,6 +1035,10 @@ def occupancy_company_wise_api(request):
             elif r_str.startswith('5') or 'S-5' in r_str or 'SR-5' in r_str or '5TH' in r_str: floor = "5TH FLOOR"
             else: floor = "GENERAL WARD"
 
+            fallback_doc = (pat.get('doctorName') if pat else '') or ''
+            doc_raw = adm.get('admittingDoctor') or adm.get('consultingDoctor') or fallback_doc
+            doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+
             raw_occupancy.append({
                 "company_name": cname,
                 "floor": floor,
@@ -927,7 +1050,9 @@ def occupancy_company_wise_api(request):
                 "relation": rel,
                 "address": addr,
                 "admitting_date": adm_dt_str,
-                "room_number": room_display
+                "room_number": room_display,
+                "doctor_name": doc_name,
+                "doctor": doc_name
             })
 
         # Build Hierarchical structure: Company -> Floor -> items
@@ -1420,13 +1545,16 @@ def companywise_registration_api(request):
 
             pname = b.get('patient_name') or pat.get('name') or ''
             addr = pat.get('permanent_address') or ''
-            doc = b.get('doctorName') or pat.get('doctorName') or ''
+            fallback_doc = pat.get('doctorName') or ''
+            doc_raw = b.get('doctorName') or fallback_doc
+            doc = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
 
             grouped_by_date[d_str][comp].append({
                 "op_number": uhid or '',
                 "patient_name": pname,
                 "address": addr,
                 "doctor_name": doc,
+                "doctor": doc,
                 "claim_status": ""
             })
             seen_ops.add(uhid)
@@ -1457,13 +1585,16 @@ def companywise_registration_api(request):
 
             pname = pat.get('name') or ''
             addr = pat.get('permanent_address') or ''
-            doc = a.get('admittingDoctor') or a.get('consultingDoctor') or ''
+            fallback_doc = pat.get('doctorName') or ''
+            doc_raw = a.get('admittingDoctor') or a.get('consultingDoctor') or fallback_doc
+            doc = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
 
             grouped_by_date[d_str][comp].append({
                 "op_number": uhid or '',
                 "patient_name": pname,
                 "address": addr,
                 "doctor_name": doc,
+                "doctor": doc,
                 "claim_status": ""
             })
             seen_ops.add(uhid)
@@ -1567,7 +1698,9 @@ def insurance_discharge_bill_all_api(request):
         gender = (pat.get('gender') if pat else '') or ''
         age_gender = f"{age} Yrs / {gender}".strip(' /')
         addr = (pat.get('permanent_address') if pat else '') or ''
-        doc_name = (pat.get('doctorName') if pat else '') or (adm.get('admittingDoctor') if adm else '') or (adm.get('doctorName') if adm else '')
+        fallback_doc = (pat.get('doctorName') if pat else '') or (adm.get('doctorName') if adm else '') or ''
+        doc_raw = (adm.get('admittingDoctor') if adm else '') or (adm.get('consultingDoctor') if adm else '') or fallback_doc
+        doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
 
         # Corporate / TPA company name
         comp_name = (adm.get('insurance_company') if adm else '') or (pat.get('company_name') if pat else '')
@@ -1776,11 +1909,13 @@ def prescription_details_api(request):
 
         target_uhid = pat.get('uhid', uhid)
         pname = f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip() or pat.get('patientName', '')
-        doc_name = pat.get('doctorName', '')
-
         adm = hms_db['hospital_admission'].find_one({"uhid": target_uhid}) or {}
         ip_no = adm.get('ipNumber', '')
         room_no = adm.get('roomNumber', '')
+
+        fallback_doc = pat.get('doctorName', '') or ''
+        doc_raw = fallback_doc or adm.get('admittingDoctor') or adm.get('consultingDoctor') or ''
+        doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
 
         # Fetch prescribed drugs from pharmacy billing or emr for this patient
         pharm_bills = list(hms_db['hospital_pharmacybilling'].find({"uhid": target_uhid}))
@@ -2178,6 +2313,11 @@ def medicine_abstract_api(request):
         total_discount = round(sum(b.get('discount_amount', 0) for b in bills), 2)
         total_bill_amount = round(sum(b['bill_amount'] for b in bills), 2)
 
+        fallback_doc = (patient_doc.get('doctorName') if patient_doc else '') or ''
+        doc_raw = (adm_doc.get('admittingDoctor') if adm_doc else '') or (adm_doc.get('consultingDoctor') if adm_doc else '') or fallback_doc
+        doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+        comp_name = (adm_doc.get('insurance_company') if adm_doc else '') or (patient_doc.get('company_name') if patient_doc else '') or ''
+
         return Response({
             "success": True,
             "message": "Success" if bills else "No record found",
@@ -2188,7 +2328,12 @@ def medicine_abstract_api(request):
             "patient_info": {
                 "patient_name": patient_name,
                 "ip_number": target_ip,
-                "op_number": target_uhid
+                "op_number": target_uhid,
+                "doctor_name": doc_name,
+                "doctor": doc_name,
+                "company": comp_name,
+                "company_name": comp_name,
+                "insurance_company": comp_name
             },
             "bills": bills,
             "summary": {
