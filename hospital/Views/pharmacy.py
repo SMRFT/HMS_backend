@@ -3124,24 +3124,28 @@ def pharmacy_medicinechart(request):
             base_mongo_filter["outlet_code"] = target_outlet
 
         date_q = {}
+        str_date_q = {}
         if from_date_str:
             try:
-                f_dt = datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d")
+                # 6 hours buffer to safely cover Asia/Kolkata timezone (UTC+5:30)
+                f_dt = datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d") - timedelta(hours=6)
                 date_q["$gte"] = f_dt
+                str_date_q["$gte"] = (datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
             except Exception:
                 pass
         if to_date_str:
             try:
-                t_dt = datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d") + timedelta(days=1)
+                t_dt = datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d") + timedelta(days=1, hours=6)
                 date_q["$lt"] = t_dt
+                str_date_q["$lt"] = (datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d")
             except Exception:
                 pass
 
         if date_q:
             base_mongo_filter["$or"] = [
-                {"ward_request_date": date_q},
                 {"created_date": date_q},
-                {"bill_date": date_q}
+                {"created_date": str_date_q},
+                {"created_date": {"$exists": False}, "ward_request_date": date_q}
             ]
 
         cursor = pharmacy_billing_collection.find(base_mongo_filter).sort("created_date", -1)
@@ -3160,15 +3164,12 @@ def pharmacy_medicinechart(request):
                 if val:
                     b[date_key] = to_utc_iso(val)
 
-            # Ensure request_no is always resolved for ward requests
-            if not b.get("request_no"):
-                b_no = b.get("bill_no")
-                if b_no and str(b_no).startswith("MR"):
-                    b["request_no"] = str(b_no)
-                elif b.get("Bill_id"):
-                    b["request_no"] = f"MRIP{str(b.get('Bill_id')).zfill(3)}"
-                elif b.get("_id"):
-                    b["request_no"] = f"MRIP{str(b.get('_id'))[-4:].zfill(3)}"
+            # Only retain request_no if explicitly present in document
+            raw_req = b.get("request_no")
+            if raw_req and str(raw_req).strip() and str(raw_req).strip().lower() not in ["none", "null", "undefined"]:
+                b["request_no"] = str(raw_req).strip()
+            else:
+                b["request_no"] = ""
 
             serialized_data.append(b)
 
@@ -3452,9 +3453,18 @@ def pharmacy_medicinechart(request):
                 bill["inpatient_number"] = adm_info.get("ipNumber")
             bill["admission_datetime"] = adm_info.get("admissionDateTime", "")
             b_mode = str(bill.get("billing_mode") or "").strip().upper()
-            is_ot = "OT" in b_mode
+            req_no = str(bill.get("request_no") or "").strip().upper()
             raw_room = str(bill.get("room_no") or bill.get("ward_name") or "").strip()
+            is_ot = "OT" in b_mode or req_no.startswith("OT") or "OT" in raw_room.upper()
             if is_ot:
+                if (not raw_room or raw_room in ["-", "—", "None", ""]) and (bill.get("inpatient_number") or uhid_str):
+                    try:
+                        q_sc = {"inpatient_number": bill.get("inpatient_number")} if bill.get("inpatient_number") else {"uhid": uhid_str}
+                        sc_doc = hms_db["hospital_surgeryschedule"].find_one(q_sc, sort=[("created_date", -1)])
+                        if sc_doc:
+                            raw_room = sc_doc.get("ot_name") or sc_doc.get("theater") or sc_doc.get("ot_id") or ""
+                    except Exception:
+                        pass
                 if raw_room and raw_room not in ["-", "—", "None", ""]:
                     room_lbl = raw_room if "OT" in raw_room.upper() else f"OT Request ({raw_room})"
                 else:
@@ -3462,8 +3472,9 @@ def pharmacy_medicinechart(request):
                 bill["billing_mode"] = "OT REQUEST"
             else:
                 room_lbl = raw_room if raw_room and raw_room not in ["-", "—", "None", ""] else (adm_info.get("roomLabel") or "")
+                bill["billing_mode"] = "WARD REQUEST"
             bill["room_no"] = room_lbl
-            bill["ward_name"] = room_lbl
+            bill["ward_name"] = bill.get("ward_name") or room_lbl
 
             # Resolve room_category, block, nursing_station from hospital_room in dbcollection.py (cached)
             if room_lbl not in room_cache:
@@ -3474,6 +3485,8 @@ def pharmacy_medicinechart(request):
             bill["room_category"] = room_info.get("room_category") or ""
             bill["block"] = room_info.get("block") or ""
             bill["nursing_station"] = room_info.get("nursing_station") or ""
+            if not bill.get("ward_name") or bill.get("ward_name") in ["-", "—", "None"]:
+                bill["ward_name"] = room_info.get("room_category") or room_info.get("block") or room_info.get("nursing_station") or room_lbl
             bill["patient_details"]["room_category"] = bill["room_category"]
             bill["patient_details"]["block"] = bill["block"]
             bill["patient_details"]["nursing_station"] = bill["nursing_station"]
