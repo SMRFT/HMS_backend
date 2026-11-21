@@ -1,7 +1,7 @@
 import os
 import re
 import datetime as _dt_module
-from datetime import date as _date, datetime as _datetime
+from datetime import date as _date, datetime as _datetime, time as _time
 import json as _json
 from decimal import Decimal, InvalidOperation
 
@@ -1021,12 +1021,15 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
     if not adm and ip_number and adm_map is None:
         try:
             _, db = get_hms_db()
-            adm = db["hospital_admission"].find_one({"ipNumber": ip_number})
+            adm = db["hospital_admission"].find_one({
+                "$or": [{"ipNumber": ip_number}, {"ip_number": ip_number}]
+            })
         except Exception:
             adm = None
 
     adm_str, current_room = _extract_adm_room_and_date(adm)
 
+    # Customer type and insurance MUST strictly originate from the admission collection (adm), NEVER from registration
     adm_cust_raw = (adm.get("customer_type") or adm.get("customerType") or adm.get("patient_type") or "").strip() if adm else ""
     if adm_cust_raw:
         bill_cust_type = adm_cust_raw
@@ -1035,7 +1038,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         bill_cust_type = str(doc.get("customer_type") or "GENERAL").strip()
         bill_is_ins = "INSURANCE" in bill_cust_type.upper()
 
-    raw_comp = (adm.get("insurance_company") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
+    raw_comp = (adm.get("insurance_company") or adm.get("insuranceCompanyName") or adm.get("company_code") or "") if (adm and bill_is_ins) else ""
     company_name_p = ""
     if raw_comp and bill_is_ins:
         if ins_map is not None:
@@ -1050,9 +1053,11 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             except Exception:
                 company_name_p = str(raw_comp)
 
-    eff_claim = (doc.get("claim_number") or "") if bill_is_ins else ""
-    eff_id_card = (doc.get("id_card_number") or "") if bill_is_ins else ""
-    eff_company = (doc.get("company_name") or company_name_p or str(raw_comp)) if bill_is_ins else ""
+    # Insurance company strictly from admission collection first, then bill doc
+    adm_company = str(adm.get("insurance_company") or adm.get("insuranceCompanyName") or company_name_p or (adm.get("company_code") if bill_is_ins else "") or "").strip() if adm else ""
+    eff_company = (adm_company or doc.get("company_name") or "") if bill_is_ins else ""
+    eff_claim = (adm.get("claim_number") or adm.get("referral_number") or doc.get("claim_number") or "") if bill_is_ins else ""
+    eff_id_card = (adm.get("id_card_number") or adm.get("card_no") or doc.get("id_card_number") or "") if bill_is_ins else ""
 
     # Discharge date resolution
     disch_dt = (
@@ -1099,15 +1104,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
 
-            if bill_is_ins and (not eff_claim or not eff_id_card or not eff_company):
+            if bill_is_ins and (not eff_claim or not eff_id_card):
                 if ins_member_map is not None:
                     ins_member = ins_member_map.get(uhid, {})
                     if not eff_claim and ins_member.get("claim_number"):
                         eff_claim = ins_member["claim_number"]
                     if not eff_id_card and ins_member.get("id_card_number"):
                         eff_id_card = ins_member["id_card_number"]
-                    if not eff_company and ins_member.get("company_name"):
-                        eff_company = ins_member["company_name"]
                 else:
                     p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() if p else ""
                     ins_member = _resolve_insurance_member_details(uhid=uhid, patient_name=p_name)
@@ -1115,8 +1118,6 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                         eff_claim = ins_member["claim_number"]
                     if not eff_id_card and ins_member.get("id_card_number"):
                         eff_id_card = ins_member["id_card_number"]
-                    if not eff_company and ins_member.get("company_name"):
-                        eff_company = ins_member["company_name"]
 
             patient_details = {
                 "patient_name":   f"{p.get('firstName', '')} {p.get('lastName', '')}".strip(),
@@ -1137,8 +1138,8 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 "admission_date": adm_str,
                 "discharge_date": disch_str,
                 "room_no":        current_room,
-                "company":        eff_company,
-                "company_code":   str(raw_comp),
+                "company":        eff_company if bill_is_ins else "",
+                "company_code":   str(adm.get("company_code") or raw_comp) if (adm and bill_is_ins) else "",
                 "customer_type":  bill_cust_type,
                 "claim_number":   eff_claim,
                 "id_card_number": eff_id_card,
@@ -3684,29 +3685,37 @@ def discharge_billing_list_create(request):
                 and_conditions.append({"company_name": {"$regex": re.escape(str(insurance_type_f).strip()), "$options": "i"}})
 
         date_conds = []
+        from_date_obj = None
+        to_date_obj   = None
         if from_f or to_f:
             f_str = str(from_f).strip() if from_f else ""
             t_str = str(to_f).strip() if to_f else ""
-            from_dt_ist = _datetime.strptime(f_str, "%Y-%m-%d").replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=_IST_TZ) if f_str else None
-            to_dt_ist = _datetime.strptime(t_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=_IST_TZ) if t_str else None
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+                if f_str and not from_date_obj:
+                    try: from_date_obj = _datetime.strptime(f_str[:10], fmt).date()
+                    except ValueError: pass
+                if t_str and not to_date_obj:
+                    try: to_date_obj = _datetime.strptime(t_str[:10], fmt).date()
+                    except ValueError: pass
+
+            from_dt_ist = _datetime.combine(from_date_obj, _time.min).replace(tzinfo=_IST_TZ) if from_date_obj else None
+            to_dt_ist   = _datetime.combine(to_date_obj,   _time.max).replace(tzinfo=_IST_TZ) if to_date_obj else None
 
             # Aware UTC
             c_aware = {}
             if from_dt_ist: c_aware["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc)
             if to_dt_ist:   c_aware["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc)
-            if c_aware: date_conds.append({"bill_date": c_aware})
+            if c_aware:
+                date_conds.append({"bill_date": c_aware})
+                date_conds.append({"created_date": c_aware})
 
             # Naive UTC
             c_naive = {}
             if from_dt_ist: c_naive["$gte"] = from_dt_ist.astimezone(_dt_module.timezone.utc).replace(tzinfo=None)
             if to_dt_ist:   c_naive["$lte"] = to_dt_ist.astimezone(_dt_module.timezone.utc).replace(tzinfo=None)
-            if c_naive: date_conds.append({"bill_date": c_naive})
-
-            # String representation
-            c_str = {}
-            if f_str: c_str["$gte"] = f_str
-            if t_str: c_str["$lte"] = t_str + "\uffff"
-            if c_str: date_conds.append({"bill_date": c_str})
+            if c_naive:
+                date_conds.append({"bill_date": c_naive})
+                date_conds.append({"created_date": c_naive})
 
         search_or = []
         if search_f:
@@ -3811,6 +3820,22 @@ def discharge_billing_list_create(request):
                 cursor_fallback = cursor_fallback.limit(limit_val)
             raw_bills = list(cursor_fallback)
 
+        if from_date_obj or to_date_obj:
+            filtered_bills = []
+            for b in raw_bills:
+                b_dt = b.get("bill_date") or b.get("discharge_date") or b.get("created_date")
+                b_ist = _to_ist_dt(b_dt)
+                if b_ist:
+                    b_cal = b_ist.date()
+                    if from_date_obj and b_cal < from_date_obj:
+                        continue
+                    if to_date_obj and b_cal > to_date_obj:
+                        continue
+                    filtered_bills.append(b)
+                elif not from_date_obj and not to_date_obj:
+                    filtered_bills.append(b)
+            raw_bills = filtered_bills
+
         raw_bills.sort(key=lambda b: b.get("discharge_id") or 0, reverse=True)
 
         if not raw_bills:
@@ -3826,8 +3851,15 @@ def discharge_billing_list_create(request):
         patient_docs = list(db["hospital_patient"].find({"uhid": {"$in": uhids}})) if uhids else []
         patient_map = {str(p.get("uhid")).strip(): p for p in patient_docs if p.get("uhid")}
 
-        adm_docs = list(db["hospital_admission"].find({"ipNumber": {"$in": ip_numbers}})) if ip_numbers else []
-        adm_map = {str(a.get("ipNumber")).strip(): a for a in adm_docs if a.get("ipNumber")}
+        adm_docs = list(db["hospital_admission"].find({
+            "$or": [{"ipNumber": {"$in": ip_numbers}}, {"ip_number": {"$in": ip_numbers}}]
+        })) if ip_numbers else []
+        adm_map = {}
+        for a in adm_docs:
+            if a.get("ipNumber"):
+                adm_map[str(a.get("ipNumber")).strip()] = a
+            if a.get("ip_number"):
+                adm_map[str(a.get("ip_number")).strip()] = a
 
         # Single batch fetch for ALL insurance member details (Claim and ID card numbers)
         ins_members = list(db["hospital_insurancemember"].find(
@@ -5777,6 +5809,18 @@ def get_discharge_requests(request):
     search_param = (request.GET.get("search") or "").strip().lower()
     hospital_code = (request.GET.get("hospital_code") or "").strip()
 
+    target_date_obj = None
+    if date_param and date_param.lower() != "all":
+        if date_param.lower() == "today":
+            target_date_obj = _to_ist_dt(timezone.now()).date()
+        else:
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+                try:
+                    target_date_obj = _datetime.strptime(date_param[:10], fmt).date()
+                    break
+                except ValueError:
+                    pass
+
     adm_query = {
         "is_admitted": True,
         "ward_status": "Sent for billing",
@@ -5798,7 +5842,10 @@ def get_discharge_requests(request):
                 "lastmodified_date": 1,
                 "created_date": 1,
                 "customer_type": 1,
+                "customerType": 1,
                 "insurance_company": 1,
+                "insuranceCompanyName": 1,
+                "company_code": 1,
                 "room_details": 1,
                 "roomShitingDetails": 1,
                 "ward_status": 1,
@@ -5872,7 +5919,7 @@ def get_discharge_requests(request):
         gender = p.get("gender") or ""
 
         doc_id = str(a.get("admittingDoctor") or a.get("consultingDoctor") or "").strip()
-        doc_name = doc_map.get(doc_id) or (_resolve_employee_name(doc_id) if doc_id else "")
+        doc_name = doc_map.get(doc_id) or (_resolve_employee_name(doc_id) if doc_id else "") or doc_id
 
         room_no = ""
         bed_no = ""
@@ -5898,9 +5945,13 @@ def get_discharge_requests(request):
         )
         adm_dt = _to_ist_dt(a.get("admissionDateTime"))
 
-        req_date_str = req_dt.strftime("%Y-%m-%d") if req_dt else ""
-        if date_param and date_param.lower() != "all" and req_date_str != date_param:
-            continue
+        if target_date_obj:
+            if not req_dt or req_dt.date() != target_date_obj:
+                continue
+
+        cust_t = a.get("customer_type") or a.get("customerType") or a.get("patient_type") or "General"
+        is_ins_req = "INSURANCE" in str(cust_t).upper()
+        comp_req = (a.get("insurance_company") or a.get("insuranceCompanyName") or a.get("company_code") or "") if is_ins_req else ""
 
         row = {
             "id": str(a.get("_id") or ip_num or uhid),
@@ -5915,9 +5966,10 @@ def get_discharge_requests(request):
             "doctorName": doc_name,
             "roomNo": room_no,
             "bedNo": bed_no,
-            "customerType": a.get("customer_type") or a.get("customerType") or a.get("patient_type") or "General",
-            "customer_type": a.get("customer_type") or a.get("customerType") or a.get("patient_type") or "General",
-            "insuranceCompany": a.get("insurance_company") or "",
+            "customerType": cust_t,
+            "customer_type": cust_t,
+            "insuranceCompany": comp_req,
+            "company_code": str(a.get("company_code") or "") if is_ins_req else "",
             "wardStatus": a.get("ward_status") or "",
             "requestDate": req_date_str,
             "requestDateDisplay": req_dt.strftime("%d/%m/%Y") if req_dt else "",

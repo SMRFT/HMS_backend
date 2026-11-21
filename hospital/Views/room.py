@@ -2101,10 +2101,20 @@ def room_shifting_view(request):
     # ════════════════════════════════════════════════════════════════════════
     if request.method == "GET":
         try:
-            from_date = str(request.GET.get("from_date", "")).strip()[:10]
-            to_date   = str(request.GET.get("to_date",   "")).strip()[:10]
-            uhid      = str(request.GET.get("uhid",      "")).strip()
-            ip_number = str(request.GET.get("ip_number", "")).strip()
+            from_date_raw = str(request.GET.get("from_date", "")).strip()
+            to_date_raw   = str(request.GET.get("to_date",   "")).strip()
+            uhid          = str(request.GET.get("uhid",      "")).strip()
+            ip_number     = str(request.GET.get("ip_number", "")).strip()
+
+            from_date_obj = None
+            to_date_obj   = None
+            for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                if from_date_raw and not from_date_obj:
+                    try: from_date_obj = datetime.strptime(from_date_raw[:10], fmt).date()
+                    except ValueError: pass
+                if to_date_raw and not to_date_obj:
+                    try: to_date_obj = datetime.strptime(to_date_raw[:10], fmt).date()
+                    except ValueError: pass
 
             client, hms_db = _get_hms_db()
             _ensure_room_indexes(hms_db)
@@ -2130,24 +2140,10 @@ def room_shifting_view(request):
 
             admissions_list = list(admissions_cursor)
 
-            # ── Batch fetch all Patient names in a single indexed query ──────
-            uhids = list(filter(None, {str(a.get("uhid") or "").strip() for a in admissions_list}))
-            patient_name_map = {}
-            if uhids:
-                pat_cursor = hms_db["hospital_patient"].find(
-                    {"uhid": {"$in": uhids}},
-                    {"uhid": 1, "firstName": 1, "lastName": 1, "_id": 0}
-                )
-                for p in pat_cursor:
-                    uk = str(p.get("uhid") or "").strip()
-                    if uk:
-                        patient_name_map[uk] = f"{p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
-
             results = []
             for admission in admissions_list:
                 adm_uhid = str(admission.get("uhid") or "").strip()
                 adm_ip   = str(admission.get("ipNumber") or "").strip()
-                patient_name = patient_name_map.get(adm_uhid, "")
 
                 # Current active room (for old room display)
                 room_details = _safe_list(admission.get("room_details"))
@@ -2173,23 +2169,27 @@ def room_shifting_view(request):
                     if isinstance(raw_dt, dict) and "$date" in raw_dt:
                         raw_dt = raw_dt["$date"]
                     raw_dt_ist = _to_ist_dt(raw_dt)
-                    if raw_dt_ist is not None:
-                        shift_date = raw_dt_ist.strftime("%Y-%m-%d")
-                    elif hasattr(raw_dt, "strftime"):
-                        shift_date = raw_dt.strftime("%Y-%m-%d")
-                    else:
-                        shift_date = str(raw_dt).replace("T", " ")[:10]
-
-                    if from_date and shift_date and shift_date < from_date:
-                        continue
-                    if to_date and shift_date and shift_date > to_date:
-                        continue
+                    if (from_date_obj or to_date_obj):
+                        if raw_dt_ist is not None:
+                            shift_cal = raw_dt_ist.date()
+                            if from_date_obj and shift_cal < from_date_obj:
+                                continue
+                            if to_date_obj and shift_cal > to_date_obj:
+                                continue
+                        elif hasattr(raw_dt, "date"):
+                            shift_cal = raw_dt.date()
+                            if from_date_obj and shift_cal < from_date_obj:
+                                continue
+                            if to_date_obj and shift_cal > to_date_obj:
+                                continue
+                        else:
+                            continue
 
                     results.append({
                         "uhid":             adm_uhid,
                         "ipNumber":         adm_ip,
                         "ipserial_number":  str(admission.get("ipserial_number") or ""),
-                        "patient_name":     patient_name,
+                        "patient_name":     "",
                         "shifting_id":      str(shift.get("shifting_id",      "")),
                         "oldRoomNo":        str(shift.get("oldRoomNo",        old_room_no)),
                         "oldBedNo":         str(shift.get("oldBedNo",         old_bed_no)),
@@ -2203,6 +2203,21 @@ def room_shifting_view(request):
                         "is_roomCleaned":   bool(shift.get("is_roomCleaned",  False)),
                         "edited_from":      str(shift.get("edited_from",      "") or ""),
                     })
+
+            # ── Batch fetch Patient names ONLY for matched results in a single indexed query ──
+            matched_uhids = list(filter(None, {str(r.get("uhid") or "").strip() for r in results}))
+            if matched_uhids:
+                pat_cursor = hms_db["hospital_patient"].find(
+                    {"uhid": {"$in": matched_uhids}},
+                    {"uhid": 1, "firstName": 1, "lastName": 1, "_id": 0}
+                )
+                patient_name_map = {}
+                for p in pat_cursor:
+                    uk = str(p.get("uhid") or "").strip()
+                    if uk:
+                        patient_name_map[uk] = f"{p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
+                for r in results:
+                    r["patient_name"] = patient_name_map.get(r.get("uhid", ""), "")
 
             # Sort by shiftingDateTime descending
             results.sort(key=lambda x: x.get("shiftingDateTime", ""), reverse=True)

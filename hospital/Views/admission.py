@@ -26,11 +26,63 @@ from .discharge import _resolve_employee_name
 import traceback
 import json
 import ast
+import time
 import pytz
 from datetime import datetime, date, time as dt_time, timezone as dt_timezone
 
 IST_TZ = pytz.timezone(getattr(settings, 'TIME_ZONE', 'Asia/Kolkata') or 'Asia/Kolkata')
 _ISO_DT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$')
+
+# ── Doctor Profile Cache (TTL 5 mins) for Ultra-fast Doctor Name Resolution ──
+_doc_profile_cache = {"data": None, "timestamp": 0}
+
+def _get_doctor_profile_map():
+    now = time.time()
+    if _doc_profile_cache["data"] is not None and (now - _doc_profile_cache["timestamp"] < 300):
+        return _doc_profile_cache["data"]
+    try:
+        host = os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017")
+        client = MongoClient(host, serverSelectionTimeoutMS=4000, connectTimeoutMS=4000, socketTimeoutMS=6000)
+        gdb = client["Global"]
+        profiles = gdb["backend_diagnostics_profile"].find({}, {"employeeId": 1, "employeeName": 1, "_id": 0})
+        doc_map = {}
+        for p in profiles:
+            eid = str(p.get("employeeId") or "").strip()
+            ename = str(p.get("employeeName") or "").strip()
+            if eid and ename:
+                doc_map[eid] = ename
+        client.close()
+        _doc_profile_cache["data"] = doc_map
+        _doc_profile_cache["timestamp"] = now
+        return doc_map
+    except Exception as ex:
+        print(f"[_get_doctor_profile_map] Error: {ex}")
+        if _doc_profile_cache["data"] is not None:
+            return _doc_profile_cache["data"]
+        return {}
+
+
+def _resolve_doctor_name(val, doc_map=None):
+    """
+    Resolve doctor name from employee ID using profile mapping.
+    For old data where doctor name was already saved as text, preserves the existing name.
+    """
+    if not val:
+        return ""
+    v_str = str(val).strip()
+    if not v_str:
+        return ""
+    if doc_map is None:
+        doc_map = _get_doctor_profile_map()
+    # 1. Match exact ID in doctor profile map
+    if v_str in doc_map:
+        return doc_map[v_str]
+    # 2. Match without 'DR.' prefix if stored like 'DR.60064'
+    cleaned_id = re.sub(r'^(dr[.\s]*)+', '', v_str, flags=re.IGNORECASE).strip()
+    if cleaned_id in doc_map:
+        return doc_map[cleaned_id]
+    # 3. For old data, doctor name is already stored directly as text (e.g. 'DR.SANGEETHA M.D')
+    return v_str
 
 
 def _now_ist():
@@ -579,16 +631,14 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
                 if u_key:
                     patient_map[u_key] = pt
 
-            # Extract company codes for insurance provider lookup
+            # Extract company codes for insurance provider lookup strictly from admission records
             company_codes = set()
             for d in adm_list:
-                c = str(d.get("company_code") or "").strip()
-                if c:
-                    company_codes.add(c)
-            for pt in patient_map.values():
-                c = str(pt.get("company_code") or "").strip()
-                if c:
-                    company_codes.add(c)
+                c_t = str(d.get("customer_type") or d.get("customerType") or "").strip().upper()
+                if c_t == "INSURANCE":
+                    c = str(d.get("company_code") or "").strip()
+                    if c:
+                        company_codes.add(c)
 
             ins_map = {}
             if company_codes:
@@ -603,16 +653,50 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
             if client:
                 client.close()
 
+    doc_map = _get_doctor_profile_map()
+
     for adm_data in adm_list:
+        # ── 1. Doctor Name Resolution (Match ID from profile, or keep existing name for old data) ──
+        raw_admitting = str(adm_data.get("admittingDoctor") or "").strip()
+        admitting_name = str(adm_data.get("admittingDoctorName") or "").strip()
+        resolved_admitting = admitting_name or _resolve_doctor_name(raw_admitting, doc_map)
+
+        raw_consulting = str(adm_data.get("consultingDoctor") or "").strip()
+        consulting_name = str(adm_data.get("consultingDoctorName") or "").strip()
+        resolved_consulting = consulting_name or _resolve_doctor_name(raw_consulting, doc_map)
+
+        adm_data["admittingDoctor"]     = resolved_admitting
+        adm_data["admittingDoctorName"] = resolved_admitting
+        adm_data["admittingDoctorId"]   = raw_admitting
+
+        adm_data["consultingDoctor"]     = resolved_consulting
+        adm_data["consultingDoctorName"] = resolved_consulting
+        adm_data["consultingDoctorId"]   = raw_consulting
+
         uhid = str(adm_data.get("uhid") or "").strip()
         pt = patient_map.get(uhid)
         if not pt:
             continue
         
-        company_code = str(adm_data.get("company_code") or pt.get("company_code") or "").strip()
-        ins_name = str(adm_data.get("insurance_company") or adm_data.get("insuranceCompanyName") or "").strip()
-        if not ins_name and company_code:
-            ins_name = ins_map.get(company_code, company_code)
+        # Customer type and insurance MUST strictly originate from the admission collection, NEVER from registration (patient_map)
+        c_type = str(adm_data.get("customer_type") or adm_data.get("customerType") or "GENERAL").strip().upper()
+        if not c_type:
+            c_type = "GENERAL"
+        adm_data["customerType"]  = c_type
+        adm_data["customer_type"] = c_type
+
+        if c_type == "INSURANCE":
+            company_code = str(adm_data.get("company_code") or "").strip()
+            ins_name = str(adm_data.get("insurance_company") or adm_data.get("insuranceCompanyName") or "").strip()
+            if not ins_name and company_code:
+                ins_name = ins_map.get(company_code, company_code)
+            adm_data["insuranceCompanyName"] = ins_name
+            adm_data["insurance_company"]    = ins_name
+            adm_data["company_code"]         = company_code
+        else:
+            adm_data["insuranceCompanyName"] = ""
+            adm_data["insurance_company"]    = ""
+            adm_data["company_code"]         = ""
 
         dob = pt.get("dob") or pt.get("dateOfBirth")
         calc_num, calc_unit = _calc_age_and_type_from_dob(dob)
@@ -641,19 +725,10 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         adm_data["state"]                = pt.get("state") or ""
         adm_data["spouseName"]           = pt.get("spouseName") or pt.get("spouse_name") or ""
         adm_data["fatherName"]           = pt.get("fatherName") or pt.get("father_name") or ""
+        adm_data["guardian_name"]        = pt.get("guardian_name") or pt.get("guardianName") or ""
+        adm_data["guardian_type"]        = pt.get("guardian_type") or pt.get("guardianType") or ""
         adm_data["relationship"]         = pt.get("relationship") or adm_data.get("attender_relationship") or ""
         adm_data["aadhaar"]              = pt.get("aadhaar") or pt.get("aadhaar_number") or pt.get("aadhar") or pt.get("national_id") or ""
-        if not adm_data.get("customerType") and not adm_data.get("customer_type"):
-            c_type = str(pt.get("customer_type") or pt.get("customerType") or "GENERAL").strip().upper()
-            adm_data["customerType"]     = c_type
-            adm_data["customer_type"]    = c_type
-        else:
-            c_type = str(adm_data.get("customerType") or adm_data.get("customer_type") or "GENERAL").strip().upper()
-            adm_data["customerType"]     = c_type
-            adm_data["customer_type"]    = c_type
-        adm_data["insuranceCompanyName"] = ins_name
-        adm_data["insurance_company"]    = ins_name
-        adm_data["company_code"]         = company_code
 
     return adm_list
 
@@ -1121,9 +1196,21 @@ def admission_view(request):
                         if len(part) >= 3:
                             doc_tokens.append(part)
 
+            expanded_doc_tokens = set()
             if doc_tokens:
+                doc_profile_map = _get_doctor_profile_map()
+                expanded_doc_tokens = set(doc_tokens)
+                for tok in list(doc_tokens):
+                    tok_s = str(tok).strip()
+                    if tok_s in doc_profile_map:
+                        expanded_doc_tokens.add(doc_profile_map[tok_s])
+                    for eid, ename in doc_profile_map.items():
+                        if tok_s.lower() in ename.lower() or ename.lower() in tok_s.lower():
+                            expanded_doc_tokens.add(eid)
+                            expanded_doc_tokens.add(ename)
+
                 doc_clauses = []
-                for tok in set(doc_tokens):
+                for tok in expanded_doc_tokens:
                     doc_clauses.append({"admittingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
                     doc_clauses.append({"consultingDoctor": {"$regex": re.escape(tok), "$options": "i"}})
                     doc_clauses.append({"admittingDoctorName": {"$regex": re.escape(tok), "$options": "i"}})
@@ -1187,16 +1274,6 @@ def admission_view(request):
                     date_or.append({"admissionDateTime": c_naive})
                     date_or.append({"created_date": c_naive})
 
-                # 3. String representation
-                c_str = {}
-                from_iso = from_date.strftime('%Y-%m-%d') if from_date else ''
-                to_iso   = to_date.strftime('%Y-%m-%d') if to_date else ''
-                if from_iso: c_str["$gte"] = from_iso
-                if to_iso:   c_str["$lte"] = to_iso + "\uffff"
-                if c_str:
-                    date_or.append({"admissionDateTime": c_str})
-                    date_or.append({"created_date": c_str})
-
                 if date_or:
                     and_conditions.append({"$or": date_or})
 
@@ -1243,6 +1320,10 @@ def admission_view(request):
                     "attender_name":         adm.get("attender_name") or "",
                     "attender_relationship": adm.get("attender_relationship") or "",
                     "attender_phone":        adm.get("attender_phone") or "",
+                    "guardian_name":         adm.get("guardian_name") or "",
+                    "guardian_type":         adm.get("guardian_type") or "",
+                    "spouseName":            adm.get("spouseName") or adm.get("spouse_name") or "",
+                    "fatherName":            adm.get("fatherName") or adm.get("father_name") or "",
                     "is_high_risk":          bool(adm.get("is_high_risk", False)),
                     "high_risk_reason":      adm.get("high_risk_reason") or "",
                     "high_risk_date":        hr_dt_iso,
@@ -1291,23 +1372,26 @@ def admission_view(request):
                     doc_match = False
                     fields_to_check = [
                         str(d.get("admittingDoctor") or "").lower(),
-                        str(d.get("consultingDoctor") or "").lower(),
                         str(d.get("admittingDoctorName") or "").lower(),
+                        str(d.get("admittingDoctorId") or "").lower(),
+                        str(d.get("consultingDoctor") or "").lower(),
+                        str(d.get("consultingDoctorName") or "").lower(),
+                        str(d.get("consultingDoctorId") or "").lower(),
                     ]
-                    for tok in doc_tokens:
-                        tok_low = tok.lower()
-                        if any(tok_low in f for f in fields_to_check):
+                    tokens_to_test = expanded_doc_tokens if expanded_doc_tokens else doc_tokens
+                    for tok in tokens_to_test:
+                        tok_low = str(tok).lower().strip()
+                        if tok_low and any(tok_low in f for f in fields_to_check):
                             doc_match = True
                             break
                     if not doc_match:
                         continue
 
-                # 3. Customer type check
+                # 3. Customer type check (strictly based on admission)
                 if customer_type_filter and customer_type_filter.lower() != "all":
                     ct_low = str(d.get("customer_type") or d.get("customerType") or "").strip().lower()
                     if customer_type_filter.lower() == "insurance":
-                        is_ins = (ct_low == "insurance" or bool(d.get("company_code")) or bool(d.get("insurance_company")) or bool(d.get("insuranceCompanyName")))
-                        if not is_ins:
+                        if "insurance" not in ct_low and not bool(d.get("company_code")) and not bool(d.get("insurance_company")):
                             continue
                     else:
                         if ct_low != customer_type_filter.lower():
@@ -1323,6 +1407,8 @@ def admission_view(request):
                             continue
                         if to_date and d_cal_date > to_date:
                             continue
+                    else:
+                        continue
 
                 filtered_result.append(d)
 
@@ -1615,11 +1701,13 @@ def admission_detail(request, ipNumber):
                 if not uhid: return {}
                 client, hms_db = _get_hms_db()
                 pt = None
-                ins_name = getattr(adm, 'insurance_company', None) or ""
+                adm_cust = str(getattr(adm, 'customer_type', '') or '').strip() or "General"
+                is_ins = adm_cust.upper() == "INSURANCE"
+                ins_name = (getattr(adm, 'insurance_company', '') or '') if is_ins else ""
+                company_code = str(getattr(adm, 'company_code', '') or '').strip() if is_ins else ""
                 try:
                     pt = hms_db["hospital_patient"].find_one({"uhid": uhid})
-                    company_code = getattr(adm, 'company_code', None) or (pt.get('company_code') if pt else "") or ""
-                    if not ins_name and company_code:
+                    if is_ins and not ins_name and company_code:
                         ins = hms_db["hospital_insuranceprovider"].find_one({"company_code": company_code})
                         if ins:
                             ins_name = ins.get("company_name", company_code)
@@ -1645,11 +1733,11 @@ def admission_detail(request, ipNumber):
                     'zipcode': pt.get("zipcode") or "",
                     'city':    pt.get("city") or "",
                     'state':   pt.get("state") or "",
-                    'customerType': getattr(adm, "customer_type", None) or str(pt.get("customer_type") or pt.get("customerType") or "General"),
-                    'customer_type': getattr(adm, "customer_type", None) or str(pt.get("customer_type") or pt.get("customerType") or "General"),
-                    'insuranceCompanyName': ins_name,
-                    'insurance_company': ins_name,
-                    'company_code': getattr(adm, "company_code", "") or pt.get("company_code") or "",
+                    'customerType': adm_cust,
+                    'customer_type': adm_cust,
+                    'insuranceCompanyName': ins_name if is_ins else "",
+                    'insurance_company': ins_name if is_ins else "",
+                    'company_code': company_code if is_ins else "",
                 }
             except Exception:
                 return {}
@@ -2068,23 +2156,29 @@ def admission_advance(request, ipNumber=None):
             to_dt = None
             if from_date and to_date:
                 try:
-                    from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-                    to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
-                    from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
-                    to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
-                    from_naive  = from_dt_utc.replace(tzinfo=None)
-                    to_naive    = to_dt_utc.replace(tzinfo=None)
-                    and_clauses.append({
-                        "$or": [
-                            {"advance_payments.date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
-                            {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                            {"advance_payments.created_date": {"$gte": from_naive, "$lte": to_naive}},
-                            {"advance_payments.created_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
-                            {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                            {"advance_payments.bill_date": {"$gte": from_naive, "$lte": to_naive}},
-                            {"advance_payments.bill_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
-                        ]
-                    })
+                    for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                        if not from_dt:
+                            try: from_dt = datetime.strptime(from_date.strip(), fmt).date()
+                            except ValueError: pass
+                        if not to_dt:
+                            try: to_dt = datetime.strptime(to_date.strip(), fmt).date()
+                            except ValueError: pass
+                    if from_dt and to_dt:
+                        from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                        to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
+                        from_naive  = from_dt_utc.replace(tzinfo=None)
+                        to_naive    = to_dt_utc.replace(tzinfo=None)
+                        from_iso_str = from_dt.strftime('%Y-%m-%d')
+                        to_iso_str   = to_dt.strftime('%Y-%m-%d')
+                        and_clauses.append({
+                            "$or": [
+                                {"advance_payments.date": {"$gte": from_iso_str, "$lte": to_iso_str + "\uffff"}},
+                                {"advance_payments.created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                                {"advance_payments.created_date": {"$gte": from_naive, "$lte": to_naive}},
+                                {"advance_payments.bill_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                                {"advance_payments.bill_date": {"$gte": from_naive, "$lte": to_naive}},
+                            ]
+                        })
                 except Exception as e:
                     return JsonResponse({'success': False, 'error': f'Invalid date format: {str(e)}'}, status=400)
             else:
@@ -2156,10 +2250,8 @@ def admission_advance(request, ipNumber=None):
                                 rd["created_by_name"]  = rd["refunded_by_name"]
                     advance_payments.append(_normalize_ist_timestamps(p))
 
-            if from_date and to_date:
+            if from_dt and to_dt:
                 try:
-                    from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-                    to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
                     filtered = []
                     for p in advance_payments:
                         date_value = p.get('created_date') or p.get('bill_date') or p.get('date')
@@ -2169,8 +2261,19 @@ def admission_advance(request, ipNumber=None):
                             ist_dt = _to_ist_dt(date_value)
                             if ist_dt is not None:
                                 p_date = ist_dt.date()
+                            elif isinstance(date_value, (datetime, date)):
+                                p_date = date_value.date() if isinstance(date_value, datetime) else date_value
                             elif isinstance(date_value, str):
-                                p_date = datetime.strptime(date_value[:10], "%Y-%m-%d").date()
+                                s_val = date_value.strip()
+                                p_date = None
+                                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y'):
+                                    try:
+                                        p_date = datetime.strptime(s_val[:10], fmt).date()
+                                        break
+                                    except ValueError:
+                                        pass
+                                if not p_date:
+                                    continue
                             else:
                                 continue
                             if from_dt <= p_date <= to_dt:
@@ -2506,22 +2609,28 @@ def ip_advance_refunds_list(request):
         if branch_code and branch_code != "system":     q["branch_code"]   = branch_code
         # IP refunds are displayed commonly across all outlets; do not filter by outlet_code on GET
 
+        from_dt = None
+        to_dt = None
         if from_date and to_date:
             try:
-                from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-                to_dt   = datetime.strptime(to_date,   "%Y-%m-%d").date()
-                from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
-                to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
-                from_naive  = from_dt_utc.replace(tzinfo=None)
-                to_naive    = to_dt_utc.replace(tzinfo=None)
-                q["$or"] = [
-                    {"refund_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                    {"refund_date": {"$gte": from_naive, "$lte": to_naive}},
-                    {"refund_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
-                    {"created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
-                    {"created_date": {"$gte": from_naive, "$lte": to_naive}},
-                    {"created_date": {"$gte": from_date, "$lte": to_date + "\uffff"}},
-                ]
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                    if not from_dt:
+                        try: from_dt = datetime.strptime(from_date.strip(), fmt).date()
+                        except ValueError: pass
+                    if not to_dt:
+                        try: to_dt = datetime.strptime(to_date.strip(), fmt).date()
+                        except ValueError: pass
+                if from_dt and to_dt:
+                    from_dt_utc = IST_TZ.localize(datetime.combine(from_dt, dt_time.min)).astimezone(dt_timezone.utc)
+                    to_dt_utc   = IST_TZ.localize(datetime.combine(to_dt,   dt_time.max)).astimezone(dt_timezone.utc)
+                    from_naive  = from_dt_utc.replace(tzinfo=None)
+                    to_naive    = to_dt_utc.replace(tzinfo=None)
+                    q["$or"] = [
+                        {"refund_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                        {"refund_date": {"$gte": from_naive, "$lte": to_naive}},
+                        {"created_date": {"$gte": from_dt_utc, "$lte": to_dt_utc}},
+                        {"created_date": {"$gte": from_naive, "$lte": to_naive}},
+                    ]
             except Exception:
                 pass
 
@@ -2559,19 +2668,18 @@ def ip_advance_refunds_list(request):
 
         res_list = []
         for r in refund_docs:
-            if from_date and to_date:
+            if from_dt and to_dt:
                 r_dt_val = r.get("refund_date") or r.get("created_date")
                 r_ist = _to_ist_dt(r_dt_val)
                 if r_ist:
                     if not (from_dt <= r_ist.date() <= to_dt):
                         continue
-                elif isinstance(r_dt_val, str) and len(r_dt_val) >= 10:
-                    try:
-                        rd_part = datetime.strptime(r_dt_val[:10], "%Y-%m-%d").date()
-                        if not (from_dt <= rd_part <= to_dt):
-                            continue
-                    except Exception:
-                        pass
+                elif isinstance(r_dt_val, (datetime, date)):
+                    r_date = r_dt_val.date() if isinstance(r_dt_val, datetime) else r_dt_val
+                    if not (from_dt <= r_date <= to_dt):
+                        continue
+                else:
+                    continue
             r_dict = _normalize_ist_timestamps(r)
             u = str(r_dict.get("uhid") or "").strip().upper()
             ip = str(r_dict.get("ip_number") or "").strip()
@@ -2926,9 +3034,17 @@ def admitted_patients(request):
         except (TypeError, ValueError):
             limit_val = 500
 
-        target_date = date_str
-        if target_date.lower() == "today":
-            target_date = _now_ist().date().strftime("%Y-%m-%d")
+        target_date_obj = None
+        if date_str and date_str.lower() != "all":
+            if date_str.lower() == "today":
+                target_date_obj = _now_ist().date()
+            else:
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d'):
+                    try:
+                        target_date_obj = datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        pass
 
         client, hms_db = _get_hms_db()
         try:
@@ -2937,6 +3053,13 @@ def admitted_patients(request):
                 "is_discharged": {"$ne": True},
                 "is_cancelled": {"$ne": True},
             }
+            if target_date_obj:
+                start_utc = IST_TZ.localize(datetime.combine(target_date_obj, dt_time.min)).astimezone(dt_timezone.utc)
+                end_utc   = IST_TZ.localize(datetime.combine(target_date_obj, dt_time.max)).astimezone(dt_timezone.utc)
+                adm_filter["$or"] = [
+                    {"admissionDateTime": {"$gte": start_utc, "$lte": end_utc}},
+                    {"admissionDateTime": {"$gte": start_utc.replace(tzinfo=None), "$lte": end_utc.replace(tzinfo=None)}},
+                ]
             if hospital_code and hospital_code != "system":
                 adm_filter["hospital_code"] = hospital_code
             if branch_code and branch_code != "system":
@@ -3003,19 +3126,19 @@ def admitted_patients(request):
                 adm_time_disp = adm_dt_ist.strftime("%I:%M %p") if adm_dt_ist else ""
                 adm_dt_disp = adm_dt_ist.strftime("%d-%m-%Y %I:%M %p") if adm_dt_ist else ""
 
-                if target_date and target_date.lower() != "all":
-                    if adm_date_iso != target_date:
+                if target_date_obj:
+                    if not adm_dt_ist or adm_dt_ist.date() != target_date_obj:
                         continue
 
                 total_days = max(1, (today_ist_date - adm_dt_ist.date()).days) if adm_dt_ist else 1
 
-                cust_type = str(
-                    a.get("customerType") or a.get("customer_type") or p.get("customer_type") or p.get("customerType") or "General"
-                ).strip()
-                ins_id = str(a.get("insurance_id") or p.get("insurance_id") or "").strip()
+                # Customer type and insurance MUST strictly originate from the admission collection
+                cust_type = str(a.get("customerType") or a.get("customer_type") or "General").strip()
+                is_ins = cust_type.upper() == "INSURANCE"
+                adm_code = str(a.get("company_code") or a.get("insurance_id") or "").strip()
                 company = str(
-                    a.get("companyName") or a.get("company_name") or ins_map.get(ins_id, "") or p.get("company_name") or ""
-                ).strip()
+                    a.get("insurance_company") or a.get("insuranceCompanyName") or a.get("companyName") or a.get("company_name") or (ins_map.get(adm_code, "") if adm_code else "")
+                ).strip() if is_ins else ""
 
                 addr = str(
                     p.get("permanent_address") or p.get("address") or a.get("permanent_address") or ""
@@ -3036,8 +3159,9 @@ def admitted_patients(request):
                     "mobile": mobile,
                     "address": addr,
                     "doctor": doc_resolved,
-                    "admittingDoctor": raw_doc,
+                    "admittingDoctor": doc_resolved,
                     "admittingDoctorName": doc_resolved,
+                    "admittingDoctorId": raw_doc,
                     "department": str(a.get("department") or ""),
                     "roomNo": room_no,
                     "bedNo": bed_no,
@@ -3067,7 +3191,7 @@ def admitted_patients(request):
 
             return Response({
                 "success": True,
-                "date": target_date,
+                "date": target_date_obj.strftime("%Y-%m-%d") if target_date_obj else "all",
                 "total": len(results),
                 "data": results,
             }, status=200)
