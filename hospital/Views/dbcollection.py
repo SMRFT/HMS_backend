@@ -193,26 +193,15 @@ def get_insurance_provider_by_patient(uhid=None, company_code=None, patient_obj=
             c_code = c_code or str(getattr(patient_obj, "company_code", "") or "").strip()
             cust_type = str(getattr(patient_obj, "customer_type", "") or "").strip()
 
-    # 2. If uhid passed and we need to check Patient model
-    if uhid and (not c_code or not cust_type):
+    # 2. If uhid passed and we need to check patient data
+    if uhid and (not c_code or not cust_type) and not patient_obj:
         u_str = str(uhid).strip()
-        try:
-            from ..models import Patient
-            p = Patient.objects.filter(uhid=u_str).first()
-            if p:
-                cust_type = cust_type or str(p.customer_type or "").strip()
-                c_code = c_code or str(p.company_code or "").strip()
-        except Exception:
-            pass
-
-        if not c_code or not cust_type:
-            # Fallback to patient_collection in mongo
-            p_doc = patient_collection.find_one({"uhid": u_str})
-            if not p_doc:
-                p_doc = patient_collection.find_one({"uhid": {"$regex": f"^{re.escape(u_str)}$", "$options": "i"}})
-            if p_doc:
-                cust_type = cust_type or str(p_doc.get("customer_type") or "").strip()
-                c_code = c_code or str(p_doc.get("company_code") or "").strip()
+        p_doc = patient_collection.find_one({"uhid": u_str})
+        if not p_doc:
+            p_doc = patient_collection.find_one({"uhid": {"$regex": f"^{re.escape(u_str)}$", "$options": "i"}})
+        if p_doc:
+            cust_type = cust_type or str(p_doc.get("customer_type") or "").strip()
+            c_code = c_code or str(p_doc.get("company_code") or "").strip()
 
     is_ins = cust_type.lower() == "insurance" or bool(c_code)
     res["is_insurance"] = is_ins

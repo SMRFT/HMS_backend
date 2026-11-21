@@ -197,8 +197,9 @@ def doctor_list_from_diagnostics(request):
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_list(request):
     """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with schedule details and resolved Department & Designation names"""
+    client = None
     try:
-        client = get_mongo_client()
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         global_db = client['Global']
 
         # Get Mappings
@@ -282,14 +283,18 @@ def doctor_schedule_list(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
 
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_detail(request, employee_id):
     """Get doctor schedule details by employeeId with resolved Department and Designation names"""
+    client = None
     try:
-        client = get_mongo_client()
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         global_db = client['Global']
         user_collection = global_db['backend_diagnostics_user']
 
@@ -368,14 +373,18 @@ def doctor_schedule_detail(request, employee_id):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
 
 
 @api_view(['POST', 'PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_upsert(request, employee_id):
     """Create or update doctor schedule by employeeId"""
+    client = None
     try:
-        client = get_mongo_client()
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         branch_code = request.data.get("auth-branch-code", "system")
         hospital_code = request.data.get("auth-hospital-code", "system")
 
@@ -450,3 +459,6 @@ def doctor_schedule_upsert(request, employee_id):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()

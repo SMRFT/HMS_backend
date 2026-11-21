@@ -269,6 +269,7 @@ class CustomerType(AuditModel):
         return self.type_name
 
 class Billing(AuditModel):
+    is_active = models.BooleanField(default=True)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="billings")
     uhid = models.CharField(max_length=50, blank=True, null=True)
     registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -579,6 +580,7 @@ from django.utils import timezone
 
 class PharmacyBilling(AuditModel):
 
+    is_active = models.BooleanField(default=True)
     Bill_id = models.IntegerField(primary_key=True)
     bill_no = models.CharField(max_length=50, blank=True, null=True)
     estimate_no = models.CharField(max_length=50, blank=True, null=True)
@@ -1091,6 +1093,7 @@ class IpAdvance_Refund(AuditModel):
 
 class DischargeBilling(AuditModel):
     # ── Identity ──────────────────────────────────────────────────────────────
+    is_active       = models.BooleanField(default=True)
     discharge_id    = models.IntegerField(primary_key=True)
     status          = models.CharField(max_length=20, db_index=True)
     estimate_number = models.CharField(max_length=60, blank=True, null=True, unique=True)

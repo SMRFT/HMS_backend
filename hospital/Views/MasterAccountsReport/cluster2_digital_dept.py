@@ -23,11 +23,13 @@ def credit_card_report_api(request):
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
+        is_refresh = str(data.get("refresh") or data.get("force_refresh") or "").lower() in ["true", "1"]
         res = AccountsLedgerEngine.get_ledger_data(
             from_str=data.get("from_date") or data.get("start_date"),
             to_str=data.get("to_date") or data.get("end_date"),
             outlet_code=data.get("outlet_code") or data.get("outlet"),
-            shift_no=data.get("shiftno") or data.get("shift_no")
+            shift_no=data.get("shiftno") or data.get("shift_no"),
+            force_refresh=is_refresh
         )
         
         def _parse_date_keys(raw_d):
@@ -203,10 +205,12 @@ def date_wise_collection_summary_api(request):
         to_d = data.get("to_date") or data.get("end_date")
         outlet = data.get("outlet_code") or data.get("outlet")
         
+        is_refresh = str(data.get("refresh") or data.get("force_refresh") or "").lower() in ["true", "1"]
         res = AccountsLedgerEngine.get_ledger_data(
             from_str=from_d,
             to_str=to_d,
-            outlet_code=outlet
+            outlet_code=outlet,
+            force_refresh=is_refresh
         )
         
         summary_map = {}
@@ -221,6 +225,8 @@ def date_wise_collection_summary_api(request):
                 d_str = raw_d[:10]
                 
             cat = str(b.get("category") or "GENERAL").strip()
+            if cat.upper() in ["DISCHARGE", "DISCHARGEBILLS"]:
+                cat = "DISCHARGE"
             b_no = str(b.get("bill_no") or "").strip()
             
             gross = clean_num(b.get("gross"))
@@ -234,19 +240,22 @@ def date_wise_collection_summary_api(request):
             sales_ret = 0.0
             adv_refd = 0.0
             
-            if cat in ["REFUND", "SALES RETURNS", "SALES RETURN"]:
+            cat_upper = cat.upper()
+            if any(k in cat_upper for k in ["REFUND", "RETURN"]):
                 sales_ret = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(sales_ret)
-                cash = -abs(sales_ret)
+                cash = 0.0
                 bank = 0.0
+                credit = 0.0
                 cat = "SALES RETURNS"
-            elif cat in ["EXPENSE PAYMENT", "MISCELLANEOUS EXPENSE"]:
+            elif any(k in cat_upper for k in ["EXPENSE", "PAYMENT"]):
                 adv_refd = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(adv_refd)
-                cash = -abs(adv_refd)
+                cash = 0.0
                 bank = 0.0
+                credit = 0.0
                 cat = "MISCELLANEOUS EXPENSE"
                 
             key = (d_str, cat)
@@ -291,6 +300,8 @@ def date_wise_collection_summary_api(request):
                 row["bill_range"] = ""
             for k in ["gross_amount", "discount", "bill_adv", "ip_return", "sales_ret", "ip_credit", "p_debit", "debit_col", "adv_refd", "net_amount", "cash", "bank"]:
                 row[k] = round(row[k], 2)
+            row["card"] = row["bank"]
+            row["total"] = row["net_amount"]
             rows.append(row)
 
         categories = sorted(list(set(r.get("bill_name") for r in rows if r.get("bill_name"))))
@@ -351,17 +362,28 @@ def bill_type_wise_collection_api(request):
         data = request.data if request.method == "POST" else request.query_params
         cat_filter = (data.get("category") or data.get("bill_type") or "").strip()
 
+        is_refresh = str(data.get("refresh") or data.get("force_refresh") or "").lower() in ["true", "1"]
         res = AccountsLedgerEngine.get_ledger_data(
             from_str=data.get("from_date") or data.get("start_date"),
             to_str=data.get("to_date") or data.get("end_date"),
-            outlet_code=data.get("outlet_code") or data.get("outlet")
+            outlet_code=data.get("outlet_code") or data.get("outlet"),
+            force_refresh=is_refresh
         )
         
         dept_map = {}
         for b in res["bills"]:
             cat = b["category"]
             if cat_filter and cat_filter.lower() not in ["all", "all types", "all categories", ""]:
-                if cat.strip().lower() != cat_filter.lower():
+                cat_f_lower = cat_filter.strip().lower()
+                cat_lower = cat.strip().lower()
+                # Flexible matching for cardiology and package breakdowns
+                if cat_f_lower == "cardiology" or "cardio" in cat_f_lower:
+                    if "cardio" not in cat_lower and not any(k in cat_lower for k in ["ecg", "echo", "tmt", "holter"]):
+                        continue
+                elif cat_f_lower == "package" or "package" in cat_f_lower:
+                    if "package" not in cat_lower:
+                        continue
+                elif cat_lower != cat_f_lower and cat_f_lower not in cat_lower:
                     continue
             dept_map.setdefault(cat, {
                 "bill_type": cat,
@@ -373,9 +395,12 @@ def bill_type_wise_collection_api(request):
                 "total_revenue": 0.0,
                 "bill_count": 0
             })
-            dept_map[cat]["cash"] += b["cash"]
-            dept_map[cat]["card"] += b["bank"]
-            dept_map[cat]["credit"] += b["credit"]
+            c_val = b["cash"] if b["cash"] > 0 else 0.0
+            b_val = b["bank"] if b["bank"] > 0 else 0.0
+            cr_val = b["credit"] if b["credit"] > 0 else 0.0
+            dept_map[cat]["cash"] += c_val
+            dept_map[cat]["card"] += b_val
+            dept_map[cat]["credit"] += cr_val
             dept_map[cat]["bill_count"] += 1
             
         rows = list(dept_map.values())

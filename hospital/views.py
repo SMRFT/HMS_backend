@@ -749,68 +749,91 @@ def patient_registration_stats(request):
         today = timezone.localdate()
 
         if from_date_str:
-             from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+            from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
         else:
-             from_date = today
+            from_date = today
 
         if to_date_str:
-             to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+            to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
         else:
-             to_date = today
-        
-        # Safe construction using timezone helper if needed
-        # We assume USE_TZ=True or configured correctly.
-        # timezone.make_aware requires naive datetime.
-        
+            to_date = today
+
         start_naive = datetime.combine(from_date, time.min)
         end_naive = datetime.combine(to_date, time.max)
-        
+
         if timezone.is_naive(start_naive):
             start_dt = timezone.make_aware(start_naive)
         else:
             start_dt = start_naive
-            
+
         if timezone.is_naive(end_naive):
             end_dt = timezone.make_aware(end_naive)
         else:
             end_dt = end_naive
 
-        # Base filter for Bills
-        bill_filter = Q(billed_date__range=(start_dt, end_dt))
-        
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        if not mongo_host:
+            return Response({"error": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
+        hms_db = client['HMS']
+        billing_coll = hms_db['hospital_billing']
+        patient_coll = hms_db['hospital_patient']
+
+        bill_query = {
+            'billed_date': {'$gte': start_dt, '$lte': end_dt}
+        }
         if doctor_id:
-            bill_filter &= Q(doctor_id=doctor_id)
-            
-        bills = Billing.objects.filter(bill_filter).select_related('patient')
-        
-        total_visits = bills.count()
+            d_str = str(doctor_id).strip()
+            if d_str.isdigit():
+                bill_query['doctor_id'] = {'$in': [d_str, int(d_str)]}
+            else:
+                bill_query['doctor_id'] = d_str
+
+        # Fetch only needed fields from hospital_billing to avoid overhead
+        bills = list(billing_coll.find(
+            bill_query,
+            {'patient_id': 1, 'uhid': 1, 'bill_number': 1}
+        ))
+
+        total_visits = len(bills)
         new_visit_count = 0
         existing_visit_count = 0
-        
-        # Optimization: fetch patient dates in a list/dict if needed, but iteration is fine for moderate scale
-        for bill in bills:
-            if not hasattr(bill, 'patient') or bill.patient is None:
-                print(f"Warning: Bill {bill.bill_number} has no patient reference.")
-                existing_visit_count += 1
-                continue
 
-            p_created = bill.patient.created_date
-            
-            if p_created is None:
-                # If no created_date, treat as old patient
-                existing_visit_count += 1
-                continue
+        # Optimization: A patient is a new_visit if their registration date (created_date) >= start_dt.
+        # Instead of querying all patient records (which triggers slow queries for large date ranges),
+        # we only fetch newly registered patients (created_date >= start_dt).
+        new_patients = list(patient_coll.find(
+            {'created_date': {'$gte': start_dt}},
+            {'id': 1, 'uhid': 1}
+        ))
 
-            # Ensure p_created is aware for comparison
-            if timezone.is_naive(p_created):
-                p_created = timezone.make_aware(p_created)
-                
-            # Logic: If patient created in range (>= start_dt), it's a new registration
-            if p_created >= start_dt:
-                 new_visit_count += 1
+        new_patient_ids = set()
+        new_uhids = set()
+        for p in new_patients:
+            if p.get('id') is not None:
+                new_patient_ids.add(p['id'])
+                new_patient_ids.add(str(p['id']))
+            if p.get('uhid'):
+                new_uhids.add(str(p['uhid']).strip())
+
+        for b in bills:
+            pid = b.get('patient_id')
+            uh = str(b.get('uhid') or '').strip()
+
+            is_new = False
+            if pid is not None and (pid in new_patient_ids or str(pid) in new_patient_ids):
+                is_new = True
+            elif uh and uh in new_uhids:
+                is_new = True
+
+            if is_new:
+                new_visit_count += 1
             else:
-                 existing_visit_count += 1
-                 
+                existing_visit_count += 1
+
+        client.close()
+
         return Response({
             "new_visit": new_visit_count,
             "existing_visit": existing_visit_count,
@@ -828,6 +851,7 @@ def patient_registration_stats(request):
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
 def patient_visit_list(request):
+    client = None
     try:
         from_date_str = request.GET.get('fromDate')
         to_date_str = request.GET.get('toDate')
@@ -836,42 +860,74 @@ def patient_visit_list(request):
         today = timezone.localdate()
 
         if from_date_str:
-             from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
+            from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
         else:
-             from_date = today
+            from_date = today
 
         if to_date_str:
-             to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
+            to_date = datetime.strptime(to_date_str, '%Y-%m-%d').date()
         else:
-             to_date = today
-        
+            to_date = today
+
         start_naive = datetime.combine(from_date, time.min)
         end_naive = datetime.combine(to_date, time.max)
-        
+
         if timezone.is_naive(start_naive):
-             start_dt = timezone.make_aware(start_naive)
+            start_dt = timezone.make_aware(start_naive)
         else:
-             start_dt = start_naive
-             
+            start_dt = start_naive
+
         if timezone.is_naive(end_naive):
-             end_dt = timezone.make_aware(end_naive)
+            end_dt = timezone.make_aware(end_naive)
         else:
-             end_dt = end_naive
+            end_dt = end_naive
 
-        bill_filter = Q(billed_date__range=(start_dt, end_dt))
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        if not mongo_host:
+            return Response({"error": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
+        hms_db = client['HMS']
+        global_db = client['Global']
+
+        billing_coll = hms_db['hospital_billing']
+        patient_coll = hms_db['hospital_patient']
+        refund_coll = hms_db['hospital_refund']
+        diag_coll = global_db['backend_diagnostics_profile']
+
+        bill_query = {'billed_date': {'$gte': start_dt, '$lte': end_dt}}
         if doctor_id:
-            bill_filter &= Q(doctor_id=doctor_id)
+            d_str = str(doctor_id).strip()
+            if d_str.isdigit():
+                bill_query['doctor_id'] = {'$in': [d_str, int(d_str)]}
+            else:
+                bill_query['doctor_id'] = d_str
 
-        bills = Billing.objects.filter(bill_filter).select_related('patient').order_by('-billed_date')
-        
-        # Build lookup map for employee IDs (doctors, creators, and edit history users)
+        bills = list(billing_coll.find(bill_query).sort('billed_date', -1))
+
         all_emp_ids = set()
+        bill_numbers = []
+        patient_ids = []
+        uhids = []
+
         for b in bills:
-            if b.doctor_id:
-                all_emp_ids.add(str(b.doctor_id).strip())
-            if b.created_by:
-                all_emp_ids.add(str(b.created_by).strip())
-            for h in (b.edit_history or []):
+            pid = b.get('patient_id')
+            if pid is not None:
+                if isinstance(pid, int):
+                    patient_ids.append(pid)
+                elif isinstance(pid, str) and pid.isdigit():
+                    patient_ids.append(int(pid))
+            uh = b.get('uhid')
+            if uh:
+                uhids.append(str(uh).strip())
+
+            if b.get('bill_number'):
+                bill_numbers.append(b['bill_number'])
+            if b.get('doctor_id'):
+                all_emp_ids.add(str(b['doctor_id']).strip())
+            if b.get('created_by'):
+                all_emp_ids.add(str(b['created_by']).strip())
+            for h in (b.get('edit_history') or []):
                 if h.get('user'):
                     all_emp_ids.add(str(h.get('user')).strip())
                 changes = h.get('changes', {})
@@ -881,101 +937,137 @@ def patient_visit_list(request):
                     if old_d: all_emp_ids.add(str(old_d).strip())
                     if new_d: all_emp_ids.add(str(new_d).strip())
 
+        # Batch fetch patients in chunks of 100 to maximize index performance
+        patient_map = {}
+        pids_list = list(set(patient_ids))
+        uhs_list = list(set(uhids))
+
+        for i in range(0, len(pids_list), 100):
+            chunk = pids_list[i:i+100]
+            for p in patient_coll.find({'id': {'$in': chunk}}):
+                if p.get('id') is not None:
+                    patient_map[p['id']] = p
+                    patient_map[str(p['id'])] = p
+                if p.get('uhid'):
+                    patient_map[str(p['uhid']).strip()] = p
+
+        missing_uhs = [u for u in uhs_list if u not in patient_map]
+        for i in range(0, len(missing_uhs), 100):
+            chunk = missing_uhs[i:i+100]
+            for p in patient_coll.find({'uhid': {'$in': chunk}}):
+                if p.get('id') is not None:
+                    patient_map[p['id']] = p
+                    patient_map[str(p['id'])] = p
+                if p.get('uhid'):
+                    patient_map[str(p['uhid']).strip()] = p
+
+        # Batch fetch employee names
         emp_map = {}
         if all_emp_ids:
             try:
-                mongo_host = os.getenv("GLOBAL_DB_HOST")
-                if mongo_host:
-                    client = MongoClient(mongo_host)
-                    global_db = client['Global']
-                    diag_collection = global_db['backend_diagnostics_profile']
-                    for doc in diag_collection.find({"employeeId": {"$in": list(all_emp_ids)}}, {"employeeId": 1, "employeeName": 1}):
-                        if doc.get("employeeId") and doc.get("employeeName"):
-                            emp_map[str(doc.get("employeeId")).strip()] = doc.get("employeeName")
+                for doc in diag_coll.find({"employeeId": {"$in": list(all_emp_ids)}}, {"employeeId": 1, "employeeName": 1}):
+                    if doc.get("employeeId") and doc.get("employeeName"):
+                        emp_map[str(doc.get("employeeId")).strip()] = doc.get("employeeName")
             except Exception as ex:
                 print(f"Error fetching emp map: {ex}")
 
-        # Batch fetch refunds for all bills in this list to eliminate N+1 queries
-        bill_numbers = [b.bill_number for b in bills if b.bill_number]
+        # Batch fetch refunds
         refunds_by_bill = {}
         if bill_numbers:
             try:
-                for r in Refund.objects.filter(bill_no__in=bill_numbers):
-                    refunds_by_bill.setdefault(r.bill_no, []).append(r)
+                for r in refund_coll.find({'bill_no': {'$in': bill_numbers}}):
+                    bno = r.get('bill_no')
+                    if bno:
+                        refunds_by_bill.setdefault(bno, []).append(r)
             except Exception as ref_err:
                 print(f"Error batch fetching refunds: {ref_err}")
 
         data = []
         for bill in bills:
-            if not hasattr(bill, 'patient') or bill.patient is None:
-                print(f"Warning: Bill {bill.bill_number} has no patient.")
+            p = None
+            if bill.get('patient_id') is not None:
+                p = patient_map.get(bill.get('patient_id')) or patient_map.get(str(bill.get('patient_id')))
+            if not p and bill.get('uhid'):
+                p = patient_map.get(str(bill.get('uhid')).strip())
+
+            if not p:
                 continue
 
-            p_created = bill.patient.created_date
-            if p_created and timezone.is_naive(p_created):
+            p_created = p.get('created_date')
+            if p_created and hasattr(p_created, 'tzinfo') and timezone.is_naive(p_created):
                 p_created = timezone.make_aware(p_created)
-            
+            elif p_created and isinstance(p_created, str):
+                try:
+                    p_created = datetime.fromisoformat(p_created)
+                    if timezone.is_naive(p_created):
+                        p_created = timezone.make_aware(p_created)
+                except Exception:
+                    pass
+
             if p_created and start_dt:
                 visit_type = "New" if p_created >= start_dt else "Review"
             else:
                 visit_type = "Review"
-            
-            p = bill.patient
-            full_name = f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
-            resolved_doc_name = emp_map.get(str(bill.doctor_id).strip()) or p.doctorName or bill.doctor_id
-            
-            # Formatting address safely with district
+
+            full_name = f"{p.get('salutation') or ''} {p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
+            doc_id_val = str(bill.get('doctor_id') or '').strip()
+            resolved_doc_name = emp_map.get(doc_id_val) or p.get('doctorName') or bill.get('doctor_id')
+
             address_parts = [
-                p.permanent_address,
-                p.area,
-                p.city,
-                p.district,
-                p.state,
-                p.zipcode
+                p.get('permanent_address'),
+                p.get('area'),
+                p.get('city'),
+                p.get('district'),
+                p.get('state'),
+                p.get('zipcode')
             ]
             full_address = ", ".join([str(val) for val in address_parts if val]).strip()
 
-            # Get refund details from batch map
-            refunds = refunds_by_bill.get(bill.bill_number, [])
+            refunds = refunds_by_bill.get(bill.get('bill_number'), [])
             refund_data = []
             total_refunded = 0
             for r in refunds:
-                amt = r.refund_amount
-                if hasattr(amt, 'to_decimal'): amt = amt.to_decimal()
-                total_refunded += float(amt)
+                amt = r.get('refund_amount', 0)
+                if hasattr(amt, 'to_decimal'):
+                    amt = amt.to_decimal()
+                try:
+                    total_refunded += float(amt)
+                except Exception:
+                    pass
 
                 ref_dt_str = ''
-                if r.refund_date:
-                    ref_dt = r.refund_date
-                    if timezone.is_naive(ref_dt):
+                ref_dt = r.get('refund_date')
+                if ref_dt:
+                    if hasattr(ref_dt, 'tzinfo') and timezone.is_naive(ref_dt):
                         ref_dt = timezone.make_aware(ref_dt)
                     ref_dt_str = timezone.localtime(ref_dt).strftime("%d-%m-%Y %I:%M %p")
 
                 refund_data.append({
-                    "refund_bill_no": r.refund_bill_no,
-                    "amount": str(r.refund_amount),
-                    "status": r.status,
-                    "reason": r.remarks or '',
+                    "refund_bill_no": r.get('refund_bill_no'),
+                    "amount": str(r.get('refund_amount', 0)),
+                    "status": r.get('status'),
+                    "reason": r.get('remarks') or '',
                     "date": ref_dt_str
                 })
 
             formatted_history = []
-            for h in (bill.edit_history or []):
+            for h in (bill.get('edit_history') or []):
                 raw_user = str(h.get('user', '')).strip()
                 resolved_user = emp_map.get(raw_user, raw_user)
-                
+
                 changes = h.get('changes', {})
                 formatted_changes = {}
-                for f_key, f_val in changes.items():
-                    if f_key == 'doctor' and isinstance(f_val, dict):
-                        old_id = str(f_val.get('old', '')).strip()
-                        new_id = str(f_val.get('new', '')).strip()
-                        formatted_changes['doctor'] = {
-                            'old': emp_map.get(old_id, old_id),
-                            'new': emp_map.get(new_id, new_id)
-                        }
-                    else:
-                        formatted_changes[f_key] = f_val
+                if isinstance(changes, dict):
+                    for f_key, f_val in changes.items():
+                        if f_key == 'doctor' and isinstance(f_val, dict):
+                            old_id = str(f_val.get('old', '')).strip()
+                            new_id = str(f_val.get('new', '')).strip()
+                            formatted_changes['doctor'] = {
+                                'old': emp_map.get(old_id, old_id),
+                                'new': emp_map.get(new_id, new_id)
+                            }
+                        else:
+                            formatted_changes[f_key] = f_val
 
                 h_date = h.get('date')
                 if isinstance(h_date, datetime):
@@ -983,40 +1075,45 @@ def patient_visit_list(request):
                         h_date = timezone.make_aware(h_date)
                     h_date = timezone.localtime(h_date).strftime("%d-%m-%Y %I:%M %p")
 
+                reason_val = h.get('reason', '') or ''
+                if not reason_val and isinstance(h.get('changes'), dict):
+                    reason_val = h.get('changes', {}).get('refund', {}).get('reason', '')
+
                 formatted_history.append({
                     'date': h_date,
                     'user': resolved_user,
-                    'reason': h.get('reason', '') or (h.get('changes', {}).get('refund', {}).get('reason', '') if isinstance(h.get('changes'), dict) else ''),
+                    'reason': reason_val,
                     'changes': formatted_changes
                 })
 
-            g_type = getattr(p, 'guardian_type', None)
-            if not g_type or (p.gender and str(p.gender).upper().startswith('M') and g_type == 'W/o'):
+            gender_val = str(p.get('gender') or '')
+            g_type = p.get('guardian_type')
+            if not g_type or (gender_val.upper().startswith('M') and g_type == 'W/o'):
                 g_type = 'S/o'
             elif not g_type:
-                g_type = 'D/o' if (p.gender and str(p.gender).upper().startswith('F')) else 'S/o'
-            g_name = getattr(p, 'guardian_name', None) or getattr(p, 'spouse_name', '') or ''
-            perm_addr = getattr(p, 'permanent_address', '') or ''
-            area_val = getattr(p, 'area', '') or ''
-            city_val = getattr(p, 'city', '') or ''
-            dist_val = getattr(p, 'district', '') or ''
+                g_type = 'D/o' if gender_val.upper().startswith('F') else 'S/o'
+            g_name = p.get('guardian_name') or p.get('spouse_name') or ''
+            perm_addr = p.get('permanent_address') or ''
+            area_val = p.get('area') or ''
+            city_val = p.get('city') or ''
+            dist_val = p.get('district') or ''
 
             billed_dt_str = ''
-            if bill.billed_date:
-                b_dt = bill.billed_date
-                if timezone.is_naive(b_dt):
+            b_dt = bill.get('billed_date')
+            if b_dt:
+                if hasattr(b_dt, 'tzinfo') and timezone.is_naive(b_dt):
                     b_dt = timezone.make_aware(b_dt)
                 billed_dt_str = timezone.localtime(b_dt).strftime("%d-%m-%Y %I:%M %p")
 
             data.append({
-                "uhid": p.uhid,
+                "uhid": p.get('uhid'),
                 "patientName": full_name,
-                "age": p.age,
-                "gender": p.gender,
-                "mobile": p.mobilePhone,
-                "doctor": bill.doctor_id, 
+                "age": p.get('age'),
+                "gender": p.get('gender'),
+                "mobile": p.get('mobilePhone'),
+                "doctor": bill.get('doctor_id'),
                 "doctorName": resolved_doc_name,
-                "spouseName": p.spouse_name or '',
+                "spouseName": p.get('spouse_name') or '',
                 "guardianType": g_type,
                 "guardianName": g_name,
                 "permanentAddress": perm_addr,
@@ -1025,25 +1122,29 @@ def patient_visit_list(request):
                 "district": dist_val,
                 "address": full_address,
                 "visitType": visit_type,
-                "billNumber": bill.bill_number,
-                "registrationFee": str(bill.registration_fee or 0),
-                "consultingFee": str(bill.consulting_fee or 0),
-                "billAmount": str(bill.total_fees or 0),
-                "paymentStatus": bill.payment_status,
-                "paymentMethod": bill.payment_method or 'Cash',
+                "billNumber": bill.get('bill_number'),
+                "registrationFee": str(bill.get('registration_fee') or 0),
+                "consultingFee": str(bill.get('consulting_fee') or 0),
+                "billAmount": str(bill.get('total_fees') or 0),
+                "paymentStatus": bill.get('payment_status'),
+                "paymentMethod": bill.get('payment_method') or 'Cash',
                 "date": billed_dt_str,
-                "created_by": str(bill.created_by or ''),
-                "preparedBy": emp_map.get(str(bill.created_by).strip()) or str(bill.created_by or 'Staff'),
+                "created_by": str(bill.get('created_by') or ''),
+                "preparedBy": emp_map.get(str(bill.get('created_by') or '').strip()) or str(bill.get('created_by') or 'Staff'),
                 "editHistory": formatted_history,
                 "refunds": refund_data,
                 "totalRefunded": str(total_refunded)
             })
-            
+
         return Response(data)
-        
+
     except Exception as e:
         print(f"Error in visit list: {e}")
         return Response({"error": str(e)}, status=500)
+    finally:
+        if client:
+            client.close()
+
 
 
 # QR Registration Views

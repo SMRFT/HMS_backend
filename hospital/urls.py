@@ -511,6 +511,7 @@ urlpatterns = [
     path('report-insurance-discharge-bill-all/', insurance_dedicated_apis.insurance_discharge_bill_all_api, name='report_insurance_discharge_bill_all'),
     path('report-prescription-details/', insurance_dedicated_apis.prescription_details_api, name='report_prescription_details'),
     path('report-medicine-abstract/', insurance_dedicated_apis.medicine_abstract_api, name='report_medicine_abstract'),
+    path('get-ip-numbers-by-uhid/', insurance_dedicated_apis.get_ip_numbers_by_uhid_api, name='get_ip_numbers_by_uhid'),
 
     path('DrugPurchaseReportsDashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard'),
     path('drug-purchase-reports-dashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard_kebab'),

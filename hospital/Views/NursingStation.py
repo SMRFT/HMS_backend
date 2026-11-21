@@ -71,30 +71,70 @@ from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid,
 def get_admission_list(request):
 
     try:
+        import re
 
         from_date = request.GET.get("from_date")
-
         to_date = request.GET.get("to_date")
+        status_param = (request.GET.get("status") or "admitted").strip().lower()
+        search_query = (request.GET.get("search") or "").strip()
+        uhid_param = (request.GET.get("uhid") or "").strip()
+        ip_param = (request.GET.get("ipNumber") or request.GET.get("ip_number") or "").strip()
 
-        query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
+        if status_param == "discharged":
+            query = {"is_discharged": True, "is_cancelled": {"$ne": True}}
+            sort_fields = [("dischargeDateTime", -1), ("admissionDateTime", -1)]
+            default_limit = 150
+        elif status_param == "all":
+            query = {"is_cancelled": {"$ne": True}}
+            sort_fields = [("admissionDateTime", -1)]
+            default_limit = 200
+        else:
+            # Default: Active Admitted patients
+            query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
+            sort_fields = [("admissionDateTime", -1)]
+            default_limit = 0
 
         if from_date and to_date:
-
             ist = pytz.timezone("Asia/Kolkata")
-
             start_ist = ist.localize(datetime.strptime(from_date, "%Y-%m-%d"))
-
             end_ist = ist.localize(datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1))
-
             start_utc = start_ist.astimezone(pytz.UTC)
-
             end_utc = end_ist.astimezone(pytz.UTC)
 
-            query["admissionDateTime"] = {"$gte": start_utc, "$lt": end_utc}
+            if status_param == "discharged":
+                query["$or"] = [
+                    {"dischargeDateTime": {"$gte": start_utc, "$lt": end_utc}},
+                    {"admissionDateTime": {"$gte": start_utc, "$lt": end_utc}}
+                ]
+            else:
+                query["admissionDateTime"] = {"$gte": start_utc, "$lt": end_utc}
+            default_limit = 0
 
-            
+        if uhid_param:
+            query["uhid"] = {"$regex": re.escape(uhid_param), "$options": "i"}
+        if ip_param:
+            query["ipNumber"] = {"$regex": re.escape(ip_param), "$options": "i"}
+        if search_query:
+            sq_regex = {"$regex": re.escape(search_query), "$options": "i"}
+            or_clauses = [
+                {"uhid": sq_regex},
+                {"ipNumber": sq_regex},
+                {"patient_name": sq_regex},
+                {"patient_details.firstName": sq_regex},
+                {"patient_details.lastName": sq_regex},
+                {"roomNo": sq_regex},
+                {"doctorName": sq_regex}
+            ]
+            if "$or" in query:
+                query["$and"] = [{"$or": query.pop("$or")}, {"$or": or_clauses}]
+            else:
+                query["$or"] = or_clauses
+            default_limit = 100
 
-        raw_admissions = list(mongo_db["hospital_admission"].find(query).sort("admissionDateTime", -1))
+        cursor = mongo_db["hospital_admission"].find(query).sort(sort_fields)
+        if default_limit > 0:
+            cursor = cursor.limit(default_limit)
+        raw_admissions = list(cursor)
 
         
 
@@ -403,6 +443,29 @@ def get_admission_list(request):
                         item["admissionDateTime"] = ist_dt.isoformat()
                         item["admissionDate"] = ist_dt.strftime("%d/%m/%Y")
                         item["admissionTime"] = ist_dt.strftime("%I:%M %p")
+                    except Exception:
+                        pass
+
+                raw_dis_dt = item.get("dischargeDateTime") or item.get("discharge_date")
+                dis_dt_obj = None
+                if isinstance(raw_dis_dt, str):
+                    try:
+                        clean_dis_str = raw_dis_dt.replace("Z", "+00:00")
+                        dis_dt_obj = datetime.fromisoformat(clean_dis_str)
+                    except Exception:
+                        pass
+                elif isinstance(raw_dis_dt, datetime):
+                    dis_dt_obj = raw_dis_dt
+
+                if dis_dt_obj:
+                    try:
+                        if not dis_dt_obj.tzinfo:
+                            dis_dt_obj = pytz.UTC.localize(dis_dt_obj)
+                        kolkata_tz = pytz.timezone("Asia/Kolkata")
+                        ist_dis_dt = dis_dt_obj.astimezone(kolkata_tz)
+                        item["dischargeDateTime"] = ist_dis_dt.isoformat()
+                        item["dischargeDate"] = ist_dis_dt.strftime("%d/%m/%Y")
+                        item["dischargeTime"] = ist_dis_dt.strftime("%I:%M %p")
                     except Exception:
                         pass
 
@@ -1347,7 +1410,8 @@ def save_lab_ward_request(request):
             "hospital_code": str(hospital_code),
             "created_date": now_ist,
             "lastmodified_by": None,
-            "lastmodified_date": now_ist
+            "lastmodified_date": now_ist,
+            "is_active": True
         }
 
         collection = mongo_db["hospital_estimatebilling"]
@@ -2490,6 +2554,7 @@ def save_medicine_ward_request(request):
             branch_code=branch_code,
             created_by=current_user,
             is_ward_request=True,
+            is_active=True,
             room_no=room_no,
             ward_request_date=timezone.now() if 'timezone' in globals() else datetime.now()
         )
@@ -2502,6 +2567,7 @@ def save_medicine_ward_request(request):
                 "request_no": req_no,
                 "bill_no": None,
                 "is_ward_request": True,
+                "is_active": True,
                 "room_no": room_no,
                 "ward_name": room_no
             }}
