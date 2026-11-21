@@ -360,8 +360,8 @@ def accounts_audit_report_api(request):
                     "is_approved": True,
                     "billing_details": compact_details
                 })
-        finally:
-            client.close()
+        except Exception as e:
+            raise e
             
         return Response({
             "success": True,
