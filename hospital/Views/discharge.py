@@ -2748,77 +2748,176 @@ def search_discharge_patient(request):
             return match_clause
 
         # ── 1. hospital_investbilling ─────────────────────────────────────────
-        inv_q = get_query(
-            ["ipNumber", "inpatient_number", "ip_number"],
-            {"paymentMethod": "Credit", "paymentStatus": "Pending", "is_active": {"$ne": False}}
-        )
+        # Strictly only active bills (is_active: True), paymentMethod: "Credit", paymentStatus: "Pending", with IP number
+        # If is_active is false, don't get that data
+        inv_q = None
+        if effective_ip:
+            inv_q = {
+                "$and": [
+                    {"$or": [
+                        {"ipNumber": effective_ip},
+                        {"inpatient_number": effective_ip},
+                        {"ip_number": effective_ip}
+                    ]},
+                    {"is_active": True},
+                    {"paymentMethod": "Credit"},
+                    {"paymentStatus": "Pending"}
+                ]
+            }
+
         if inv_q:
-            is_insurance_patient = str(patient_info.get("patient_type") or "").strip().lower() == "insurance"
-            nabh_tid_map, nabh_code_map = {}, {}
-            if is_insurance_patient:
-                try:
-                    nabh_records = list(db["hospital_lab_nabh_rate"].find(
-                        {},
-                        {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1, "sl_no": 1}
-                    ))
-                    for n_rec in nabh_records:
-                        tid = n_rec.get("test_id")
-                        if tid is not None and str(tid).strip() != "":
-                            t_str = str(tid).strip()
-                            nabh_tid_map[t_str] = n_rec
-                            try:
-                                nabh_tid_map[str(int(t_str))] = n_rec
-                            except Exception:
-                                pass
-                        c = n_rec.get("nabh_code")
-                        if c and str(c).strip():
-                            nabh_code_map[str(c).strip().upper()] = n_rec
-                except Exception as e:
-                    print(f"Error prefetching hospital_lab_nabh_rate: {e}")
+            bills = list(db["hospital_investbilling"].find(inv_q))
 
-            grouped_invest_map = {}
-            grouped_invest_list = []
+            lab_test_ids = set()
+            lab_codes = set()
+            pkg_codes = set()
 
-            for bill in db["hospital_investbilling"].find(inv_q):
-                bill_no   = bill.get("investBillNo", "")
-                doc_raw   = str(bill.get("doctor") or "").strip()
-                doctor    = _resolve_employee_name(doc_raw) if doc_raw else ""
+            parsed_bills = []
+            for bill in bills:
                 raw_items = bill.get("item", [])
                 if isinstance(raw_items, str):
                     try:
                         raw_items = _json.loads(raw_items)
                     except Exception:
                         raw_items = []
-                for it in (raw_items if isinstance(raw_items, list) else []):
-                    matched_n = None
-                    item_btn  = str(it.get("billTypeNo", "") or bill.get("billTypeNo", "") or "LAB01").strip().upper()
-                    item_name = str(it.get("itemName", "")).strip()
-                    test_id   = it.get("test_id") or it.get("item_id")
-                    nabh_code = str(it.get("nabh_code", "") or "").strip()
+                if not isinstance(raw_items, list):
+                    raw_items = []
+
+                b_btn = str(bill.get("billTypeNo", "") or "").strip().upper()
+                b_bt = str(bill.get("bill_type", "")).strip()
+                b_wtype = str(bill.get("ward_request_type", "") or "").strip().upper()
+
+                parsed_items = []
+                for it in raw_items:
+                    it_btn = str(it.get("billTypeNo", "") or b_btn or "LAB01").strip().upper()
+                    nc = str(it.get("nabh_code") or it.get("nabhCode") or bill.get("nabh_code") or bill.get("nabhCode") or "").strip()
+                    tid = it.get("test_id") or it.get("item_id")
+
+                    is_lab = it_btn.startswith("LAB") or b_btn.startswith("LAB") or b_bt in ("16", "33") or b_wtype == "LAB" or nc.upper().startswith("LB")
+                    if is_lab:
+                        if tid is not None and str(tid).strip():
+                            t_str = str(tid).strip()
+                            lab_test_ids.add(t_str)
+                            if t_str.isdigit():
+                                lab_test_ids.add(int(t_str))
+                        if nc:
+                            lab_codes.add(nc.upper())
+                    else:
+                        if nc:
+                            pkg_codes.add(nc.upper())
+
+                    parsed_items.append((it, it_btn, nc, tid, is_lab))
+                parsed_bills.append((bill, parsed_items))
+
+            # 1. Fetch matching records from hospital_lab_nabh_rate (for lab alone)
+            lab_map_tid = {}
+            lab_map_code = {}
+            if lab_test_ids or lab_codes:
+                try:
+                    lab_conds = []
+                    if lab_test_ids:
+                        lab_conds.append({"test_id": {"$in": list(lab_test_ids)}})
+                    if lab_codes:
+                        lab_conds.append({"nabh_code": {"$in": list(lab_codes)}})
+                    q_lab = {"$or": lab_conds} if len(lab_conds) > 1 else lab_conds[0]
+                    for doc in db["hospital_lab_nabh_rate"].find(q_lab):
+                        tid = doc.get("test_id")
+                        if tid is not None and str(tid).strip():
+                            lab_map_tid[str(tid).strip()] = doc
+                        c = str(doc.get("nabh_code") or "").strip().upper()
+                        if c:
+                            lab_map_code[c] = doc
+                except Exception as e:
+                    print(f"Error querying hospital_lab_nabh_rate: {e}")
+
+            # 2. Fetch matching records from insurance packages collections (for non-lab / other investigations)
+            raw_ins_comp = str(
+                patient_info.get("insurance_company") or
+                patient_info.get("company") or
+                patient_info.get("company_code") or
+                admission_doc.get("insurance_company") or
+                admission_doc.get("company_code") or ""
+            ).lower()
+
+            preferred_pkg_colls = []
+            if "echs" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_echs")
+            elif "railway" in raw_ins_comp or "esi" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
+            elif "cghs" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_cghs")
+                preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
+            elif "cm" in raw_ins_comp or "chief minister" in raw_ins_comp or "tnhsp" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_cm_scheme")
+            elif "nhis" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_nhis")
+            elif "gipsa" in raw_ins_comp:
+                preferred_pkg_colls.append("hospital_insurance_packages_general_gipsa")
+
+            all_pkg_colls = [
+                "hospital_insurance_packages_echs",
+                "hospital_insurance_packages_cghs",
+                "hospital_insurance_packages_railway_cghs_esi_esic",
+                "hospital_insurance_packages_cm_scheme",
+                "hospital_insurance_packages_nhis",
+                "hospital_insurance_packages_general_gipsa",
+                "hospital_insurance_packages_implants_and_specified",
+            ]
+            for c in all_pkg_colls:
+                if c not in preferred_pkg_colls:
+                    preferred_pkg_colls.append(c)
+
+            pkg_map_code = {}
+            if pkg_codes:
+                try:
+                    for coll_name in preferred_pkg_colls:
+                        rem_codes = [c for c in pkg_codes if c not in pkg_map_code]
+                        if not rem_codes:
+                            break
+                        for doc in db[coll_name].find({"nabh_code": {"$in": rem_codes}}):
+                            c_code = str(doc.get("nabh_code") or "").strip().upper()
+                            if c_code and c_code not in pkg_map_code:
+                                pkg_map_code[c_code] = doc
+                except Exception as e:
+                    print(f"Error querying insurance package collections: {e}")
+
+            grouped_invest_map = {}
+
+            for bill, parsed_items in parsed_bills:
+                bill_no = bill.get("investBillNo", "")
+                doc_raw = str(bill.get("doctor") or "").strip()
+                doctor  = _resolve_employee_name(doc_raw) if doc_raw else ""
+
+                for it, item_btn, nabh_code, test_id, is_lab in parsed_items:
+                    orig_name = str(it.get("itemName", "")).strip()
+                    item_name = orig_name
                     price     = _to_float(it.get("price", 0) or it.get("rate", 0))
+                    matched_rec = None
 
-                    if is_insurance_patient and (item_btn.startswith("LAB") or str(bill.get("bill_type")) == "16" or test_id is not None):
-                        matched_n = None
-                        if test_id is not None and str(test_id).strip() != "":
-                            t_s = str(test_id).strip()
-                            matched_n = nabh_tid_map.get(t_s)
-                            if not matched_n:
-                                try:
-                                    matched_n = nabh_tid_map.get(str(int(t_s)))
-                                except Exception:
-                                    pass
-                        if not matched_n and nabh_code:
-                            matched_n = nabh_code_map.get(nabh_code.upper())
-
-                        if matched_n:
-                            if matched_n.get("test_name"):
-                                item_name = str(matched_n.get("test_name")).strip()
-                            if matched_n.get("nabh_code"):
-                                nabh_code = str(matched_n.get("nabh_code")).strip()
-                            if item_btn == "LAB02" and matched_n.get("nabh_rate") is not None:
-                                price = _to_float(matched_n.get("nabh_rate"))
-                            elif item_btn == "LAB03" and matched_n.get("non_nabh_rate") is not None:
-                                price = _to_float(matched_n.get("non_nabh_rate"))
+                    if is_lab:
+                        t_s = str(test_id).strip() if test_id is not None else ""
+                        matched_rec = lab_map_tid.get(t_s) or (lab_map_code.get(nabh_code.upper()) if nabh_code else None)
+                        if matched_rec:
+                            lab_name = matched_rec.get("test_name") or matched_rec.get("name")
+                            if lab_name:
+                                item_name = str(lab_name).strip()
+                            if matched_rec.get("nabh_code"):
+                                nabh_code = str(matched_rec.get("nabh_code")).strip()
+                            if item_btn == "LAB02" and matched_rec.get("nabh_rate") is not None:
+                                price = _to_float(matched_rec.get("nabh_rate"))
+                            elif item_btn == "LAB03" and matched_rec.get("non_nabh_rate") is not None:
+                                price = _to_float(matched_rec.get("non_nabh_rate"))
+                    else:
+                        if nabh_code:
+                            matched_rec = pkg_map_code.get(nabh_code.upper())
+                            if matched_rec:
+                                pkg_item_name = matched_rec.get("name") or matched_rec.get("itemName")
+                                if pkg_item_name:
+                                    item_name = str(pkg_item_name).strip()
+                                if matched_rec.get("nabh_code"):
+                                    nabh_code = str(matched_rec.get("nabh_code")).strip()
+                                if price == 0 and matched_rec.get("nabh_rate") is not None:
+                                    price = _to_float(matched_rec.get("nabh_rate"))
 
                     qty   = int(it.get("quantity", 1) or 1)
                     disc  = _to_float(it.get("discount", 0))
@@ -2849,18 +2948,17 @@ def search_discharge_patient(request):
                             "bill_type":      bill.get("bill_type", 16),
                             "test_id":        test_id,
                             "nabh_code":      nabh_code,
-                            "nabh_rate":      _to_float(matched_n.get("nabh_rate")) if matched_n and matched_n.get("nabh_rate") is not None else None,
-                            "non_nabh_rate":  _to_float(matched_n.get("non_nabh_rate")) if matched_n and matched_n.get("non_nabh_rate") is not None else None,
+                            "nabh_rate":      _to_float(matched_rec.get("nabh_rate")) if matched_rec and matched_rec.get("nabh_rate") is not None else None,
+                            "non_nabh_rate":  _to_float(matched_rec.get("non_nabh_rate")) if matched_rec and matched_rec.get("non_nabh_rate") is not None else None,
                             "doctor":         doctor,
                             "payment_status": bill.get("paymentStatus", ""),
-                            "package_name":   it.get("packageName", "") or bill.get("packageName", ""),
+                            "package_name":   matched_rec.get("name") if (matched_rec and not is_lab) else (it.get("packageName", "") or bill.get("packageName", "")),
                             "source":         "hospital_investbilling",
                         }
                         if item_name:
                             grouped_invest_map[g_key] = new_inv
-                        grouped_invest_list.append(new_inv)
 
-            invest_items.extend(grouped_invest_list)
+            invest_items.extend(list(grouped_invest_map.values()))
 
         # ── 2. hospital_patientdietorder (EXCLUDED) ───────────────────────────
         # Note: Diet food collection is excluded from discharge billing because
@@ -3641,6 +3739,36 @@ def get_discharge_investigation_items(request):
                         "price": price,
                         "nabh_code": nabh_code
                     })
+
+        # If insurance, match nabh_code in insurance packages collections and display the package name
+        if is_insurance:
+            codes_to_resolve = list({it["nabh_code"].strip().upper() for it in formatted_items if it.get("nabh_code")})
+            if codes_to_resolve:
+                client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                db = client['HMS']
+                pkg_names = {}
+                pkg_colls = [
+                    "hospital_insurance_packages_echs",
+                    "hospital_insurance_packages_cghs",
+                    "hospital_insurance_packages_railway_cghs_esi_esic",
+                    "hospital_insurance_packages_cm_scheme",
+                    "hospital_insurance_packages_nhis",
+                    "hospital_insurance_packages_general_gipsa",
+                    "hospital_insurance_packages_implants_and_specified",
+                ]
+                for c in pkg_colls:
+                    rem = [code for code in codes_to_resolve if code not in pkg_names]
+                    if not rem:
+                        break
+                    for p_doc in db[c].find({"nabh_code": {"$in": rem}}):
+                        c_code = str(p_doc.get("nabh_code") or "").strip().upper()
+                        if c_code and c_code not in pkg_names:
+                            pkg_names[c_code] = p_doc.get("name") or p_doc.get("itemName")
+                client.close()
+                for it in formatted_items:
+                    nc = str(it.get("nabh_code") or "").strip().upper()
+                    if nc in pkg_names and pkg_names[nc]:
+                        it["itemName"] = pkg_names[nc]
 
         return JsonResponse({"items": formatted_items}, safe=True)
 
