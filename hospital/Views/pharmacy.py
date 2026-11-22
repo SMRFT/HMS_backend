@@ -1151,10 +1151,21 @@ def save_pharmacy_bill(request):
             update_data.pop("converted_bill_no", None)
 
             update_data["billing_status"] = "Billed"
-            update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
+            existing_bm = str(record.get("billing_mode") or "").strip().upper()
+            req_no = str(record.get("request_no") or "").strip().upper()
+            if existing_bm in ["OT REQUEST", "WARD REQUEST", "DISCHARGE MEDICINE"] or req_no.startswith("OT") or record.get("is_ward_request"):
+                if existing_bm == "OT REQUEST" or req_no.startswith("OT"):
+                    update_data["billing_mode"] = "OT REQUEST"
+                elif "DISCHARGE" in existing_bm:
+                    update_data["billing_mode"] = "DISCHARGE MEDICINE"
+                else:
+                    update_data["billing_mode"] = "WARD REQUEST"
+            else:
+                update_data["billing_mode"]   = data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "ESTIMATE")
             update_data["payment_mode"]   = norm_pm or "Cash"
             update_data["bill_date"]      = datetime.utcnow()
             update_data["billed_id"]      = employee_id
+            update_data["is_active"]      = True
 
         # 🔥 CANCEL BILL / ESTIMATE
         elif status == "Cancelled":
@@ -1251,6 +1262,7 @@ def save_pharmacy_bill(request):
             "outlet_code":          outlet_code,
             "is_dispatched":        False,        
             "pending_returns":      [],     
+            "is_active":            True,
             **fields
         }
 
@@ -1280,6 +1292,7 @@ def save_pharmacy_bill(request):
                 "billing_mode": data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "DIRECT"),
                 "payment_mode": norm_pm or "Cash",
                 "billed_id":    employee_id,
+                "is_active":    True,
             })
 
             bill_collection.insert_one(record_doc)
@@ -1317,6 +1330,7 @@ def save_pharmacy_bill(request):
                 "bill_no":      None,
                 "estimate_no":  estimate_no,
                 "billing_mode": "ESTIMATE",
+                "is_active":    True,
             })
 
             bill_collection.insert_one(record_doc)
@@ -1597,6 +1611,7 @@ def save_oppharmacy_estimate(request):
         "created_by": employee_id,
         "created_date": now_ist,
         "bill_date": now_ist,
+        "is_active": True,
     }
 
     raw_pname = (
@@ -2354,6 +2369,8 @@ def collect_oppharmacy_payment(request):
 
         data = request.data
 
+        bill_mongo_id = data.get("_id") or data.get("id") or data.get("bill_mongo_id")
+        bill_no = data.get("bill_no") or data.get("bill_number")
         Bill_id = data.get("Bill_id")
         uhid = data.get("uhid")
         payment_details = data.get("payment_details")
@@ -2430,10 +2447,10 @@ def collect_oppharmacy_payment(request):
         # VALIDATIONS
         # =====================================================
 
-        if not Bill_id:
+        if not Bill_id and not bill_mongo_id and not bill_no:
             return Response({
                 "success": False,
-                "error": "Bill_id is required"
+                "error": "Bill_id, _id, or bill_no is required"
             })
 
         if not payment_details:
@@ -2478,7 +2495,11 @@ def collect_oppharmacy_payment(request):
         # TYPE CONVERSIONS
         # =====================================================
 
-        Bill_id = int(Bill_id)
+        if Bill_id:
+            try:
+                Bill_id = int(Bill_id)
+            except Exception:
+                pass
 
         uhid_clean = str(uhid).strip() if uhid and str(uhid).strip() not in ["-", "None", "null", ""] else None
 
@@ -2502,6 +2523,30 @@ def collect_oppharmacy_payment(request):
         # FIND BILL
         # =====================================================
 
+        bill = None
+
+        # 1. Highest priority: Search by MongoDB ObjectId if provided (100% unique guarantee)
+        if bill_mongo_id:
+            try:
+                from bson import ObjectId
+                bill = bill_collection.find_one({"_id": ObjectId(str(bill_mongo_id))})
+            except Exception:
+                pass
+
+        # 2. Second priority: Search by bill_no if provided
+        if not bill and bill_no:
+            b_query = {
+                "bill_no": str(bill_no).strip(),
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "$or": [
+                    {"is_deleted": False},
+                    {"is_deleted": {"$exists": False}}
+                ]
+            }
+            bill = bill_collection.find_one(b_query)
+
+        # 3. Third priority: Search by Bill_id (strictly prioritizing UNPAID bills to avoid collisions)
         query = {
             "Bill_id": Bill_id,
             "hospital_code": hospital_code,
@@ -2517,32 +2562,82 @@ def collect_oppharmacy_payment(request):
         elif len(parsed_outlets) > 1:
             query["outlet_code"] = {"$in": parsed_outlets}
 
-        bill = bill_collection.find_one(query)
-
-        if not bill:
-            # Fallback search without outlet_code constraint in case bill is in another authorized outlet
-            fallback_query = {
+        if not bill and Bill_id:
+            # 3a. Search UNPAID bill matching Bill_id (and uhid if passed)
+            unpaid_query = {
                 "Bill_id": Bill_id,
+                "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
                 "$or": [
                     {"is_deleted": False},
                     {"is_deleted": {"$exists": False}}
                 ]
             }
-            if hospital_code:
-                fallback_query["hospital_code"] = hospital_code
-            if branch_code:
-                fallback_query["branch_code"] = branch_code
-            bill = bill_collection.find_one(fallback_query)
+            if uhid_clean:
+                unpaid_query["uhid"] = uhid_clean
+            if len(parsed_outlets) == 1:
+                unpaid_query["outlet_code"] = parsed_outlets[0]
+            elif len(parsed_outlets) > 1:
+                unpaid_query["outlet_code"] = {"$in": parsed_outlets}
 
-        if not bill:
-            # Final fallback by Bill_id alone
-            bill = bill_collection.find_one({
-                "Bill_id": Bill_id,
+            bill = bill_collection.find_one(unpaid_query)
+
+            # 3b. Fallback: Search UNPAID bill without outlet constraint
+            if not bill:
+                unpaid_fb = {
+                    "Bill_id": Bill_id,
+                    "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                }
+                if uhid_clean:
+                    unpaid_fb["uhid"] = uhid_clean
+                bill = bill_collection.find_one(unpaid_fb)
+
+            # 3c. Fallback to standard Bill_id query
+            if not bill:
+                bill = bill_collection.find_one(query)
+
+            if not bill:
+                fallback_query = {
+                    "Bill_id": Bill_id,
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                }
+                if hospital_code:
+                    fallback_query["hospital_code"] = hospital_code
+                if branch_code:
+                    fallback_query["branch_code"] = branch_code
+                bill = bill_collection.find_one(fallback_query)
+
+            if not bill:
+                bill = bill_collection.find_one({
+                    "Bill_id": Bill_id,
+                    "$or": [
+                        {"is_deleted": False},
+                        {"is_deleted": {"$exists": False}}
+                    ]
+                })
+
+        # 4. Critical Safety: If found bill is Paid, but cashier provided uhid and UHID does not match
+        if bill and bill.get("billing_status") == "Paid" and uhid_clean and str(bill.get("uhid")).strip() != uhid_clean:
+            patient_pending_bill = bill_collection.find_one({
+                "uhid": uhid_clean,
+                "billing_status": {"$in": ["Billed", "Pending", "Processing", "Unpaid"]},
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
                 "$or": [
                     {"is_deleted": False},
                     {"is_deleted": {"$exists": False}}
                 ]
             })
+            if patient_pending_bill:
+                bill = patient_pending_bill
 
         if not bill:
             return Response({
@@ -3014,6 +3109,9 @@ def pharmacy_medicinechart(request):
         # =========================================
         # 1. GET BILL DATA (Using PyMongo for speed & reliability)
         # =========================================
+        from_date_str = data.get("from_date") or request.GET.get("from_date")
+        to_date_str   = data.get("to_date")   or request.GET.get("to_date")
+
         base_mongo_filter = {
             "hospital_code": hospital_code,
             "branch_code": branch_code,
@@ -3025,10 +3123,36 @@ def pharmacy_medicinechart(request):
         if target_outlet:
             base_mongo_filter["outlet_code"] = target_outlet
 
+        date_q = {}
+        str_date_q = {}
+        if from_date_str:
+            try:
+                # 6 hours buffer to safely cover Asia/Kolkata timezone (UTC+5:30)
+                f_dt = datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d") - timedelta(hours=6)
+                date_q["$gte"] = f_dt
+                str_date_q["$gte"] = (datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        if to_date_str:
+            try:
+                t_dt = datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d") + timedelta(days=1, hours=6)
+                date_q["$lt"] = t_dt
+                str_date_q["$lt"] = (datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d")
+            except Exception:
+                pass
 
-        raw_bills = list(pharmacy_billing_collection.find(
-            base_mongo_filter
-        ).sort("created_date", -1))
+        if date_q:
+            base_mongo_filter["$or"] = [
+                {"created_date": date_q},
+                {"created_date": str_date_q},
+                {"created_date": {"$exists": False}, "ward_request_date": date_q}
+            ]
+
+        cursor = pharmacy_billing_collection.find(base_mongo_filter).sort("created_date", -1)
+        if not date_q:
+            cursor = cursor.limit(300)
+
+        raw_bills = list(cursor)
 
         serialized_data = []
         for bill in raw_bills:
@@ -3039,6 +3163,14 @@ def pharmacy_medicinechart(request):
                 val = b.get(date_key)
                 if val:
                     b[date_key] = to_utc_iso(val)
+
+            # Only retain request_no if explicitly present in document
+            raw_req = b.get("request_no")
+            if raw_req and str(raw_req).strip() and str(raw_req).strip().lower() not in ["none", "null", "undefined"]:
+                b["request_no"] = str(raw_req).strip()
+            else:
+                b["request_no"] = ""
+
             serialized_data.append(b)
 
         if not serialized_data:
@@ -3093,21 +3225,30 @@ def pharmacy_medicinechart(request):
                         except (ValueError, TypeError):
                             all_item_ids.add(str(iid).strip())
 
-        # 3. Bulk fetch Patients
+        # 3. Bulk fetch Patients using PyMongo (ultra-fast, zero SQL queries)
         patient_map = {}
         if all_uhids:
             try:
-                for p in Patient.objects.filter(uhid__in=list(all_uhids)):
-                    f = (p.firstName or "").strip()
-                    l = (p.lastName or "").strip()
+                p_docs = list(mongo_db["hospital_patient"].find(
+                    {"uhid": {"$in": list(all_uhids)}},
+                    {
+                        "uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1,
+                        "permanent_address": 1, "area": 1, "mobilePhone": 1,
+                        "customer_type": 1, "company_code": 1, "dob": 1, "age": 1
+                    }
+                ))
+                for p in p_docs:
+                    f = (p.get("firstName") or "").strip()
+                    l = (p.get("lastName") or "").strip()
                     n = f if (f and l and (f.lower() == l.lower() or f.lower().endswith(l.lower()))) else f"{f} {l}".strip()
-                    full_p_name = f"{p.salutation or ''} {n}".strip()
+                    full_p_name = f"{p.get('salutation') or ''} {n}".strip()
 
                     age_str = ""
-                    if p.dob:
+                    dob = p.get("dob")
+                    if dob:
                         try:
-                            d = p.dob
                             today = date.today()
+                            d = dob.date() if hasattr(dob, "date") else dob
                             years = today.year - d.year
                             months = today.month - d.month
                             days = today.day - d.day
@@ -3119,17 +3260,17 @@ def pharmacy_medicinechart(request):
                                 months += 12
                             age_str = f"{years}Y {months}M {days}D"
                         except Exception:
-                            age_str = str(p.age) if p.age else ""
-                    elif p.age:
-                        age_str = str(p.age)
+                            age_str = str(p.get("age") or "")
+                    elif p.get("age"):
+                        age_str = str(p.get("age"))
 
-                    patient_map[str(p.uhid).strip()] = {
+                    patient_map[str(p.get("uhid")).strip()] = {
                         "patient_name": full_p_name,
-                        "address": p.permanent_address or "",
-                        "place": p.area or "",
-                        "mobile": p.mobilePhone or "",
-                        "customer_type": p.customer_type or "General",
-                        "company_code": p.company_code or "",
+                        "address": p.get("permanent_address") or "",
+                        "place": p.get("area") or "",
+                        "mobile": p.get("mobilePhone") or "",
+                        "customer_type": p.get("customer_type") or "General",
+                        "company_code": p.get("company_code") or "",
                         "age": age_str,
                     }
             except Exception as e:
@@ -3263,6 +3404,9 @@ def pharmacy_medicinechart(request):
         # 6. IN-MEMORY ASSEMBLY (Instant)
         # =========================================
         final_data = []
+        room_cache = {}
+        ins_cache = {}
+
         for bill in serialized_data:
             b_id = bill.get("Bill_id")
             uhid_str = str(bill.get("uhid") or "").strip()
@@ -3309,9 +3453,18 @@ def pharmacy_medicinechart(request):
                 bill["inpatient_number"] = adm_info.get("ipNumber")
             bill["admission_datetime"] = adm_info.get("admissionDateTime", "")
             b_mode = str(bill.get("billing_mode") or "").strip().upper()
-            is_ot = "OT" in b_mode
+            req_no = str(bill.get("request_no") or "").strip().upper()
             raw_room = str(bill.get("room_no") or bill.get("ward_name") or "").strip()
+            is_ot = "OT" in b_mode or req_no.startswith("OT") or "OT" in raw_room.upper()
             if is_ot:
+                if (not raw_room or raw_room in ["-", "—", "None", ""]) and (bill.get("inpatient_number") or uhid_str):
+                    try:
+                        q_sc = {"inpatient_number": bill.get("inpatient_number")} if bill.get("inpatient_number") else {"uhid": uhid_str}
+                        sc_doc = hms_db["hospital_surgeryschedule"].find_one(q_sc, sort=[("created_date", -1)])
+                        if sc_doc:
+                            raw_room = sc_doc.get("ot_name") or sc_doc.get("theater") or sc_doc.get("ot_id") or ""
+                    except Exception:
+                        pass
                 if raw_room and raw_room not in ["-", "—", "None", ""]:
                     room_lbl = raw_room if "OT" in raw_room.upper() else f"OT Request ({raw_room})"
                 else:
@@ -3319,15 +3472,21 @@ def pharmacy_medicinechart(request):
                 bill["billing_mode"] = "OT REQUEST"
             else:
                 room_lbl = raw_room if raw_room and raw_room not in ["-", "—", "None", ""] else (adm_info.get("roomLabel") or "")
+                bill["billing_mode"] = "WARD REQUEST"
             bill["room_no"] = room_lbl
-            bill["ward_name"] = room_lbl
+            bill["ward_name"] = bill.get("ward_name") or room_lbl
 
-            # Resolve room_category, block, nursing_station from hospital_room in dbcollection.py
-            room_info = get_room_details(room_lbl, hospital_code=hospital_code, branch_code=branch_code)
+            # Resolve room_category, block, nursing_station from hospital_room in dbcollection.py (cached)
+            if room_lbl not in room_cache:
+                room_cache[room_lbl] = get_room_details(room_lbl, hospital_code=hospital_code, branch_code=branch_code)
+            room_info = room_cache[room_lbl]
+
             bill["room_details"] = room_info
             bill["room_category"] = room_info.get("room_category") or ""
             bill["block"] = room_info.get("block") or ""
             bill["nursing_station"] = room_info.get("nursing_station") or ""
+            if not bill.get("ward_name") or bill.get("ward_name") in ["-", "—", "None"]:
+                bill["ward_name"] = room_info.get("room_category") or room_info.get("block") or room_info.get("nursing_station") or room_lbl
             bill["patient_details"]["room_category"] = bill["room_category"]
             bill["patient_details"]["block"] = bill["block"]
             bill["patient_details"]["nursing_station"] = bill["nursing_station"]
@@ -3339,11 +3498,14 @@ def pharmacy_medicinechart(request):
             final_cust_type = adm_cust_type or pat_cust_type or bill_cust_type or "General"
 
             comp_code = p_info.get("company_code") or bill.get("company_code") or adm_info.get("company_code") or ""
-            ins_details = get_insurance_provider_by_patient(
-                uhid=uhid_str,
-                company_code=comp_code,
-                patient_obj=p_info
-            )
+            ins_key = (uhid_str, comp_code)
+            if ins_key not in ins_cache:
+                ins_cache[ins_key] = get_insurance_provider_by_patient(
+                    uhid=uhid_str,
+                    company_code=comp_code,
+                    patient_obj=p_info
+                )
+            ins_details = ins_cache[ins_key]
 
             ins_company = ins_details.get("company_name") or adm_info.get("insurance_company") or bill.get("insurance_company") or ""
             is_ins = bool(
@@ -3402,22 +3564,6 @@ def pharmacy_medicinechart(request):
 
             # If all items in this bill are fully dispatched, do not display the bill in pending chart
             if not mapped_items and not is_completed_bill:
-                if bill.get("billing_status") in ["Pending", "Processing"]:
-                    try:
-                        from bson import ObjectId
-                        o_id = bill.get("_id")
-                        if o_id:
-                            m_filter = {"_id": ObjectId(str(o_id))} if ObjectId.is_valid(str(o_id)) else {"_id": o_id}
-                            pharmacy_billing_collection.update_one(
-                                m_filter,
-                                {"$set": {"billing_status": "Billed", "is_dispatched": True}}
-                            )
-                        if b_id:
-                            PharmacyBilling.objects.filter(Bill_id=int(b_id)).update(
-                                billing_status="Billed"
-                            )
-                    except Exception:
-                        pass
                 continue
 
             bill["medicine_items"] = mapped_items
@@ -3912,6 +4058,7 @@ def convert_to_bill(request):
             {
                 "$set": {
                     "billing_status": "Processing",
+                    "is_active": True,
                     "lastmodified_date": datetime.utcnow()
                 }
             }
@@ -4286,18 +4433,21 @@ def finalize_bill(request):
         # =====================================================
         # ✅ GENERATE BILL NO
         # =====================================================
+        is_save_later_only = bool(data.get("save_later_only")) or (is_ward and not billed_items_map)
+
         fy = get_financial_year()
         new_bill_no = bill.get("bill_no")
         bill_date   = bill.get("bill_date")
-        if not new_bill_no or str(new_bill_no).startswith("MR"):
-            new_bill_no = get_next_pharmacy_bill_no(
-                outlet_code=bill_outlet,
-                fy=fy,
-                db_instance=mongo_db
-            )
-            bill_date = datetime.utcnow()
-        elif not bill_date:
-            bill_date = datetime.utcnow()
+        if not is_save_later_only:
+            if not new_bill_no or str(new_bill_no).startswith("MR"):
+                new_bill_no = get_next_pharmacy_bill_no(
+                    outlet_code=bill_outlet,
+                    fy=fy,
+                    db_instance=mongo_db
+                )
+                bill_date = datetime.utcnow()
+            elif not bill_date:
+                bill_date = datetime.utcnow()
 
         # =====================================================
         # ✅ PREPARE MEDICINE HISTORY
@@ -4443,6 +4593,9 @@ def finalize_bill(request):
 
             except Exception as e:
                 print("Skipping invalid med:", med, "Error:", e)
+                continue
+
+            if qty <= 0:
                 continue
 
             result = stock_collection.update_one(
@@ -4652,8 +4805,12 @@ def finalize_bill(request):
                     final_particulars.append(item_entry)
 
             set_payload["medicine_particulars"] = final_particulars
-            set_payload["billing_status"]       = "Billed" if all_items_fully_dispatched else "Processing"
-            set_payload["is_dispatched"]        = True if all_items_fully_dispatched else False
+            if is_save_later_only or not all_items_fully_dispatched:
+                set_payload["billing_status"] = "Processing"
+                set_payload["is_dispatched"] = False
+            else:
+                set_payload["billing_status"] = "Billed"
+                set_payload["is_dispatched"] = True
         else:
             for sm in sanitized_meds:
                 b_qty = float(sm.get("qty", 0))
@@ -4667,8 +4824,10 @@ def finalize_bill(request):
             set_payload["billing_status"]       = "Billed"
             set_payload["is_dispatched"]        = True
 
-        set_payload["bill_no"]              = new_bill_no
-        set_payload["bill_date"]            = bill_date
+        if new_bill_no and not is_save_later_only:
+            set_payload["bill_no"]              = new_bill_no
+        if bill_date and not is_save_later_only:
+            set_payload["bill_date"]            = bill_date
         set_payload["billed_id"]            = employee_id
         set_payload["lastmodified_date"]    = now_ts
         set_payload["lastmodified_by"]      = employee_id
@@ -4730,6 +4889,8 @@ def finalize_bill(request):
         if emp_name == "Unknown":
             emp_name = ""
 
+        res_msg = "Prescriptions saved for later in Medicine Chart" if is_save_later_only else "Bill finalized, dispatched & stock updated"
+
         # =====================================================
         # ✅ RESPONSE
         # =====================================================
@@ -4737,7 +4898,7 @@ def finalize_bill(request):
 
             "status":          "success",
 
-            "message":         "Bill finalized, dispatched & stock updated",
+            "message":         res_msg,
 
             "bill_no":         new_bill_no,
 

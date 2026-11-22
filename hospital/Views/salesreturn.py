@@ -1606,6 +1606,13 @@ def get_return_bills(request):
                     continue
 
                 # ---------------------------------------------------
+                # INVESTIGATION REFUND APPROVAL FILTER
+                # ---------------------------------------------------
+                if collection_name == "hospital_investrefund":
+                    if doc.get("is_approved") not in [True, "true", "True"]:
+                        continue
+
+                # ---------------------------------------------------
                 # GET UHID
                 # ---------------------------------------------------
 
@@ -1710,7 +1717,8 @@ def get_return_bills(request):
                             {
                                 "$dateToString": {
                                     "format": "%Y-%m-%d",
-                                    "date": "$return_bill_date"
+                                    "date": "$return_bill_date",
+                                    "timezone": "Asia/Kolkata"
                                 }
                             },
                             current_date.strftime("%Y-%m-%d")
@@ -1739,7 +1747,8 @@ def get_return_bills(request):
                             {
                                 "$dateToString": {
                                     "format": "%Y-%m-%d",
-                                    "date": "$refund_date"
+                                    "date": "$refund_date",
+                                    "timezone": "Asia/Kolkata"
                                 }
                             },
                             current_date.strftime("%Y-%m-%d")
@@ -1768,7 +1777,8 @@ def get_return_bills(request):
                             {
                                 "$dateToString": {
                                     "format": "%Y-%m-%d",
-                                    "date": "$refund_date"
+                                    "date": "$refund_date",
+                                    "timezone": "Asia/Kolkata"
                                 }
                             },
                             current_date.strftime("%Y-%m-%d")
@@ -1792,12 +1802,14 @@ def get_return_bills(request):
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
+                    "is_approved": {"$in": [True, "true", "True"]},
                     "$expr": {
                         "$eq": [
                             {
                                 "$dateToString": {
                                     "format": "%Y-%m-%d",
-                                    "date": "$refundBillDate"
+                                    "date": "$refundBillDate",
+                                    "timezone": "Asia/Kolkata"
                                 }
                             },
                             current_date.strftime("%Y-%m-%d")

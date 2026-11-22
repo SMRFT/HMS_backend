@@ -14,6 +14,7 @@ Cluster 3: Inpatient Advances, Settlements & Dues APIs
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+from datetime import datetime, date, timedelta
 from pyauth.auth import HasRoleAndDataPermission
 from .core_ledger_engine import AccountsLedgerEngine, clean_num, get_db, parse_date, format_dt, format_ist_time, format_ist_date, format_ist_datetime, to_ist
 
@@ -1134,6 +1135,35 @@ def bill_cancellation_register_api(request):
                 "amount": amt,
                 "cancelled_by": ar.get("created_by") or "Cashier",
                 "reason": ar.get("remarks") or "IP Advance Refund"
+            })
+
+        # 5b. Discharge Refunds (hospital_dischargebilling)
+        dis_ref_clauses = make_date_clauses(["paid_date", "bill_date", "discharge_date", "created_date"])
+        q_dis_ref = {
+            "$or": [
+                {"payment_details.is_refund": True},
+                {"net_amount": {"$lt": 0}}
+            ]
+        }
+        if dis_ref_clauses:
+            q_dis_ref = {"$and": [q_dis_ref, {"$or": dis_ref_clauses}]}
+        for dr in db["hospital_dischargebilling"].find(q_dis_ref):
+            amt = abs(clean_num(dr.get("net_amount") or 0))
+            dt = dr.get("paid_date") or dr.get("bill_date") or dr.get("discharge_date") or dr.get("created_date")
+            bno = dr.get("bill_no") or dr.get("bill_number") or str(dr.get("_id"))
+            u = str(dr.get("uhid") or "").strip()
+            if u:
+                uhid_set.add(u)
+            rows.append({
+                "bill_no": bno,
+                "date": format_ist_date(dt),
+                "date_raw": dt,
+                "category": "Discharge Refund",
+                "mr_no": u or "-",
+                "patient_name": dr.get("patient_name") or "",
+                "amount": amt,
+                "cancelled_by": dr.get("CashierID") or dr.get("created_by") or "Cashier",
+                "reason": "Discharge Settlement Refund"
             })
 
         # 6. Legacy / Other Hospital Billing

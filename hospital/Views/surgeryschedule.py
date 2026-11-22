@@ -1197,6 +1197,38 @@ def save_ot_medicine_ward_request(request):
 
             cleaned_medicines.append(cleaned)
 
+        # Resolve OT Room / Theater name
+        resolved_room = (
+            data.get("wardName")
+            or data.get("room_no")
+            or data.get("roomNo")
+            or data.get("ot_name")
+            or data.get("otName")
+            or data.get("theater")
+            or ""
+        ).strip()
+        if not resolved_room or resolved_room in ["-", "—", "None"]:
+            ip_val = str(data.get("ipNumber") or "").strip()
+            uhid_val = str(data.get("uhid") or "").strip()
+            try:
+                if ip_val or uhid_val:
+                    q = {"inpatient_number": ip_val} if ip_val else {"uhid": uhid_val}
+                    sched_doc = hms_db["hospital_surgeryschedule"].find_one(q, sort=[("created_date", -1)])
+                    if sched_doc:
+                        resolved_room = sched_doc.get("ot_name") or sched_doc.get("theater") or sched_doc.get("ot_id") or ""
+                if not resolved_room and (ip_val or uhid_val):
+                    adm_q = {"ipNumber": ip_val} if ip_val else {"uhid": uhid_val}
+                    adm_doc = hms_db["hospital_admission"].find_one(adm_q, sort=[("admissionDateTime", -1)])
+                    if adm_doc:
+                        r_list = adm_doc.get("room_details") or []
+                        act_r = next((r for r in r_list if isinstance(r, dict) and r.get("is_roomActive")), None)
+                        if act_r:
+                            resolved_room = act_r.get("roomNo") or ""
+            except Exception:
+                pass
+        if not resolved_room:
+            resolved_room = "-"
+
         # Save through model instead of direct mongo insert
         bill = PharmacyBilling.objects.create(
             branch_code=branch_code,
@@ -1217,7 +1249,7 @@ def save_ot_medicine_ward_request(request):
 
             bill_type=18,
             doctor_id=data.get("doctor_id", ""),
-            room_no=data.get("wardName", ""),
+            room_no=resolved_room,
 
             medicine_particulars=cleaned_medicines,
 

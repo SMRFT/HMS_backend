@@ -1,0 +1,137 @@
+========================================================================================
+SHANMUGA HOSPITAL - COMPREHENSIVE CASH FLOW & FINANCIAL RECONCILIATION AUDIT
+========================================================================================
+Report Generated: 2026-11-21
+Audited Period: 18/11/2026, 19/11/2026, 20/11/2026
+System: Shanmuga Hospital Management System (HMS)
+
+========================================================================================
+1. EXECUTIVE SUMMARY & DAILY TOTAL CASH FLOW RECONCILIATION
+========================================================================================
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+Date         Records  Gross Collection (INR)  Returns & Refunds (INR)  Net Cash Flow (INR)  Shift Drawer (INR)  Expenses (INR)  Status
+-----------------------------------------------------------------------------------------------------------------------------------------
+18/11/2026   499      8,70,341.86             16,663.96                8,53,677.90          8,53,677.90         2,600.00        100% TALLIES
+19/11/2026   475      9,61,112.25             14,540.65                9,46,571.60          9,46,571.60         2,353.00        100% TALLIES
+20/11/2026   332      8,24,223.30             18,697.65                8,05,525.65          8,05,525.65         2,900.00        100% TALLIES
+-----------------------------------------------------------------------------------------------------------------------------------------
+TOTAL        1,306    26,55,677.41            49,902.26                26,05,775.15         26,05,775.15        7,853.00        PERFECT RECONCILIATION
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+========================================================================================
+2. CASH FLOW STREAMS BREAKDOWN (DEPARTMENT & MODULE AUDIT)
+========================================================================================
+
+Stream A: Inpatient Advance Deposits (IPAdvance Payment)
+  - DB Collection: hospital_cashcountercollection (Category: IPAdvance Payment)
+  - Department Table: hospital_admission (advance_payments)
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 16 bills | Collected: INR 3,55,000.00
+  - 19/11/2026: 20 bills | Collected: INR 4,84,500.00
+  - 20/11/2026: 20 bills | Collected: INR 3,54,500.00
+
+Stream B: Outpatient Pharmacy Billing (OPPharmacyBills)
+  - DB Collection: hospital_cashcountercollection (Category: OPPharmacyBills)
+  - Department Table: hospital_pharmacybilling
+  - Status: WORKING CORRECTLY (Link via Bill_id integer)
+  - 18/11/2026: 182 bills | Collected: INR 1,73,791.00
+  - 19/11/2026: 187 bills | Collected: INR 2,72,358.00
+  - 20/11/2026: 65 bills  | Collected: INR 62,606.56
+
+Stream C: Diagnostic & Investigation Billing (Investigation)
+  - DB Collection: hospital_cashcountercollection (Category: Investigation)
+  - Department Table: hospital_investbilling
+  - Status: WORKING CORRECTLY (Indexed on investBillNo)
+  - 18/11/2026: 109 bills | Collected: INR 1,83,990.00
+  - 19/11/2026: 89 bills  | Collected: INR 1,16,820.00
+  - 20/11/2026: 97 bills  | Collected: INR 1,42,955.00
+
+Stream D: OP Registration & Consultation Billing (Billing)
+  - DB Collection: hospital_cashcountercollection (Category: Billing)
+  - Department Table: hospital_billing
+  - Status: WORKING CORRECTLY (Indexed on bill_number)
+  - 18/11/2026: 134 bills | Collected: INR 60,950.00
+  - 19/11/2026: 144 bills | Collected: INR 61,250.00
+  - 20/11/2026: 94 bills  | Collected: INR 40,650.00
+
+Stream E: Inpatient Discharge Clearances (Discharge)
+  - DB Collection: hospital_cashcountercollection (Category: Discharge)
+  - Department Table: hospital_dischargebilling
+  - Status: WORKING CORRECTLY (Linked via bill_no)
+  - 18/11/2026: 7 bills  | Collected: INR 90,050.86
+  - 19/11/2026: 3 bills  | Collected: INR 24,684.25
+  - 20/11/2026: 10 bills | Collected: INR 2,17,931.74
+
+Stream F: Sales Returns & Pharmacy Refunds (Sales Return)
+  - DB Collection: hospital_cashcountercollection (Category: Sales Return)
+  - Department Table: hospital_salesreturn
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 9 returns  | Returned: INR 7,693.14
+  - 19/11/2026: 9 returns  | Returned: INR 8,831.65
+  - 20/11/2026: 14 returns | Returned: INR 4,922.65
+
+Stream G: Diagnostic / Investigation Refunds (Investigation Refund)
+  - DB Collection: hospital_cashcountercollection (Category: Investigation Refund)
+  - Department Table: hospital_investrefund
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 2 refunds | Returned: INR 5,020.00
+  - 19/11/2026: 1 refund  | Returned: INR 1,200.00
+  - 20/11/2026: 0 refunds | Returned: INR 0.00
+
+Stream H: General / OP Refunds (Refund / refund)
+  - DB Collection: hospital_cashcountercollection (Category: Refund, refund)
+  - Department Table: hospital_refund, hospital_ipadvance_refund
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 2 refunds | Returned: INR 1,350.82
+  - 19/11/2026: 1 refund  | Returned: INR 1,956.00
+  - 20/11/2026: 2 refunds | Returned: INR 10,875.00
+
+Stream I: Miscellaneous Sundry Receipts (Receipt)
+  - DB Collection: hospital_cashcountercollection (Category: Receipt)
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 24 receipts | Collected: INR 6,560.00
+  - 19/11/2026: 9 receipts  | Collected: INR 1,500.00
+  - 20/11/2026: 15 receipts | Collected: INR 5,580.00
+
+Stream J: Expense Payout Vouchers (Payment)
+  - DB Collection: hospital_cashcountercollection (Category: Payment) & hospital_receiptandpayment
+  - Status: WORKING CORRECTLY
+  - 18/11/2026: 14 vouchers | Paid Out: INR 2,600.00
+  - 19/11/2026: 11 vouchers | Paid Out: INR 2,353.00
+  - 20/11/2026: 15 vouchers | Paid Out: INR 2,900.00
+
+========================================================================================
+3. WHAT WAS NOT WORKING PROPERLY & ACTUAL ROOT CAUSE
+========================================================================================
+
+1. Database Timeouts & Broken Connections:
+   - Issue: 18/11, 19/11, 20/11 calculations did not load / timed out.
+   - Cause: Full collection scans on hospital_investbilling (165k docs) and hospital_billing (103k docs) with $or queries.
+   - Fix: Created indexes investBillNo_1, bill_number_1, patient_id_1. Targeted specific fields without $or on nulls. Removed client.close() that destroyed connection pool. Query time dropped from >30s to 0.19s.
+
+2. Shift Basis Zero Totals:
+   - Issue: Shift declared collection evaluated to zero.
+   - Cause: Shift collection stores field as collected_Amount (capital A) and ClosingBalance, but code queried lowercase collected_amount or total_amount.
+   - Fix: Standardized extraction across collected_Amount and ClosingBalance.
+
+3. Master Accounts Audit Report Column Wrapping (Image 1):
+   - Issue: "Billing Details / Change" description squeezed into 1 letter per line (W\nr\no\nn\ng\n...).
+   - Cause: CSS table-layout: auto with overflow-wrap: anywhere and lack of landscape width.
+   - Fix: Set table-layout: fixed, assigned explicit percentage widths across all 10 columns totaling 100%, replaced overflow-wrap with word-break: break-word, enabled isWide: true.
+
+4. Audit Report Popover Item Display (Image 2):
+   - Issue: Items showed "Item x1 INR 0.00".
+   - Cause: Pharmacy particulars store item_name, qty, price, total. Popover only checked it.name and it.amount.
+   - Fix: Support it.name || it.item_name || it.itemName || it.particular and it.amount ?? it.total ?? it.calculated_price.
+
+5. Admission vs Discharge Filters (Image 3):
+   - Issue: Company / Corporate and Outlet filter missing.
+   - Cause: A4MultiPageViewer flagged report as isNoOutletReport.
+   - Fix: Enabled Outlet dropdown and added Company filter dropdown in modal and viewer bar.
+
+6. Doctor ID Displayed Instead of Name (Image 4):
+   - Issue: Doctor printed as employee ID 50697.
+   - Cause: Doctor name not looked up in Global.backend_diagnostics_profile.
+   - Fix: Batch employee cache and client-side fallback to /get_employee_name/?employee_id=.
+========================================================================================
