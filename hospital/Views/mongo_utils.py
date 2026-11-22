@@ -30,6 +30,7 @@ def get_hms_db():
             maxPoolSize=50,
             minPoolSize=5,
             connectTimeoutMS=5000,
+            socketTimeoutMS=20000,
             serverSelectionTimeoutMS=5000,
             retryWrites=True
         )

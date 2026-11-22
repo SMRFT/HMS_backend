@@ -6,12 +6,13 @@ from dotenv import load_dotenv
 # Ensure .env is loaded from backend directory regardless of working directory
 _backend_env = Path(__file__).resolve().parent.parent.parent / ".env"
 if _backend_env.exists():
-    load_dotenv(dotenv_path=_backend_env, override=False)
-load_dotenv(override=True)
+    load_dotenv(dotenv_path=_backend_env, override=True)
+else:
+    load_dotenv(override=True)
 
 # Create Mongo client (single place)
 mongo_url = os.getenv("GLOBAL_DB_HOST")
-client = MongoClient(mongo_url)
+client = MongoClient(mongo_url, w=1, retryWrites=False, serverSelectionTimeoutMS=5000, socketTimeoutMS=15000)
 
 # Databases
 

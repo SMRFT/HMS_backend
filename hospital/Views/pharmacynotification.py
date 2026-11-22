@@ -124,18 +124,24 @@ def pharmacy_notifications(request):
 
         item_ids = list({s.get("item_id") for s in stocks if s.get("item_id") is not None})
 
-        # Fetch item details in one batch query with projection
+        # Fetch item details in chunks with projection to avoid socket resets on large sets
         items_map = {}
         if item_ids:
-            items_cursor = db["hospital_pharmacyitem"].find(
-                {"item_id": {"$in": item_ids}},
-                {"item_id": 1, "item_name": 1, "reorder_level": 1, "_id": 0}
-            )
-            for it in items_cursor:
-                items_map[it.get("item_id")] = {
-                    "name": it.get("item_name") or "Unknown",
-                    "reorder_level": float(it.get("reorder_level") or 0),
-                }
+            item_id_list = list(item_ids)
+            for i in range(0, len(item_id_list), 200):
+                chunk = item_id_list[i:i + 200]
+                try:
+                    items_cursor = db["hospital_pharmacyitem"].find(
+                        {"item_id": {"$in": chunk}},
+                        {"item_id": 1, "item_name": 1, "reorder_level": 1, "_id": 0}
+                    )
+                    for it in items_cursor:
+                        items_map[it.get("item_id")] = {
+                            "name": it.get("item_name") or "Unknown",
+                            "reorder_level": float(it.get("reorder_level") or 0),
+                        }
+                except Exception as ex:
+                    logger.warning(f"Error fetching item chunk in pharmacy_notifications: {ex}")
 
         expiry_data = []
         low_stock_map = {}
@@ -277,4 +283,4 @@ def pharmacy_notifications(request):
             "success": False,
             "error": str(e)
         }, status=500)
-
+
