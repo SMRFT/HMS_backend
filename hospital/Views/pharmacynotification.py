@@ -2,15 +2,9 @@ from django.http import JsonResponse
 from django.utils import timezone
 from datetime import timedelta, datetime
 import logging
-import time
 from .mongo_utils import get_hms_db
 
 logger = logging.getLogger(__name__)
-
-# In-memory cache for pharmacy item definitions (item_id -> name, reorder_level)
-_ITEM_MAP_CACHE = {}
-_ITEM_MAP_EXPIRY = 0
-
 
 
 def pharmacy_notifications(request):
@@ -128,12 +122,33 @@ def pharmacy_notifications(request):
 
         stocks = list(db["hospital_pharmacystock"].find(stock_filter, stock_projection))
 
+        item_ids = list({s.get("item_id") for s in stocks if s.get("item_id") is not None})
+
+        # Fetch item details in chunks with projection to avoid socket resets on large sets
+        items_map = {}
+        if item_ids:
+            item_id_list = list(item_ids)
+            for i in range(0, len(item_id_list), 200):
+                chunk = item_id_list[i:i + 200]
+                try:
+                    items_cursor = db["hospital_pharmacyitem"].find(
+                        {"item_id": {"$in": chunk}},
+                        {"item_id": 1, "item_name": 1, "reorder_level": 1, "_id": 0}
+                    )
+                    for it in items_cursor:
+                        items_map[it.get("item_id")] = {
+                            "name": it.get("item_name") or "Unknown",
+                            "reorder_level": float(it.get("reorder_level") or 0),
+                        }
+                except Exception as ex:
+                    logger.warning(f"Error fetching item chunk in pharmacy_notifications: {ex}")
+
+        expiry_data = []
+        low_stock_map = {}
+
         # -----------------------------
         # Expiry + Stock Calculations
         # -----------------------------
-        raw_expiry_candidates = []
-        low_stock_map = {}
-
         for stock in stocks:
             total_stock = float(stock.get("total_stock") or 0)
             sold_quantity = float(stock.get("sold_quantity") or 0)
@@ -158,7 +173,9 @@ def pharmacy_notifications(request):
             s_out = str(stock.get("outlet_code") or "").strip()
             s_out_name = outlet_map.get(s_out, "OP Pharmacy" if s_out == "OLET002" else ("IP Pharmacy" if s_out == "OLET001" else s_out or "Pharmacy"))
 
-            # Expiry Candidates
+            # -----------------------------
+            # Expiry Alerts
+            # -----------------------------
             raw_expiry = stock.get("expiry_date")
             if raw_expiry:
                 expiry_date = None
@@ -175,9 +192,11 @@ def pharmacy_notifications(request):
                 if expiry_date and isinstance(expiry_date, type(today)) and today <= expiry_date <= days_90:
                     days_left = (expiry_date - today).days
                     urgency = "critical" if expiry_date <= days_30 else "warning"
-                    raw_expiry_candidates.append({
+
+                    expiry_data.append({
                         "stock_id": stock.get("stock_id"),
                         "item_id": item_id,
+                        "item_name": items_map.get(item_id, {}).get("name", "Unknown"),
                         "batch_number": stock.get("batch_number"),
                         "expiry_date": expiry_date.strftime("%d %b %Y"),
                         "days_left": days_left,
@@ -187,54 +206,14 @@ def pharmacy_notifications(request):
                         "outlet_name": s_out_name,
                     })
 
-            # Low Stock Tracking
+            # -----------------------------
+            # Low Stock Calculation (per item & outlet)
+            # -----------------------------
             if item_id:
                 key = (item_id, s_out) if (not outlet_code or is_drug_purchase) else item_id
                 low_stock_map[key] = low_stock_map.get(key, 0) + available
 
-        # Gather target item IDs needing name & reorder_level resolution
-        target_item_ids = set()
-        for cand in raw_expiry_candidates:
-            if cand.get("item_id"):
-                target_item_ids.add(cand["item_id"])
-        for key, qty in low_stock_map.items():
-            iid = key[0] if isinstance(key, tuple) else key
-            if iid and qty <= 50:
-                target_item_ids.add(iid)
-
-        # Fetch item details with in-memory caching and resilient chunking of 50
-        global _ITEM_MAP_CACHE, _ITEM_MAP_EXPIRY
-        now_ts = time.time()
-        items_map = dict(_ITEM_MAP_CACHE) if (now_ts < _ITEM_MAP_EXPIRY and _ITEM_MAP_CACHE) else {}
-
-        missing_ids = [iid for iid in target_item_ids if iid not in items_map]
-        if missing_ids:
-            try:
-                for i in range(0, len(missing_ids), 50):
-                    chunk = missing_ids[i:i + 50]
-                    items_cursor = db["hospital_pharmacyitem"].find(
-                        {"item_id": {"$in": chunk}},
-                        {"item_id": 1, "item_name": 1, "reorder_level": 1, "_id": 0}
-                    )
-                    for it in items_cursor:
-                        entry = {
-                            "name": it.get("item_name") or "Unknown",
-                            "reorder_level": float(it.get("reorder_level") or 0),
-                        }
-                        items_map[it.get("item_id")] = entry
-                        _ITEM_MAP_CACHE[it.get("item_id")] = entry
-                _ITEM_MAP_EXPIRY = now_ts + 600
-            except Exception as e:
-                logger.warning(f"Error fetching pharmacy items for notifications: {e}")
-                for iid in missing_ids:
-                    if iid not in items_map:
-                        items_map[iid] = {"name": f"Item #{iid}", "reorder_level": 0.0}
-
-        # Build final expiry alerts
-        expiry_data = []
-        for cand in raw_expiry_candidates:
-            cand["item_name"] = items_map.get(cand["item_id"], {}).get("name", "Unknown")
-            expiry_data.append(cand)
+        # Sort expiry alerts
         expiry_data.sort(key=lambda x: x["days_left"])
 
         # -----------------------------
@@ -304,4 +283,4 @@ def pharmacy_notifications(request):
             "success": False,
             "error": str(e)
         }, status=500)
-
+

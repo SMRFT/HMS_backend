@@ -55,7 +55,12 @@ def safe_dec(val):
 
 def get_shift_pymongo(query, sort_field=None):
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         db = client["HMS"]
         col = db["hospital_cashcountershiftdetails"]
         
@@ -281,11 +286,7 @@ def validate_active_shift(shiftno, counter_id, outlet_code, hospital_code, branc
     if not shiftno and not counter_id:
         return False, "Shift number or Cash Counter is required for transaction.", None
 
-    from pymongo import MongoClient
-    import os
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    db = client["HMS"]
-    col = db["hospital_cashcountershiftdetails"]
+    from .dbcollection import cashcounter_shift_collection as col
 
     # 1. If shiftno is given, look up that exact shift
     if shiftno:
@@ -296,13 +297,11 @@ def validate_active_shift(shiftno, counter_id, outlet_code, hospital_code, branc
             "is_active": True
         })
         if doc:
-            client.close()
             return True, "Shift is active and valid.", doc.get("shiftno")
 
         # Check if the shift was already closed
         closed_doc = col.find_one({"shiftno": clean_shiftno})
         if closed_doc:
-            client.close()
             return False, f"Shift '{clean_shiftno}' is already closed or inactive. Please start a new shift.", None
 
     # 2. Lookup active shift by counter_id
@@ -314,7 +313,6 @@ def validate_active_shift(shiftno, counter_id, outlet_code, hospital_code, branc
         query["CashCounter"] = str(counter_id).strip()
 
     doc = col.find_one(query, sort=[("StartingTime", -1)])
-    client.close()
 
     if not doc:
         counter_msg = f" for counter '{counter_id}'" if counter_id else ""
@@ -436,7 +434,12 @@ def cash_counter_shiftdetails(request):
     # ✅ CREATE SHIFT (POST)
     # =====================================================
     if request.method == "POST":
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         global_db = client["Global"]
         hms_db = client["HMS"]
         profile_col = global_db["backend_diagnostics_profile"]
@@ -673,7 +676,12 @@ def cash_counter_shiftdetails(request):
 
         # ✅ Record remitted/submitted transactions in hospital_cashcountercollection
         try:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
             db = client["HMS"]
             
             # Record Remitted
@@ -859,8 +867,7 @@ def calculate_shift_collection(shift_no):
     }
 
     try:
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client["HMS"]
+        from .dbcollection import hms_db as db
 
         shift_vals = [shift_no]
         try:
@@ -1034,8 +1041,6 @@ def calculate_shift_collection(shift_no):
                 results["total_collection"] -= amt
                 results["cash_collection"] -= amt
 
-        client.close()
-
     except Exception as e:
         print("Error calculating shift collection:", e)
         traceback.print_exc()
@@ -1070,9 +1075,8 @@ def recalculate_and_update_shift_details(shift_no):
         shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
 
         # 3. Sum up RemittedToBank and HandOverAmount, and check for close-shift records or manual entries in MongoDB directly
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db = client["HMS"]
-        col = db["hospital_cashcountercollection"]
+        from .dbcollection import hms_db, cashcounter_shift_collection
+        col = hms_db["hospital_cashcountercollection"]
 
         remitted_sum = Decimal('0.00')
         handover_sum = Decimal('0.00')
@@ -1107,8 +1111,6 @@ def recalculate_and_update_shift_details(shift_no):
             elif cat == "submit":
                 extra_submit += safe_dec(val)
 
-        client.close()
-
         # 4. Set fields - RemittedToBank and HandOverAmount are not used
         shift.RemittedToBank = Decimal('0.00')
         shift.HandOverAmount = Decimal('0.00')
@@ -1126,13 +1128,14 @@ def recalculate_and_update_shift_details(shift_no):
             if hasattr(shift, field):
                 setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
-        shift.save()
+        try:
+            shift.save()
+        except Exception as save_err:
+            print(f"[recalculate_and_update_shift_details] Djongo shift.save error (ignored, syncing directly via PyMongo): {save_err}")
 
         # Also sync directly to MongoDB
         try:
-            m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            m_db = m_client["HMS"]
-            m_db["hospital_cashcountershiftdetails"].update_one(
+            cashcounter_shift_collection.update_one(
                 {"shiftno": str(shift_no)},
                 {"$set": {
                     "collected_Amount": Decimal128(str(shift.collected_Amount)),
@@ -1141,9 +1144,8 @@ def recalculate_and_update_shift_details(shift_no):
                     "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
                 }}
             )
-            m_client.close()
-        except Exception:
-            pass
+        except Exception as sync_err:
+            print(f"[recalculate_and_update_shift_details] Direct PyMongo sync error: {sync_err}")
 
         print(f"[recalculate_and_update_shift_details] Shift {shift_no} updated successfully.")
 
@@ -1200,7 +1202,12 @@ def admin_close_shift(request):
         remarks = data.get("remarks") or data.get("reason") or "Closed by Administrator"
 
         # 1. Fetch shift via PyMongo directly to avoid Djongo localhost issues
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         db = client["HMS"]
         col = db["hospital_cashcountershiftdetails"]
 
@@ -1470,7 +1477,12 @@ def get_active_shift(request):
             outlet_code = outlet_code[0] if outlet_code else None 
         
         # Get cashcounter from employee profile
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         global_db = client["Global"]
         hms_db = client["HMS"]
         profile_col = global_db["backend_diagnostics_profile"]
@@ -1622,12 +1634,14 @@ def get_active_shift(request):
         ]:
             setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
-        shift.save()
+        try:
+            shift.save()
+        except Exception as e:
+            logger.warning(f"shift.save() via ORM skipped: {e}")
 
         try:
-            m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            m_db = m_client["HMS"]
-            m_db["hospital_cashcountershiftdetails"].update_one(
+            from .dbcollection import cashcounter_shift_collection
+            cashcounter_shift_collection.update_one(
                 {"shiftno": str(shift.shiftno)},
                 {"$set": {
                     "collected_Amount": Decimal128(str(shift.collected_Amount)),
@@ -1636,7 +1650,6 @@ def get_active_shift(request):
                     "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
                 }}
             )
-            m_client.close()
         except Exception:
             pass
         
@@ -1836,7 +1849,12 @@ def post_receipt_payments(request):
         amount       = data.get("amount")
 
         # Resolve cash counter from employee profile
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         global_db = client["Global"]
         profile_col = global_db["backend_diagnostics_profile"]
         try:
@@ -2058,7 +2076,12 @@ def get_receipt_payments(request):
         voucher_type  = data.get("voucher_type")
 
         # ✅ DB CONNECTION
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         db = client["HMS"]
         transaction_col = db["hospital_receiptandpayment"]
         account_col     = db["hospital_Receiptpayment"]
@@ -3240,7 +3263,12 @@ def update_mainblock_pendingbills(request):
 
         counter_id = data.get("counter_id")
         if not counter_id and employee_id:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
             global_db = client["Global"]
             profile_col = global_db["backend_diagnostics_profile"]
             try:
@@ -3803,7 +3831,12 @@ def get_shift_summary_report(request):
         if limit_val <= 0 and not is_active_only and not shiftno_filter and not (from_date and to_date):
             limit_val = 500
 
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+        client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
         hms_db = client["HMS"]
         col_shifts = hms_db["hospital_cashcountershiftdetails"]
 
@@ -4291,7 +4324,12 @@ def collectpayment_return_bills(request):
         bill_type       = data.get("bill_type")          # int, from the bill row
         counter_id      = data.get("counter_id")
         if not counter_id and clean_cashier:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
             global_db = client["Global"]
             profile_col = global_db["backend_diagnostics_profile"]
             try:
@@ -5268,7 +5306,12 @@ def ipadvance_bills(request):
 
             from pymongo import MongoClient
             import os
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            client = MongoClient(
+            os.getenv("GLOBAL_DB_HOST"),
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=20000
+        )
             db = client["HMS"]
             admission_col = db["hospital_admission"]
 
@@ -5403,27 +5446,28 @@ import os
 @permission_classes([HasRoleAndDataPermission])
 def OPPharmacy_pending_bills(request):
     try:
-        data = request.data
-        employee_id = data.get("auth-user-id")
+        data = request.data if hasattr(request, "data") and isinstance(request.data, dict) else {}
+        employee_id = data.get("auth-user-id") or request.headers.get("auth-user-id") or request.GET.get("auth-user-id") or extract_aud_employee_id(request)
 
         # ✅ AUTH CODES
-        hospital_code = data.get("auth-hospital-code")
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
+        hospital_code = data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or request.GET.get("auth-hospital-code") or "SH001"
+        branch_code   = data.get("auth-branch-code") or request.headers.get("auth-branch-code") or request.GET.get("auth-branch-code") or "SHB001"
+        outlet_code   = data.get("auth-outlet-code") or request.headers.get("auth-outlet-code") or request.GET.get("auth-outlet-code")
 
         # =========================================================
-        # ✅ MongoDB Collections
+        # ✅ MongoDB Collections (Using shared pooled connection)
         # =========================================================
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        global_db = client["Global"]
-        profile_collection = global_db["backend_diagnostics_profile"]
-
-        hms_db = client["HMS"]
-        billtype_collection       = hms_db["hospital_billtype"]
-        pharmacy_item_collection  = hms_db["hospital_pharmacyitem"]
-        pharmacy_stock_collection = hms_db["hospital_pharmacystock"]
-        oppharmacy_collection     = hms_db["hospital_pharmacybilling"]
-        cashcounter_collection    = hms_db["hospital_cashcounter"]
+        from .dbcollection import (
+            hms_db,
+            global_db,
+            profile_collection,
+            pharmacy_item_collection,
+            pharmacy_stock_collection,
+            pharmacy_billing_collection as oppharmacy_collection,
+            cashcounter_collection,
+            patient_collection,
+            hms_billtype as billtype_collection
+        )
 
         # =========================================================
         # ✅ Employee Cashcounter & Bill Type Permission Check
@@ -5647,7 +5691,7 @@ def OPPharmacy_pending_bills(request):
                 ]}
             ]
 
-        raw_bills = list(oppharmacy_collection.find(mongo_filter).sort("created_date", -1).limit(2000))
+        raw_bills = list(oppharmacy_collection.find(mongo_filter).sort("created_date", -1).limit(500))
 
         if not raw_bills:
             return Response({
@@ -5660,17 +5704,29 @@ def OPPharmacy_pending_bills(request):
             }, status=status.HTTP_200_OK)
 
         # =========================================================
-        # ✅ Patient Mapping (Batch fetch)
+        # ✅ Patient Mapping (Fast direct PyMongo fetch)
         # =========================================================
-        uhids = list(set([str(b.get("uhid")).strip() for b in raw_bills if b.get("uhid")]))
+        uhids_to_fetch = set()
+        for b in raw_bills:
+            p_name = b.get("patient_name") or b.get("patientname") or b.get("patientName") or b.get("customer_name")
+            if not p_name and b.get("uhid"):
+                uhids_to_fetch.add(str(b.get("uhid")).strip())
+
         patient_map = {}
-        if uhids:
+        if uhids_to_fetch:
             try:
-                patients = Patient.objects.filter(uhid__in=uhids)
-                patient_map = {
-                    str(p.uhid).strip(): f"{p.salutation or ''} {p.firstName or ''} {p.lastName or ''}".strip()
-                    for p in patients
-                }
+                uhids_list = list(uhids_to_fetch)
+                for i in range(0, len(uhids_list), 100):
+                    chunk = uhids_list[i:i + 100]
+                    p_cursor = patient_collection.find(
+                        {"uhid": {"$in": chunk}},
+                        {"uhid": 1, "salutation": 1, "firstName": 1, "lastName": 1, "_id": 0}
+                    )
+                    for p in p_cursor:
+                        u = str(p.get("uhid") or "").strip()
+                        name = f"{p.get('salutation') or ''} {p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
+                        if u:
+                            patient_map[u] = name
             except Exception:
                 pass
 
@@ -5689,15 +5745,18 @@ def OPPharmacy_pending_bills(request):
 
         doctor_map = {}
         if doctor_ids:
-            doctor_cursor = profile_collection.find(
-                {"employeeId": {"$in": doctor_ids}},
-                {"employeeId": 1, "employeeName": 1, "_id": 0}
-            )
-            for doc in doctor_cursor:
-                doc_name = doc.get("employeeName", "")
-                if doc_name and not doc_name.lower().startswith("dr"):
-                    doc_name = f"Dr. {doc_name}"
-                doctor_map[str(doc.get("employeeId"))] = doc_name
+            try:
+                doctor_cursor = profile_collection.find(
+                    {"employeeId": {"$in": doctor_ids}},
+                    {"employeeId": 1, "employeeName": 1, "_id": 0}
+                )
+                for doc in doctor_cursor:
+                    doc_name = doc.get("employeeName", "")
+                    if doc_name and not doc_name.lower().startswith("dr"):
+                        doc_name = f"Dr. {doc_name}"
+                    doctor_map[str(doc.get("employeeId"))] = doc_name
+            except Exception:
+                pass
 
         # =========================================================
         # ✅ Bill Type Mapping
@@ -5714,86 +5773,46 @@ def OPPharmacy_pending_bills(request):
 
         billtype_map = {}
         if bill_types:
-            billtype_cursor = billtype_collection.find(
-                {"bill_type": {"$in": bill_types}},
-                {"bill_type": 1, "bill_name": 1, "_id": 0}
-            )
-            billtype_map = {
-                bt["bill_type"]: bt.get("bill_name", "")
-                for bt in billtype_cursor
-            }
+            try:
+                billtype_cursor = billtype_collection.find(
+                    {"bill_type": {"$in": bill_types}},
+                    {"bill_type": 1, "bill_name": 1, "_id": 0}
+                )
+                billtype_map = {
+                    bt["bill_type"]: bt.get("bill_name", "")
+                    for bt in billtype_cursor
+                }
+            except Exception:
+                pass
 
         # =========================================================
-        # ✅ Collect Items & Stock Mapping
+        # ✅ Collect Items Name Mapping (Batched & Lightweight)
         # =========================================================
-        item_ids = set()
-        item_batch_set = set()
+        missing_item_ids = set()
         for b in raw_bills:
             for item in b.get("medicine_particulars", []):
-                if not isinstance(item, dict):
-                    continue
-                iid = item.get("item_id")
-                if iid is not None:
-                    try:
-                        item_ids.add(int(iid))
-                    except (ValueError, TypeError):
-                        item_ids.add(str(iid))
-                b_num = str(item.get("batch_number") or "").strip()
-                if iid is not None and b_num:
-                    try:
-                        item_batch_set.add((int(iid), b_num))
-                    except (ValueError, TypeError):
-                        item_batch_set.add((str(iid), b_num))
-
-        item_ids = list(item_ids)
-        batch_numbers = list(set([i[1] for i in item_batch_set]))
+                if isinstance(item, dict) and not item.get("item_name"):
+                    iid = item.get("item_id")
+                    if iid is not None:
+                        try:
+                            missing_item_ids.add(int(iid))
+                        except (ValueError, TypeError):
+                            missing_item_ids.add(str(iid))
 
         item_map = {}
-        if item_ids:
-            item_cursor = pharmacy_item_collection.find(
-                {
-                    "item_id": {"$in": item_ids},
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code
-                },
-                {"item_id": 1, "item_name": 1, "_id": 0}
-            )
-            item_map = {i["item_id"]: i.get("item_name", "") for i in item_cursor}
-
-        stock_map = {}
-        if item_ids and batch_numbers:
-            stock_filter = {
-                "item_id": {"$in": item_ids},
-                "batch_number": {"$in": batch_numbers},
-                "hospital_code": hospital_code,
-                "branch_code": branch_code
-            }
-            if matched_outlet:
-                if isinstance(matched_outlet, (list, tuple)):
-                    parsed_so = [str(x).strip() for x in matched_outlet if str(x).strip()]
-                    if len(parsed_so) == 1:
-                        stock_filter["outlet_code"] = parsed_so[0]
-                    elif parsed_so:
-                        stock_filter["outlet_code"] = {"$in": parsed_so}
-                elif str(matched_outlet).strip().upper() not in ["ALL", ""]:
-                    stock_filter["outlet_code"] = str(matched_outlet).strip()
-
-            stock_cursor = pharmacy_stock_collection.find(
-                stock_filter,
-                {
-                    "item_id": 1,
-                    "batch_number": 1,
-                    "CGST_Percentage": 1,
-                    "SGST_Percentage": 1,
-                    "CGST_Amt": 1,
-                    "SGST_Amt": 1,
-                    "_id": 0
-                }
-            )
-            stock_map = {
-                (s["item_id"], str(s.get("batch_number") or "").strip()): s
-                for s in stock_cursor
-            }
+        if missing_item_ids:
+            try:
+                chunk_list = list(missing_item_ids)
+                for i in range(0, len(chunk_list), 100):
+                    chunk = chunk_list[i:i + 100]
+                    item_cursor = pharmacy_item_collection.find(
+                        {"item_id": {"$in": chunk}},
+                        {"item_id": 1, "item_name": 1, "_id": 0}
+                    )
+                    for doc in item_cursor:
+                        item_map[doc["item_id"]] = doc.get("item_name", "")
+            except Exception:
+                pass
 
         # =========================================================
         # ✅ Final Response Serialization
@@ -5890,11 +5909,10 @@ def OPPharmacy_pending_bills(request):
 
                 it_dict["item_name"] = it_dict.get("item_name") or item_map.get(iid_val, "")
 
-                stock = stock_map.get((iid_val, batch_number), {})
-                it_dict["CGST_Percentage"] = convert_decimal(stock.get("CGST_Percentage", 0))
-                it_dict["SGST_Percentage"] = convert_decimal(stock.get("SGST_Percentage", 0))
-                it_dict["CGST_Amt"]        = convert_decimal(stock.get("CGST_Amt", 0))
-                it_dict["SGST_Amt"]        = convert_decimal(stock.get("SGST_Amt", 0))
+                it_dict["CGST_Percentage"] = convert_decimal(it_dict.get("CGST_Percentage", 0))
+                it_dict["SGST_Percentage"] = convert_decimal(it_dict.get("SGST_Percentage", 0))
+                it_dict["CGST_Amt"]        = convert_decimal(it_dict.get("CGST_Amt", 0))
+                it_dict["SGST_Amt"]        = convert_decimal(it_dict.get("SGST_Amt", 0))
 
                 updated_items.append(it_dict)
 
