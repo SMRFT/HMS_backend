@@ -1094,31 +1094,53 @@ def OP_salesreturn_billdetails(request):
         from .dbcollection import pharmacy_stock_collection as stock_col, pharmacy_billing_collection as bill_col
  
         for item in cleaned_particulars:
-            item_id      = int(item.get("item_id"))
-            batch_number = str(item.get("batch_number"))
-            return_qty   = float(item.get("return_qty", 0))
-            billed_qty   = float(item.get("billed_qty", 0))
- 
-            # ─── 1. STOCK: update lastmodified_date only ──────────────────────
-            # sales_return_quantity and sales_return_ref_id are NOT updated here
-            stock_result = stock_col.update_one(
-                {
+            item_id        = int(item.get("item_id"))
+            batch_number   = str(item.get("batch_number", "")).strip()
+            return_qty     = float(item.get("return_qty", 0))
+            billed_qty     = float(item.get("billed_qty", 0))
+            return_qty_val = int(return_qty) if return_qty.is_integer() else return_qty
+
+            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number ───
+            stock_filter = {
+                "item_id":      {"$in": [item_id, str(item_id)]},
+                "batch_number": {"$in": [batch_number, str(item.get("batch_number", ""))]},
+                "outlet_code":  outlet_code
+            }
+
+            existing_stock = stock_col.find_one(stock_filter)
+            if not existing_stock:
+                # Fallback to direct equality match
+                existing_stock = stock_col.find_one({
                     "item_id":      item_id,
                     "batch_number": batch_number,
                     "outlet_code":  outlet_code
-                },
+                })
+
+            if not existing_stock:
+                return Response({
+                    "status":  "error",
+                    "message": f"Stock not found for item_id {item_id}, batch {batch_number} in outlet {outlet_code}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Ensure sales_return_quantity is not null/None in Mongo document before $inc
+            if existing_stock.get("sales_return_quantity") is None:
+                stock_col.update_one(
+                    {"_id": existing_stock["_id"]},
+                    {"$set": {"sales_return_quantity": 0}}
+                )
+
+            stock_col.update_one(
+                {"_id": existing_stock["_id"]},
                 {
+                    "$inc": {
+                        "sales_return_quantity": return_qty_val
+                    },
                     "$set": {
-                        "lastmodified_date": datetime.utcnow()
+                        "lastmodified_date": datetime.utcnow(),
+                        "lastmodified_by":   employee_id
                     }
                 }
             )
- 
-            if stock_result.matched_count == 0:
-                return Response({
-                    "status":  "error",
-                    "message": f"Stock not found for item_id {item_id}, batch {batch_number}"
-                }, status=status.HTTP_400_BAD_REQUEST)
  
             # ─── 2. BILL: push a NEW edit_history entry ───────────────────────
             # We do NOT guard against the same bill_no being returned again —
