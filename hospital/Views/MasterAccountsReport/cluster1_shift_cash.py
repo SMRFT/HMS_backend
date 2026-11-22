@@ -40,12 +40,18 @@ def shift_basis_collection_api(request):
             ret_val = s.get("sales_return") or 0.0
             tot_val = round(c_val + cr_val + cd_val, 2)
             open_bal = s.get("opening_balance") or 0.0
-            close_bal = s.get("closing_balance") or s.get("net_handover_cash") or 0.0
+            close_bal = s.get("net_handover_cash") if s.get("net_handover_cash") is not None else round(c_val - (s.get("expenses_paid") or 0.0) - ret_val, 2)
+            s_dict = dict(s)
+            s_dict["closing_balance"] = close_bal
+            s_dict["CreditAmount"] = cr_val
+            s_dict["credit"] = cr_val
+
             summary_data.append({
+                **s_dict,
                 "shiftno": s["shift_no"],
                 "date": dt_s,
                 "displayDate": dt_s,
-                "SelectedOutlet": s.get("outlet_code") or "OLET003",
+                "SelectedOutlet": s.get("SelectedOutlet") or s.get("outlet_code") or "OLET003",
                 "User": s["cashier_name"],
                 "CashierID": s["cashier_id"],
                 "StartTime": format_ist_time(s.get("start_time") or s.get("StartTime") or s.get("StartingTime")) or "08:00 AM",
@@ -57,13 +63,12 @@ def shift_basis_collection_api(request):
                 "totalColl": tot_val,
                 "expensesPaid": s.get("expenses_paid") or 0.0,
                 "expenses_paid": s.get("expenses_paid") or 0.0,
-                "netHandover": s.get("net_handover_cash") or close_bal,
-                "net_handover_cash": s.get("net_handover_cash") or close_bal,
+                "netHandover": close_bal,
+                "net_handover_cash": close_bal,
                 "sales_return": ret_val,
                 "retAmt": ret_val,
                 "closeBal": close_bal,
                 "ShiftStatus": s.get("shift_status") or "closed",
-                **s
             })
 
         return Response({
@@ -409,11 +414,16 @@ def cashier_wise_summary_api(request):
                 "total_revenue": 0.0,
                 "bill_count": 0
             })
-            cashier_map[key]["gross_cash"] += b["cash"]
-            cashier_map[key]["card_amount"] += b["bank"]
-            cashier_map[key]["credit_amount"] += b["credit"]
-            cashier_map[key]["total_revenue"] += b["gross"]
+            c_val = b["cash"] if b["cash"] > 0 else 0.0
+            b_val = b["bank"] if b["bank"] > 0 else 0.0
+            cr_val = b["credit"] if b["credit"] > 0 else 0.0
+            cashier_map[key]["gross_cash"] += c_val
+            cashier_map[key]["card_amount"] += b_val
+            cashier_map[key]["credit_amount"] += cr_val
+            cashier_map[key]["total_revenue"] += (c_val + b_val + cr_val)
             cashier_map[key]["bill_count"] += 1
+            if b.get("is_sales_return") or b.get("category") in ["Sales Return", "SALES RETURNS", "REFUND"] or b["cash"] < 0:
+                cashier_map[key]["sales_returns"] = cashier_map[key].get("sales_returns", 0.0) + abs(b.get("return_amount") or b.get("refund_amount") or b["cash"])
             
         for v in res["expense_vouchers"]:
             cid = v["cashier_id"]
@@ -458,7 +468,8 @@ def cashier_wise_summary_api(request):
             r["gross_cash"] = round(r["gross_cash"], 2)
             r["cash"] = r["gross_cash"]
             r["expenses_paid"] = round(r["expenses_paid"], 2)
-            r["net_cash"] = round(r["gross_cash"] - r["expenses_paid"], 2)
+            r["sales_returns"] = round(r.get("sales_returns", 0.0), 2)
+            r["net_cash"] = round(r["gross_cash"] - r["expenses_paid"] - r["sales_returns"], 2)
             r["card_amount"] = round(r["card_amount"], 2)
             r["card"] = r["card_amount"]
             r["credit_amount"] = round(r["credit_amount"], 2)
