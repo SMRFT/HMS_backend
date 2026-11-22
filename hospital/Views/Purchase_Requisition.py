@@ -50,27 +50,70 @@ def _get_data(request):
     return request.data if hasattr(request, "data") else request.POST
 
 
+def _extract_jwt_claims(request):
+    token = (
+        request.headers.get("Authorization")
+        or request.headers.get("authorization")
+        or request.META.get("HTTP_AUTHORIZATION")
+        or ""
+    )
+    if not token:
+        return {}
+    token = token.replace("Bearer ", "").replace("bearer ", "").strip()
+    if "." in token:
+        try:
+            import base64, json
+            parts = token.split(".")
+            if len(parts) >= 2:
+                p = parts[1]
+                p += "=" * (-len(p) % 4)
+                return json.loads(base64.urlsafe_b64decode(p.encode("utf-8")).decode("utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
 def _auth(request):
     data = _get_data(request)
+    claims = _extract_jwt_claims(request)
+
+    emp_id = (
+        data.get("auth-user-id")
+        or data.get("created_by")
+        or data.get("employee_id")
+        or data.get("user_id")
+        or request.headers.get("auth-user-id")
+        or request.headers.get("Auth-User-Id")
+        or request.headers.get("Employee-Id")
+        or request.headers.get("User-Id")
+        or claims.get("aud")
+        or claims.get("user_id")
+        or claims.get("employeeId")
+        or "system"
+    )
+
+    hosp_code = (
+        data.get("auth-hospital-code")
+        or data.get("hospital_code")
+        or request.headers.get("auth-hospital-code")
+        or request.headers.get("Hospital-Code")
+        or claims.get("hospital_code")
+        or "system"
+    )
+
+    branch_code = (
+        data.get("auth-branch-code")
+        or data.get("branch_code")
+        or request.headers.get("auth-branch-code")
+        or request.headers.get("Branch-Code")
+        or (claims.get("allowed-data")[0] if isinstance(claims.get("allowed-data"), list) and claims.get("allowed-data") else "")
+        or "system"
+    )
+
     return {
-        "employee_id": (
-            data.get("auth-user-id")
-            or request.headers.get("auth-user-id")
-            or request.headers.get("Auth-User-Id")
-            or "system"
-        ),
-        "hospital_code": (
-            data.get("auth-hospital-code")
-            or request.headers.get("auth-hospital-code")
-            or request.headers.get("Hospital-Code")
-            or "system"
-        ),
-        "branch_code": (
-            data.get("auth-branch-code")
-            or request.headers.get("auth-branch-code")
-            or request.headers.get("Branch-Code")
-            or "system"
-        ),
+        "employee_id": str(emp_id).strip(),
+        "hospital_code": str(hosp_code).strip(),
+        "branch_code": str(branch_code).strip(),
     }
 
 
@@ -380,12 +423,18 @@ def purchase_requisition_view(request, pk=None):
                 except Exception:
                     pass
 
+            now = timezone.now()
             payload = {
                 "pr_number": _next_pr_number(),
                 "items":     clean_items,            # ← native list, not JSON string
                 "status":    "Draft",
                 "outlet_code": outlet_code,
                 "outlet_name": outlet_name,
+
+                "created_by": employee_id,
+                "created_date": now,
+                "lastmodified_by": employee_id,
+                "lastmodified_date": now,
 
                 "approved_by": "", "approved_date": None,
                 "rejected_by": "", "rejected_reason": "", "rejected_date": None,
@@ -400,7 +449,6 @@ def purchase_requisition_view(request, pk=None):
 
             serializer = PurchaseRequisitionSerializer(data=payload)
             if serializer.is_valid():
-                now   = timezone.now()
                 saved = serializer.save(
                     created_by=employee_id,
                     created_date=now,
