@@ -608,6 +608,50 @@ def _save_admission(adm, room_details, shifting_details, advance_payments, extra
     _sync_to_mongo(adm.ipNumber, rd, sd, ap, sync_extra)
 
 
+def _normalize_guardian_type(g_type, pt_dict=None, adm_dict=None):
+    t = str(g_type or "").strip().lower()
+    if t in ("w/o", "wife of", "wife"):
+        return "W/o"
+    if t in ("s/o", "son of", "son"):
+        return "S/o"
+    if t in ("d/o", "daughter of", "daughter"):
+        return "D/o"
+    if t in ("f/o", "father of", "father"):
+        return "F/o"
+    if t in ("h/o", "husband of", "husband", "spouse"):
+        return "H/o"
+    if t in ("m/o", "mother of", "mother"):
+        return "M/o"
+    if t in ("c/o", "care of"):
+        return "C/o"
+
+    pt = pt_dict or {}
+    adm = adm_dict or {}
+    gen = str(pt.get("gender") or adm.get("gender") or "").strip().lower()
+    sal = str(pt.get("salutation") or adm.get("salutation") or "").strip().lower()
+    mar = str(pt.get("marital_status") or "").strip().lower()
+    pat_name = str(pt.get("firstName") or adm.get("patient_name") or "").strip().lower()
+    try:
+        age_val = float(pt.get("age") or adm.get("age") or 0)
+    except (ValueError, TypeError):
+        age_val = 0
+
+    if gen.startswith("f"):
+        if "mrs" in sal or pat_name.startswith("mrs.") or "married" in mar or age_val >= 21:
+            return "W/o"
+        if "ms" in sal or "miss" in sal or (0 < age_val < 21):
+            return "D/o"
+        return "W/o"
+    elif gen.startswith("m"):
+        return "S/o"
+    else:
+        if "mrs" in sal or pat_name.startswith("mrs."):
+            return "W/o"
+        if "mr" in sal or pat_name.startswith("mr."):
+            return "S/o"
+        return "W/o"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # High-Performance Batch Patient & Insurance Enrichment
 # ─────────────────────────────────────────────────────────────────────────────
@@ -726,7 +770,10 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         adm_data["spouseName"]           = pt.get("spouseName") or pt.get("spouse_name") or ""
         adm_data["fatherName"]           = pt.get("fatherName") or pt.get("father_name") or ""
         adm_data["guardian_name"]        = pt.get("guardian_name") or pt.get("guardianName") or ""
-        adm_data["guardian_type"]        = pt.get("guardian_type") or pt.get("guardianType") or ""
+        raw_gt                           = pt.get("guardian_type") or pt.get("guardianType") or ""
+        adm_data["guardian_type"]        = _normalize_guardian_type(raw_gt, pt_dict=pt, adm_dict=adm_data)
+        adm_data["salutation"]           = pt.get("salutation") or adm_data.get("salutation") or ""
+        adm_data["marital_status"]       = pt.get("marital_status") or ""
         adm_data["relationship"]         = pt.get("relationship") or adm_data.get("attender_relationship") or ""
         adm_data["aadhaar"]              = pt.get("aadhaar") or pt.get("aadhaar_number") or pt.get("aadhar") or pt.get("national_id") or ""
 
