@@ -49,6 +49,34 @@ from pyauth.auth import HasRoleAndDataPermission
 from ..models import Patient, Admission, DischargeBilling, PatientNextVisitLog, Billing
 
 
+def _normalize_guardian_type(g_type, pt_dict=None):
+    t = str(g_type or "").strip().lower()
+    if t in ("w/o", "wife of", "wife"): return "W/o"
+    if t in ("s/o", "son of", "son"): return "S/o"
+    if t in ("d/o", "daughter of", "daughter"): return "D/o"
+    if t in ("f/o", "father of", "father"): return "F/o"
+    if t in ("h/o", "husband of", "husband", "spouse"): return "H/o"
+    if t in ("m/o", "mother of", "mother"): return "M/o"
+    if t in ("c/o", "care of"): return "C/o"
+    pt = pt_dict or {}
+    gen = str(pt.get("gender") or "").strip().lower()
+    sal = str(pt.get("salutation") or "").strip().lower()
+    mar = str(pt.get("marital_status") or "").strip().lower()
+    pat_name = str(pt.get("firstName") or "").strip().lower()
+    try: age_val = float(pt.get("age") or 0)
+    except (ValueError, TypeError): age_val = 0
+    if gen.startswith("f"):
+        if "mrs" in sal or pat_name.startswith("mrs.") or "married" in mar or age_val >= 21: return "W/o"
+        if "ms" in sal or "miss" in sal or (0 < age_val < 21): return "D/o"
+        return "W/o"
+    elif gen.startswith("m"):
+        return "S/o"
+    else:
+        if "mrs" in sal or pat_name.startswith("mrs."): return "W/o"
+        if "mr" in sal or pat_name.startswith("mr."): return "S/o"
+        return "W/o"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Safe float conversion
 # Handles: Decimal128 (bson), Decimal, smart-quoted str, plain str, None
@@ -1102,7 +1130,7 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                     dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
-            guardian_type_val = p.get("guardian_type") or ("W/o" if str(p.get("gender", "")).lower() == "female" and p.get("spouse_name") else "S/o")
+            guardian_type_val = _normalize_guardian_type(p.get("guardian_type"), pt_dict=p)
 
             if bill_is_ins and (not eff_claim or not eff_id_card):
                 if ins_member_map is not None:
@@ -2405,7 +2433,7 @@ def search_discharge_patient(request):
         disch_str = disch_dt[:10]
 
     guardian_val = patient_doc.get("guardian_name") or patient_doc.get("spouse_name") or patient_doc.get("father_name") or patient_doc.get("emergency_contact") or ""
-    guardian_type_val = patient_doc.get("guardian_type") or ("W/o" if str(patient_doc.get("gender", "")).lower() == "female" and patient_doc.get("spouse_name") else "S/o")
+    guardian_type_val = _normalize_guardian_type(patient_doc.get("guardian_type"), pt_dict=patient_doc)
 
     # Strictly determine Billing Type from admission alone - NEVER fall back to patient_doc or member master
     adm_cust_raw = (admission_doc.get("customer_type") or admission_doc.get("customerType") or admission_doc.get("patient_type") or "").strip()
