@@ -60,9 +60,72 @@ global_db = client["Global"]
 
 profile_collection = global_db["backend_diagnostics_profile"]
 
+diagnostics_db = client["Diagnostics"]
+
 room_collection = mongo_db["hospital_room"]
 
 from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid, get_employee_name_by_id, get_doctor_name_by_id
+
+# --- Helper: Timezone conversion to IST (Asia/Kolkata) ---
+def format_dt_to_ist(dt_raw):
+    if not dt_raw:
+        return ""
+    if isinstance(dt_raw, str):
+        try:
+            s = dt_raw.strip().replace("Z", "+00:00")
+            dt_raw = datetime.fromisoformat(s)
+        except Exception:
+            return dt_raw
+    if isinstance(dt_raw, datetime):
+        if not dt_raw.tzinfo:
+            dt_raw = pytz.UTC.localize(dt_raw)
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        return dt_raw.astimezone(ist_tz).strftime("%d/%m/%Y, %I:%M %p")
+    return str(dt_raw)
+
+# --- Helper: Cache Microbiology Test IDs from Diagnostics core_testdetails ---
+_microbio_test_ids_cache = None
+_microbio_cache_time = 0
+
+def get_microbiology_test_ids():
+    global _microbio_test_ids_cache, _microbio_cache_time
+    import time
+    now = time.time()
+    if _microbio_test_ids_cache is not None and (now - _microbio_cache_time) < 1800:
+        return _microbio_test_ids_cache
+    try:
+        coll = diagnostics_db["core_testdetails"]
+        docs = coll.find({"department": re.compile(r"^\s*microbiology\s*$", re.IGNORECASE)}, {"test_id": 1})
+        ids = set()
+        for d in docs:
+            tid = d.get("test_id")
+            if tid is not None:
+                ids.add(str(tid).strip())
+                try:
+                    ids.add(str(int(tid)))
+                except Exception:
+                    pass
+        _microbio_test_ids_cache = ids
+        _microbio_cache_time = now
+        return ids
+    except Exception as e:
+        print(f"Error fetching microbiology test IDs: {e}")
+        return _microbio_test_ids_cache or set()
+
+def is_microbiology_test(item_test_id):
+    if not item_test_id:
+        return False
+    micro_ids = get_microbiology_test_ids()
+    raw_str = str(item_test_id).strip()
+    if raw_str in micro_ids:
+        return True
+    try:
+        int_str = str(int(raw_str))
+        if int_str in micro_ids:
+            return True
+    except Exception:
+        pass
+    return False
 
 @api_view(["GET"])
 
@@ -520,7 +583,10 @@ def get_admission_list(request):
                     raw_items = p_doc.get("item", [])
                     if isinstance(raw_items, list) and raw_items:
                         has_pending = any(
-                            isinstance(it, dict) and str(it.get("status") or doc_st).strip().lower() not in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] and not it.get("cancelled")
+                            isinstance(it, dict)
+                            and str(it.get("status") or doc_st).strip().lower() not in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"]
+                            and not it.get("cancelled")
+                            and not (w_type != "RADIOLOGY" and is_microbiology_test(it.get("test_id") or it.get("testId") or it.get("item_id")))
                             for it in raw_items
                         )
                         if not has_pending:
@@ -3487,7 +3553,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     for d in lab_docs:
         bill_no = d.get("investBillNo") or "Lab Request"
         dt_raw = d.get("investBillDate") or d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         status_str = d.get("status") or "Result Pending"
@@ -3503,6 +3569,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
             if isinstance(it, dict) and it.get("itemName"):
                 it_st = str(it.get("status") or status_str or "").strip().lower()
                 if it_st in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] or it.get("cancelled"):
+                    continue
+                # Skip Microbiology tests from blocking clearance
+                t_id = it.get("test_id") or it.get("testId") or it.get("item_id")
+                if is_microbiology_test(t_id):
                     continue
                 p = it.get("price")
                 p_str = f" (Rs. {p})" if p else ""
@@ -3540,7 +3610,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     for d in rad_docs:
         bill_no = d.get("investBillNo") or "Radiology Request"
         dt_raw = d.get("investBillDate") or d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         status_str = d.get("status") or "Result Pending"
@@ -3637,7 +3707,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         b_num = d.get("bill_no") or d.get("Bill_id") or "Req"
         b_label = f"Bill #{b_num}" if not str(b_num).startswith("Bill") else str(b_num)
         dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("net_amount") if d.get("net_amount") is not None else d.get("total_amount")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         st_str = d.get("billing_status") or "Pending"
@@ -3689,8 +3759,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
 
             if return_details:
                 pharm_returns_pending_count += len(return_details)
+                ret_dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
                 pharm_bills.append({
                     "bill_no": f"{b_label} - Return Request",
+                    "date": format_dt_to_ist(ret_dt_raw),
                     "status": "Return Pending Approval",
                     "items": return_details
                 })
@@ -3705,7 +3777,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     }
     implant_docs = list(mongo_db["hospital_implant_request"].find(
         implant_query,
-        {"ImplantRequest_id": 1, "items": 1, "status": 1}
+        {"ImplantRequest_id": 1, "items": 1, "status": 1, "created_date": 1, "date": 1}
     ))
     implant_item_ids = set()
     for d in implant_docs:
@@ -3740,8 +3812,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                         qty = it.get("quantity") or it.get("qty") or 1
                         item_details.append(f"{it_name} (Qty: {qty})")
 
+                imp_dt_raw = imp.get("created_date") or imp.get("date")
                 implant_bills.append({
                     "bill_no": b_label,
+                    "date": format_dt_to_ist(imp_dt_raw),
                     "status": st_str,
                     "items": item_details
                 })
@@ -3765,7 +3839,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         d_type = d.get("diet_type") or "Regular Diet"
         st = d.get("status") or "Ordered"
         dt_raw = d.get("order_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
 
         diet_bills.append({
             "bill_no": f"Diet: {m_time}",
@@ -3793,7 +3867,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         rtype = d.get("request_type") or "Normal"
         st = d.get("status") or "Pending"
         dt_raw = d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
 
         raw_items = d.get("items", [])
         item_details = []
