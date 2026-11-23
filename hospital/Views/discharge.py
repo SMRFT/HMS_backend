@@ -2766,28 +2766,7 @@ def search_discharge_patient(request):
             }
 
         if inv_q:
-            is_insurance_patient = str(patient_info.get("patient_type") or "").strip().lower() == "insurance"
-            nabh_tid_map, nabh_code_map = {}, {}
-            if is_insurance_patient:
-                try:
-                    nabh_records = list(db["hospital_lab_nabh_rate"].find(
-                        {},
-                        {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1, "sl_no": 1}
-                    ))
-                    for n_rec in nabh_records:
-                        tid = n_rec.get("test_id")
-                        if tid is not None and str(tid).strip() != "":
-                            t_str = str(tid).strip()
-                            nabh_tid_map[t_str] = n_rec
-                            try:
-                                nabh_tid_map[str(int(t_str))] = n_rec
-                            except Exception:
-                                pass
-                        c = n_rec.get("nabh_code")
-                        if c and str(c).strip():
-                            nabh_code_map[str(c).strip().upper()] = n_rec
-                except Exception as e:
-                    print(f"Error prefetching hospital_lab_nabh_rate: {e}")
+            bills = list(db["hospital_investbilling"].find(inv_q))
 
             lab_test_ids = set()
             lab_codes = set()
