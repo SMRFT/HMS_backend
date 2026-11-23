@@ -765,7 +765,113 @@ def get_next_room_kit_id():
     )
 
 
-# 6. Pharmacy Billing Bill Number (Outlet-Wise)
+# 6. Pharmacy Billing Bill Number & Primary Key Bill_id
+def get_next_pharmacy_bill_id(db_instance=None):
+    """
+    Returns the next strictly unique, collision-free integer Bill_id for PharmacyBilling.
+    Thread-safe and atomic across all billing and ward request workflows.
+
+    Guarantees:
+    1. Uses MongoDB 'counters' collection (_id: 'pharmacy_billing_bill_id') with atomic $inc.
+    2. Self-healing synchronization: if 'seq' in counters ever lags behind the true
+       maximum Bill_id in 'hospital_pharmacybilling', it immediately synchronizes
+       and jumps past the maximum existing Bill_id.
+    3. Collision check: verifies against 'hospital_pharmacybilling' that the candidate
+       Bill_id does NOT already exist. If any document exists (e.g. from legacy or direct inserts),
+       it advances the counter until an unused, strictly unique Bill_id is secured.
+    """
+    should_close = False
+    if db_instance is not None:
+        db = db_instance
+    else:
+        client, db = _get_db()
+        should_close = True
+
+    try:
+        counters = db["counters"]
+        pharm_col = db["hospital_pharmacybilling"]
+
+        # Atomic increment
+        doc = counters.find_one_and_update(
+            {"_id": "pharmacy_billing_bill_id"},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        candidate = int(doc.get("seq", 1))
+
+        # Check for collision against actual hospital_pharmacybilling collection
+        if pharm_col.find_one({"Bill_id": {"$in": [candidate, int(candidate)]}}, {"_id": 1}) is not None:
+            # Collision detected! Find the true maximum Bill_id in collection
+            max_doc = pharm_col.find_one(
+                {"Bill_id": {"$ne": None}},
+                sort=[("Bill_id", -1)],
+                projection={"Bill_id": 1}
+            )
+            true_max = int(max_doc["Bill_id"]) if (max_doc and max_doc.get("Bill_id") is not None) else candidate
+            target = max(candidate, true_max) + 1
+
+            # Advance counter atomically to target
+            counters.update_one(
+                {"_id": "pharmacy_billing_bill_id"},
+                {"$max": {"seq": target}}
+            )
+
+            # Skip any sparse scattered IDs ahead
+            while pharm_col.find_one({"Bill_id": {"$in": [target, int(target)]}}, {"_id": 1}) is not None:
+                target += 1
+                counters.update_one(
+                    {"_id": "pharmacy_billing_bill_id"},
+                    {"$max": {"seq": target}}
+                )
+
+            # Ensure counter seq is updated to target
+            counters.update_one(
+                {"_id": "pharmacy_billing_bill_id"},
+                {"$max": {"seq": target}}
+            )
+            return target
+
+        return candidate
+    finally:
+        if should_close:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def peek_next_pharmacy_bill_id(db_instance=None):
+    """Read-only preview of the next candidate Bill_id without consuming a sequence."""
+    should_close = False
+    if db_instance is not None:
+        db = db_instance
+    else:
+        client, db = _get_db()
+        should_close = True
+
+    try:
+        counters = db["counters"]
+        pharm_col = db["hospital_pharmacybilling"]
+        existing = counters.find_one({"_id": "pharmacy_billing_bill_id"})
+        seq = int(existing["seq"]) if (existing and "seq" in existing) else 0
+
+        max_doc = pharm_col.find_one(
+            {"Bill_id": {"$ne": None}},
+            sort=[("Bill_id", -1)],
+            projection={"Bill_id": 1}
+        )
+        true_max = int(max_doc["Bill_id"]) if (max_doc and max_doc.get("Bill_id") is not None) else 0
+        candidate = max(seq, true_max) + 1
+        return candidate
+    finally:
+        if should_close:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def get_next_pharmacy_bill_no(outlet_code=None, fy=None, db_instance=None):
     """
     Returns next sequential, outlet-wise Pharmacy bill number:

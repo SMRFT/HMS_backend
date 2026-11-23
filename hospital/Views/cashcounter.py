@@ -14,8 +14,12 @@ from datetime import datetime
 from bson.decimal128 import Decimal128
 
 from decimal import Decimal
+import logging
+logger = logging.getLogger(__name__)
 
-from ..models import Cashcountershiftdetails,PharmacyBilling,Patient,DischargeBilling,Billing
+from rest_framework import status
+
+from ..models import Cashcountershiftdetails,PharmacyBilling,Patient,DischargeBilling,Billing,ReceiptAndPayment
 
 
 from ..serializers import CashcountershiftdetailsSerializer,PharmacyBillingSerializer, PatientSerializer, DischargeBillingSerializer, BillingSerializer, CashCounterCollectionSerializer
@@ -2340,19 +2344,6 @@ def serialize_mongo(doc):
     return doc
 
 
-# =========================================================
-# ✅ DECIMAL CONVERTER
-# =========================================================
-def convert_decimal(value):
-
-    if isinstance(value, Decimal128):
-        return float(value.to_decimal())
-
-    try:
-        return float(value)
-    except:
-        return 0.0
-
 
 # =========================================================
 # ✅ PATIENT LOOKUP HELPER (ROBUST MULTI-FALLBACK SEARCH)
@@ -2487,11 +2478,10 @@ def get_mainblock_pendingbills(request):
     try:
 
         data = request.data if isinstance(request.data, dict) else {}
-        employee_id = (
-            data.get("auth-user-id") )
-        hospital_code = data.get("auth-hospital-code")  
-        branch_code = data.get("auth-branch-code")  
-        outlet_code = data.get("auth-outlet-code") 
+        employee_id = data.get("auth-user-id") or request.GET.get("auth-user-id")
+        hospital_code = data.get("auth-hospital-code") or request.GET.get("auth-hospital-code")
+        branch_code = data.get("auth-branch-code") or request.GET.get("auth-branch-code")
+        outlet_code = data.get("auth-outlet-code") or request.GET.get("auth-outlet-code")
         final_data = []
 
         # =========================================================
@@ -2947,9 +2937,7 @@ def get_mainblock_pendingbills(request):
                 doc_name_cache[d_str] = d_str
                 return d_str
             try:
-                ids = [d_str]
-                if d_str.isdigit():
-                    ids.append(int(d_str))
+                ids = [d_str, int(d_str)] if d_str.isdigit() else [d_str]
                 p_doc = profile_col.find_one({"employeeId": {"$in": ids}}, {"employeeName": 1, "name": 1})
                 if p_doc:
                     nm = p_doc.get("employeeName") or p_doc.get("name")

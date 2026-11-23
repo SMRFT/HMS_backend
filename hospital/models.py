@@ -627,28 +627,47 @@ class PharmacyBilling(AuditModel):
     Package_id = models.CharField(max_length=100, blank=True, null=True)
     is_received = models.BooleanField(default=False)
 
-    # :white_check_mark: AUTO-INCREMENT LOGIC
+    # ✅ AUTO-INCREMENT LOGIC (Guaranteed Unique & Collision-Free)
     def save(self, *args, **kwargs):
-        if not self.Bill_id:
-            try:
-                from .counter_service import get_next_sequence_value
-                def _seed_pharmacy_bill_id(db):
-                    last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
-                    return last.Bill_id if (last and last.Bill_id is not None) else 0
+        is_new = self._state.adding or not self.Bill_id
+        if is_new:
+            from .counter_service import get_next_pharmacy_bill_id, _get_db
 
-                self.Bill_id = get_next_sequence_value(
-                    "pharmacy_billing_bill_id",
-                    seed_resolver=_seed_pharmacy_bill_id
-                )
-            except Exception:
-                last = PharmacyBilling.objects.filter(Bill_id__isnull=False).order_by('-Bill_id').first()
-                last_id = last.Bill_id if (last and last.Bill_id is not None) else 0
-                self.Bill_id = last_id + 1
+            # Prevent Djongo from executing an UPDATE on any existing record with the same PK
+            if "force_insert" not in kwargs and not kwargs.get("force_update"):
+                kwargs["force_insert"] = True
 
-        super().save(*args, **kwargs)
+            max_retries = 5
+            for attempt in range(max_retries):
+                if not self.Bill_id or attempt > 0:
+                    self.Bill_id = get_next_pharmacy_bill_id()
+
+                # Verify if Bill_id is already present. If present, create new Bill_id!
+                try:
+                    client, db = _get_db()
+                    try:
+                        while db["hospital_pharmacybilling"].find_one({"Bill_id": int(self.Bill_id)}, {"_id": 1}) is not None:
+                            self.Bill_id = get_next_pharmacy_bill_id(db_instance=db)
+                    finally:
+                        client.close()
+                except Exception:
+                    pass
+
+                try:
+                    super().save(*args, **kwargs)
+                    return
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if attempt < max_retries - 1 and ("duplicate" in err_msg or "unique" in err_msg or "11000" in err_msg or "databaseerror" in str(type(e)).lower()):
+                        self.Bill_id = None
+                        continue
+                    raise
+        else:
+            super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.billing_status} - {self.patient_name}"  
+        pname = getattr(self, "patientname", None) or getattr(self, "patient_name", "") or getattr(self, "uhid", "")
+        return f"{self.billing_status} - {pname}"  
 
 
         
