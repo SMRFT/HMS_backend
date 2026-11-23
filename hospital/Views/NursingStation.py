@@ -1233,7 +1233,14 @@ def save_lab_ward_request(request):
 
         # Auto-enrich NABH code
         nabh_records = list(mongo_db["hospital_lab_nabh_rate"].find({}, {"_id": 0, "test_id": 1, "nabh_code": 1}))
-        nabh_map = {str(r.get("test_id", "")).strip(): str(r.get("nabh_code", "")).strip() for r in nabh_records if r.get("test_id") is not None}
+        nabh_map = {}
+        for r in nabh_records:
+            t_fld = r.get("test_id")
+            if t_fld is not None:
+                t_list = t_fld if isinstance(t_fld, list) else [t_fld]
+                for tid in t_list:
+                    if tid is not None and str(tid).strip():
+                        nabh_map[str(tid).strip()] = str(r.get("nabh_code", "")).strip()
 
         enriched_tests = []
         total_price = 0
