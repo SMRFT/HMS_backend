@@ -33,7 +33,7 @@ from .dbcollection import (
     hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name,
     get_room_details, hospital_room
 )
-from ..counter_service import get_next_pharmacy_bill_no, get_next_sequence_value
+from ..counter_service import get_next_pharmacy_bill_no, get_next_pharmacy_bill_id, get_next_sequence_value
 
 # MongoDB Configuration
 from dotenv import load_dotenv
@@ -1296,7 +1296,7 @@ def save_pharmacy_bill(request):
     # ======================================================
     if request.method == "POST":
 
-        next_Bill_id = get_next_sequence_value("pharmacy_billing_bill_id", db_instance=mongo_db)
+        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
 
         record_doc = {
             "Bill_id":              next_Bill_id,
@@ -1356,7 +1356,21 @@ def save_pharmacy_bill(request):
                 "is_active":    True,
             })
 
-            bill_collection.insert_one(record_doc)
+            # Verify if Bill_id is already present. If present, create new Bill_id!
+            while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+
+            while True:
+                try:
+                    bill_collection.insert_one(record_doc)
+                    break
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "11000" in str(e):
+                        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                        record_doc["Bill_id"] = next_Bill_id
+                    else:
+                        raise
 
             adjust_blocked_stock(
                 [],
@@ -1394,7 +1408,21 @@ def save_pharmacy_bill(request):
                 "is_active":    True,
             })
 
-            bill_collection.insert_one(record_doc)
+            # Verify if Bill_id is already present. If present, create new Bill_id!
+            while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+
+            while True:
+                try:
+                    bill_collection.insert_one(record_doc)
+                    break
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "11000" in str(e):
+                        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                        record_doc["Bill_id"] = next_Bill_id
+                    else:
+                        raise
 
             adjust_blocked_stock(
                 [],
@@ -1646,7 +1674,7 @@ def save_oppharmacy_estimate(request):
     data["billing_status"] = "Estimate"
 
     # Calculate next Bill_id atomically
-    next_Bill_id = get_next_sequence_value("pharmacy_billing_bill_id", db_instance=mongo_db)
+    next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
 
@@ -1687,7 +1715,21 @@ def save_oppharmacy_estimate(request):
     if not data.get("uhid") and raw_pname:
         record_doc["patient_name"] = raw_pname
 
-    result = bill_collection.insert_one(record_doc)
+    # Verify if Bill_id is already present. If present, create new Bill_id!
+    while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+        record_doc["Bill_id"] = next_Bill_id
+
+    while True:
+        try:
+            result = bill_collection.insert_one(record_doc)
+            break
+        except Exception as e:
+            if "duplicate" in str(e).lower() or "11000" in str(e):
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+            else:
+                raise
 
     if result.inserted_id:
         return Response(
@@ -4965,16 +5007,36 @@ def finalize_bill(request):
         set_payload["billed_id"]            = employee_id
         set_payload["lastmodified_date"]    = now_ts
         set_payload["lastmodified_by"]      = employee_id
-        cumulative_bill_total = sum(
+        items_to_sum = final_particulars if is_ward else sanitized_meds
+        cumulative_bill_total = round(sum(
             float(it.get("total") or it.get("calculated_price") or 0)
-            for it in (final_particulars if is_ward else sanitized_meds)
+            for it in items_to_sum
             if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+
+        tot_item_disc = round(sum(
+            float(it.get("discount_amount") or it.get("discount") or 0)
+            for it in items_to_sum
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+        overall_disc = float(
+            frontend_overall_discount_amount
+            or data.get("overall_discount_amount")
+            or bill.get("overall_discount_amount")
+            or 0.0
         )
-        if is_ward and cumulative_bill_total > 0:
-            rounded_net = float(round(cumulative_bill_total))
-            set_payload["total_amount"]         = round(cumulative_bill_total, 2)
+        total_disc = round(tot_item_disc + overall_disc, 2)
+        if total_disc == 0:
+            total_disc = float(data.get("discount_amount") or bill.get("discount_amount") or 0.0)
+
+        if cumulative_bill_total > 0:
+            computed_net = max(0.0, cumulative_bill_total - total_disc)
+            rounded_net = float(round(computed_net))
+            set_payload["total_amount"]         = cumulative_bill_total
+            set_payload["total_item_discount"]  = tot_item_disc
+            set_payload["discount_amount"]      = total_disc
             set_payload["net_amount"]           = rounded_net
-            set_payload["round_off"]            = round(rounded_net - cumulative_bill_total, 2)
+            set_payload["round_off"]            = round(rounded_net - computed_net, 2)
         else:
             set_payload["total_amount"]         = total_amount_to_use
             set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
