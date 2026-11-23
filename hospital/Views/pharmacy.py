@@ -1142,7 +1142,17 @@ def save_pharmacy_bill(request):
             if not record.get("estimate_no"):
                 update_data["estimate_no"] = generate_estimate_no()
             update_data["billing_status"] = "Estimate"
-            update_data["billing_mode"]   = "ESTIMATE"
+            existing_bm = str(record.get("billing_mode") or "").strip().upper()
+            req_no = str(record.get("request_no") or "").strip().upper()
+            if existing_bm in ["OT REQUEST", "WARD REQUEST", "DISCHARGE MEDICINE"] or req_no.startswith("OT") or req_no.startswith("MR") or record.get("is_ward_request"):
+                if existing_bm == "OT REQUEST" or req_no.startswith("OT"):
+                    update_data["billing_mode"] = "OT REQUEST"
+                elif "DISCHARGE" in existing_bm:
+                    update_data["billing_mode"] = "DISCHARGE MEDICINE"
+                else:
+                    update_data["billing_mode"] = "WARD REQUEST"
+            else:
+                update_data["billing_mode"]   = "ESTIMATE"
             update_data["bill_date"]      = datetime.utcnow()
 
         # 🔥 CONVERT TO BILL
@@ -1293,10 +1303,23 @@ def save_pharmacy_bill(request):
                 db_instance=mongo_db
             )
 
+            existing_bm = str(data.get("billing_mode") or "").strip().upper()
+            req_no = str(data.get("request_no") or "").strip().upper()
+            is_ward = data.get("is_ward_request") or existing_bm == "WARD REQUEST" or req_no.startswith("MR")
+            is_ot = existing_bm == "OT REQUEST" or req_no.startswith("OT")
+            if is_ot:
+                resolved_bm = "OT REQUEST"
+            elif is_ward:
+                resolved_bm = "WARD REQUEST"
+            elif existing_bm:
+                resolved_bm = existing_bm
+            else:
+                resolved_bm = "IP CREDIT" if norm_pm == "Credit" else "DIRECT"
+
             record_doc.update({
                 "bill_no":      bill_no,
                 "estimate_no":  None,
-                "billing_mode": data.get("billing_mode") or ("IP CREDIT" if norm_pm == "Credit" else "DIRECT"),
+                "billing_mode": resolved_bm,
                 "payment_mode": norm_pm or "Cash",
                 "billed_id":    employee_id,
                 "is_active":    True,
@@ -4704,10 +4727,29 @@ def finalize_bill(request):
             or ins_comp_val
         )
 
+        # 🛑 Rule: billing_mode should NEVER change from WARD REQUEST or OT REQUEST or DISCHARGE MEDICINE!
+        existing_bm = str(bill.get("billing_mode") or data.get("billing_mode") or "").strip().upper()
+        req_no = str(bill.get("request_no") or data.get("request_no") or "").strip().upper()
+        is_ward = is_ward or bill.get("is_ward_request") or data.get("is_ward_request") or existing_bm == "WARD REQUEST" or req_no.startswith("MR")
+        is_ot = existing_bm == "OT REQUEST" or req_no.startswith("OT")
+        is_discharge = "DISCHARGE" in existing_bm
+
+        if is_ot:
+            set_payload["billing_mode"] = "OT REQUEST"
+        elif is_discharge:
+            set_payload["billing_mode"] = "DISCHARGE MEDICINE"
+        elif is_ward:
+            set_payload["billing_mode"] = "WARD REQUEST"
+        elif existing_bm and existing_bm not in ["ESTIMATE", "DIRECT"]:
+            set_payload["billing_mode"] = existing_bm
+        elif is_insurance_patient:
+            set_payload["billing_mode"] = "IP CREDIT"
+        elif data.get("billing_mode"):
+            set_payload["billing_mode"] = data.get("billing_mode")
+
         raw_final_pm = data.get("payment_mode") or data.get("paymentMode")
         if is_insurance_patient:
             set_payload["payment_mode"] = "Credit"
-            set_payload["billing_mode"] = "IP CREDIT"
             set_payload["is_insurance"] = True
             set_payload["customer_type"] = "Insurance"
         elif raw_final_pm:
