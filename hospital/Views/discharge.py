@@ -2766,7 +2766,31 @@ def search_discharge_patient(request):
             }
 
         if inv_q:
-            bills = list(db["hospital_investbilling"].find(inv_q))
+            is_insurance_patient = str(patient_info.get("patient_type") or "").strip().lower() == "insurance"
+            nabh_tid_map, nabh_code_map = {}, {}
+            if is_insurance_patient:
+                try:
+                    nabh_records = list(db["hospital_lab_nabh_rate"].find(
+                        {},
+                        {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1, "sl_no": 1}
+                    ))
+                    for n_rec in nabh_records:
+                        tid_field = n_rec.get("test_id")
+                        if tid_field is not None:
+                            tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
+                            for tid in tid_list:
+                                if tid is not None and str(tid).strip() != "":
+                                    t_str = str(tid).strip()
+                                    nabh_tid_map[t_str] = n_rec
+                                    try:
+                                        nabh_tid_map[str(int(t_str))] = n_rec
+                                    except Exception:
+                                        pass
+                        c = n_rec.get("nabh_code")
+                        if c and str(c).strip():
+                            nabh_code_map[str(c).strip().upper()] = n_rec
+                except Exception as e:
+                    print(f"Error prefetching hospital_lab_nabh_rate: {e}")
 
             lab_test_ids = set()
             lab_codes = set()
@@ -3586,14 +3610,17 @@ def get_discharge_investigation_items(request):
         nabh_map = {}
         nabh_code_map = {}
         for n_rec in nabh_records:
-            tid = n_rec.get('test_id')
-            if tid is not None and str(tid).strip() != '':
-                tid_str = str(tid).strip()
-                nabh_map[tid_str] = n_rec
-                try:
-                    nabh_map[str(int(tid_str))] = n_rec
-                except Exception:
-                    pass
+            tid_field = n_rec.get('test_id')
+            if tid_field is not None:
+                tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
+                for tid in tid_list:
+                    if tid is not None and str(tid).strip() != '':
+                        tid_str = str(tid).strip()
+                        nabh_map[tid_str] = n_rec
+                        try:
+                            nabh_map[str(int(tid_str))] = n_rec
+                        except Exception:
+                            pass
             n_code = n_rec.get('nabh_code')
             if n_code and str(n_code).strip():
                 nabh_code_map[str(n_code).strip().upper()] = n_rec
@@ -3657,10 +3684,12 @@ def get_discharge_investigation_items(request):
             formatted_items.append({
                 "itemName": display_name,
                 "price": str(price),
+                "rate": str(price),
                 "test_id": t_id,
                 "nabh_code": nabh_code,
                 "nabh_rate": _to_float(nabh_info.get("nabh_rate")) if nabh_info and nabh_info.get("nabh_rate") is not None else None,
                 "non_nabh_rate": _to_float(nabh_info.get("non_nabh_rate")) if nabh_info and nabh_info.get("non_nabh_rate") is not None else None,
+                "no_nabh_rate": _to_float(nabh_info.get("non_nabh_rate")) if nabh_info and nabh_info.get("non_nabh_rate") is not None else None,
             })
 
         # If customer is insurance, also append any NABH tests from hospital_lab_nabh_rate not in core_testdetails
@@ -3681,10 +3710,12 @@ def get_discharge_investigation_items(request):
                 formatted_items.append({
                     "itemName": t_name,
                     "price": str(r) if r is not None else "0",
-                    "test_id": n_rec.get("test_id") or 0,
+                    "rate": str(r) if r is not None else "0",
+                    "test_id": (n_rec.get("test_id")[0] if isinstance(n_rec.get("test_id"), list) and n_rec.get("test_id") else n_rec.get("test_id")) or 0,
                     "nabh_code": n_code,
                     "nabh_rate": _to_float(n_rec.get("nabh_rate")) if n_rec.get("nabh_rate") is not None else None,
                     "non_nabh_rate": _to_float(n_rec.get("non_nabh_rate")) if n_rec.get("non_nabh_rate") is not None else None,
+                    "no_nabh_rate": _to_float(n_rec.get("non_nabh_rate")) if n_rec.get("non_nabh_rate") is not None else None,
                 })
 
         return JsonResponse({"items": formatted_items}, safe=True)

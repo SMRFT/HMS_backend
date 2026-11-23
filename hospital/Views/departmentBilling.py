@@ -1082,22 +1082,46 @@ def get_investigation_items(request):
             # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
             hms_db = client['HMS']
             nabh_collection = hms_db['hospital_lab_nabh_rate']
-            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1}))
+            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1}))
 
             client.close()
 
-            # Build lookup dictionary by test_id (as string)
+            # Build lookup dictionary: each individual test_id -> nabh_record
+            # test_id in hospital_lab_nabh_rate can be a single int OR a list of ints
+            # (multiple tests sharing the same nabh_code/rate).
             nabh_map = {}
             for n_rec in nabh_records:
-                tid = n_rec.get('test_id')
-                if tid is not None:
-                    nabh_map[str(tid).strip()] = n_rec
+                tid_field = n_rec.get('test_id')
+                if tid_field is None:
+                    continue
+                # Normalise to list so single-int and array are handled the same way
+                tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
+                for tid in tid_list:
+                    if tid is not None:
+                        t_str = str(tid).strip()
+                        nabh_map[t_str] = n_rec
+                        try:
+                            nabh_map[str(int(t_str))] = n_rec
+                        except Exception:
+                            pass
 
             btn_upper = str(bill_type_no).upper().strip()
             formatted_items = []
             for test in tests:
                 t_id = test.get('test_id', '')
                 t_id_str = str(t_id).strip() if t_id is not None else ''
+
+                # Lookup NABH record (supporting both string and integer keys)
+                nabh_info = nabh_map.get(t_id_str)
+                if not nabh_info and t_id_str:
+                    try:
+                        nabh_info = nabh_map.get(str(int(t_id_str)))
+                    except Exception:
+                        nabh_info = None
+
+                nabh_code = str(nabh_info.get('nabh_code', '')).strip() if nabh_info else ""
+                nabh_rate = nabh_info.get('nabh_rate') if nabh_info else None
+                non_nabh_rate = nabh_info.get('non_nabh_rate') if nabh_info else None
 
                 if btn_upper == "LAB01":
                     # LAB01: No nabh_code, price from SH_Rate
@@ -1106,11 +1130,8 @@ def get_investigation_items(request):
 
                 elif btn_upper == "LAB02":
                     # LAB02: NABH rate & NABH code
-                    if not (t_id_str and t_id_str in nabh_map):
+                    if not nabh_info:
                         continue
-                    nabh_info = nabh_map[t_id_str]
-                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
-                    nabh_rate = nabh_info.get('nabh_rate')
                     if nabh_rate is not None and str(nabh_rate).strip() != "" and str(nabh_rate).strip().lower() != "none":
                         price = str(nabh_rate).strip()
                     else:
@@ -1118,11 +1139,8 @@ def get_investigation_items(request):
 
                 elif btn_upper == "LAB03":
                     # LAB03: Non-NABH rate & NABH code
-                    if not (t_id_str and t_id_str in nabh_map):
+                    if not nabh_info:
                         continue
-                    nabh_info = nabh_map[t_id_str]
-                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
-                    non_nabh_rate = nabh_info.get('non_nabh_rate')
                     if non_nabh_rate is not None and str(non_nabh_rate).strip() != "" and str(non_nabh_rate).strip().lower() != "none":
                         price = str(non_nabh_rate).strip()
                     else:
@@ -1130,8 +1148,6 @@ def get_investigation_items(request):
 
                 else:
                     # Fallback for any other LAB category
-                    nabh_info = nabh_map.get(t_id_str, {})
-                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
                     price = test.get('SH_Rate', '0')
 
                 if price is None or str(price).strip().lower() == 'none' or str(price).strip() == '':
@@ -1140,8 +1156,12 @@ def get_investigation_items(request):
                 formatted_items.append({
                     "itemName": test.get('test_name', ''),
                     "price": str(price),
+                    "rate": str(price),
                     "test_id": t_id,
                     "nabh_code": nabh_code,
+                    "nabh_rate": nabh_rate,
+                    "non_nabh_rate": non_nabh_rate,
+                    "no_nabh_rate": non_nabh_rate,
                     "shortcut": (test.get('shortcut') or "").strip(),
                 })
 
@@ -1198,6 +1218,7 @@ def get_investigation_items(request):
                             "itemName": item_name,
                             "item_id": item_id,
                             "price": price if (price and price.lower() != "none") else "0",
+                            "rate": price if (price and price.lower() != "none") else "0",
                             "nabh_code": nabh_code,
                            "shortcut": (item.get('shortcut') or "").strip(),
                         })
@@ -1218,6 +1239,7 @@ def get_investigation_items(request):
                             "itemName": item_name,
                             "item_id": item_id,
                             "price": price,
+                            "rate": price,
                             "nabh_code": nabh_code,
                             "shortcut": (item.get('shortcut') or "").strip(),
                         })
@@ -2427,21 +2449,21 @@ def invest_refund_create(request):
 
         # ── Last-incremental refundBillNo (no atomic counter) ────────────────
         # Find the highest existing refundBillNo for this prefix and add 1.
+       # Match only well-formed numbers: prefix + exactly 6 digits
         last_doc = refund_col.find_one(
-            {'refundBillNo': {'$regex': f'^{re.escape(prefix)}'}},
+            {'refundBillNo': {'$regex': f'^{re.escape(prefix)}\\d{{6}}$'}},
             sort=[('refundBillNo', -1)]
         )
 
+        last_seq = 0
         if last_doc and last_doc.get('refundBillNo'):
             try:
-                last_seq = int(last_doc['refundBillNo'].rsplit('/', 1)[-1])
+                last_seq = int(last_doc['refundBillNo'][len(prefix):])
             except (ValueError, IndexError):
                 last_seq = 0
-        else:
-            last_seq = 0
 
         next_seq       = last_seq + 1
-        refund_bill_no = f"{prefix}{next_seq:06d}"   # e.g. "2627/16/000009"
+        refund_bill_no = f"{prefix}{next_seq:06d}"   # e.g. "2627000006"
 
         # ── Build document ───────────────────────────────────────────────────
         now = timezone.now()
