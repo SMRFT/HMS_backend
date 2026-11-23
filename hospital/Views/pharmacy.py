@@ -4971,8 +4971,10 @@ def finalize_bill(request):
             if not it.get("is_deleted") and not it.get("deleted_is")
         )
         if is_ward and cumulative_bill_total > 0:
+            rounded_net = float(round(cumulative_bill_total))
             set_payload["total_amount"]         = round(cumulative_bill_total, 2)
-            set_payload["net_amount"]           = round(cumulative_bill_total, 2)
+            set_payload["net_amount"]           = rounded_net
+            set_payload["round_off"]            = round(rounded_net - cumulative_bill_total, 2)
         else:
             set_payload["total_amount"]         = total_amount_to_use
             set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
