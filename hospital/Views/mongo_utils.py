@@ -641,3 +641,143 @@ def apply_date_filter(filter_q, request, date_field="created_date"):
 
     return filter_q
 
+
+def get_unified_purchase_returns(from_date=None, to_date=None, vendor_id=None, search_query=None, vendor_map=None):
+    """
+    Fetch and unify purchase returns from BOTH:
+    1. hospital_storespurchasereturn (StoresPurchaseReturn)
+    2. hospital_purchasereturn (Pharmacy/General PurchaseReturn)
+    Matches debit notes, resolves vendor details, computes accurate item-level or bill-level return values,
+    and applies date/vendor/search filtering.
+    """
+    from hospital.Views.dbcollection import hms_db
+    if vendor_map is None:
+        vendor_map = {}
+
+    spr_docs = list(hms_db['hospital_storespurchasereturn'].find({'is_active': {'$ne': False}}))
+    spr_by_key = {}
+    for spr in spr_docs:
+        d_no = str(spr.get('debit_note_no') or spr.get('return_id') or '').strip()
+        m = re.search(r'(\d{4}\d{6})$', d_no)
+        if m:
+            spr_by_key[m.group(1)] = spr
+        elif len(d_no) >= 10:
+            spr_by_key[d_no[-10:]] = spr
+
+    pr_docs = list(hms_db['hospital_purchasereturn'].find())
+    unified = []
+    seen_spr_ids = set()
+
+    def _safe_float(val):
+        if not val:
+            return 0.0
+        try:
+            return float(str(val).replace(',', '').strip())
+        except Exception:
+            return 0.0
+
+    def _format_dt(d):
+        if not d:
+            return ''
+        if hasattr(d, 'strftime'):
+            return d.strftime('%Y-%m-%d')
+        return str(d).strip()[:10]
+
+    for pr in pr_docs:
+        b_no = str(pr.get('purchase_return_bill_no') or '').strip()
+        clean_b = b_no.replace('/', '')
+        spr_match = spr_by_key.get(clean_b)
+        if not spr_match:
+            for k, v in spr_by_key.items():
+                if k.endswith(clean_b) or clean_b.endswith(k):
+                    spr_match = v
+                    break
+
+        if spr_match:
+            seen_spr_ids.add(str(spr_match.get('_id')))
+            vid = str(spr_match.get('vendor_id') or '').strip()
+            vname = spr_match.get('vendor_name') or vendor_map.get(vid) or vid
+            reason = spr_match.get('return_reason') or pr.get('return_remark') or 'Purchase Return'
+            debit_no = spr_match.get('debit_note_no') or b_no
+            grn_no = spr_match.get('grn_number') or pr.get('grn_number') or '-'
+            items = pr.get('items') or spr_match.get('items') or []
+        else:
+            vid = str(pr.get('vendor_id') or '').strip()
+            vname = pr.get('vendor_name') or vendor_map.get(vid) or vid
+            reason = pr.get('return_remark') or 'Purchase Return'
+            debit_no = b_no
+            grn_no = pr.get('grn_number') or '-'
+            items = pr.get('items') or []
+
+        amt = _safe_float(pr.get('purchase_return_amount'))
+        if amt <= 0 and isinstance(items, list):
+            amt = sum(_safe_float(it.get('price', 0)) * _safe_float(it.get('return_qty', 0)) for it in items if isinstance(it, dict))
+
+        dt = pr.get('purchase_return_bill_date') or pr.get('created_date')
+        d_str = _format_dt(dt)
+
+        if from_date and d_str and d_str < str(from_date)[:10]:
+            continue
+        if to_date and d_str and d_str > str(to_date)[:10]:
+            continue
+        if vendor_id and vendor_id != 'all' and str(vid) != str(vendor_id):
+            continue
+        if search_query:
+            sq = search_query.lower()
+            if sq not in str(vname).lower() and sq not in str(vid).lower() and sq not in str(b_no).lower() and sq not in str(debit_no).lower() and sq not in str(grn_no).lower():
+                continue
+
+        unified.append({
+            'return_id': b_no or debit_no,
+            'debit_note_no': debit_no,
+            'date': d_str,
+            'vendor_id': vid,
+            'vendor_name': vname,
+            'grn_number': grn_no,
+            'reason': reason,
+            'total_amount': round(amt, 2),
+            'items_count': len(items) if isinstance(items, list) else 0,
+            'items': items if isinstance(items, list) else []
+        })
+
+    # Add remaining SPR documents that did not match PR
+    for spr in spr_docs:
+        if str(spr.get('_id')) in seen_spr_ids:
+            continue
+
+        d_no = str(spr.get('debit_note_no') or spr.get('return_id') or '').strip()
+        vid = str(spr.get('vendor_id') or '').strip()
+        vname = spr.get('vendor_name') or vendor_map.get(vid) or vid
+        items = spr.get('items') or []
+        amt = _safe_float(spr.get('total_return_amount'))
+        if amt <= 0 and isinstance(items, list):
+            amt = sum(_safe_float(it.get('rate') or it.get('price', 0)) * _safe_float(it.get('quantity') or it.get('return_qty', 0)) for it in items if isinstance(it, dict))
+        dt = spr.get('return_date') or spr.get('created_date')
+        d_str = _format_dt(dt)
+
+        if from_date and d_str and d_str < str(from_date)[:10]:
+            continue
+        if to_date and d_str and d_str > str(to_date)[:10]:
+            continue
+        if vendor_id and vendor_id != 'all' and str(vid) != str(vendor_id):
+            continue
+        if search_query:
+            sq = search_query.lower()
+            if sq not in str(vname).lower() and sq not in str(vid).lower() and sq not in str(d_no).lower():
+                continue
+
+        unified.append({
+            'return_id': spr.get('return_id') or d_no,
+            'debit_note_no': d_no,
+            'date': d_str,
+            'vendor_id': vid,
+            'vendor_name': vname,
+            'grn_number': spr.get('grn_number') or '-',
+            'reason': spr.get('return_reason') or 'Purchase Return',
+            'total_amount': round(amt, 2),
+            'items_count': len(items) if isinstance(items, list) else 0,
+            'items': items if isinstance(items, list) else []
+        })
+
+    return unified
+

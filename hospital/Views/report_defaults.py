@@ -88,6 +88,14 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                          'page_id': 10,
                          'permissions': {   'Supplier-Based GRN Report': 'HMS-STORES-SUPPLIER-GRN-RPT'},
                          'route': '/StoresSupplierGrnReport'},
+                     {   'description': 'Chronological Goods Received Note (GRN) report '
+                                        'categorized by Date with active suppliers, '
+                                        'gross purchases, returns, and net purchases.',
+                         'icon': 'CalendarDays',
+                         'name': 'Date-Based Stores GRN Report',
+                         'page_id': 21,
+                         'permissions': {   'Date-Based Stores GRN Report': 'HMS-P-SGRN'},
+                         'route': '/StoresDateGrnReport'},
                      {   'description': 'Store item requisitions (indents) '
                                         'grouped by Department with approval '
                                         'status and item quantities.',
@@ -904,6 +912,14 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'route': '/DrugSupplierGrnReport'
             },
             {
+                'description': 'Goods Received Note (GRN) report categorized by Date with day of week, supplier count, gross purchases, returns, and net purchases from hospital_grn and hospital_vendor.',
+                'icon': 'CalendarDays',
+                'name': 'Date-Based GRN Report (ALL (IP PHARMACY, OP PHARMACY, DRUG PURCHASE))',
+                'page_id': 615,
+                'permissions': {'Date-Based GRN Report (ALL (IP PHARMACY, OP PHARMACY, DRUG PURCHASE))': 'HMS-P-DPRD'},
+                'route': '/DrugDateGrnReport'
+            },
+            {
                 'description': 'Store item requisitions (indents) grouped by Department with approval status and item quantities.',
                 'icon': 'ClipboardList',
                 'name': 'Department-Based Indent Report',
@@ -1255,30 +1271,34 @@ def seed_default_report_masters(force=False):
             ]
         }
         existing = collection.find_one(update_filter)
-        if not existing:
-            doc = {
-                'group': g['group'],
-                'group_id': g['group_id'],
-                'order': g.get('order', 1),
-                'pages': g.get('pages', []),
-                'is_active': True,
-                'created_by': 'system_seed',
-                'created_date': now,
-                'lastmodified_date': now,
-            }
-            collection.insert_one(doc)
-        elif force:
-            collection.update_one(
-                {'_id': existing['_id']},
-                {
-                    '$set': {
-                        'group': g['group'],
-                        'group_id': g['group_id'],
-                        'order': g.get('order', 1),
-                        'pages': g.get('pages', []),
-                        'is_active': True,
-                        'lastmodified_by': 'system_seed',
-                        'lastmodified_date': now,
-                    }
+        try:
+            if not existing:
+                doc = {
+                    'group': g['group'],
+                    'group_id': g['group_id'],
+                    'order': g.get('order', 1),
+                    'pages': g.get('pages', []),
+                    'is_active': True,
+                    'created_by': 'system_seed',
+                    'created_date': now,
+                    'lastmodified_date': now,
                 }
-            )
+                collection.insert_one(doc)
+            elif force:
+                collection.update_one(
+                    {'_id': existing['_id']},
+                    {
+                        '$set': {
+                            'group': g['group'],
+                            'group_id': g['group_id'],
+                            'order': g.get('order', 1),
+                            'pages': g.get('pages', []),
+                            'is_active': True,
+                            'lastmodified_by': 'system_seed',
+                            'lastmodified_date': now,
+                        }
+                    }
+                )
+        except Exception as e:
+            # Handle read-only secondary replica gracefully
+            pass

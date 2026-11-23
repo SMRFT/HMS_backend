@@ -519,6 +519,7 @@ urlpatterns = [
 
     # Separate Drug Purchase Reports APIs (like Stores Reports)
     path('drug-supplier-grn-report/', drug_purchase_reports.drug_supplier_grn_report_view, name='drug_supplier_grn_report'),
+    path('drug-date-grn-report/', drug_purchase_reports.drug_date_grn_report_view, name='drug_date_grn_report'),
     path('drug-purchase-analysis-report/', drug_purchase_reports.drug_purchase_analysis_report_view, name='drug_purchase_analysis_report'),
     path('drug-supplier-wise-report/', drug_purchase_reports.drug_supplier_wise_report_view, name='drug_supplier_wise_report'),
     path('drug-previous-day-stock-report/', drug_purchase_reports.drug_previous_day_stock_report_view, name='drug_previous_day_stock_report'),
@@ -645,6 +646,7 @@ urlpatterns = [
     path('vending-machine-sales/import-excel/', stores.vending_machine_sales_import_excel, name='vending_machine_sales_import_excel'),
     path('vending-machine-report/', stores.vending_machine_report, name='vending_machine_report'),
     path('stores-grn-supplier-report/', stores.stores_grn_supplier_report, name='stores_grn_supplier_report'),
+    path('stores-grn-date-report/', stores.stores_grn_date_report, name='stores_grn_date_report'),
     path('stores-indent-department-report/', stores.stores_indent_department_report, name='stores_indent_department_report'),
     
     # Stores Purchase Orders

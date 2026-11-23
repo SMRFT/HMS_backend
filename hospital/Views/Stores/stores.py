@@ -1112,6 +1112,47 @@ def stores_grn_list_create(request):
         category = request.query_params.get('category') or request.GET.get('category') or request.query_params.get('purchase_category') or request.GET.get('purchase_category')
         if category and category != 'ALL':
             queryset = queryset.filter(purchase_category__iexact=category)
+
+        # Single GRN details lookup by GRN number (fast targeted fetch)
+        grn_number = request.query_params.get('grn_number') or request.GET.get('grn_number')
+        if grn_number:
+            import urllib.parse
+            clean_grn = urllib.parse.unquote(str(grn_number)).strip()
+            grn_obj = storesGRN.objects.filter(grn_number=clean_grn, is_active__in=[True]).first()
+            if not grn_obj:
+                grn_obj = storesGRN.objects.filter(grn_number__iexact=clean_grn, is_active__in=[True]).first()
+            if not grn_obj:
+                return Response({"error": "GRN not found"}, status=status.HTTP_404_NOT_FOUND)
+            emp_map = get_employee_map_for_grns([grn_obj])
+            dept_map = get_department_map_for_grns([grn_obj])
+            serializer = StoresGRNSerializer(grn_obj, context={'employee_map': emp_map, 'department_map': dept_map})
+            return Response(serializer.data)
+
+        # Fast lightweight response for GRN numbers dropdown
+        only_numbers = (
+            request.query_params.get('only_numbers') or 
+            request.query_params.get('summary_only') or 
+            request.query_params.get('only_grn_numbers') or 
+            request.GET.get('only_numbers')
+        )
+        if only_numbers:
+            raw_vals = list(queryset.values('grn_number', 'invoice_no', 'date', 'department', 'vendor_id'))
+            formatted_vals = []
+            for item in raw_vals:
+                d_val = item.get('date')
+                if d_val:
+                    if hasattr(d_val, 'strftime'):
+                        d_val = d_val.strftime('%Y-%m-%d')
+                    else:
+                        d_val = str(d_val)
+                formatted_vals.append({
+                    'grn_number': item.get('grn_number'),
+                    'invoice_no': item.get('invoice_no') or '',
+                    'date': d_val or '',
+                    'department': item.get('department') or '',
+                    'vendor_id': item.get('vendor_id') or ''
+                })
+            return Response(formatted_vals)
             
         emp_map = get_employee_map_for_grns(queryset)
         dept_map = get_department_map_for_grns(queryset)
@@ -1527,7 +1568,14 @@ def get_stores_intents(request):
         assigned_depts = (dept_doc.get("departments") if dept_doc else []) or []
         query["department"] = {"$in": assigned_depts}
     elif department_filter:
-        query["department"] = department_filter
+        dept_str = str(department_filter).strip()
+        cands = list(get_department_candidates(dept_str))
+        if len(cands) == 1:
+            query["department"] = cands[0]
+        elif len(cands) > 1:
+            query["department"] = {"$in": cands}
+        else:
+            query["department"] = dept_str
 
     if hod_status:
         if hod_status == 'Pending':
@@ -2870,6 +2918,7 @@ def stores_grn_supplier_report(request):
     to_date = request.query_params.get('to_date') or request.GET.get('to_date')
     vendor_id = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
     search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    department_filter = request.query_params.get('department') or request.GET.get('department')
 
     # Get all active vendors
     vendors_qs = GeneralStoreVendor.objects.filter(is_active__in=[True])
@@ -2885,6 +2934,13 @@ def stores_grn_supplier_report(request):
         grn_qs = grn_qs.filter(date__lte=to_date)
     if vendor_id:
         grn_qs = grn_qs.filter(vendor_id=vendor_id)
+    if department_filter and department_filter != 'ALL':
+        dept_str = str(department_filter).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        grn_qs = grn_qs.filter(q_dept)
 
     # Group GRNs by Supplier
     supplier_groups = {}
@@ -2977,13 +3033,68 @@ def stores_grn_supplier_report(request):
         grand_pending_amount += pend_amt
         grand_tax_amount += tax_amt
 
+    # Fetch unified purchase returns from hospital_purchasereturn AND hospital_storespurchasereturn
+    from hospital.Views.mongo_utils import get_unified_purchase_returns
+    unified_returns = get_unified_purchase_returns(
+        from_date=from_date,
+        to_date=to_date,
+        vendor_id=vendor_id,
+        search_query=search_query,
+        vendor_map=vendor_map
+    )
+
+    total_returns_count = 0
+    grand_return_amount = 0.0
+
+    for ret in unified_returns:
+        v_id = str(ret.get('vendor_id') or 'UNKNOWN')
+        v_name = ret.get('vendor_name') or vendor_map.get(v_id) or v_id
+        ret_amt = _safe_num(ret.get('total_amount'))
+
+        if v_id not in supplier_groups:
+            supplier_groups[v_id] = {
+                'vendor_id': v_id,
+                'vendor_name': v_name,
+                'total_grns': 0,
+                'taxable_amount': 0.0,
+                'tax_amount': 0.0,
+                'total_amount': 0.0,
+                'total_paid': 0.0,
+                'pending_amount': 0.0,
+                'total_items_qty': 0,
+                'grns': [],
+                'total_returns': 0,
+                'return_amount': 0.0,
+                'net_amount': 0.0,
+                'returns': []
+            }
+
+        group = supplier_groups[v_id]
+        if 'total_returns' not in group:
+            group['total_returns'] = 0
+            group['return_amount'] = 0.0
+            group['net_amount'] = group.get('total_amount', 0.0)
+            group['returns'] = []
+
+        group['total_returns'] += 1
+        group['return_amount'] += ret_amt
+        group['returns'].append(ret)
+
+        total_returns_count += 1
+        grand_return_amount += ret_amt
+
     supplier_list = list(supplier_groups.values())
+    supplier_list.sort(key=lambda s: str(s.get('vendor_name', '')).lower())
     for s in supplier_list:
         s['taxable_amount'] = round(s['taxable_amount'], 2)
         s['tax_amount'] = round(s['tax_amount'], 2)
         s['total_amount'] = round(s['total_amount'], 2)
         s['total_paid'] = round(s['total_paid'], 2)
         s['pending_amount'] = round(s['pending_amount'], 2)
+        s['total_returns'] = s.get('total_returns', 0)
+        s['return_amount'] = round(s.get('return_amount', 0.0), 2)
+        s['net_amount'] = round(s['total_amount'] - s['return_amount'], 2)
+        s['returns'] = s.get('returns', [])
 
     summary = {
         'total_suppliers': len(supplier_list),
@@ -2991,13 +3102,264 @@ def stores_grn_supplier_report(request):
         'grand_tax_amount': round(grand_tax_amount, 2),
         'grand_total_amount': round(grand_total_amount, 2),
         'grand_total_paid': round(grand_total_paid, 2),
-        'grand_pending_amount': round(grand_pending_amount, 2)
+        'grand_pending_amount': round(grand_pending_amount, 2),
+        'total_returns': total_returns_count,
+        'grand_return_amount': round(grand_return_amount, 2),
+        'grand_net_amount': round(grand_total_amount - grand_return_amount, 2)
     }
 
     return Response({
         "success": True,
         "summary": summary,
         "data": supplier_list,
+        "vendors": all_vendors
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def stores_grn_date_report(request):
+    """
+    Date-Based Stores GRN Report:
+    Groups goods received notes (hospital_storesgrn) and purchase returns / debit notes (hospital_storespurchasereturn)
+    by date with day of week, supplier count, gross purchases, returns, and net purchases.
+    """
+    from_date = request.query_params.get('from_date') or request.GET.get('from_date')
+    to_date = request.query_params.get('to_date') or request.GET.get('to_date')
+    vendor_id = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+    search_query = request.query_params.get('search') or request.GET.get('search') or ''
+    department_filter = request.query_params.get('department') or request.GET.get('department')
+
+    vendors_qs = GeneralStoreVendor.objects.filter(is_active__in=[True])
+    vendor_map = {str(v.vendor_id): v.name for v in vendors_qs}
+    all_vendors = [{'vendor_id': str(v.vendor_id), 'name': v.name} for v in vendors_qs if v.vendor_id and v.name]
+    all_vendors.sort(key=lambda x: str(x['name']).lower())
+
+    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
+    if from_date:
+        grn_qs = grn_qs.filter(date__gte=from_date)
+    if to_date:
+        grn_qs = grn_qs.filter(date__lte=to_date)
+    if vendor_id and vendor_id != 'all':
+        grn_qs = grn_qs.filter(vendor_id=vendor_id)
+    if department_filter and department_filter != 'ALL':
+        dept_str = str(department_filter).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        grn_qs = grn_qs.filter(q_dept)
+
+    def _safe_num(v):
+        if v is None or v == '':
+            return 0.0
+        try:
+            return float(str(v))
+        except Exception:
+            return 0.0
+
+    def _format_date(d):
+        if not d:
+            return ""
+        if hasattr(d, 'strftime'):
+            return d.strftime('%Y-%m-%d')
+        return str(d).strip()[:10]
+
+    date_groups = {}
+    total_grns_count = 0
+    grand_total_amount = 0.0
+    grand_total_paid = 0.0
+    grand_pending_amount = 0.0
+    grand_tax_amount = 0.0
+
+    for grn in grn_qs:
+        d_str = _format_date(grn.date)
+        if not d_str:
+            d_str = _format_date(grn.created_date)
+        if not d_str:
+            d_str = "UNKNOWN"
+
+        v_id = str(grn.vendor_id or 'UNKNOWN')
+        v_name = vendor_map.get(v_id) or v_id
+
+        # Items
+        items = grn.items
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except Exception:
+                items = []
+        if not isinstance(items, list):
+            items = []
+
+        item_qty = 0
+        for it in items:
+            if isinstance(it, dict):
+                q = _safe_num(it.get('quantity'))
+                f = _safe_num(it.get('free'))
+                item_qty += int(q + f)
+
+        tot_amt = _safe_num(grn.total_amount or grn.net_invoice_amount)
+        tot_paid = _safe_num(grn.total_amount_paid)
+        pend_amt = max(0.0, tot_amt - tot_paid)
+        tax_amt = _safe_num(grn.cgst) + _safe_num(grn.sgst) + _safe_num(grn.igst) + _safe_num(grn.local_tax)
+        taxable_amt = _safe_num(grn.taxable_amount) or max(0.0, tot_amt - tax_amt)
+
+        if d_str not in date_groups:
+            dow = ""
+            try:
+                dow = datetime.strptime(d_str, '%Y-%m-%d').strftime('%A')
+            except Exception:
+                pass
+            date_groups[d_str] = {
+                'date': d_str,
+                'day_of_week': dow,
+                'total_grns': 0,
+                'suppliers': set(),
+                'taxable_amount': 0.0,
+                'tax_amount': 0.0,
+                'total_amount': 0.0,
+                'total_paid': 0.0,
+                'pending_amount': 0.0,
+                'total_items_qty': 0,
+                'grns': [],
+                'total_returns': 0,
+                'return_amount': 0.0,
+                'net_amount': 0.0,
+                'returns': []
+            }
+
+        dg = date_groups[d_str]
+        dg['total_grns'] += 1
+        dg['suppliers'].add(v_name)
+        dg['taxable_amount'] += taxable_amt
+        dg['tax_amount'] += tax_amt
+        dg['total_amount'] += tot_amt
+        dg['total_paid'] += tot_paid
+        dg['pending_amount'] += pend_amt
+        dg['total_items_qty'] += item_qty
+
+        dg['grns'].append({
+            'grn_number': grn.grn_number,
+            'date': d_str,
+            'invoice_no': grn.invoice_no,
+            'invoice_date': _format_date(grn.invoice_date),
+            'vendor_id': v_id,
+            'vendor_name': v_name,
+            'department': grn.department or '',
+            'tax_amount': round(tax_amt, 2),
+            'total_amount': round(tot_amt, 2),
+            'total_paid': round(tot_paid, 2),
+            'pending_amount': round(pend_amt, 2),
+            'items_count': len(items),
+            'items': items,
+            'is_approved': grn.is_approved
+        })
+
+        total_grns_count += 1
+        grand_total_amount += tot_amt
+        grand_total_paid += tot_paid
+        grand_pending_amount += pend_amt
+        grand_tax_amount += tax_amt
+
+    # Fetch unified purchase returns from hospital_purchasereturn AND hospital_storespurchasereturn
+    from hospital.Views.mongo_utils import get_unified_purchase_returns
+    unified_returns = get_unified_purchase_returns(
+        from_date=from_date,
+        to_date=to_date,
+        vendor_id=vendor_id,
+        search_query=search_query,
+        vendor_map=vendor_map
+    )
+
+    total_returns_count = 0
+    grand_return_amount = 0.0
+
+    for ret in unified_returns:
+        d_str = ret.get('date') or 'UNKNOWN'
+        v_name = ret.get('vendor_name') or 'UNKNOWN'
+        ret_amt = _safe_num(ret.get('total_amount'))
+
+        if d_str not in date_groups:
+            dow = ""
+            try:
+                dow = datetime.strptime(d_str, '%Y-%m-%d').strftime('%A')
+            except Exception:
+                pass
+            date_groups[d_str] = {
+                'date': d_str,
+                'day_of_week': dow,
+                'total_grns': 0,
+                'suppliers': set(),
+                'taxable_amount': 0.0,
+                'tax_amount': 0.0,
+                'total_amount': 0.0,
+                'total_paid': 0.0,
+                'pending_amount': 0.0,
+                'total_items_qty': 0,
+                'grns': [],
+                'total_returns': 0,
+                'return_amount': 0.0,
+                'net_amount': 0.0,
+                'returns': []
+            }
+
+        dg = date_groups[d_str]
+        dg['suppliers'].add(v_name)
+        dg['total_returns'] += 1
+        dg['return_amount'] += ret_amt
+        dg['returns'].append(ret)
+
+        total_returns_count += 1
+        grand_return_amount += ret_amt
+
+    # Convert suppliers set to count, round values
+    date_list = []
+    for d_str, dg in date_groups.items():
+        dg['taxable_amount'] = round(dg['taxable_amount'], 2)
+        dg['tax_amount'] = round(dg['tax_amount'], 2)
+        dg['total_amount'] = round(dg['total_amount'], 2)
+        dg['total_paid'] = round(dg['total_paid'], 2)
+        dg['pending_amount'] = round(dg['pending_amount'], 2)
+        dg['return_amount'] = round(dg['return_amount'], 2)
+        dg['net_amount'] = round(dg['total_amount'] - dg['return_amount'], 2)
+        dg['suppliers_count'] = len(dg['suppliers'])
+        dg['suppliers'] = sorted(list(dg['suppliers']))
+        
+        # Search query check
+        if search_query:
+            sq = search_query.lower()
+            match = (
+                sq in d_str.lower() or 
+                sq in dg['day_of_week'].lower() or
+                any(sq in s.lower() for s in dg['suppliers']) or
+                any(sq in str(g.get('grn_number', '')).lower() or sq in str(g.get('invoice_no', '')).lower() or sq in str(g.get('vendor_name', '')).lower() for g in dg['grns']) or
+                any(sq in str(r.get('debit_note_no', '')).lower() or sq in str(r.get('return_id', '')).lower() or sq in str(r.get('vendor_name', '')).lower() for r in dg['returns'])
+            )
+            if not match:
+                continue
+
+        date_list.append(dg)
+
+    # Sort dates descending (newest date first)
+    date_list.sort(key=lambda x: str(x['date']), reverse=True)
+
+    summary = {
+        'total_dates': len(date_list),
+        'total_grns': total_grns_count,
+        'grand_tax_amount': round(grand_tax_amount, 2),
+        'grand_total_amount': round(grand_total_amount, 2),
+        'grand_total_paid': round(grand_total_paid, 2),
+        'grand_pending_amount': round(grand_pending_amount, 2),
+        'total_returns': total_returns_count,
+        'grand_return_amount': round(grand_return_amount, 2),
+        'grand_net_amount': round(grand_total_amount - grand_return_amount, 2)
+    }
+
+    return Response({
+        "success": True,
+        "summary": summary,
+        "data": date_list,
         "vendors": all_vendors
     }, status=status.HTTP_200_OK)
 
@@ -3028,7 +3390,15 @@ def stores_indent_department_report(request):
     if to_date:
         indent_qs = indent_qs.filter(date__lte=to_date)
     if department_filter:
-        indent_qs = indent_qs.filter(department=department_filter)
+        dept_str = str(department_filter).strip()
+        dept_cands = list(get_department_candidates(dept_str))
+        q_dept = Q()
+        for cand in dept_cands:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        if dept_cands:
+            indent_qs = indent_qs.filter(q_dept)
+        else:
+            indent_qs = indent_qs.filter(department=dept_str)
 
     # Group Indents by Department
     dept_groups = {}
@@ -3386,6 +3756,7 @@ def stores_purchase_analysis_report(request):
     from_date = request.query_params.get('from_date') or request.GET.get('from_date')
     to_date = request.query_params.get('to_date') or request.GET.get('to_date')
     vendor_filter = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+    department_filter = request.query_params.get('department') or request.GET.get('department')
 
     vendor_map = {v.vendor_id: v.name for v in GeneralStoreVendor.objects.filter(is_active__in=[True]) if v.vendor_id}
 
@@ -3396,6 +3767,13 @@ def stores_purchase_analysis_report(request):
         grn_qs = grn_qs.filter(date__lte=to_date)
     if vendor_filter:
         grn_qs = grn_qs.filter(vendor_id=vendor_filter)
+    if department_filter and department_filter != 'ALL':
+        dept_str = str(department_filter).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        grn_qs = grn_qs.filter(q_dept)
 
     monthly_spend = {}
     vendor_spend = {}
@@ -4032,7 +4410,15 @@ def stores_non_moving_items_report(request):
 
     items_qs = ItemMaster.objects.filter(is_active__in=[True], total_quantity__gt=0).order_by('-total_quantity')
     if department_filter:
-        items_qs = items_qs.filter(department=department_filter)
+        dept_str = str(department_filter).strip()
+        dept_cands = list(get_department_candidates(dept_str))
+        q_dept = Q()
+        for cand in dept_cands:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        if dept_cands:
+            items_qs = items_qs.filter(q_dept)
+        else:
+            items_qs = items_qs.filter(department=dept_str)
     if group_filter:
         items_qs = items_qs.filter(group=group_filter)
 
@@ -4115,6 +4501,7 @@ def stores_short_expiry_report(request):
     days_threshold = safe_int(request.query_params.get('days') or request.GET.get('days'), 90)
     search_query = request.query_params.get('search') or request.GET.get('search') or ''
     vendor_filter = request.query_params.get('vendor_id') or request.GET.get('vendor_id')
+    department_filter = request.query_params.get('department') or request.GET.get('department')
 
     today = datetime.now().date()
     expiry_limit = today + timedelta(days=days_threshold)
@@ -4130,6 +4517,13 @@ def stores_short_expiry_report(request):
     grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
     if vendor_filter:
         grn_qs = grn_qs.filter(vendor_id=vendor_filter)
+    if department_filter and department_filter != 'ALL':
+        dept_str = str(department_filter).strip()
+        dept_candidates = get_department_candidates(dept_str)
+        q_dept = Q()
+        for cand in dept_candidates:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        grn_qs = grn_qs.filter(q_dept)
 
     for grn in grn_qs:
         v_id = str(grn.vendor_id or '')
@@ -4229,7 +4623,15 @@ def stores_reorder_level_report(request):
 
     items_qs = ItemMaster.objects.filter(is_active__in=[True]).order_by('itemName')
     if department_filter:
-        items_qs = items_qs.filter(department=department_filter)
+        dept_str = str(department_filter).strip()
+        dept_cands = list(get_department_candidates(dept_str))
+        q_dept = Q()
+        for cand in dept_cands:
+            q_dept |= Q(department=cand) | Q(department__iexact=cand)
+        if dept_cands:
+            items_qs = items_qs.filter(q_dept)
+        else:
+            items_qs = items_qs.filter(department=dept_str)
     if group_filter:
         items_qs = items_qs.filter(group=group_filter)
 
@@ -4457,7 +4859,15 @@ def stores_indent_return_list_create(request):
         if to_date:
             qs = qs.filter(return_date__lte=to_date)
         if department:
-            qs = qs.filter(department=department)
+            dept_str = str(department).strip()
+            dept_cands = list(get_department_candidates(dept_str))
+            q_dept = Q()
+            for cand in dept_cands:
+                q_dept |= Q(department=cand) | Q(department__iexact=cand) | Q(department_name__iexact=cand)
+            if dept_cands:
+                qs = qs.filter(q_dept)
+            else:
+                qs = qs.filter(Q(department=dept_str) | Q(department_name=dept_str))
         if status_filter:
             qs = qs.filter(status=status_filter)
         if intent_id:
