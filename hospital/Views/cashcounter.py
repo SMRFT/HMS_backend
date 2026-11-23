@@ -2479,18 +2479,9 @@ def get_mainblock_pendingbills(request):
         data = request.data if isinstance(request.data, dict) else {}
         employee_id = (
             data.get("auth-user-id") )
-        hospital_code = (
-            data.get("auth-hospital-code") 
-           
-        )
-        branch_code = (
-            data.get("auth-branch-code") 
-            
-        )
-        outlet_code = (
-            data.get("auth-outlet-code") 
-           )
-
+        hospital_code = data.get("auth-hospital-code")  
+        branch_code = data.get("auth-branch-code")  
+        outlet_code = data.get("auth-outlet-code") 
         final_data = []
 
         # =========================================================
@@ -2801,6 +2792,17 @@ def get_mainblock_pendingbills(request):
         )
 
         discharge_query = build_module_query("status", status_dis, "bill_date")
+        if not is_received_req:
+            discharge_cash_or_zero = {
+                "$or": [
+                    pending_cash_filter,
+                    {"net_amount": {"$in": [0, 0.0, "0", "0.00", Decimal128("0.00")]}},
+                    {"total_amount": {"$in": [0, 0.0, "0", "0.00", Decimal128("0.00")]}},
+                ]
+            }
+            discharge_conds = [c for c in discharge_query.get("$and", []) if c != pending_cash_filter]
+            discharge_conds.append(discharge_cash_or_zero)
+            discharge_query = {"$and": discharge_conds}
         discharge_docs = list(discharge_col.find(discharge_query).sort("bill_date", -1).limit(150))
 
         # =========================================================
@@ -3099,7 +3101,11 @@ def get_mainblock_pendingbills(request):
         # ✅ 3. DISCHARGE BILLING (payment_method: 'Cash' alone)
         # =========================================================
         for dis in discharge_docs:
-            if not is_allowed_bill_doc(dis):
+            total_amt = convert_decimal(dis.get("net_amount") if dis.get("net_amount") is not None else (dis.get("total_amount") or 0))
+            is_zero_amt_dis = (total_amt == 0)
+
+            # Allow 0 amount bills also for payment, otherwise enforce cash payment filter
+            if not is_zero_amt_dis and not is_allowed_bill_doc(dis):
                 continue
             if not is_discharge_allowed and allowed_bill_type_ids:
                 continue
@@ -3120,7 +3126,7 @@ def get_mainblock_pendingbills(request):
             if not matched_items and (not allowed_bill_type_ids or is_discharge_allowed):
                 matched_items = items
 
-            if not matched_items:
+            if not matched_items and not is_zero_amt_dis:
                 continue
 
             patient = _resolve_patient_fast(
@@ -3132,8 +3138,7 @@ def get_mainblock_pendingbills(request):
             resolved_patient_name = format_patient_name(patient) or dis.get("patient_name") or dis.get("patient")
             doc_display = _get_doctor_display(dis.get("doctor_name") or dis.get("doctor") or dis.get("admittingDoctor") or dis.get("consultingDoctor"))
             raw_pm = dis.get("payment_method") or (dis.get("payment_details", {}).get("method") if isinstance(dis.get("payment_details"), dict) else None)
-            pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if is_received_req else "-")
-            total_amt = convert_decimal(dis.get("net_amount") if dis.get("net_amount") is not None else (dis.get("total_amount") or 0))
+            pay_method = str(raw_pm).strip() if raw_pm and str(raw_pm).strip() not in ["", "None", "null", "-"] else ("Cash" if (is_received_req or is_zero_amt_dis) else "-")
 
             is_dis_refund = total_amt < 0
             bt_display_name = "DISCHARGE (REFUND)" if is_dis_refund else "DISCHARGE"
