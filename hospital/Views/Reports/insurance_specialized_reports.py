@@ -285,8 +285,34 @@ def build_specialized_insurance_report(request, report_key):
             if not dbills:
                 dbills = list(hms_db['hospital_dischargebilling'].find({}).sort("bill_date", -1).limit(200))
 
-            b_uhids = list(set([b.get('uhid') for b in dbills if b.get('uhid')]))
-            b_ips = list(set([b.get('ip_number') for b in dbills if b.get('ip_number')]))
+            # Also include credit & oncology daycare bills from hospital_investbilling
+            q_inv = {
+                "$or": [
+                    {"outlet_code": "OLET004"},
+                    {"paymentMethod": {"$in": ["Credit", "CREDIT"]}},
+                    {"customer_type": {"$in": ["INSURANCE", "Insurance", "insurance"]}}
+                ]
+            }
+            if dt_start and dt_end:
+                q_inv_date = {
+                    "$and": [
+                        {"$or": [
+                            {"outlet_code": "OLET004"},
+                            {"paymentMethod": {"$in": ["Credit", "CREDIT"]}},
+                            {"customer_type": {"$in": ["INSURANCE", "Insurance", "insurance"]}}
+                        ]},
+                        {"$or": [
+                            {"investBillDate": {"$gte": dt_start, "$lte": dt_end}},
+                            {"created_date": {"$gte": dt_start, "$lte": dt_end}}
+                        ]}
+                    ]
+                }
+                inv_bills = list(hms_db['hospital_investbilling'].find(q_inv_date).sort("investBillDate", -1).limit(1000))
+            else:
+                inv_bills = list(hms_db['hospital_investbilling'].find(q_inv).sort("investBillDate", -1).limit(200))
+
+            b_uhids = list(set([b.get('uhid') for b in dbills if b.get('uhid')] + [ib.get('uhid') for ib in inv_bills if ib.get('uhid')]))
+            b_ips = list(set([b.get('ip_number') for b in dbills if b.get('ip_number')] + [ib.get('ipNumber') for ib in inv_bills if ib.get('ipNumber')]))
 
             b_pats = {p['uhid']: p for p in hms_db['hospital_patient'].find({'uhid': {'$in': b_uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1, "company_code": 1, "company_name": 1, "permanent_address": 1, "mobilePhone": 1, "district": 1, "city": 1})}
             b_adms = {a.get('ipNumber') or a.get('ip_number'): a for a in hms_db['hospital_admission'].find({'$or': [{'ipNumber': {'$in': b_ips}}, {'ip_number': {'$in': b_ips}}]}, {"ipNumber": 1, "ip_number": 1, "company_code": 1, "insurance_company": 1, "patientName": 1, "admissionDateTime": 1, "consultingDoctor": 1, "room_details": 1})}
@@ -359,6 +385,66 @@ def build_specialized_insurance_report(request, report_key):
                     "raw_bill": b,
                     "raw_adm": adm
                 })
+
+            for ib in inv_bills:
+                uh = ib.get('uhid') or ''
+                ipn = ib.get('ipNumber') or ''
+                pat = b_pats.get(uh, {})
+                adm = b_adms.get(ipn, {})
+                clm = b_claims.get(ipn, {})
+                mem = b_mems.get(uh, {})
+
+                pname = f"{ib.get('firstName', '')} {ib.get('lastName', '')}".strip() or f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip() or f"Patient {uh}"
+                cname = resolve_company(None, None, adm, pat, clm)
+                if cname in ['INSURANCE / CORPORATE', 'PRIVATE / CASH']:
+                    cname = 'TNCMCHIS' if ib.get('outlet_code') == 'OLET004' else cname
+                ccode = name_to_code_map.get(cname.upper()) or cname
+
+                b_date = ib.get('investBillDate') or ib.get('created_date')
+                b_date_str = format_dt(b_date)
+                adm_date_str = format_dt(adm.get('admissionDateTime')) if adm.get('admissionDateTime') else b_date_str
+
+                b_amt = clean_num(ib.get('total') or ib.get('finalPrice'))
+                p_status = str(ib.get('paymentStatus') or ib.get('payment_status') or 'Pending').upper()
+                settled = b_amt if p_status in ['PAID', 'COMPLETED', 'SETTLED'] else 0.0
+                due_amt = max(0.0, b_amt - settled)
+
+                b_no_raw = str(ib.get('investBillNo') or '')
+                formatted_bno = f"SCI {b_no_raw}" if (ib.get('outlet_code') == 'OLET004' and not b_no_raw.startswith('SCI')) else b_no_raw
+
+                pool.append({
+                    "bill_date": b_date_str,
+                    "patient_name": pname,
+                    "bill_amount": round(b_amt, 2),
+                    "op_number": uh,
+                    "uhid": uh,
+                    "despatch_date": b_date_str,
+                    "settlement_date": b_date_str,
+                    "settled_amount": round(settled, 2),
+                    "disallowed_amount": 0.0,
+                    "due_amount": round(due_amt, 2),
+                    "card_number": str(mem.get('card_no') or ''),
+                    "service_no": str(mem.get('service_number') or ''),
+                    "claim_ref": str(clm.get('claim_id') or ''),
+                    "tds": 0.0,
+                    "paid_by_patient": 0.0,
+                    "settlement_duration": "",
+                    "ip_number": ipn or "-",
+                    "bill_id": formatted_bno,
+                    "sh_bill_no": formatted_bno,
+                    "place": str(pat.get('city') or pat.get('district') or 'SALEM'),
+                    "admitting_date": adm_date_str,
+                    "discharge_date": b_date_str,
+                    "advance": 0.0,
+                    "status": "SETTLED" if settled >= b_amt else "BILLED",
+                    "old_billno": "",
+                    "company_name": cname,
+                    "company_code": ccode,
+                    "category": "DAYCARE/TKT OP",
+                    "raw_bill": ib,
+                    "raw_adm": adm
+                })
+
             return pool
 
         # ---------------------------------------------------------
@@ -1359,40 +1445,134 @@ def build_specialized_insurance_report(request, report_key):
                 {"key": "status", "label": "Status", "width": "100px"}
             ]
 
-            op_bills = list(hms_db['hospital_billing'].find({
+            # Query OP credit bills from hospital_billing
+            q_hb = {
                 "$or": [
                     {"customer_type": {"$in": ["INSURANCE", "Insurance", "insurance"]}},
-                    {"payment_method": "Credit"},
+                    {"payment_method": {"$in": ["Credit", "credit"]}},
                     {"is_insurance": True}
                 ]
-            }).sort("created_date", -1).limit(250))
+            }
+            if dt_start and dt_end:
+                q_hb_date = {
+                    "$and": [
+                        q_hb,
+                        {"$or": [
+                            {"billed_date": {"$gte": dt_start, "$lte": dt_end}},
+                            {"created_date": {"$gte": dt_start, "$lte": dt_end}}
+                        ]}
+                    ]
+                }
+                op_bills = list(hms_db['hospital_billing'].find(q_hb_date).sort("created_date", -1).limit(500))
+            else:
+                op_bills = list(hms_db['hospital_billing'].find(q_hb).sort("created_date", -1).limit(250))
             if not op_bills:
-                op_bills = list(hms_db['hospital_billing'].find({}).sort("created_date", -1).limit(100))
+                op_bills = list(hms_db['hospital_billing'].find(q_hb).sort("created_date", -1).limit(150))
+
+            # Also query Outpatient Daycare / Investigation credit bills from hospital_investbilling
+            q_inv_op = {
+                "$or": [
+                    {"outlet_code": "OLET004"},
+                    {"paymentMethod": {"$in": ["Credit", "CREDIT"]}},
+                    {"customer_type": {"$in": ["INSURANCE", "Insurance", "insurance"]}}
+                ],
+                "ipNumber": {"$in": [None, "", "-"]}
+            }
+            if dt_start and dt_end:
+                q_inv_date = {
+                    "$and": [
+                        q_inv_op,
+                        {"$or": [
+                            {"investBillDate": {"$gte": dt_start, "$lte": dt_end}},
+                            {"created_date": {"$gte": dt_start, "$lte": dt_end}}
+                        ]}
+                    ]
+                }
+                inv_op_bills = list(hms_db['hospital_investbilling'].find(q_inv_date).sort("investBillDate", -1).limit(500))
+            else:
+                inv_op_bills = list(hms_db['hospital_investbilling'].find(q_inv_op).sort("investBillDate", -1).limit(150))
+
+            all_uhids = list(set([b.get('uhid') for b in op_bills if b.get('uhid')] + [ib.get('uhid') for ib in inv_op_bills if ib.get('uhid')]))
+            pats_map = {p['uhid']: p for p in hms_db['hospital_patient'].find({'uhid': {'$in': all_uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1, "company_code": 1, "company_name": 1, "doctorName": 1})}
 
             sno = 1
             tot_b_amt = tot_s_amt = tot_d_amt = 0.0
+
             for b in op_bills:
-                b_date_str = format_dt(b.get('bill_date') or b.get('created_date'))
-                b_amt = clean_num(b.get('total_amount')) or clean_num(b.get('net_amount'))
-                paid_amt = clean_num(b.get('paid_amount')) or b_amt
+                uh = str(b.get('uhid') or b.get('op_number') or '')
+                pat = pats_map.get(uh, {})
+                b_date_str = format_dt(b.get('billed_date') or b.get('bill_date') or b.get('created_date'))
+                b_amt = clean_num(b.get('total_amount')) or clean_num(b.get('total_fees')) or clean_num(b.get('net_amount'))
+                paid_amt = clean_num(b.get('paid_amount')) or (b_amt if str(b.get('payment_status') or b.get('status') or '').lower() == 'paid' else 0.0)
                 due_amt = max(0.0, b_amt - paid_amt)
-                cname = resolve_company(b.get('company_name'), b.get('company_code'))
-                doc_raw = b.get('doctor_name') or b.get('doctorName')
+
+                c_raw = b.get('company_name') or b.get('company_code') or pat.get('company_name') or pat.get('company_code')
+                cname = resolve_company(c_raw, None, pat=pat)
+                ccode = name_to_code_map.get(cname.upper()) or str(c_raw or cname)
+
+                doc_raw = b.get('doctor_name') or b.get('doctorName') or pat.get('doctorName')
                 doc_name = resolve_doc(doc_raw)
+                pname = str(b.get('patient_name') or b.get('patientName') or f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip() or f"Patient {uh}")
 
                 row = {
                     "sno": sno,
                     "bill_date": b_date_str,
                     "bill_no": str(b.get('bill_no') or b.get('bill_number') or f"OP{sno:04d}"),
-                    "op_number": str(b.get('uhid') or b.get('op_number') or ''),
-                    "patient_name": str(b.get('patient_name') or b.get('patientName') or f"Patient {sno}"),
+                    "op_number": uh,
+                    "patient_name": pname,
                     "company_name": cname,
-                    "company_code": str(b.get('company_code') or cname),
+                    "company_code": ccode,
                     "doctor_name": doc_name,
                     "bill_amount": round(b_amt, 2),
                     "settled_amount": round(paid_amt, 2),
                     "due_amount": round(due_amt, 2),
-                    "status": str(b.get('status') or 'SETTLED').upper()
+                    "status": "SETTLED" if due_amt <= 0.01 else "PENDING"
+                }
+
+                if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):
+                    continue
+
+                tot_b_amt += b_amt
+                tot_s_amt += paid_amt
+                tot_d_amt += due_amt
+                records.append(row)
+                sno += 1
+
+            for ib in inv_op_bills:
+                uh = str(ib.get('uhid') or '')
+                pat = pats_map.get(uh, {})
+                b_date_str = format_dt(ib.get('investBillDate') or ib.get('created_date'))
+                b_amt = clean_num(ib.get('total') or ib.get('finalPrice'))
+                p_status = str(ib.get('paymentStatus') or ib.get('payment_status') or 'Pending').upper()
+                paid_amt = b_amt if p_status in ['PAID', 'COMPLETED', 'SETTLED'] else 0.0
+                due_amt = max(0.0, b_amt - paid_amt)
+
+                c_raw = pat.get('company_name') or pat.get('company_code')
+                if not c_raw and ib.get('outlet_code') == 'OLET004':
+                    c_raw = 'TNCMCHIS'
+                cname = resolve_company(c_raw, None, pat=pat)
+                ccode = name_to_code_map.get(cname.upper()) or str(c_raw or cname)
+
+                doc_raw = ib.get('doctor') or pat.get('doctorName')
+                doc_name = resolve_doc(doc_raw)
+
+                pname = f"{ib.get('firstName', '')} {ib.get('lastName', '')}".strip() or f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip() or f"Patient {uh}"
+                inv_bno = str(ib.get('investBillNo') or '')
+                formatted_bno = f"SCI {inv_bno}" if (ib.get('outlet_code') == 'OLET004' and not inv_bno.startswith('SCI')) else inv_bno
+
+                row = {
+                    "sno": sno,
+                    "bill_date": b_date_str,
+                    "bill_no": formatted_bno,
+                    "op_number": uh,
+                    "patient_name": pname,
+                    "company_name": cname,
+                    "company_code": ccode,
+                    "doctor_name": doc_name,
+                    "bill_amount": round(b_amt, 2),
+                    "settled_amount": round(paid_amt, 2),
+                    "due_amount": round(due_amt, 2),
+                    "status": "SETTLED" if due_amt <= 0.01 else "PENDING"
                 }
 
                 if not row_matches_filters(row, dt_start, dt_end, company_filter, search_query, company_map):

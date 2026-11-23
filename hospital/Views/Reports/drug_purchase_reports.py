@@ -4,6 +4,7 @@ from rest_framework import status
 from pyauth.auth import HasRoleAndDataPermission
 from pymongo import MongoClient
 import os
+import re
 import json
 import ast
 from datetime import datetime, date, timedelta
@@ -79,22 +80,21 @@ def filter_grn_by_scope(grn, scope):
     if not scope:
         return True
     sc = str(scope).upper().strip()
-    if 'ALL' in sc or 'CONSOLIDATED' in sc or sc == 'DRUG PURCHASE':
+    if 'ALL' in sc or 'CONSOLIDATED' in sc:
         return True
-    
+
     grn_no = str(grn.get('grn_number') or grn.get('draft_number') or '').upper()
     cat = str(grn.get('purchase_category') or '').upper()
     outlet = str(grn.get('outlet_code') or '').upper()
 
-    if 'OP' in sc:
-        if grn_no.startswith('OP/') or 'OP' in cat or outlet in ['OLET002', 'OLET004']:
-            return True
-        return not grn_no.startswith('IP/')
-    
-    if 'IP' in sc:
-        if grn_no.startswith('IP/') or 'IP' in cat or outlet in ['OLET001', 'OLET003']:
-            return True
-        return False
+    if sc == 'DRUG PURCHASE' or (sc.startswith('DRUG') and 'ALL' not in sc):
+        return cat == 'DRUG PURCHASE' or grn_no.startswith('DRUG') or outlet == 'OLET006'
+
+    if sc == 'OP PHARMACY' or sc == 'OP':
+        return cat == 'OP PHARMACY' or grn_no.startswith('OP/') or outlet in ['OLET002', 'OLET004']
+
+    if sc == 'IP PHARMACY' or sc == 'IP':
+        return cat == 'IP PHARMACY' or grn_no.startswith('IP/') or outlet in ['OLET001', 'OLET003']
 
     return True
 
@@ -241,22 +241,81 @@ def get_drug_supplier_grn_report_data(hms_db, params):
         grand_tax += tax_amt
         grand_net += net
 
+    # Fetch unified purchase returns from hospital_purchasereturn & hospital_storespurchasereturn
+    from hospital.Views.mongo_utils import get_unified_purchase_returns
+    unified_returns = get_unified_purchase_returns(
+        from_date=from_date,
+        to_date=to_date,
+        vendor_id=vendor_filter,
+        search_query=search_q,
+        vendor_map={vid: vinfo.get('name') for vid, vinfo in v_map.items()}
+    )
+
+    total_returns_count = 0
+    grand_return = 0.0
+
+    for ret in unified_returns:
+        v_id = str(ret.get('vendor_id') or 'UNKNOWN')
+        v_name = ret.get('vendor_name') or v_map.get(v_id, {}).get('name') or f"Vendor #{v_id}"
+        ret_amt = clean_num(ret.get('total_amount'))
+
+        if v_id not in supplier_groups:
+            supplier_groups[v_id] = {
+                "sno": sno,
+                "vendor_id": v_id,
+                "vendor_name": v_name,
+                "vendor_gstin": v_map.get(v_id, {}).get('gstin', ''),
+                "total_grns": 0,
+                "taxable_amount": 0.0,
+                "tax_amount": 0.0,
+                "total_discount": 0.0,
+                "total_amount": 0.0,
+                "total_returns": 0,
+                "return_amount": 0.0,
+                "net_amount": 0.0,
+                "total_items_qty": 0,
+                "grns": [],
+                "returns": []
+            }
+            sno += 1
+
+        sg = supplier_groups[v_id]
+        if 'total_returns' not in sg:
+            sg['total_returns'] = 0
+            sg['return_amount'] = 0.0
+            sg['net_amount'] = sg.get('total_amount', 0.0)
+            sg['returns'] = []
+
+        sg['total_returns'] += 1
+        sg['return_amount'] += ret_amt
+        sg['net_amount'] = round(sg['total_amount'] - sg['return_amount'], 2)
+        sg['returns'].append(ret)
+
+        total_returns_count += 1
+        grand_return += ret_amt
+
     for sg in supplier_groups.values():
         sg["taxable_amount"] = round(sg["taxable_amount"], 2)
         sg["tax_amount"] = round(sg["tax_amount"], 2)
         sg["total_discount"] = round(sg["total_discount"], 2)
         sg["total_amount"] = round(sg["total_amount"], 2)
-        sg["net_amount"] = round(sg["net_amount"], 2)
+        sg["total_returns"] = sg.get("total_returns", 0)
+        sg["return_amount"] = round(sg.get("return_amount", 0.0), 2)
+        sg["net_amount"] = round(sg["total_amount"] - sg["return_amount"], 2)
+        sg["returns"] = sg.get("returns", [])
 
     suppliers_list = list(supplier_groups.values())
+    suppliers_list.sort(key=lambda x: str(x.get('vendor_name', '')).lower())
 
     columns = [
-        {"key": "vendor_name", "label": "Supplier / Vendor", "width": "240px"},
-        {"key": "total_grns", "label": "Total GRNs", "width": "110px", "align": "center"},
-        {"key": "taxable_amount", "label": "Taxable Amount", "width": "130px", "align": "right"},
-        {"key": "tax_amount", "label": "Tax Paid", "width": "110px", "align": "right"},
-        {"key": "total_amount", "label": "Total Invoice Amount", "width": "150px", "align": "right"},
-        {"key": "total_items_qty", "label": "Items Recd", "width": "110px", "align": "center"}
+        {"key": "vendor_name", "label": "Supplier / Vendor", "width": "230px"},
+        {"key": "total_grns", "label": "Total GRNs", "width": "100px", "align": "center"},
+        {"key": "taxable_amount", "label": "Taxable Amount", "width": "120px", "align": "right"},
+        {"key": "total_amount", "label": "Total GRN Amount", "width": "140px", "align": "right"},
+        {"key": "total_returns", "label": "Returns (Qty)", "width": "100px", "align": "center"},
+        {"key": "return_amount", "label": "Return Amount", "width": "130px", "align": "right"},
+        {"key": "net_amount", "label": "Net Purchases", "width": "140px", "align": "right"},
+        {"key": "total_items_qty", "label": "Items Recd", "width": "100px", "align": "center"}
     ]
 
     summary = {
@@ -264,13 +323,249 @@ def get_drug_supplier_grn_report_data(hms_db, params):
         "total_grns": total_grns_count,
         "grand_taxable_amount": round(grand_taxable, 2),
         "grand_tax_amount": round(grand_tax, 2),
-        "grand_total_amount": round(grand_net, 2)
+        "grand_total_amount": round(grand_net, 2),
+        "total_returns": total_returns_count,
+        "grand_return_amount": round(grand_return, 2),
+        "grand_net_amount": round(grand_net - grand_return, 2)
     }
 
     return {
         "title": f"Supplier-Based GRN Report ({scope})",
         "columns": columns,
         "data": suppliers_list,
+        "summary": summary,
+        "vendors": v_list
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1B. Date-Based GRN Report (from hospital_grn, hospital_purchasereturn & hospital_vendor)
+# ─────────────────────────────────────────────────────────────────────────────
+def get_drug_date_grn_report_data(hms_db, params):
+    scope = params.get('scope', 'DRUG PURCHASE')
+    vendor_filter = params.get('vendor_id', 'all')
+    search_q = params.get('search', '').lower().strip()
+    from_date = params.get('from_date')
+    to_date = params.get('to_date')
+
+    v_map, v_list = get_vendor_map(hms_db)
+
+    # Query hospital_grn
+    query = {"is_active": {"$ne": False}}
+    grns = list(hms_db['hospital_grn'].find(query).sort("created_date", -1))
+
+    date_groups = {}
+    total_grns_count = 0
+    grand_taxable = 0.0
+    grand_tax = 0.0
+    grand_net = 0.0
+    sno = 1
+
+    for g in grns:
+        if not filter_grn_by_scope(g, scope):
+            continue
+        if not match_date_range(g, from_date, to_date):
+            continue
+
+        vid = str(g.get('vendor_id') or '').strip()
+        v_info = v_map.get(vid, {})
+        v_name = v_info.get('name') or g.get('vendor_name') or f"Vendor #{vid}"
+        v_gstin = v_info.get('gstin') or g.get('vendor_gstin') or ""
+
+        if vendor_filter and vendor_filter != 'all' and vid != vendor_filter:
+            continue
+
+        raw_dt = g.get('date') or g.get('invoice_date') or g.get('created_date')
+        if hasattr(raw_dt, 'strftime'):
+            d_str = raw_dt.strftime('%Y-%m-%d')
+        else:
+            d_str = str(raw_dt or '')[:10]
+        if not d_str or len(d_str) < 10:
+            d_str = datetime.now().strftime("%Y-%m-%d")
+
+        grn_no = g.get('grn_number') or g.get('draft_number') or f"GRN-{sno}"
+        inv_no = g.get('invoice_no') or f"INV-2627-{sno}"
+        inv_dt = g.get('invoice_date') or g.get('date') or d_str
+        if isinstance(inv_dt, datetime):
+            inv_dt = inv_dt.strftime("%Y-%m-%d")
+
+        taxable = clean_num(g.get('taxable_amount') or (clean_num(g.get('net_invoice_amount') or g.get('total_amount')) * 0.95))
+        cgst = clean_num(g.get('cgst') or (taxable * 0.025))
+        sgst = clean_num(g.get('sgst') or (taxable * 0.025))
+        tax_amt = cgst + sgst
+        disc = clean_num(g.get('total_discount', 0))
+        net = clean_num(g.get('net_invoice_amount') or g.get('total_amount') or (taxable + tax_amt))
+
+        items_list = parse_items_json(g.get('items'))
+        item_qty = 0
+        for it in items_list:
+            if isinstance(it, dict):
+                item_qty += int(clean_num(it.get('quantity') or it.get('qty') or 1))
+
+        if d_str not in date_groups:
+            dow = ""
+            try:
+                dow = datetime.strptime(d_str, '%Y-%m-%d').strftime('%A')
+            except Exception:
+                pass
+            date_groups[d_str] = {
+                "date": d_str,
+                "day_of_week": dow,
+                "total_grns": 0,
+                "suppliers": set(),
+                "taxable_amount": 0.0,
+                "tax_amount": 0.0,
+                "total_discount": 0.0,
+                "total_amount": 0.0,
+                "total_returns": 0,
+                "return_amount": 0.0,
+                "net_amount": 0.0,
+                "total_items_qty": 0,
+                "grns": [],
+                "returns": []
+            }
+
+        dg = date_groups[d_str]
+        dg["total_grns"] += 1
+        dg["suppliers"].add(v_name)
+        dg["taxable_amount"] += taxable
+        dg["tax_amount"] += tax_amt
+        dg["total_discount"] += disc
+        dg["total_amount"] += net
+        dg["total_items_qty"] += item_qty
+
+        dg["grns"].append({
+            "grn_number": grn_no,
+            "date": d_str,
+            "invoice_no": inv_no,
+            "invoice_date": str(inv_dt)[:10],
+            "vendor_id": vid,
+            "vendor_name": v_name,
+            "vendor_gstin": v_gstin,
+            "taxable_amount": round(taxable, 2),
+            "cgst": round(cgst, 2),
+            "sgst": round(sgst, 2),
+            "tax_amount": round(tax_amt, 2),
+            "total_amount": round(net, 2),
+            "net_amount": round(net, 2),
+            "items_count": len(items_list),
+            "items": items_list,
+            "payment_mode": g.get('payment_mode') or 'Credit',
+            "is_approved": g.get('status') == 'Approved' or bool(g.get('grn_number'))
+        })
+
+        total_grns_count += 1
+        grand_taxable += taxable
+        grand_tax += tax_amt
+        grand_net += net
+        sno += 1
+
+    # Fetch unified purchase returns from hospital_purchasereturn & hospital_storespurchasereturn
+    from hospital.Views.mongo_utils import get_unified_purchase_returns
+    unified_returns = get_unified_purchase_returns(
+        from_date=from_date,
+        to_date=to_date,
+        vendor_id=vendor_filter,
+        search_query=search_q,
+        vendor_map={vid: vinfo.get('name') for vid, vinfo in v_map.items()}
+    )
+
+    total_returns_count = 0
+    grand_return = 0.0
+
+    for ret in unified_returns:
+        d_str = ret.get('date') or 'UNKNOWN'
+        v_name = ret.get('vendor_name') or v_map.get(str(ret.get('vendor_id')), {}).get('name') or 'UNKNOWN'
+        ret_amt = clean_num(ret.get('total_amount'))
+
+        if d_str not in date_groups:
+            dow = ""
+            try:
+                dow = datetime.strptime(d_str, '%Y-%m-%d').strftime('%A')
+            except Exception:
+                pass
+            date_groups[d_str] = {
+                "date": d_str,
+                "day_of_week": dow,
+                "total_grns": 0,
+                "suppliers": set(),
+                "taxable_amount": 0.0,
+                "tax_amount": 0.0,
+                "total_discount": 0.0,
+                "total_amount": 0.0,
+                "total_returns": 0,
+                "return_amount": 0.0,
+                "net_amount": 0.0,
+                "total_items_qty": 0,
+                "grns": [],
+                "returns": []
+            }
+
+        dg = date_groups[d_str]
+        dg["suppliers"].add(v_name)
+        dg["total_returns"] += 1
+        dg["return_amount"] += ret_amt
+        dg["returns"].append(ret)
+
+        total_returns_count += 1
+        grand_return += ret_amt
+
+    dates_list = []
+    for d_str, dg in date_groups.items():
+        dg["taxable_amount"] = round(dg["taxable_amount"], 2)
+        dg["tax_amount"] = round(dg["tax_amount"], 2)
+        dg["total_discount"] = round(dg["total_discount"], 2)
+        dg["total_amount"] = round(dg["total_amount"], 2)
+        dg["total_returns"] = dg.get("total_returns", 0)
+        dg["return_amount"] = round(dg.get("return_amount", 0.0), 2)
+        dg["net_amount"] = round(dg["total_amount"] - dg["return_amount"], 2)
+        dg["suppliers_count"] = len(dg["suppliers"])
+        dg["suppliers"] = sorted(list(dg["suppliers"]))
+
+        if search_q:
+            match = (
+                search_q in d_str.lower() or
+                search_q in dg["day_of_week"].lower() or
+                any(search_q in s.lower() for s in dg["suppliers"]) or
+                any(search_q in f"{g.get('grn_number', '')} {g.get('invoice_no', '')} {g.get('vendor_name', '')} {g.get('vendor_id', '')}".lower() for g in dg["grns"]) or
+                any(search_q in f"{r.get('debit_note_no', '')} {r.get('return_id', '')} {r.get('vendor_name', '')} {r.get('grn_number', '')}".lower() for r in dg["returns"])
+            )
+            if not match:
+                continue
+
+        dates_list.append(dg)
+
+    # Sort dates descending (newest first)
+    dates_list.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+
+    columns = [
+        {"key": "date", "label": "Date", "width": "120px"},
+        {"key": "day_of_week", "label": "Day", "width": "100px"},
+        {"key": "total_grns", "label": "Total GRNs", "width": "100px", "align": "center"},
+        {"key": "suppliers_count", "label": "Suppliers", "width": "90px", "align": "center"},
+        {"key": "taxable_amount", "label": "Taxable Amount", "width": "120px", "align": "right"},
+        {"key": "total_amount", "label": "Total Purchases", "width": "140px", "align": "right"},
+        {"key": "total_returns", "label": "Returns (Qty)", "width": "100px", "align": "center"},
+        {"key": "return_amount", "label": "Return Amount", "width": "130px", "align": "right"},
+        {"key": "net_amount", "label": "Net Purchases", "width": "140px", "align": "right"},
+        {"key": "total_items_qty", "label": "Items Recd", "width": "100px", "align": "center"}
+    ]
+
+    summary = {
+        "total_dates": len(dates_list),
+        "total_grns": total_grns_count,
+        "grand_taxable_amount": round(grand_taxable, 2),
+        "grand_tax_amount": round(grand_tax, 2),
+        "grand_total_amount": round(grand_net, 2),
+        "total_returns": total_returns_count,
+        "grand_return_amount": round(grand_return, 2),
+        "grand_net_amount": round(grand_net - grand_return, 2)
+    }
+
+    return {
+        "title": f"Date-Based GRN Report ({scope})",
+        "columns": columns,
+        "data": dates_list,
         "summary": summary,
         "vendors": v_list
     }
@@ -1247,6 +1542,12 @@ def drug_supplier_grn_report_view(request):
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
+def drug_date_grn_report_view(request):
+    """Date-Based GRN Report from hospital_grn, hospital_purchasereturn & hospital_vendor"""
+    return _handle_report_request(request, get_drug_date_grn_report_data)
+
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
 def drug_purchase_analysis_report_view(request):
     """Purchase Analysis Report from hospital_grn & hospital_vendor"""
     return _handle_report_request(request, get_drug_purchase_analysis_report_data)
@@ -1355,7 +1656,9 @@ def drug_purchase_reports_dashboard_view(request):
         }
 
         # Dispatch to separate specialized functions
-        if 'supplier_grn' in report_key or 'stores_supplier_grn' in report_key:
+        if 'date_grn' in report_key or 'stores_date_grn' in report_key:
+            res_data = get_drug_date_grn_report_data(hms_db, params)
+        elif 'supplier_grn' in report_key or 'stores_supplier_grn' in report_key:
             res_data = get_drug_supplier_grn_report_data(hms_db, params)
         elif 'purchase_analysis' in report_key:
             res_data = get_drug_purchase_analysis_report_data(hms_db, params)

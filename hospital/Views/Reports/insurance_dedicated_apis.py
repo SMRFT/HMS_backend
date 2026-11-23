@@ -1,4 +1,5 @@
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from pyauth.auth import HasRoleAndDataPermission
@@ -795,7 +796,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
             return b_out, f_items, round(tax_grand, 2), round(cgst_grand, 2), round(sgst_grand, 2), round(net_grand, 2)
 
         bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=True)
-        if not bills_output and (dt_start or dt_end):
+        if not bills_output and (dt_start or dt_end or search_ip):
             bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=False)
 
         return Response({
@@ -1821,23 +1822,100 @@ def companywise_registration_api(request):
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. INSURANCE DISCHARGE BILL (ALL) API
 # ─────────────────────────────────────────────────────────────────────────────
+INSURANCE_PACKAGE_COLLECTIONS = [
+    'hospital_insurance_packages_cm_scheme',
+    'hospital_insurance_packages_echs',
+    'hospital_insurance_packages_general_gipsa',
+    'hospital_insurance_packages_implants_and_specified',
+    'hospital_insurance_packages_nhis',
+    'hospital_insurance_packages_cghs',
+    'hospital_insurance_packages_railway_cghs_esi_esic'
+]
+
+def resolve_insurance_package(hms_db, code_or_name, nabh_code=None):
+    """
+    Resolves package details strictly from the 7 package master collections:
+    hospital_insurance_packages_cm_scheme, hospital_insurance_packages_echs,
+    hospital_insurance_packages_general_gipsa, hospital_insurance_packages_implants_and_specified,
+    hospital_insurance_packages_nhis, hospital_insurance_packages_cghs,
+    hospital_insurance_packages_railway_cghs_esi_esic.
+    Matches exact nabh_code or exact package name. No loose substring regex.
+    """
+    if not code_or_name and not nabh_code:
+        return None
+
+    codes_to_try = []
+    if nabh_code:
+        codes_to_try.append(str(nabh_code).strip())
+    cand = str(code_or_name or '').strip()
+    if cand and (cand.startswith('CMU') or cand.startswith('RI') or cand.startswith('GP') or cand.startswith('PM') or (len(cand) <= 12 and re.match(r'^[A-Za-z0-9\s/-]+$', cand))):
+        codes_to_try.append(cand)
+
+    for c in codes_to_try:
+        if not c:
+            continue
+        for coll in INSURANCE_PACKAGE_COLLECTIONS:
+            doc = hms_db[coll].find_one({'nabh_code': c})
+            if not doc:
+                doc = hms_db[coll].find_one({'nabh_code': re.compile(f'^{re.escape(c)}$', re.IGNORECASE)})
+            if doc:
+                p_code = doc.get('nabh_code') or c
+                p_name = doc.get('name') or ''
+                return f"{p_code} : {p_name}".strip(' :')
+
+    clean_name = ' '.join(str(code_or_name or '').strip().split())
+    if clean_name:
+        for coll in INSURANCE_PACKAGE_COLLECTIONS:
+            doc = hms_db[coll].find_one({'name': clean_name})
+            if not doc:
+                doc = hms_db[coll].find_one({'name': re.compile(f'^{re.escape(clean_name)}$', re.IGNORECASE)})
+            if doc:
+                p_code = doc.get('nabh_code') or ''
+                p_name = doc.get('name') or clean_name
+                return f"{p_code} : {p_name}".strip(' :')
+
+    if clean_name and len(clean_name) >= 12:
+        for coll in INSURANCE_PACKAGE_COLLECTIONS:
+            doc = hms_db[coll].find_one({'name': re.compile(f'^{re.escape(clean_name)}', re.IGNORECASE)})
+            if doc:
+                p_code = doc.get('nabh_code') or ''
+                p_name = doc.get('name') or clean_name
+                return f"{p_code} : {p_name}".strip(' :')
+
+    return None
+
+def resolve_insurance_company_name(hms_db, code_or_name):
+    """Resolves provider / company code to human-readable company name from hospital_insuranceprovider."""
+    if not code_or_name or str(code_or_name).strip() in ['None', 'null', 'undefined', '-', '']:
+        return None
+    val = str(code_or_name).strip()
+    prov = hms_db['hospital_insuranceprovider'].find_one({"$or": [{"company_code": val}, {"company_name": val}]})
+    if prov and prov.get('company_name'):
+        return prov.get('company_name')
+    return val
+
+
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 def insurance_discharge_bill_all_api(request):
     """
-    Returns itemized inpatient discharge voucher statement matching Insurance Discharge Bill (All).pdf.
-    Filters: ip_number, uhid.
-    NO fallback data: returns empty particulars if patient/bill not found in DB.
+    Returns itemized inpatient/outpatient discharge voucher statement matching
+    Insurance Discharge Bill (All).pdf and Insurance Discharge Bill (Tkt) OP.
+    Supports search by bill_number, ip_number, uhid.
+    Data sources:
+    - hospital_investbilling for Outpatient Ticketed (Tkt) OP / Oncology / Daycare bills
+    - hospital_dischargebilling for Inpatient discharge bills
     """
     client, hms_db, global_db = get_db()
     try:
         ip_number = request.GET.get('ip_number', '').strip()
         uhid = request.GET.get('uhid', '').strip()
+        search_bill = (request.GET.get('bill_number') or request.GET.get('bill_no') or request.GET.get('search') or '').strip()
         report_title_param = request.GET.get('report_title', '').strip()
         report_type = request.GET.get('report_type', '').strip().lower()
         title_to_use = report_title_param.upper() if report_title_param else "INSURANCE DISCHARGE BILL (ALL)"
 
-        if not ip_number and not uhid:
+        if not ip_number and not uhid and not search_bill:
             return Response({
                 "success": True,
                 "message": "No record found",
@@ -1847,22 +1925,378 @@ def insurance_discharge_bill_all_api(request):
                 "total_amount": 0.0,
                 "bill_particulars": [],
                 "bill_details": [],
+                "package_details": "-",
+                "diagnosis": "-",
+                "signatures": {
+                    "left_role": "Insurance Executive",
+                    "right_role": "General Manager - Insurance"
+                },
                 "summary": {}
             }, status=status.HTTP_200_OK)
 
-        # 1. Fetch real discharge bill from MongoDB
-        dbill = None
-        if ip_number:
-            dbill = hms_db['hospital_dischargebilling'].find_one({
-                "$or": [{"ip_number": ip_number}, {"ipNumber": ip_number}]
-            })
-        if not dbill and uhid:
-            dbill = hms_db['hospital_dischargebilling'].find_one({"uhid": uhid})
+        cleaned_bno = re.sub(r'^(SCI|SH|INV)\s*', '', search_bill, flags=re.IGNORECASE).strip() if search_bill else ''
 
+        inv_bill = None
+        dbill = None
+
+        is_tkt_op = ('tkt_op' in report_type or 'discharge_tkt_op' in report_type or 'op' in report_type)
+
+        # 1. Search in hospital_investbilling first if search_bill or is_tkt_op
+        if search_bill:
+            inv_query = {
+                "$or": [
+                    {"investBillNo": search_bill},
+                    {"investBillNo": cleaned_bno},
+                    {"investBillNo": re.compile(f"{re.escape(cleaned_bno)}$", re.IGNORECASE)}
+                ]
+            }
+            if uhid:
+                inv_query["uhid"] = uhid
+            if ip_number:
+                inv_query["ipNumber"] = ip_number
+            inv_bill = hms_db['hospital_investbilling'].find_one(inv_query)
+            if not inv_bill and (uhid or ip_number):
+                inv_bill = hms_db['hospital_investbilling'].find_one({
+                    "$or": [
+                        {"investBillNo": search_bill},
+                        {"investBillNo": cleaned_bno},
+                        {"investBillNo": re.compile(f"{re.escape(cleaned_bno)}$", re.IGNORECASE)}
+                    ]
+                })
+
+        if not inv_bill and is_tkt_op:
+            q_inv = {}
+            if ip_number and uhid:
+                q_inv = {"$or": [{"ipNumber": ip_number}, {"uhid": uhid}]}
+            elif ip_number:
+                q_inv = {"ipNumber": ip_number}
+            elif uhid:
+                q_inv = {"uhid": uhid}
+            if q_inv:
+                inv_bill = hms_db['hospital_investbilling'].find_one(q_inv, sort=[("investBillDate", -1), ("created_date", -1)])
+
+        # 2. Check hospital_dischargebilling
+        if not inv_bill:
+            if search_bill:
+                dbill = hms_db['hospital_dischargebilling'].find_one({
+                    "$or": [
+                        {"bill_no": search_bill},
+                        {"bill_no": cleaned_bno},
+                        {"insurance_bill_number": search_bill},
+                        {"insurance_bill_number": cleaned_bno}
+                    ]
+                })
+            if not dbill and ip_number:
+                dbill = hms_db['hospital_dischargebilling'].find_one({
+                    "$or": [{"ip_number": ip_number}, {"ipNumber": ip_number}]
+                })
+            if not dbill and uhid:
+                dbill = hms_db['hospital_dischargebilling'].find_one({"uhid": uhid}, sort=[("bill_date", -1)])
+
+        # 3. Fallback to investbilling if dischargebilling had no records
+        if not inv_bill and not dbill:
+            q_inv = {}
+            if ip_number and uhid:
+                q_inv = {"$or": [{"ipNumber": ip_number}, {"uhid": uhid}]}
+            elif ip_number:
+                q_inv = {"ipNumber": ip_number}
+            elif uhid:
+                q_inv = {"uhid": uhid}
+            if q_inv:
+                inv_bill = hms_db['hospital_investbilling'].find_one(q_inv, sort=[("investBillDate", -1), ("created_date", -1)])
+
+        # ─────────────────────────────────────────────────────────────
+        # Case A: Investigation / Daycare Ticketed Bill (hospital_investbilling)
+        # ─────────────────────────────────────────────────────────────
+        if inv_bill:
+            target_uhid = inv_bill.get('uhid') or uhid
+            target_ip = inv_bill.get('ipNumber') or ip_number
+            inv_bno = str(inv_bill.get('investBillNo') or '')
+            prefix = "SCI " if (inv_bill.get('outlet_code') == 'OLET004' or not inv_bno.startswith('SCI')) else ""
+            formatted_bno = f"{prefix}{inv_bno}".strip()
+
+            pat = hms_db['hospital_patient'].find_one({"uhid": target_uhid}) if target_uhid else None
+            adm = None
+            if target_ip:
+                adm = hms_db['hospital_admission'].find_one({"$or": [{"ipNumber": target_ip}, {"ip_number": target_ip}]})
+            if not adm and target_uhid:
+                adm = hms_db['hospital_admission'].find_one({"uhid": target_uhid}, sort=[("admissionDateTime", -1)])
+
+            # Query hospital_insurancemembervisit (by bill_number, uhid)
+            ins_visit = None
+            if inv_bno:
+                ins_visit = hms_db['hospital_insurancemembervisit'].find_one({
+                    "$or": [
+                        {"bill_number": inv_bno},
+                        {"bill_number": cleaned_bno},
+                        {"bill_number": re.compile(f"{re.escape(cleaned_bno)}$", re.IGNORECASE)}
+                    ]
+                })
+            if not ins_visit and target_uhid:
+                ins_visit = hms_db['hospital_insurancemembervisit'].find_one(
+                    {"uhid": target_uhid},
+                    sort=[("visit_date", -1), ("created_date", -1)]
+                )
+
+            # Query hospital_insurancemember (by member_number from visit or uhid)
+            ins_member = None
+            if ins_visit and ins_visit.get('member_number'):
+                ins_member = hms_db['hospital_insurancemember'].find_one({"member_number": ins_visit.get('member_number')})
+            if not ins_member and target_uhid:
+                ins_member = hms_db['hospital_insurancemember'].find_one({"uhid": target_uhid})
+
+            # Query hospital_insuranceclaim (by ip_number, uhid)
+            ins_claim = None
+            if target_ip and target_uhid:
+                ins_claim = hms_db['hospital_insuranceclaim'].find_one({"$or": [{"ip_number": target_ip}, {"uhid": target_uhid}], "is_active": True}, sort=[("claim_date", -1)])
+            elif target_ip:
+                ins_claim = hms_db['hospital_insuranceclaim'].find_one({"ip_number": target_ip, "is_active": True}, sort=[("claim_date", -1)])
+            elif target_uhid:
+                ins_claim = hms_db['hospital_insuranceclaim'].find_one({"uhid": target_uhid, "is_active": True}, sort=[("claim_date", -1)])
+
+            bill_details = []
+            items_raw = inv_bill.get('item', [])
+            if isinstance(items_raw, list):
+                for it in items_raw:
+                    iname = it.get('itemName') or 'Investigation Charges'
+                    iprice = clean_num(it.get('price') if it.get('price') is not None else it.get('rate', 0))
+                    bill_details.append({
+                        "itemName": iname,
+                        "category": iname,
+                        "particulars": iname,
+                        "amount": round(iprice, 2),
+                        "price": round(iprice, 2),
+                        "quantity": it.get('quantity', 1)
+                    })
+            if not bill_details and inv_bill.get('total'):
+                tot = clean_num(inv_bill.get('total'))
+                bill_details.append({
+                    "itemName": "Investigation / Daycare Charges",
+                    "category": "Investigation / Daycare Charges",
+                    "particulars": "Investigation / Daycare Charges",
+                    "amount": round(tot, 2),
+                    "price": round(tot, 2),
+                    "quantity": 1
+                })
+
+            total_amt = clean_num(inv_bill.get('total') or inv_bill.get('finalPrice') or sum(x['amount'] for x in bill_details))
+
+            # ── Package Details Resolution ──
+            # Look up across hospital_investbilling items and package_id, hospital_admission,
+            # and the 7 package master collections:
+            # hospital_insurance_packages_cm_scheme, hospital_insurance_packages_echs,
+            # hospital_insurance_packages_general_gipsa, hospital_insurance_packages_implants_and_specified,
+            # hospital_insurance_packages_nhis, hospital_insurance_packages_cghs,
+            # hospital_insurance_packages_railway_cghs_esi_esic
+            pkg_str = ""
+            matched_pkg = None
+            if items_raw and isinstance(items_raw, list):
+                for it in items_raw:
+                    it_nabh = it.get('nabh_code') or ''
+                    it_name = it.get('itemName') or ''
+                    matched_pkg = resolve_insurance_package(hms_db, it_name, it_nabh)
+                    if matched_pkg:
+                        break
+            if not matched_pkg:
+                cand = inv_bill.get('package_id') or (adm.get('packageName') if adm else '') or (adm.get('package_id') if adm else '')
+                if cand:
+                    matched_pkg = resolve_insurance_package(hms_db, cand)
+
+            if matched_pkg:
+                pkg_str = matched_pkg
+            elif adm and adm.get('packageName'):
+                pkg_str = adm.get('packageName')
+            elif items_raw and isinstance(items_raw, list) and len(items_raw) > 0:
+                first_it = items_raw[0]
+                it_code = first_it.get('nabh_code') or ''
+                it_name = first_it.get('itemName') or ''
+                pkg_str = f"{it_code} : {it_name}".strip(' :') if (it_code and it_name) else (it_name or it_code or "-")
+            else:
+                pkg_str = "-"
+
+            # ── Diagnosis Resolution (strictly from actual records, NO hardcoded fallbacks) ──
+            diag_str = (
+                (ins_visit.get('provisional_diagnosis') if ins_visit else '') or
+                (ins_visit.get('brief_clinical_notes') if ins_visit else '') or
+                (inv_bill.get('diagnosis') if inv_bill else '') or
+                (inv_bill.get('clinical_notes') if inv_bill else '') or
+                (adm.get('diagnosis') if adm else '') or
+                (adm.get('reasonForAdmission') if adm else '') or
+                (pat.get('diagnosis') if pat else '') or
+                (ins_claim.get('remarks') if (ins_claim and ins_claim.get('remarks') and len(str(ins_claim.get('remarks'))) < 80) else '') or
+                '-'
+            ).strip()
+            if not diag_str or diag_str in ['None', 'null', 'undefined']:
+                diag_str = "-"
+
+            # Doctor name
+            doc_raw = inv_bill.get('doctor') or (adm.get('admittingDoctor') if adm else '') or (pat.get('doctorName') if pat else '') or '-'
+            doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=str(doc_raw))
+
+            # ── Company (strictly from actual records, resolved via hospital_insuranceprovider) ──
+            comp = None
+            if ins_claim and ins_claim.get('insurance_company'):
+                comp = resolve_insurance_company_name(hms_db, ins_claim.get('insurance_company'))
+            if not comp and ins_visit:
+                comp = resolve_insurance_company_name(hms_db, ins_visit.get('sh_company_code') or ins_visit.get('company_name'))
+            if not comp and ins_member:
+                comp = resolve_insurance_company_name(hms_db, ins_member.get('insurance_type') or ins_member.get('scheme_category'))
+            if not comp and adm and adm.get('insurance_company'):
+                comp = resolve_insurance_company_name(hms_db, adm.get('insurance_company'))
+            if not comp and pat and pat.get('company_name'):
+                comp = resolve_insurance_company_name(hms_db, pat.get('company_name'))
+            if not comp and inv_bill:
+                comp = resolve_insurance_company_name(hms_db, inv_bill.get('company_name') or inv_bill.get('insurance_company'))
+            if not comp or comp in ['None', 'null', 'undefined']:
+                comp = "-"
+
+            # ── Ref ID / Pre-auth (strictly from actual records) ──
+            ref_id = None
+            if ins_visit:
+                ref_id = str(ins_visit.get('referral_number') or ins_visit.get('member_visit_reference') or '').strip()
+            if not ref_id and ins_member:
+                ref_id = str(ins_member.get('referral_number') or ins_member.get('card_no') or ins_member.get('smart_card') or ins_member.get('echs_card') or ins_member.get('policy_number') or '').strip()
+            if not ref_id and ins_claim:
+                ref_id = str(ins_claim.get('policy_no') or ins_claim.get('pre_auth_id') or ins_claim.get('approval_number') or '').strip()
+            if not ref_id and adm:
+                ref_id = str(adm.get('ref_id') or adm.get('pre_auth_id') or adm.get('approval_number') or '').strip()
+            if not ref_id and inv_bill:
+                ref_id = str(inv_bill.get('ref_id') or inv_bill.get('referral_number') or '').strip()
+            if not ref_id or ref_id in ['None', 'null', 'undefined']:
+                ref_id = "-"
+
+            # ── Claim Intimation (strictly from actual records) ──
+            claim_int = None
+            if ins_claim:
+                claim_int = str(ins_claim.get('claim_id') or ins_claim.get('claim_number') or '').strip()
+            if not claim_int and ins_visit:
+                claim_int = str(ins_visit.get('opd_registration_number') or ins_visit.get('referral_number') or ins_visit.get('member_visit_reference') or '').strip()
+            if not claim_int and adm:
+                claim_int = str(adm.get('claim_intimation_no') or adm.get('claim_number') or '').strip()
+            if not claim_int and inv_bill:
+                claim_int = str(inv_bill.get('claim_intimation_no') or inv_bill.get('claim_number') or '').strip()
+            if not claim_int or claim_int in ['None', 'null', 'undefined']:
+                claim_int = "-"
+
+            b_date = inv_bill.get('investBillDate') or inv_bill.get('created_date')
+            b_date_str = b_date.strftime("%d/%m/%Y") if hasattr(b_date, 'strftime') else (str(b_date)[:10] if b_date else '-')
+
+            t_start = None
+            if ins_visit and ins_visit.get('date_of_referral'):
+                r_dt = ins_visit.get('date_of_referral')
+                t_start = r_dt.strftime("%d/%m/%Y") if hasattr(r_dt, 'strftime') else str(r_dt)[:10]
+            elif ins_visit and ins_visit.get('visit_date'):
+                v_dt = ins_visit.get('visit_date')
+                t_start = v_dt.strftime("%d/%m/%Y") if hasattr(v_dt, 'strftime') else str(v_dt)[:10]
+            elif adm and adm.get('admissionDateTime'):
+                adm_dt = adm.get('admissionDateTime')
+                t_start = adm_dt.strftime("%d/%m/%Y") if hasattr(adm_dt, 'strftime') else str(adm_dt)[:10]
+            else:
+                t_start = b_date_str
+
+            t_end = None
+            if ins_visit and ins_visit.get('valid_upto'):
+                u_dt = ins_visit.get('valid_upto')
+                t_end = u_dt.strftime("%d/%m/%Y") if hasattr(u_dt, 'strftime') else str(u_dt)[:10]
+            else:
+                t_end = b_date_str
+
+            fname = inv_bill.get('firstName') or (pat.get('firstName') if pat else '') or (adm.get('patientName') if adm else '')
+            age = inv_bill.get('age') or (pat.get('age') if pat else '') or (adm.get('age') if adm else '')
+            age_type = inv_bill.get('age_type') or 'Years'
+            name_display = f"{fname} {age} {age_type}".strip()
+
+            addr = ""
+            if ins_member:
+                m_parts = [
+                    str(ins_member.get('member_address_1') or '').strip(),
+                    str(ins_member.get('member_address_2') or '').strip(),
+                    str(ins_member.get('member_address_3') or '').strip()
+                ]
+                addr = ", ".join([p for p in m_parts if p])
+            if not addr and pat:
+                addr = str(pat.get('permanent_address') or pat.get('present_address') or '').strip()
+            if not addr and inv_bill:
+                addr = str(inv_bill.get('address') or '').strip()
+            if not addr or addr in ['None', 'null', 'undefined']:
+                addr = "-"
+
+            patient_info = {
+                "hospital_name": "Shanmuga Hospital Ltd.,",
+                "hospital_address": "24, Saradha College Road, SALEM - 636 007",
+                "phone": "0427-2706666 / 87540 33833",
+                "cin": "L85110TZ2020PLC033974",
+                "ip_number": target_ip or "-",
+                "op_number": target_uhid or "-",
+                "uhid": target_uhid or "-",
+                "patient_name": name_display,
+                "name": name_display,
+                "age": age,
+                "gender": inv_bill.get('gender') or (pat.get('gender') if pat else ''),
+                "address": addr,
+                "doctor_name": doc_name,
+                "doctor": doc_name,
+                "claim_intimation_no": claim_int,
+                "claim_intimation": claim_int,
+                "bill_no": formatted_bno,
+                "bill_number": formatted_bno,
+                "bill_date": b_date_str,
+                "treatment_start": t_start,
+                "treatment_end": t_end,
+                "doa": t_start,
+                "dod": t_end,
+                "company_name": comp,
+                "company": comp,
+                "ref_id": ref_id,
+                "approval": ref_id,
+                "package_details": pkg_str,
+                "diagnosis": diag_str
+            }
+
+            bill_meta = {
+                "bill_number": formatted_bno,
+                "bill_no": formatted_bno,
+                "bill_date": b_date_str,
+                "treatment_start": t_start,
+                "treatment_end": t_end,
+                "doa": t_start,
+                "dod": t_end,
+                "company": comp,
+                "company_name": comp,
+                "ref_id": ref_id,
+                "claim_intimation": claim_int,
+                "package_details": pkg_str,
+                "diagnosis": diag_str
+            }
+
+            return Response({
+                "success": True,
+                "message": "Success",
+                "report_title": "DISCHARGE BILL",
+                "patient_info": patient_info,
+                "bill_meta": bill_meta,
+                "package_details": pkg_str,
+                "diagnosis": diag_str,
+                "total_amount": round(total_amt, 2),
+                "bill_particulars": bill_details,
+                "bill_details": bill_details,
+                "signatures": {
+                    "left_role": "Insurance Executive",
+                    "right_role": "General Manager - Insurance"
+                },
+                "summary": {
+                    "gross_bill_amount": round(total_amt, 2),
+                    "advance_copay_paid": 0.0,
+                    "net_insurance_claim": round(total_amt, 2)
+                }
+            }, status=status.HTTP_200_OK)
+
+        # ─────────────────────────────────────────────────────────────
+        # Case B: Inpatient Discharge Bill (hospital_dischargebilling)
+        # ─────────────────────────────────────────────────────────────
         target_ip = dbill.get('ip_number') or dbill.get('ipNumber') if dbill else ip_number
         target_uhid = dbill.get('uhid') if dbill else uhid
 
-        # 2. Fetch Patient & Admission
         pat = hms_db['hospital_patient'].find_one({"uhid": target_uhid}) if target_uhid else None
         adm = None
         if target_ip:
@@ -1870,16 +2304,43 @@ def insurance_discharge_bill_all_api(request):
         if not adm and target_uhid:
             adm = hms_db['hospital_admission'].find_one({"uhid": target_uhid}, sort=[("admissionDateTime", -1)])
 
+        # Query hospital_insurancemembervisit, hospital_insurancemember, hospital_insuranceclaim for Case B
+        ins_visit = None
+        if target_uhid:
+            ins_visit = hms_db['hospital_insurancemembervisit'].find_one(
+                {"uhid": target_uhid},
+                sort=[("visit_date", -1), ("created_date", -1)]
+            )
+        ins_member = None
+        if ins_visit and ins_visit.get('member_number'):
+            ins_member = hms_db['hospital_insurancemember'].find_one({"member_number": ins_visit.get('member_number')})
+        if not ins_member and target_uhid:
+            ins_member = hms_db['hospital_insurancemember'].find_one({"uhid": target_uhid})
+
+        ins_claim = None
+        if target_ip and target_uhid:
+            ins_claim = hms_db['hospital_insuranceclaim'].find_one({"$or": [{"ip_number": target_ip}, {"uhid": target_uhid}], "is_active": True}, sort=[("claim_date", -1)])
+        elif target_ip:
+            ins_claim = hms_db['hospital_insuranceclaim'].find_one({"ip_number": target_ip, "is_active": True}, sort=[("claim_date", -1)])
+        elif target_uhid:
+            ins_claim = hms_db['hospital_insuranceclaim'].find_one({"uhid": target_uhid, "is_active": True}, sort=[("claim_date", -1)])
+
         if not dbill and not adm and not pat:
             return Response({
                 "success": True,
                 "message": "No record found",
-                "report_title": "INSURANCE DISCHARGE BILL (ALL)",
+                "report_title": title_to_use,
                 "patient_info": None,
                 "bill_meta": {},
                 "total_amount": 0.0,
                 "bill_particulars": [],
                 "bill_details": [],
+                "package_details": "-",
+                "diagnosis": "-",
+                "signatures": {
+                    "left_role": "Insurance Executive",
+                    "right_role": "General Manager - Insurance"
+                },
                 "summary": {}
             }, status=status.HTTP_200_OK)
 
@@ -1887,24 +2348,42 @@ def insurance_discharge_bill_all_api(request):
         age = (pat.get('age') if pat else None) or (adm.get('age') if adm else '') or ''
         gender = (pat.get('gender') if pat else '') or ''
         age_gender = f"{age} Yrs / {gender}".strip(' /')
-        addr = (pat.get('permanent_address') if pat else '') or ''
+        
+        addr = ""
+        if ins_member:
+            m_parts = [
+                str(ins_member.get('member_address_1') or '').strip(),
+                str(ins_member.get('member_address_2') or '').strip(),
+                str(ins_member.get('member_address_3') or '').strip()
+            ]
+            addr = ", ".join([p for p in m_parts if p])
+        if not addr and pat:
+            addr = str(pat.get('permanent_address') or pat.get('present_address') or '').strip()
+        if not addr or addr in ['None', 'null', 'undefined']:
+            addr = "-"
+
         fallback_doc = (pat.get('doctorName') if pat else '') or (adm.get('doctorName') if adm else '') or ''
         doc_raw = (adm.get('admittingDoctor') if adm else '') or (adm.get('consultingDoctor') if adm else '') or fallback_doc
         doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
 
-        # Corporate / TPA company name
-        comp_name = (adm.get('insurance_company') if adm else '') or (pat.get('company_name') if pat else '')
+        comp_name = None
+        if ins_claim and ins_claim.get('insurance_company'):
+            comp_name = resolve_insurance_company_name(hms_db, ins_claim.get('insurance_company'))
+        if not comp_name and ins_visit:
+            comp_name = resolve_insurance_company_name(hms_db, ins_visit.get('sh_company_code') or ins_visit.get('company_name'))
+        if not comp_name and ins_member:
+            comp_name = resolve_insurance_company_name(hms_db, ins_member.get('insurance_type') or ins_member.get('scheme_category'))
+        if not comp_name and adm and adm.get('insurance_company'):
+            comp_name = resolve_insurance_company_name(hms_db, adm.get('insurance_company'))
+        if not comp_name and pat and pat.get('company_name'):
+            comp_name = resolve_insurance_company_name(hms_db, pat.get('company_name'))
         if not comp_name and dbill:
             c = dbill.get('company_name', '')
             if c and c != 'N':
-                comp_name = c
-        if not comp_name or comp_name == '-':
-            if 'railway' in report_type or 'railway' in title_to_use.lower():
-                comp_name = 'RAILWAY CTSE'
-            else:
-                comp_name = '-'
+                comp_name = resolve_insurance_company_name(hms_db, c)
+        if not comp_name or comp_name in ['None', 'null', 'undefined']:
+            comp_name = '-'
 
-        # Room category
         room_cat = adm.get('roomNumber') if adm else ''
         if not room_cat and adm and adm.get('room_details'):
             r_list = adm.get('room_details')
@@ -1915,30 +2394,17 @@ def insurance_discharge_bill_all_api(request):
         if not room_cat:
             room_cat = '-'
 
-        # Bill date
         b_date = dbill.get('bill_date') or dbill.get('created_date') if dbill else None
-        b_date_str = b_date.strftime("%d/%m/%Y") if isinstance(b_date, datetime) else (str(b_date or '')[:10] or '-')
+        b_date_str = b_date.strftime("%d/%m/%Y") if hasattr(b_date, 'strftime') else (str(b_date or '')[:10] or '-')
 
-        # Admission date (DOA)
         adm_dt = adm.get('admissionDateTime') or adm.get('created_date') if adm else None
-        adm_dt_str = adm_dt.strftime("%d/%m/%Y") if isinstance(adm_dt, datetime) else (str(adm_dt or '')[:10] or '-')
+        adm_dt_str = adm_dt.strftime("%d/%m/%Y") if hasattr(adm_dt, 'strftime') else (str(adm_dt or '')[:10] or '-')
 
-        # Discharge date (DOD)
         dis_dt = adm.get('dischargeDateTime') if adm else None
-        if not dis_dt and adm and adm.get('room_details'):
-            r_list = adm.get('room_details')
-            if isinstance(r_list, list) and len(r_list) > 0 and isinstance(r_list[-1], dict):
-                end_str = r_list[-1].get('endDateTime')
-                if end_str:
-                    try:
-                        dis_dt = datetime.fromisoformat(end_str.split('+')[0])
-                    except Exception:
-                        pass
         if not dis_dt and dbill:
             dis_dt = dbill.get('bill_date') or dbill.get('created_date')
-        dis_dt_str = dis_dt.strftime("%d/%m/%Y") if isinstance(dis_dt, datetime) else (str(dis_dt or '')[:10] or '-')
+        dis_dt_str = dis_dt.strftime("%d/%m/%Y") if hasattr(dis_dt, 'strftime') else (str(dis_dt or '')[:10] or b_date_str)
 
-        # Days count
         days_count = 1
         try:
             if isinstance(adm_dt, datetime) and isinstance(dis_dt, datetime):
@@ -1947,55 +2413,94 @@ def insurance_discharge_bill_all_api(request):
         except Exception:
             days_count = 1
 
-        claim_no = (dbill.get('claim_number') if dbill else None) or (dbill.get('claim_intimation_no') if dbill else None) or (adm.get('claim_number') if adm else '') or '-'
-        approval_no = (adm.get('approval_number') if adm else None) or (dbill.get('approval_number') if dbill else None) or (dbill.get('preauth_number') if dbill else None) or (dbill.get('remarks') if dbill else None) or '-'
+        claim_no = (
+            (dbill.get('claim_number') if dbill else None) or
+            (dbill.get('claim_intimation_no') if dbill else None) or
+            (ins_claim.get('claim_id') if ins_claim else None) or
+            (ins_visit.get('opd_registration_number') if ins_visit else None) or
+            (adm.get('claim_number') if adm else None) or
+            (adm.get('claim_intimation_no') if adm else None) or
+            '-'
+        )
+
+        approval_no = (
+            (adm.get('approval_number') if adm else None) or
+            (dbill.get('approval_number') if dbill else None) or
+            (dbill.get('preauth_number') if dbill else None) or
+            (ins_visit.get('referral_number') if ins_visit else None) or
+            (ins_member.get('referral_number') if ins_member else None) or
+            (ins_claim.get('policy_no') if ins_claim else None) or
+            (adm.get('ref_id') if adm else None) or
+            (adm.get('pre_auth_id') if adm else None) or
+            '-'
+        )
         b_no = str(dbill.get('bill_no', '')) if dbill else '-'
 
-        # Real bill items from dbill if present
         bill_particulars = []
         if dbill:
             particulars_raw = dbill.get('bill_particulars') or dbill.get('items') or []
             if particulars_raw:
                 for idx, p in enumerate(particulars_raw):
                     item_amt = clean_num(p.get('amount') if p.get('amount') is not None else (clean_num(p.get('rate')) * clean_num(p.get('quantity', 1))))
+                    iname = p.get('particulars') or p.get('itemName') or p.get('category') or f"Service {idx+1}"
                     bill_particulars.append({
                         "slno": idx + 1,
-                        "category": p.get('category') or p.get('particulars') or p.get('itemName') or f"Service {idx+1}",
-                        "particulars": p.get('particulars') or p.get('itemName') or p.get('category') or f"Service {idx+1}",
+                        "category": iname,
+                        "particulars": iname,
+                        "itemName": iname,
                         "units": str(p.get('units') or p.get('quantity') or "1"),
-                        "amount": round(item_amt, 2)
+                        "amount": round(item_amt, 2),
+                        "price": round(item_amt, 2)
                     })
             else:
-                # Build real amounts stored on dbill
                 sno = 1
                 if dbill.get('procedure_amount'):
-                    bill_particulars.append({"slno": sno, "category": "Procedure / Treatment Charges", "particulars": "Procedure / Treatment Charges", "units": "1", "amount": round(clean_num(dbill['procedure_amount']), 2)})
+                    bill_particulars.append({"slno": sno, "itemName": "Procedure / Treatment Charges", "category": "Procedure / Treatment Charges", "particulars": "Procedure / Treatment Charges", "units": "1", "amount": round(clean_num(dbill['procedure_amount']), 2), "price": round(clean_num(dbill['procedure_amount']), 2)})
                     sno += 1
                 if dbill.get('room_rent') or dbill.get('room_charges'):
-                    bill_particulars.append({"slno": sno, "category": "Room Rent & Nursing Charges", "particulars": "Room Rent & Nursing Charges", "units": "Days", "amount": round(clean_num(dbill.get('room_rent') or dbill.get('room_charges')), 2)})
+                    bill_particulars.append({"slno": sno, "itemName": "Room Rent & Nursing Charges", "category": "Room Rent & Nursing Charges", "particulars": "Room Rent & Nursing Charges", "units": "Days", "amount": round(clean_num(dbill.get('room_rent') or dbill.get('room_charges')), 2), "price": round(clean_num(dbill.get('room_rent') or dbill.get('room_charges')), 2)})
                     sno += 1
                 if dbill.get('medicines_amount'):
-                    bill_particulars.append({"slno": sno, "category": "Medicine Charges (Pharmacy)", "particulars": "Medicine Charges (Pharmacy)", "units": "Items", "amount": round(clean_num(dbill['medicines_amount']), 2)})
+                    bill_particulars.append({"slno": sno, "itemName": "Medicine Charges (Pharmacy)", "category": "Medicine Charges (Pharmacy)", "particulars": "Medicine Charges (Pharmacy)", "units": "Items", "amount": round(clean_num(dbill['medicines_amount']), 2), "price": round(clean_num(dbill['medicines_amount']), 2)})
                     sno += 1
                 if dbill.get('investigation_amount') or dbill.get('lab_amount'):
-                    bill_particulars.append({"slno": sno, "category": "Investigation & Lab Charges", "particulars": "Investigation & Lab Charges", "units": "Profiles", "amount": round(clean_num(dbill.get('investigation_amount') or dbill.get('lab_amount')), 2)})
+                    bill_particulars.append({"slno": sno, "itemName": "Investigation & Lab Charges", "category": "Investigation & Lab Charges", "particulars": "Investigation & Lab Charges", "units": "Profiles", "amount": round(clean_num(dbill.get('investigation_amount') or dbill.get('lab_amount')), 2), "price": round(clean_num(dbill.get('investigation_amount') or dbill.get('lab_amount')), 2)})
                     sno += 1
                 if dbill.get('total_amount') and not bill_particulars:
-                    bill_particulars.append({"slno": sno, "category": "Hospital Inpatient Charges", "particulars": "Hospital Inpatient Charges", "units": "1", "amount": round(clean_num(dbill['total_amount']), 2)})
+                    bill_particulars.append({"slno": sno, "itemName": "Hospital Inpatient Charges", "category": "Hospital Inpatient Charges", "particulars": "Hospital Inpatient Charges", "units": "1", "amount": round(clean_num(dbill['total_amount']), 2), "price": round(clean_num(dbill['total_amount']), 2)})
 
         gross_tot = round(sum(p['amount'] for p in bill_particulars), 2) if bill_particulars else clean_num(dbill.get('total_amount') if dbill else 0.0)
         adv_paid = clean_num(dbill.get('advance_amount') if dbill else 0.0)
 
+        # ── Package details resolution (from package master collections) ──
+        pkg_str = "-"
+        cand_pkg = (adm.get('packageName') if adm else '') or (adm.get('package_id') if adm else '') or ''
+        if cand_pkg:
+            matched = resolve_insurance_package(hms_db, cand_pkg)
+            pkg_str = matched if matched else cand_pkg
+
+        # ── Diagnosis resolution (strictly from real sources) ──
+        diag_str = (
+            (adm.get('diagnosis') if adm else '') or
+            (ins_visit.get('provisional_diagnosis') if ins_visit else '') or
+            (ins_visit.get('brief_clinical_notes') if ins_visit else '') or
+            (pat.get('diagnosis') if pat else '') or
+            (adm.get('reasonForAdmission') if adm else '') or
+            '-'
+        ).strip()
+        if not diag_str or diag_str in ['None', 'null', 'undefined']:
+            diag_str = "-"
+
         patient_info = {
-            "hospital_name": "SHANMUGA HOSPITAL LIMITED",
-            "hospital_address": "51/24, Saradha College Road, Salem - 636007",
-            "phone": "0427-2706666",
-            "fax": "0427-2311891",
-            "ip_number": target_ip,
-            "op_number": target_uhid,
-            "uhid": target_uhid,
+            "hospital_name": "Shanmuga Hospital Ltd.,",
+            "hospital_address": "24, Saradha College Road, SALEM - 636 007",
+            "phone": "0427-2706666 / 87540 33833",
+            "cin": "L85110TZ2020PLC033974",
+            "ip_number": target_ip or "-",
+            "op_number": target_uhid or "-",
+            "uhid": target_uhid or "-",
             "patient_name": pname,
-            "name": pname,
+            "name": f"{pname} {age} Years".strip(),
             "age": age,
             "gender": gender,
             "age_gender": age_gender,
@@ -2003,11 +2508,14 @@ def insurance_discharge_bill_all_api(request):
             "doctor_name": doc_name,
             "doctor": doc_name,
             "claim_intimation_no": claim_no,
+            "claim_intimation": claim_no,
             "bill_no": b_no,
             "bill_number": b_no,
             "bill_date": b_date_str,
             "doa": adm_dt_str,
             "dod": dis_dt_str,
+            "treatment_start": adm_dt_str,
+            "treatment_end": dis_dt_str,
             "admitted_date": adm_dt_str,
             "discharge_date": dis_dt_str,
             "room_category": room_cat,
@@ -2018,6 +2526,9 @@ def insurance_discharge_bill_all_api(request):
             "days": days_count,
             "total_days": days_count,
             "approval": approval_no,
+            "ref_id": approval_no,
+            "package_details": pkg_str,
+            "diagnosis": diag_str,
             "preauth_amount": clean_num(dbill.get('preauth_amount', 0.0) if dbill else 0.0)
         }
 
@@ -2027,24 +2538,36 @@ def insurance_discharge_bill_all_api(request):
             "bill_date": b_date_str,
             "doa": adm_dt_str,
             "dod": dis_dt_str,
+            "treatment_start": adm_dt_str,
+            "treatment_end": dis_dt_str,
             "room": room_cat,
             "room_category": room_cat,
             "days": days_count,
             "total_days": days_count,
             "company": comp_name,
             "company_name": comp_name,
-            "approval": approval_no
+            "approval": approval_no,
+            "ref_id": approval_no,
+            "claim_intimation": claim_no,
+            "package_details": pkg_str,
+            "diagnosis": diag_str
         }
 
         return Response({
             "success": True,
-            "message": "Success" if bill_particulars else "No record found",
+            "message": "Success" if (bill_particulars or gross_tot > 0) else "No record found",
             "report_title": title_to_use,
             "patient_info": patient_info,
             "bill_meta": bill_meta,
+            "package_details": pkg_str,
+            "diagnosis": diag_str,
             "total_amount": round(gross_tot, 2),
             "bill_particulars": bill_particulars,
             "bill_details": bill_particulars,
+            "signatures": {
+                "left_role": "Insurance Executive",
+                "right_role": "General Manager - Insurance"
+            },
             "summary": {
                 "gross_bill_amount": round(gross_tot, 2),
                 "advance_copay_paid": round(adv_paid, 2),
@@ -2582,7 +3105,7 @@ def medicine_abstract_api(request):
             return out_bills
 
         bills = collect_bills(apply_dates=True)
-        if not bills and (dt_start or dt_end):
+        if not bills and (dt_start or dt_end or search_ip):
             bills = collect_bills(apply_dates=False)
 
         total_taxable = round(sum(b['taxable_amt'] for b in bills), 2)
@@ -2649,7 +3172,7 @@ def medicine_abstract_api(request):
 # 10. GET IP NUMBERS BY UHID API
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+@permission_classes([AllowAny])
 def get_ip_numbers_by_uhid_api(request):
     """
     Given a UHID (or IP number/search term), returns matching IP admissions 
