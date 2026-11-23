@@ -742,6 +742,11 @@ def sanitize_medicines(medicines):
         if sgst_amt == 0.0 and sgst_pct > 0 and taxable_val > 0:
             sgst_amt = round((taxable_val * sgst_pct) / 100.0, 2)
 
+        is_del = bool(med.get("is_deleted") or med.get("deleted_is"))
+        # Skip items with qty 0 unless they are an audit-tracked deleted item
+        if qty_val <= 0 and not is_del:
+            continue
+
         clean_item = {
             "item_id": item_id_val,
             "batch_number": bn_val,
@@ -763,6 +768,8 @@ def sanitize_medicines(medicines):
             "discount_amount": round(disc_amt, 2),
             "discount": disc_val,
         }
+        if is_del:
+            clean_item["is_deleted"] = True
         if med.get("dosage"):
             clean_item["dosage"] = med.get("dosage")
         if med.get("noOfDays") or med.get("no_of_days"):
@@ -2375,6 +2382,15 @@ def collect_oppharmacy_payment(request):
         uhid = data.get("uhid")
         payment_details = data.get("payment_details")
 
+        from .dbcollection import (
+            hms_db,
+            global_db,
+            profile_collection,
+            pharmacy_billing_collection,
+            pharmacy_stock_collection,
+            cashcounter_shift_collection
+        )
+
         shiftno = data.get("shiftno")
         cashier_id = (
             data.get("auth-user-id")
@@ -2382,22 +2398,18 @@ def collect_oppharmacy_payment(request):
             or request.META.get("HTTP_AUTH_USER_ID")
         )
         if not cashier_id and shiftno:
-            client_cc = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            s_doc = client_cc["HMS"]["hospital_cashcountershiftdetails"].find_one({"shiftno": str(shiftno).strip()})
+            s_doc = cashcounter_shift_collection.find_one({"shiftno": str(shiftno).strip()})
             if s_doc and s_doc.get("CashierID"):
                 cashier_id = s_doc.get("CashierID")
 
         counter_id = data.get("counter_id")
         if not counter_id and cashier_id:
-            client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-            global_db = client["Global"]
-            profile_col = global_db["backend_diagnostics_profile"]
             try:
                 query_id = str(cashier_id)
                 search_query = {"employeeId": {"$in": [query_id, int(query_id) if query_id.isdigit() else query_id]}}
             except:
                 search_query = {"employeeId": str(cashier_id)}
-            profile_data = profile_col.find_one(search_query)
+            profile_data = profile_collection.find_one(search_query)
             emp_cashcounter = profile_data.get("cashcounter") if profile_data else None
             if emp_cashcounter:
                 counter_id = emp_cashcounter
@@ -2511,13 +2523,8 @@ def collect_oppharmacy_payment(request):
         # DB CONNECTION
         # =====================================================
 
-        client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-
-        db = client["HMS"]
-
-        bill_collection = db["hospital_pharmacybilling"]
-
-        stock_collection = db["hospital_pharmacystock"]
+        bill_collection = pharmacy_billing_collection
+        stock_collection = pharmacy_stock_collection
 
         # =====================================================
         # FIND BILL
@@ -2811,41 +2818,60 @@ def collect_oppharmacy_payment(request):
             "remarks": remarks
         }
 
-        print("📦 cash_counter_data:")
-        print(cash_counter_data)
-
-        cc_serializer = CashCounterCollectionSerializer(
-            data=cash_counter_data
-        )
-
-        if cc_serializer.is_valid():
-
-            instance = cc_serializer.save()
-
-            print(
-                f"✅ CashCounterCollection saved successfully "
-                f"ID = {instance.collection_id}"
-            )
-
-            # Recalculate shift totals
-            try:
-                from .cashcounter import recalculate_and_update_shift_details
-                recalculate_and_update_shift_details(shiftno)
-            except Exception as e:
-                print("Error updating shift details in OP Pharmacy payment:", e)
-
-        else:
-
-            print("❌ SERIALIZER ERRORS")
-            print(cc_serializer.errors)
-
-            err_dict = cc_serializer.errors
-            err_msg = "; ".join([f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in err_dict.items()]) if isinstance(err_dict, dict) else str(err_dict)
-
-            return Response({
-                "success": False,
-                "error": err_msg
+        # Check if cash counter record already exists for this bill to prevent double entry
+        try:
+            b_no_clean = str(bill.get("bill_no", "")).strip()
+            existing_cc = hms_db["hospital_cashcountercollection"].find_one({
+                "$or": [
+                    {"bill_no": b_no_clean},
+                    {"bill_number": b_no_clean}
+                ],
+                "billing_category": "OPPharmacyBills",
+                "transaction_type": "collected"
             })
+
+            if not existing_cc:
+                mongo_cc_data = {
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": resolved_outlet,
+                    "created_by": str(cashier_id),
+                    "created_date": datetime.utcnow(),
+                    "lastmodified_by": str(cashier_id),
+                    "lastmodified_date": datetime.utcnow(),
+                    "Bill_id": bill.get("Bill_id"),
+                    "bill_no": bill.get("bill_no"),
+                    "bill_type": bill.get("bill_type"),
+                    "bill_number": bill.get("bill_no"),
+                    "counter_code": str(counter_id),
+                    "shift_no": str(shiftno),
+                    "billing_category": "OPPharmacyBills",
+                    "transaction_type": "collected",
+                    "collected_amount": Decimal128(str(payment_details.get("Paid_amount", 0))),
+                    "Returned_amount": Decimal128("0.00"),
+                    "RemittedToBank": Decimal128("0.00"),
+                    "HandOverAmount": Decimal128("0.00"),
+                    "remarks": remarks
+                }
+                hms_db["hospital_cashcountercollection"].insert_one(mongo_cc_data)
+                print(f"✅ CashCounterCollection saved directly to MongoDB for bill {bill.get('bill_no')}")
+            else:
+                print(f"⚠️ CashCounterCollection already exists for bill {bill.get('bill_no')}, skipping duplicate insert")
+        except Exception as e_cc:
+            print("Direct PyMongo cashcountercollection save error:", e_cc)
+
+        # Recalculate shift totals in background daemon thread so response returns instantly
+        try:
+            from .cashcounter import recalculate_and_update_shift_details
+            import threading
+            threading.Thread(
+                target=recalculate_and_update_shift_details,
+                args=(shiftno,),
+                daemon=True,
+                name=f"ShiftRecalc-{shiftno}"
+            ).start()
+        except Exception as e:
+            print("Error scheduling shift recalculation in OP Pharmacy payment:", e)
 
         print("=" * 60)
 
@@ -5499,7 +5525,7 @@ def pharmacy_view_bills(request):
         {"branch_code":   branch_code},
         {
             "$or": [
-                {"billing_status": {"$in": ["Billed", "Paid", "deleted", "partially billed", "Partially Billed"]}},
+                {"billing_status": {"$in": ["Billed", "billed", "Paid", "paid", "Completed", "completed", "deleted", "partially billed", "Partially Billed"]}},
                 {
                     "billing_status": {"$in": ["Processing", "processing"]},
                     "bill_no": {"$exists": True, "$nin": [None, "", "—", "None", "null"]},

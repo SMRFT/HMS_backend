@@ -240,19 +240,22 @@ def date_wise_collection_summary_api(request):
             sales_ret = 0.0
             adv_refd = 0.0
             
-            if cat in ["REFUND", "SALES RETURNS", "SALES RETURN"]:
+            cat_upper = cat.upper()
+            if any(k in cat_upper for k in ["REFUND", "RETURN"]):
                 sales_ret = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(sales_ret)
-                cash = -abs(sales_ret)
+                cash = 0.0
                 bank = 0.0
+                credit = 0.0
                 cat = "SALES RETURNS"
-            elif cat in ["EXPENSE PAYMENT", "MISCELLANEOUS EXPENSE"]:
+            elif any(k in cat_upper for k in ["EXPENSE", "PAYMENT"]):
                 adv_refd = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(adv_refd)
-                cash = -abs(adv_refd)
+                cash = 0.0
                 bank = 0.0
+                credit = 0.0
                 cat = "MISCELLANEOUS EXPENSE"
                 
             key = (d_str, cat)
@@ -297,6 +300,8 @@ def date_wise_collection_summary_api(request):
                 row["bill_range"] = ""
             for k in ["gross_amount", "discount", "bill_adv", "ip_return", "sales_ret", "ip_credit", "p_debit", "debit_col", "adv_refd", "net_amount", "cash", "bank"]:
                 row[k] = round(row[k], 2)
+            row["card"] = row["bank"]
+            row["total"] = row["net_amount"]
             rows.append(row)
 
         categories = sorted(list(set(r.get("bill_name") for r in rows if r.get("bill_name"))))
@@ -390,9 +395,12 @@ def bill_type_wise_collection_api(request):
                 "total_revenue": 0.0,
                 "bill_count": 0
             })
-            dept_map[cat]["cash"] += b["cash"]
-            dept_map[cat]["card"] += b["bank"]
-            dept_map[cat]["credit"] += b["credit"]
+            c_val = b["cash"] if b["cash"] > 0 else 0.0
+            b_val = b["bank"] if b["bank"] > 0 else 0.0
+            cr_val = b["credit"] if b["credit"] > 0 else 0.0
+            dept_map[cat]["cash"] += c_val
+            dept_map[cat]["card"] += b_val
+            dept_map[cat]["credit"] += cr_val
             dept_map[cat]["bill_count"] += 1
             
         rows = list(dept_map.values())

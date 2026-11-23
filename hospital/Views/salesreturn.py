@@ -444,10 +444,10 @@ def salesreturn_get_patientdetails(request):
                 "message": "Patient not found"
             }, status=status.HTTP_404_NOT_FOUND)
 
-        # Prioritize patient with pharmacy bills in the last 30 days
+        # Prioritize patient with pharmacy bills in the last 90 days
         client, db = _get_db()
         bill_col = db["hospital_pharmacybilling"]
-        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        cutoff_date = datetime.utcnow() - timedelta(days=90)
         patient_bills_map = {}
         uhid_list = [p.uhid for p in matching_patients if p.uhid]
         if uhid_list:
@@ -483,9 +483,13 @@ def salesreturn_get_patientdetails(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
  
 
+class _DummyClient:
+    def close(self):
+        pass
+
 def _get_db():
-    client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-    return client, client["HMS"]
+    from .dbcollection import hms_db
+    return _DummyClient(), hms_db
  
  
 def _convert_decimal(val):
@@ -510,7 +514,7 @@ def salesreturn_get_uhid_bills(request):
         client, db = _get_db()
         bill_col = db["hospital_pharmacybilling"]
  
-        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        cutoff_date = datetime.utcnow() - timedelta(days=90)
 
         # Build patterns matching Pharmacy billing UHID search logic
         clean_uhid = str(uhid_input).strip()
@@ -619,7 +623,7 @@ def salesreturn_get_uhid_bills(request):
  
         return Response({
             "status":  "success",
-            "message": f"{len(bills)} bill(s) found within the last 30 days.",
+            "message": f"{len(bills)} bill(s) found within the last 90 days.",
             "data":    bills,
         }, status=status.HTTP_200_OK)
  
@@ -642,12 +646,12 @@ from bson.decimal128 import Decimal128
 from datetime import datetime, timedelta
 import os
 
-client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-db = client["HMS"]
-
-bill_collection  = db["hospital_pharmacybilling"]
-stock_collection = db["hospital_pharmacystock"]
-item_collection  = db["hospital_pharmacyitem"]
+from .dbcollection import (
+    hms_db as db,
+    pharmacy_billing_collection as bill_collection,
+    pharmacy_stock_collection as stock_collection,
+    pharmacy_item_collection as item_collection,
+)
 
 
 @api_view(["POST"])
@@ -712,8 +716,8 @@ def get_salesreturn_billdetails(request):
             }, status=status.HTTP_404_NOT_FOUND)
 
         # =========================
-        # ✅ BILL DATE VALIDATION (30 DAYS)
-        # Must be within 30 days from TODAY going backwards
+        # ✅ BILL DATE VALIDATION (90 DAYS)
+        # Must be within 90 days from TODAY going backwards
         # =========================
         bill_date = bill.get("bill_date")
 
@@ -730,15 +734,15 @@ def get_salesreturn_billdetails(request):
         # Normalize to date-only (strip time) for fair day comparison
         current_date  = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         bill_date_day = bill_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        allowed_from  = current_date - timedelta(days=30)
+        allowed_from  = current_date - timedelta(days=90)
 
         if bill_date_day < allowed_from:
             return Response({
                 "status": "error",
                 "message": (
                     f"Sales return is not allowed. Bill dated "
-                    f"{bill_date_day.strftime('%d-%m-%Y')} is older than 30 days. "
-                    f"Returns are accepted only within 30 days from the bill date."
+                    f"{bill_date_day.strftime('%d-%m-%Y')} is older than 90 days. "
+                    f"Returns are accepted only within 90 days from the bill date."
                 )
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -834,7 +838,9 @@ def get_salesreturn_billdetails(request):
 
             # Pro-rate calculated_price to the remaining qty
             try:
-                original_calc_price = float(item.get("calculated_price") or 0)
+                calc_val = float(item.get("calculated_price") or 0)
+                tot_val = float(item.get("total") or 0)
+                original_calc_price = tot_val if (tot_val > 0 and (calc_val <= 0 or (calc_val < tot_val and billed_qty > 1))) else (calc_val or tot_val)
             except (ValueError, TypeError):
                 original_calc_price = 0.0
 
@@ -847,7 +853,7 @@ def get_salesreturn_billdetails(request):
                 "hospital_code": hospital_code,
                 "branch_code": branch_code
             })
-            item_name = item_master.get("item_name") if item_master else "Unknown Item"
+            item_name = (item_master.get("item_name") if item_master else None) or item.get("item_name") or "Unknown Item"
 
             # 🔹 STOCK DETAILS
             stock = stock_collection.find_one({
@@ -877,6 +883,11 @@ def get_salesreturn_billdetails(request):
             # Pro-rate discount amount to remaining returnable quantity
             remaining_disc_amt = round((disc_amt / billed_qty) * remaining_qty, 2) if billed_qty > 0 else 0.0
 
+            item_mrp = convert_decimal(stock.get("mrp")) if (stock and stock.get("mrp") is not None) else item.get("mrp", 0)
+            item_exp = (stock.get("expiry_date") if stock else None) or item.get("expiry_date")
+            item_cgst = convert_decimal(stock.get("CGST_Percentage")) if (stock and stock.get("CGST_Percentage") is not None) else item.get("CGST_Percentage", 0)
+            item_sgst = convert_decimal(stock.get("SGST_Percentage")) if (stock and stock.get("SGST_Percentage") is not None) else item.get("SGST_Percentage", 0)
+
             items_data.append({
                 "item_id":            item_id,
                 "item_name":          item_name,
@@ -893,12 +904,12 @@ def get_salesreturn_billdetails(request):
                 "discount_percent":   disc_val,
                 "discount_amount":    remaining_disc_amt,
                 "original_discount_amount": disc_amt,
-                "mrp":                convert_decimal(stock.get("mrp")) if stock else 0,
-                "expiry_date":        stock.get("expiry_date") if stock else None,
+                "mrp":                item_mrp,
+                "expiry_date":        item_exp,
                 "available_stock":    stock.get("total_stock", 0) if stock else 0,
                 "blocked_qty":        stock.get("blocked_quantity", 0) if stock else 0,
-                "cgst":               convert_decimal(stock.get("CGST_Percentage")) if stock else 0,
-                "sgst":               convert_decimal(stock.get("SGST_Percentage")) if stock else 0,
+                "cgst":               item_cgst,
+                "sgst":               item_sgst,
                 "is_partial_return":  total_returned > 0,       # flag for frontend badge
             })
 
@@ -1059,11 +1070,10 @@ def OP_salesreturn_billdetails(request):
         )
         if not resolved_outlet and bill_no:
             try:
-                client_temp = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-                orig_b = client_temp["HMS"]["hospital_pharmacybilling"].find_one({"bill_no": bill_no}, {"outlet_code": 1})
+                from .dbcollection import pharmacy_billing_collection as temp_col
+                orig_b = temp_col.find_one({"bill_no": bill_no}, {"outlet_code": 1})
                 if orig_b and orig_b.get("outlet_code"):
                     resolved_outlet = orig_b.get("outlet_code")
-                client_temp.close()
             except Exception:
                 pass
 
@@ -1081,38 +1091,56 @@ def OP_salesreturn_billdetails(request):
         # Each return gets its own unique return_bill_no and a NEW edit_history
         # object pushed into the item's edit_history array — never overwrites.
         # =========================
-        client    = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-        db        = client["HMS"]
-        stock_col = db["hospital_pharmacystock"]
-        bill_col  = db["hospital_pharmacybilling"]
+        from .dbcollection import pharmacy_stock_collection as stock_col, pharmacy_billing_collection as bill_col
  
         for item in cleaned_particulars:
-            item_id      = int(item.get("item_id"))
-            batch_number = str(item.get("batch_number"))
-            return_qty   = float(item.get("return_qty", 0))
-            billed_qty   = float(item.get("billed_qty", 0))
- 
-            # ─── 1. STOCK: update lastmodified_date only ──────────────────────
-            # sales_return_quantity and sales_return_ref_id are NOT updated here
-            stock_result = stock_col.update_one(
-                {
+            item_id        = int(item.get("item_id"))
+            batch_number   = str(item.get("batch_number", "")).strip()
+            return_qty     = float(item.get("return_qty", 0))
+            billed_qty     = float(item.get("billed_qty", 0))
+            return_qty_val = int(return_qty) if return_qty.is_integer() else return_qty
+
+            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number ───
+            stock_filter = {
+                "item_id":      {"$in": [item_id, str(item_id)]},
+                "batch_number": {"$in": [batch_number, str(item.get("batch_number", ""))]},
+                "outlet_code":  outlet_code
+            }
+
+            existing_stock = stock_col.find_one(stock_filter)
+            if not existing_stock:
+                # Fallback to direct equality match
+                existing_stock = stock_col.find_one({
                     "item_id":      item_id,
                     "batch_number": batch_number,
                     "outlet_code":  outlet_code
-                },
+                })
+
+            if not existing_stock:
+                return Response({
+                    "status":  "error",
+                    "message": f"Stock not found for item_id {item_id}, batch {batch_number} in outlet {outlet_code}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Ensure sales_return_quantity is not null/None in Mongo document before $inc
+            if existing_stock.get("sales_return_quantity") is None:
+                stock_col.update_one(
+                    {"_id": existing_stock["_id"]},
+                    {"$set": {"sales_return_quantity": 0}}
+                )
+
+            stock_col.update_one(
+                {"_id": existing_stock["_id"]},
                 {
+                    "$inc": {
+                        "sales_return_quantity": return_qty_val
+                    },
                     "$set": {
-                        "lastmodified_date": datetime.utcnow()
+                        "lastmodified_date": datetime.utcnow(),
+                        "lastmodified_by":   employee_id
                     }
                 }
             )
- 
-            if stock_result.matched_count == 0:
-                client.close()
-                return Response({
-                    "status":  "error",
-                    "message": f"Stock not found for item_id {item_id}, batch {batch_number}"
-                }, status=status.HTTP_400_BAD_REQUEST)
  
             # ─── 2. BILL: push a NEW edit_history entry ───────────────────────
             # We do NOT guard against the same bill_no being returned again —
@@ -1136,7 +1164,6 @@ def OP_salesreturn_billdetails(request):
             )
  
             if duplicate_check:
-                client.close()
                 return Response({
                     "status":  "error",
                     "message": (
@@ -1225,13 +1252,10 @@ def OP_salesreturn_billdetails(request):
             )
  
             if bill_result.matched_count == 0:
-                client.close()
                 return Response({
                     "status":  "error",
                     "message": f"Item {item_id} batch {batch_number} not found in bill {bill_no}"
                 }, status=status.HTTP_400_BAD_REQUEST)
- 
-        client.close()
  
         # =========================
         # ✅ SAVE TO DJANGO (SalesReturn model)

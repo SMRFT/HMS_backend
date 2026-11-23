@@ -60,9 +60,72 @@ global_db = client["Global"]
 
 profile_collection = global_db["backend_diagnostics_profile"]
 
+diagnostics_db = client["Diagnostics"]
+
 room_collection = mongo_db["hospital_room"]
 
 from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid, get_employee_name_by_id, get_doctor_name_by_id
+
+# --- Helper: Timezone conversion to IST (Asia/Kolkata) ---
+def format_dt_to_ist(dt_raw):
+    if not dt_raw:
+        return ""
+    if isinstance(dt_raw, str):
+        try:
+            s = dt_raw.strip().replace("Z", "+00:00")
+            dt_raw = datetime.fromisoformat(s)
+        except Exception:
+            return dt_raw
+    if isinstance(dt_raw, datetime):
+        if not dt_raw.tzinfo:
+            dt_raw = pytz.UTC.localize(dt_raw)
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        return dt_raw.astimezone(ist_tz).strftime("%d/%m/%Y, %I:%M %p")
+    return str(dt_raw)
+
+# --- Helper: Cache Microbiology Test IDs from Diagnostics core_testdetails ---
+_microbio_test_ids_cache = None
+_microbio_cache_time = 0
+
+def get_microbiology_test_ids():
+    global _microbio_test_ids_cache, _microbio_cache_time
+    import time
+    now = time.time()
+    if _microbio_test_ids_cache is not None and (now - _microbio_cache_time) < 1800:
+        return _microbio_test_ids_cache
+    try:
+        coll = diagnostics_db["core_testdetails"]
+        docs = coll.find({"department": re.compile(r"^\s*microbiology\s*$", re.IGNORECASE)}, {"test_id": 1})
+        ids = set()
+        for d in docs:
+            tid = d.get("test_id")
+            if tid is not None:
+                ids.add(str(tid).strip())
+                try:
+                    ids.add(str(int(tid)))
+                except Exception:
+                    pass
+        _microbio_test_ids_cache = ids
+        _microbio_cache_time = now
+        return ids
+    except Exception as e:
+        print(f"Error fetching microbiology test IDs: {e}")
+        return _microbio_test_ids_cache or set()
+
+def is_microbiology_test(item_test_id):
+    if not item_test_id:
+        return False
+    micro_ids = get_microbiology_test_ids()
+    raw_str = str(item_test_id).strip()
+    if raw_str in micro_ids:
+        return True
+    try:
+        int_str = str(int(raw_str))
+        if int_str in micro_ids:
+            return True
+    except Exception:
+        pass
+    return False
 
 @api_view(["GET"])
 
@@ -71,30 +134,70 @@ from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid,
 def get_admission_list(request):
 
     try:
+        import re
 
         from_date = request.GET.get("from_date")
-
         to_date = request.GET.get("to_date")
+        status_param = (request.GET.get("status") or "admitted").strip().lower()
+        search_query = (request.GET.get("search") or "").strip()
+        uhid_param = (request.GET.get("uhid") or "").strip()
+        ip_param = (request.GET.get("ipNumber") or request.GET.get("ip_number") or "").strip()
 
-        query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
+        if status_param == "discharged":
+            query = {"is_discharged": True, "is_cancelled": {"$ne": True}}
+            sort_fields = [("dischargeDateTime", -1), ("admissionDateTime", -1)]
+            default_limit = 150
+        elif status_param == "all":
+            query = {"is_cancelled": {"$ne": True}}
+            sort_fields = [("admissionDateTime", -1)]
+            default_limit = 200
+        else:
+            # Default: Active Admitted patients
+            query = {"is_admitted": True, "is_cancelled": {"$ne": True}, "is_discharged": {"$ne": True}}
+            sort_fields = [("admissionDateTime", -1)]
+            default_limit = 0
 
         if from_date and to_date:
-
             ist = pytz.timezone("Asia/Kolkata")
-
             start_ist = ist.localize(datetime.strptime(from_date, "%Y-%m-%d"))
-
             end_ist = ist.localize(datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1))
-
             start_utc = start_ist.astimezone(pytz.UTC)
-
             end_utc = end_ist.astimezone(pytz.UTC)
 
-            query["admissionDateTime"] = {"$gte": start_utc, "$lt": end_utc}
+            if status_param == "discharged":
+                query["$or"] = [
+                    {"dischargeDateTime": {"$gte": start_utc, "$lt": end_utc}},
+                    {"admissionDateTime": {"$gte": start_utc, "$lt": end_utc}}
+                ]
+            else:
+                query["admissionDateTime"] = {"$gte": start_utc, "$lt": end_utc}
+            default_limit = 0
 
-            
+        if uhid_param:
+            query["uhid"] = {"$regex": re.escape(uhid_param), "$options": "i"}
+        if ip_param:
+            query["ipNumber"] = {"$regex": re.escape(ip_param), "$options": "i"}
+        if search_query:
+            sq_regex = {"$regex": re.escape(search_query), "$options": "i"}
+            or_clauses = [
+                {"uhid": sq_regex},
+                {"ipNumber": sq_regex},
+                {"patient_name": sq_regex},
+                {"patient_details.firstName": sq_regex},
+                {"patient_details.lastName": sq_regex},
+                {"roomNo": sq_regex},
+                {"doctorName": sq_regex}
+            ]
+            if "$or" in query:
+                query["$and"] = [{"$or": query.pop("$or")}, {"$or": or_clauses}]
+            else:
+                query["$or"] = or_clauses
+            default_limit = 100
 
-        raw_admissions = list(mongo_db["hospital_admission"].find(query).sort("admissionDateTime", -1))
+        cursor = mongo_db["hospital_admission"].find(query).sort(sort_fields)
+        if default_limit > 0:
+            cursor = cursor.limit(default_limit)
+        raw_admissions = list(cursor)
 
         
 
@@ -406,6 +509,29 @@ def get_admission_list(request):
                     except Exception:
                         pass
 
+                raw_dis_dt = item.get("dischargeDateTime") or item.get("discharge_date")
+                dis_dt_obj = None
+                if isinstance(raw_dis_dt, str):
+                    try:
+                        clean_dis_str = raw_dis_dt.replace("Z", "+00:00")
+                        dis_dt_obj = datetime.fromisoformat(clean_dis_str)
+                    except Exception:
+                        pass
+                elif isinstance(raw_dis_dt, datetime):
+                    dis_dt_obj = raw_dis_dt
+
+                if dis_dt_obj:
+                    try:
+                        if not dis_dt_obj.tzinfo:
+                            dis_dt_obj = pytz.UTC.localize(dis_dt_obj)
+                        kolkata_tz = pytz.timezone("Asia/Kolkata")
+                        ist_dis_dt = dis_dt_obj.astimezone(kolkata_tz)
+                        item["dischargeDateTime"] = ist_dis_dt.isoformat()
+                        item["dischargeDate"] = ist_dis_dt.strftime("%d/%m/%Y")
+                        item["dischargeTime"] = ist_dis_dt.strftime("%I:%M %p")
+                    except Exception:
+                        pass
+
         # Phase 7: Batch compute pending request flags for admitted patients
         active_ips = [it.get("ipNumber") for it in data if it.get("ipNumber") and not it.get("is_discharged")]
         if active_ips:
@@ -457,7 +583,10 @@ def get_admission_list(request):
                     raw_items = p_doc.get("item", [])
                     if isinstance(raw_items, list) and raw_items:
                         has_pending = any(
-                            isinstance(it, dict) and str(it.get("status") or doc_st).strip().lower() not in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] and not it.get("cancelled")
+                            isinstance(it, dict)
+                            and str(it.get("status") or doc_st).strip().lower() not in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"]
+                            and not it.get("cancelled")
+                            and not (w_type != "RADIOLOGY" and is_microbiology_test(it.get("test_id") or it.get("testId") or it.get("item_id")))
                             for it in raw_items
                         )
                         if not has_pending:
@@ -3431,7 +3560,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     for d in lab_docs:
         bill_no = d.get("investBillNo") or "Lab Request"
         dt_raw = d.get("investBillDate") or d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         status_str = d.get("status") or "Result Pending"
@@ -3447,6 +3576,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
             if isinstance(it, dict) and it.get("itemName"):
                 it_st = str(it.get("status") or status_str or "").strip().lower()
                 if it_st in ["cancelled", "completed", "result entered", "outsourced", "printed", "dispatched"] or it.get("cancelled"):
+                    continue
+                # Skip Microbiology tests from blocking clearance
+                t_id = it.get("test_id") or it.get("testId") or it.get("item_id")
+                if is_microbiology_test(t_id):
                     continue
                 p = it.get("price")
                 p_str = f" (Rs. {p})" if p else ""
@@ -3484,7 +3617,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     for d in rad_docs:
         bill_no = d.get("investBillNo") or "Radiology Request"
         dt_raw = d.get("investBillDate") or d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         status_str = d.get("status") or "Result Pending"
@@ -3581,7 +3714,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         b_num = d.get("bill_no") or d.get("Bill_id") or "Req"
         b_label = f"Bill #{b_num}" if not str(b_num).startswith("Bill") else str(b_num)
         dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("net_amount") if d.get("net_amount") is not None else d.get("total_amount")
         tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
         st_str = d.get("billing_status") or "Pending"
@@ -3633,8 +3766,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
 
             if return_details:
                 pharm_returns_pending_count += len(return_details)
+                ret_dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
                 pharm_bills.append({
                     "bill_no": f"{b_label} - Return Request",
+                    "date": format_dt_to_ist(ret_dt_raw),
                     "status": "Return Pending Approval",
                     "items": return_details
                 })
@@ -3649,7 +3784,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
     }
     implant_docs = list(mongo_db["hospital_implant_request"].find(
         implant_query,
-        {"ImplantRequest_id": 1, "items": 1, "status": 1}
+        {"ImplantRequest_id": 1, "items": 1, "status": 1, "created_date": 1, "date": 1}
     ))
     implant_item_ids = set()
     for d in implant_docs:
@@ -3684,8 +3819,10 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
                         qty = it.get("quantity") or it.get("qty") or 1
                         item_details.append(f"{it_name} (Qty: {qty})")
 
+                imp_dt_raw = imp.get("created_date") or imp.get("date")
                 implant_bills.append({
                     "bill_no": b_label,
+                    "date": format_dt_to_ist(imp_dt_raw),
                     "status": st_str,
                     "items": item_details
                 })
@@ -3709,7 +3846,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         d_type = d.get("diet_type") or "Regular Diet"
         st = d.get("status") or "Ordered"
         dt_raw = d.get("order_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
 
         diet_bills.append({
             "bill_no": f"Diet: {m_time}",
@@ -3737,7 +3874,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         rtype = d.get("request_type") or "Normal"
         st = d.get("status") or "Pending"
         dt_raw = d.get("created_date")
-        dt_str = dt_raw.strftime("%d/%m/%Y, %I:%M %p") if (dt_raw and hasattr(dt_raw, "strftime")) else ""
+        dt_str = format_dt_to_ist(dt_raw)
 
         raw_items = d.get("items", [])
         item_details = []

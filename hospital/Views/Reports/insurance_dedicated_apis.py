@@ -34,17 +34,38 @@ def parse_date(date_str, is_end=False):
             continue
     return None
 
+_SHARED_CLIENT = None
+
 def get_db():
-    mongo_uri = os.getenv('GLOBAL_DB_HOST')
-    if not mongo_uri:
-        env_path = os.path.join(os.path.dirname(__file__), '../../../.env')
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if line.startswith('GLOBAL_DB_HOST'):
-                        mongo_uri = line.split('=', 1)[1].strip()
-    client = MongoClient(mongo_uri, connectTimeoutMS=20000, socketTimeoutMS=60000, serverSelectionTimeoutMS=20000)
-    return client, client['HMS'], client['Global']
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is not None:
+        try:
+            _SHARED_CLIENT.admin.command('ping')
+        except Exception:
+            try:
+                _SHARED_CLIENT.close()
+            except Exception:
+                pass
+            _SHARED_CLIENT = None
+    if _SHARED_CLIENT is None:
+        mongo_uri = os.getenv('GLOBAL_DB_HOST')
+        if not mongo_uri:
+            env_path = os.path.join(os.path.dirname(__file__), '../../../.env')
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.startswith('GLOBAL_DB_HOST'):
+                            mongo_uri = line.split('=', 1)[1].strip()
+        _SHARED_CLIENT = MongoClient(
+            mongo_uri,
+            maxPoolSize=50,
+            minPoolSize=5,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=30000,
+            serverSelectionTimeoutMS=10000,
+            retryWrites=True
+        )
+    return _SHARED_CLIENT, _SHARED_CLIENT['HMS'], _SHARED_CLIENT['Global']
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,10 +105,12 @@ def get_doctor_profile_map(global_db):
                 mapping[emp_id.lower()] = name
                 if emp_id.isdigit():
                     mapping[str(int(emp_id))] = name
-        _DOCTOR_CACHE = mapping
-        _DOCTOR_CACHE_EXPIRY = now + timedelta(minutes=10)
+        if mapping:
+            _DOCTOR_CACHE = mapping
+            _DOCTOR_CACHE_EXPIRY = now + timedelta(minutes=15)
         return mapping
-    except Exception:
+    except Exception as e:
+        print(f"Error building doctor profile map: {e}")
         if _DOCTOR_CACHE:
             return _DOCTOR_CACHE
         return {}
@@ -136,8 +159,9 @@ def resolve_doctor_display_name(doc_raw, global_db, fallback_name=''):
                     f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or 
                     doc_str
                 ).strip()
-                doc_map[doc_str] = resolved
-                return resolved
+                if resolved and resolved != doc_str:
+                    doc_map[doc_str] = resolved
+                    return resolved
         except Exception:
             pass
         # If it was pure digits and still not resolved, check fallback_name
@@ -148,7 +172,10 @@ def resolve_doctor_display_name(doc_raw, global_db, fallback_name=''):
     if not doc_str.isdigit():
         return doc_str
 
-    return fallback_name or doc_str
+    if fallback_name and not str(fallback_name).strip().isdigit():
+        return str(fallback_name).strip()
+
+    return doc_str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,19 +224,95 @@ def patient_wise_pharmacy_ip_bill_api(request):
 
         # 1. Resolve Admission & Patient Info
         adm_doc = None
-        # Try finding admission by IP number or UHID
-        adm_doc = hms_db['hospital_admission'].find_one(
-            {"$or": [
-                {"ipNumber": search_term},
-                {"ipNumber": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)},
-                {"uhid": search_term},
-                {"uhid": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)}
-            ]},
-            sort=[("admissionDateTime", -1)]
-        )
 
-        target_ip = (adm_doc.get('ipNumber') if adm_doc else search_ip) or search_term
-        target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_term
+        # Disambiguate if search_ip and search_uhid are the same or if search_ip is a UHID
+        if search_ip:
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"ipNumber": search_ip},
+                    {"ipNumber": re.compile(f"^{re.escape(search_ip)}$", re.IGNORECASE)}
+                ]}
+            )
+            if not adm_doc:
+                # search_ip might actually be a UHID
+                uhid_cand = hms_db['hospital_admission'].find_one(
+                    {"$or": [
+                        {"uhid": search_ip},
+                        {"uhid": re.compile(f"^{re.escape(search_ip)}$", re.IGNORECASE)}
+                    ]},
+                    sort=[("admissionDateTime", -1)]
+                )
+                if uhid_cand:
+                    adm_doc = uhid_cand
+                    if not search_uhid:
+                        search_uhid = search_ip
+                    search_ip = adm_doc.get('ipNumber') or ''
+
+        if not search_ip and search_uhid:
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"uhid": search_uhid},
+                    {"uhid": re.compile(f"^{re.escape(search_uhid)}$", re.IGNORECASE)}
+                ]},
+                sort=[("admissionDateTime", -1)]
+            )
+            if adm_doc and adm_doc.get('ipNumber'):
+                search_ip = adm_doc.get('ipNumber')
+
+        if search_ip:
+            target_ip = search_ip
+            target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_uhid
+            all_ips = {search_ip}
+            if adm_doc and adm_doc.get('ipNumber'):
+                all_ips.add(adm_doc['ipNumber'])
+            all_uhids = {target_uhid} if target_uhid else set()
+        else:
+            # Try finding admission by IP number or UHID
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"ipNumber": search_term},
+                    {"ipNumber": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)},
+                    {"uhid": search_term},
+                    {"uhid": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)}
+                ]},
+                sort=[("admissionDateTime", -1)]
+            )
+            target_ip = (adm_doc.get('ipNumber') if adm_doc else search_ip) or search_term
+            target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_term
+
+            # Gather all related admission numbers and UHIDs for this patient
+            all_adms = list(hms_db['hospital_admission'].find({"$or": [
+                {"uhid": target_uhid},
+                {"uhid": target_ip},
+                {"ipNumber": target_ip},
+                {"ipNumber": target_uhid}
+            ]}))
+            all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
+            all_ips.add(target_ip)
+            all_ips.discard('')
+            all_ips.discard(None)
+            all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
+            all_uhids.add(target_uhid)
+            all_uhids.discard('')
+            all_uhids.discard(None)
+
+            for pb_cand in hms_db['hospital_pharmacybilling'].find({"$or": [
+                {"uhid": {"$in": list(all_uhids)}},
+                {"inpatient_number": {"$in": list(all_ips)}}
+            ]}, {"inpatient_number": 1, "uhid": 1}).limit(50):
+                if pb_cand.get('inpatient_number'):
+                    all_ips.add(pb_cand.get('inpatient_number'))
+                if pb_cand.get('uhid'):
+                    all_uhids.add(pb_cand.get('uhid'))
+
+        adm_day_start = None
+        adm_dt = adm_doc.get('admissionDateTime') if adm_doc else None
+        if isinstance(adm_dt, datetime):
+            adm_day_start = datetime.combine(adm_dt.date(), time.min)
+        elif adm_dt:
+            parsed_d = parse_date(str(adm_dt)[:10])
+            if parsed_d:
+                adm_day_start = datetime.combine(parsed_d.date(), time.min)
 
         # Fetch patient master
         patient_doc = hms_db['hospital_patient'].find_one({
@@ -225,9 +328,23 @@ def patient_wise_pharmacy_ip_bill_api(request):
         age_val = (patient_doc.get('age') if patient_doc else None) or (adm_doc.get('age') if adm_doc else '')
         gender_val = (patient_doc.get('gender') if patient_doc else 'FEMALE') or 'FEMALE'
         
-        fallback_doc = (patient_doc.get('doctorName') if patient_doc else '') or ''
-        doc_raw = (adm_doc.get('admittingDoctor') if adm_doc else '') or (adm_doc.get('consultingDoctor') if adm_doc else '') or fallback_doc
+        fallback_doc = (
+            (patient_doc.get('doctorName') if patient_doc else '') or 
+            (patient_doc.get('doctor') if patient_doc else '') or
+            (patient_doc.get('consultingDoctor') if patient_doc else '') or
+            ''
+        )
+        doc_raw = (
+            (adm_doc.get('doctorName') if adm_doc else '') or
+            (adm_doc.get('admittingDoctor') if adm_doc else '') or 
+            (adm_doc.get('consultingDoctor') if adm_doc else '') or 
+            (adm_doc.get('doctor') if adm_doc else '') or
+            fallback_doc
+        )
         doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+        if doc_name and doc_name.isdigit():
+            if fallback_doc and not str(fallback_doc).strip().isdigit():
+                doc_name = str(fallback_doc).strip()
         comp_name = (adm_doc.get('insurance_company') if adm_doc else '') or (patient_doc.get('company_name') if patient_doc else '') or ''
 
         # Resolve Room Number from room_details
@@ -279,18 +396,16 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 adm_day_start = datetime.combine(parsed_d.date(), time.min)
 
         # 2. Find linked Ward Requests for this patient and admission
-        wr_query_or = [
-            {"inpatient_number": target_ip},
-            {"uhid": target_ip}
-        ]
-        if target_uhid:
-            if adm_day_start:
-                wr_query_or.extend([
-                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start}},
-                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}}
-                ])
-            else:
-                wr_query_or.append({"uhid": target_uhid})
+        wr_query_or = []
+        if search_ip:
+            wr_query_or.append({"inpatient_number": {"$in": list(all_ips)}})
+        else:
+            for ip in all_ips:
+                wr_query_or.append({"inpatient_number": ip})
+                wr_query_or.append({"uhid": ip})
+            for u in all_uhids:
+                wr_query_or.append({"uhid": u})
+                wr_query_or.append({"inpatient_number": u})
 
         wr_docs = list(hms_db['hospital_pharmacybilling'].find({
             "$or": wr_query_or,
@@ -316,34 +431,31 @@ def patient_wise_pharmacy_ip_bill_api(request):
                             pass
 
         # 3. Query Dispatched / Direct IP pharmacy bills
-        bill_query_or = [
-            {"inpatient_number": target_ip},
-            {"uhid": target_ip}
-        ]
-        if target_uhid:
-            if adm_day_start:
-                bill_query_or.extend([
-                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start}},
-                    {"uhid": target_uhid, "created_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}},
-                    {"uhid": target_uhid, "bill_date": {"$gte": adm_day_start}},
-                    {"uhid": target_uhid, "bill_date": {"$gte": adm_day_start.strftime("%Y-%m-%d")}}
-                ])
-            else:
-                bill_query_or.append({"uhid": target_uhid})
-
-        if wr_dispatch_map:
-            bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
+        bill_query_or = []
+        if search_ip:
+            bill_query_or.append({"inpatient_number": {"$in": list(all_ips)}})
+            if wr_dispatch_map:
+                bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
+        else:
+            for ip in all_ips:
+                bill_query_or.append({"inpatient_number": ip})
+                bill_query_or.append({"uhid": ip})
+            for u in all_uhids:
+                bill_query_or.append({"uhid": u})
+                bill_query_or.append({"inpatient_number": u})
+            if wr_dispatch_map:
+                bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
 
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
             "$and": [
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
-                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}},
+                {"billing_status": {"$nin": ["Cancelled", "deleted"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
                         {"dispatch_history": {"$in": [None, []]}},
-                        {"billing_status": {"$in": ["Billed", "Completed"]}}
+                        {"billing_status": {"$in": ["Billed", "Completed", "Paid"]}}
                     ]
                 }
             ]
@@ -355,8 +467,8 @@ def patient_wise_pharmacy_ip_bill_api(request):
             ip = str(doc.get('inpatient_number') or '').strip()
             p = str(doc.get('patient_name') or doc.get('patientname') or '').strip()
             score = 0
-            if u in (target_uhid, target_ip): score += 10
-            if ip in (target_ip, target_uhid): score += 10
+            if u in all_uhids or u in all_ips: score += 10
+            if ip in all_ips or ip in all_uhids: score += 10
             if p and patient_name and patient_name.lower() in p.lower(): score += 5
             return score
 
@@ -382,28 +494,27 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     except Exception:
                         b_dt_check = parse_date(str(raw_d)[:10])
 
-            # Ensure bill date is not prior to admission date
-            if adm_day_start and b_dt_check:
+            b_ip = str(b.get('inpatient_number') or '').strip()
+            # Ensure bill date is not prior to admission date unless explicitly tagged with target_ip
+            if adm_day_start and b_dt_check and (b_ip != target_ip):
                 if hasattr(b_dt_check, 'date') and b_dt_check.date() < adm_day_start.date():
                     continue
-
-            b_status = str(b.get('billing_status') or '').strip()
-            if b_status == 'Paid':
-                continue
 
             b_mode = str(b.get('billing_mode') or '').upper()
             b_pmode = str(b.get('payment_mode') or '').upper()
             b_type = b.get('bill_type')
-            b_ip = b.get('inpatient_number')
             is_ins = b.get('is_insurance') or str(b.get('customer_type') or '').upper() == 'INSURANCE'
             
-            if (b_no in wr_dispatch_map or 
+            is_qual = (
+                (b_ip and (b_ip == target_ip or b_ip in all_ips)) or
+                b_no in wr_dispatch_map or 
                 'IP' in b_mode or 
                 'CREDIT' in b_mode or 
                 'CREDIT' in b_pmode or 
                 b_type == 18 or 
-                is_ins or 
-                (b_ip and b_ip == target_ip)):
+                is_ins
+            )
+            if is_qual:
                 seen_bill_nos.add(b_no)
                 ip_bills.append(b)
 
@@ -467,213 +578,225 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 if iid_key not in stock_item_fallback or s.get('expiry_date'):
                     stock_item_fallback[iid_key] = s
 
-        bills_output = []
-        all_flattened_items = []
-        tot_taxable_grand = 0.0
-        tot_cgst_grand = 0.0
-        tot_sgst_grand = 0.0
-        tot_net_grand = 0.0
+        def build_bills(apply_dates=True):
+            b_out = []
+            f_items = []
+            tax_grand = 0.0
+            cgst_grand = 0.0
+            sgst_grand = 0.0
+            net_grand = 0.0
 
-        for b in ip_bills:
-            b_no = b.get('bill_no') or f"PH_{b.get('Bill_id')}"
-            if search_bill and search_bill.lower() not in b_no.lower():
-                continue
+            for b in ip_bills:
+                b_no = b.get('bill_no') or f"PH_{b.get('Bill_id')}"
+                if search_bill and search_bill.lower() not in b_no.lower():
+                    continue
 
-            raw_date = b.get('bill_date') or b.get('created_date')
-            b_dt = dispatch_dates.get(b_no)
-            if not b_dt:
-                if isinstance(raw_date, datetime):
-                    b_dt = raw_date
-                elif isinstance(raw_date, str):
+                b_ip = str(b.get('inpatient_number') or '').strip()
+                raw_date = b.get('bill_date') or b.get('created_date')
+                b_dt = dispatch_dates.get(b_no)
+                if not b_dt:
+                    if isinstance(raw_date, datetime):
+                        b_dt = raw_date
+                    elif isinstance(raw_date, str):
+                        try:
+                            b_dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+                        except Exception:
+                            b_dt = parse_date(raw_date[:10])
+
+                # Apply date filters
+                if adm_day_start and b_dt and (b_ip != target_ip):
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
+                    if b_check_date < adm_day_start.date():
+                        continue
+
+                if apply_dates and dt_start and b_dt:
+                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
+                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
+                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
+                    if not (s_date_only <= b_date_only <= e_date_only):
+                        continue
+
+                b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
+
+                # Check if this bill originated from a ward request with specific dispatched items
+                allowed_ids = wr_dispatch_map.get(b_no)
+
+                raw_items = b.get('medicine_particulars') or b.get('items') or []
+                items_list = []
+                tax_slab_map = {}
+                b_taxable_tot = 0.0
+                b_cgst_tot = 0.0
+                b_sgst_tot = 0.0
+                b_net_tot = 0.0
+
+                for itm in raw_items:
+                    it_id = itm.get('item_id')
+                    if allowed_ids and it_id not in allowed_ids:
+                        continue
+
                     try:
-                        b_dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
-                    except Exception:
-                        b_dt = parse_date(raw_date[:10])
+                        it_id_int = int(it_id) if it_id is not None else None
+                    except (ValueError, TypeError):
+                        it_id_int = None
 
-            # Apply date filters
-            if dt_start and b_dt:
-                b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
-                e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
-                if not (s_date_only <= b_date_only <= e_date_only):
-                    continue
+                    im_doc = item_master_map.get(it_id_int) or item_master_map.get(str(it_id), {})
+                    batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
+                    stk_doc = stock_map.get((it_id_int, batch))
+                    stk_fallback = stock_item_fallback.get(it_id_int, {})
 
-            b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
+                    part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
+                    qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
 
-            # Check if this bill originated from a ward request with specific dispatched items
-            allowed_ids = wr_dispatch_map.get(b_no)
-
-            raw_items = b.get('medicine_particulars') or b.get('items') or []
-            items_list = []
-            tax_slab_map = {}
-            b_taxable_tot = 0.0
-            b_cgst_tot = 0.0
-            b_sgst_tot = 0.0
-            b_net_tot = 0.0
-
-            for itm in raw_items:
-                it_id = itm.get('item_id')
-                if allowed_ids and it_id not in allowed_ids:
-                    continue
-
-                try:
-                    it_id_int = int(it_id) if it_id is not None else None
-                except (ValueError, TypeError):
-                    it_id_int = None
-
-                im_doc = item_master_map.get(it_id_int) or item_master_map.get(str(it_id), {})
-                batch = str(itm.get('batch_number') or itm.get('batch') or '').strip()
-                stk_doc = stock_map.get((it_id_int, batch))
-                stk_fallback = stock_item_fallback.get(it_id_int, {})
-
-                part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
-                qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
-
-                raw_price = itm.get('mrp') or itm.get('price')
-                if raw_price is not None and str(raw_price).strip() != "":
-                    price = clean_num(raw_price)
-                elif stk_doc and stk_doc.get('mrp') is not None:
-                    price = clean_num(stk_doc.get('mrp'))
-                elif stk_fallback.get('mrp') is not None:
-                    price = clean_num(stk_fallback.get('mrp'))
-                elif stk_doc and stk_doc.get('Selling_Price') is not None:
-                    price = clean_num(stk_doc.get('Selling_Price'))
-                elif stk_fallback.get('Selling_Price') is not None:
-                    price = clean_num(stk_fallback.get('Selling_Price'))
-                else:
-                    price = 0.0
-
-                calc_price = round(price * qty, 2)
-
-                # Expiry resolution from item, or stock batch, or fallback
-                exp_raw = itm.get('expiry_date') or itm.get('expiry') or (stk_doc.get('expiry_date') if stk_doc else None) or stk_fallback.get('expiry_date')
-                exp_str = "-"
-                if isinstance(exp_raw, datetime):
-                    exp_str = exp_raw.strftime("%m/%Y")
-                elif exp_raw:
-                    exp_str = str(exp_raw)[:10]
-
-                hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip() or "300490"
-
-                # Check if item has explicitly stored taxable_value and total
-                stored_taxable = itm.get('taxable_value') or itm.get('product_value')
-                stored_cgst = itm.get('CGST_Amt')
-                stored_sgst = itm.get('SGST_Amt')
-                stored_total = itm.get('total') or itm.get('total_amount')
-
-                # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or exact batch stock / itm)
-                cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or (stk_doc.get('CGST_Percentage') if stk_doc else None) or 2.5)
-                sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or (stk_doc.get('SGST_Percentage') if stk_doc else None) or 2.5)
-                tot_tax_pct = (cgst_pct + sgst_pct) / 100.0
-
-                if stored_taxable is not None and stored_total is not None:
-                    taxable = round(clean_num(stored_taxable), 2)
-                    cgst = round(clean_num(stored_cgst) if stored_cgst is not None else (taxable * (cgst_pct / 100.0)), 2)
-                    sgst = round(clean_num(stored_sgst) if stored_sgst is not None else (taxable * (sgst_pct / 100.0)), 2)
-                    item_amt = round(clean_num(stored_total), 2)
-                else:
-                    # In Hospital Pharmacy MRP billing, calc_price is the tax-inclusive retail price
-                    # Back out the taxable base without double taxation
-                    if tot_tax_pct > 0:
-                        approx_taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
-                        cgst = round(approx_taxable * (cgst_pct / 100.0), 2)
-                        sgst = round(approx_taxable * (sgst_pct / 100.0), 2)
-                        gst = round(cgst + sgst, 2)
-                        taxable = round(calc_price - gst, 2)
-                        item_amt = calc_price
+                    raw_price = itm.get('mrp') or itm.get('price')
+                    if raw_price is not None and str(raw_price).strip() != "":
+                        price = clean_num(raw_price)
+                    elif stk_doc and stk_doc.get('mrp') is not None:
+                        price = clean_num(stk_doc.get('mrp'))
+                    elif stk_fallback.get('mrp') is not None:
+                        price = clean_num(stk_fallback.get('mrp'))
+                    elif stk_doc and stk_doc.get('Selling_Price') is not None:
+                        price = clean_num(stk_doc.get('Selling_Price'))
+                    elif stk_fallback.get('Selling_Price') is not None:
+                        price = clean_num(stk_fallback.get('Selling_Price'))
                     else:
-                        taxable = calc_price
-                        cgst = 0.0
-                        sgst = 0.0
-                        item_amt = calc_price
+                        price = 0.0
 
-                b_taxable_tot += taxable
-                b_cgst_tot += cgst
-                b_sgst_tot += sgst
-                b_net_tot += item_amt
+                    calc_price = round(price * qty, 2)
 
-                slab_key = f"{int(cgst_pct + sgst_pct)}%"
-                if slab_key not in tax_slab_map:
-                    tax_slab_map[slab_key] = {"tax_slab": slab_key, "taxable_value": 0.0, "cgst": 0.0, "sgst": 0.0, "total_tax": 0.0}
+                    # Expiry resolution from item, or stock batch, or fallback
+                    exp_raw = itm.get('expiry_date') or itm.get('expiry') or (stk_doc.get('expiry_date') if stk_doc else None) or stk_fallback.get('expiry_date')
+                    exp_str = "-"
+                    if isinstance(exp_raw, datetime):
+                        exp_str = exp_raw.strftime("%m/%Y")
+                    elif exp_raw:
+                        exp_str = str(exp_raw)[:10]
 
-                tax_slab_map[slab_key]["taxable_value"] += taxable
-                tax_slab_map[slab_key]["cgst"] += cgst
-                tax_slab_map[slab_key]["sgst"] += sgst
-                tax_slab_map[slab_key]["total_tax"] += (cgst + sgst)
+                    hsn = str(itm.get('hsn_code') or itm.get('hsn') or im_doc.get('hsn') or "300490").strip() or "300490"
 
-                row_item = {
-                    "sl_no": len(items_list) + 1,
-                    "bill_date": b_date_str,
+                    # Check if item has explicitly stored taxable_value and total
+                    stored_taxable = itm.get('taxable_value') or itm.get('product_value')
+                    stored_cgst = itm.get('CGST_Amt')
+                    stored_sgst = itm.get('SGST_Amt')
+                    stored_total = itm.get('total') or itm.get('total_amount')
+
+                    # Pharmacy medicines standard: 2.5% CGST + 2.5% SGST = 5% GST (or exact batch stock / itm)
+                    cgst_pct = clean_num(itm.get('cgst_pct') or itm.get('CGST_Percentage') or (stk_doc.get('CGST_Percentage') if stk_doc else None) or 2.5)
+                    sgst_pct = clean_num(itm.get('sgst_pct') or itm.get('SGST_Percentage') or (stk_doc.get('SGST_Percentage') if stk_doc else None) or 2.5)
+                    tot_tax_pct = (cgst_pct + sgst_pct) / 100.0
+
+                    if stored_taxable is not None and stored_total is not None:
+                        taxable = round(clean_num(stored_taxable), 2)
+                        cgst = round(clean_num(stored_cgst) if stored_cgst is not None else (taxable * (cgst_pct / 100.0)), 2)
+                        sgst = round(clean_num(stored_sgst) if stored_sgst is not None else (taxable * (sgst_pct / 100.0)), 2)
+                        item_amt = round(clean_num(stored_total), 2)
+                    else:
+                        # In Hospital Pharmacy MRP billing, calc_price is the tax-inclusive retail price
+                        # Back out the taxable base without double taxation
+                        if tot_tax_pct > 0:
+                            approx_taxable = round(calc_price / (1.0 + tot_tax_pct), 2)
+                            cgst = round(approx_taxable * (cgst_pct / 100.0), 2)
+                            sgst = round(approx_taxable * (sgst_pct / 100.0), 2)
+                            gst = round(cgst + sgst, 2)
+                            taxable = round(calc_price - gst, 2)
+                            item_amt = calc_price
+                        else:
+                            taxable = calc_price
+                            cgst = 0.0
+                            sgst = 0.0
+                            item_amt = calc_price
+
+                    b_taxable_tot += taxable
+                    b_cgst_tot += cgst
+                    b_sgst_tot += sgst
+                    b_net_tot += item_amt
+
+                    slab_key = f"{int(cgst_pct + sgst_pct)}%"
+                    if slab_key not in tax_slab_map:
+                        tax_slab_map[slab_key] = {"tax_slab": slab_key, "taxable_value": 0.0, "cgst": 0.0, "sgst": 0.0, "total_tax": 0.0}
+
+                    tax_slab_map[slab_key]["taxable_value"] += taxable
+                    tax_slab_map[slab_key]["cgst"] += cgst
+                    tax_slab_map[slab_key]["sgst"] += sgst
+                    tax_slab_map[slab_key]["total_tax"] += (cgst + sgst)
+
+                    row_item = {
+                        "sl_no": len(items_list) + 1,
+                        "bill_date": b_date_str,
+                        "bill_no": b_no,
+                        "uhid": target_uhid,
+                        "ip_number": target_ip,
+                        "qty": int(qty),
+                        "particulars": part_name,
+                        "batch": batch,
+                        "expiry": exp_str,
+                        "amount": item_amt,
+                        "hsn": hsn,
+                        "cgst_pct": cgst_pct,
+                        "cgst": cgst,
+                        "cgst_amt": cgst,
+                        "sgst_pct": sgst_pct,
+                        "sgst": sgst,
+                        "sgst_amt": sgst,
+                        "taxable_amt": taxable
+                    }
+                    items_list.append(row_item)
+                    f_items.append(row_item)
+
+                if not items_list:
+                    continue
+
+                b_taxable_tot = round(b_taxable_tot, 2)
+                b_cgst_tot = round(b_cgst_tot, 2)
+                b_sgst_tot = round(b_sgst_tot, 2)
+                b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
+                b_net_tot = round(b_net_tot, 2)
+
+                # Check for bill-level discount and stored net amount
+                b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
+                stored_net = clean_num(b.get('net_amount'))
+
+                # Net amount reflects any discount applied; only use stored_net if consistent with item totals within round-off
+                expected_net = round(b_net_tot - b_disc, 2)
+                if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
+                    bill_final_net = stored_net
+                else:
+                    bill_final_net = expected_net
+
+                tax_grand += b_taxable_tot
+                cgst_grand += b_cgst_tot
+                sgst_grand += b_sgst_tot
+                net_grand += bill_final_net
+
+                b_out.append({
                     "bill_no": b_no,
-                    "qty": int(qty),
-                    "particulars": part_name,
-                    "batch": batch,
-                    "expiry": exp_str,
-                    "amount": item_amt,
-                    "hsn": hsn,
-                    "cgst_pct": cgst_pct,
-                    "cgst": cgst,
-                    "cgst_amt": cgst,
-                    "sgst_pct": sgst_pct,
-                    "sgst": sgst,
-                    "sgst_amt": sgst,
-                    "taxable_amt": taxable
-                }
-                items_list.append(row_item)
-                all_flattened_items.append(row_item)
+                    "bill_date": b_date_str,
+                    "uhid": target_uhid,
+                    "ip_number": target_ip,
+                    "payment_mode": b.get('payment_mode') or "Credit",
+                    "billing_mode": b.get('billing_mode') or "IP CREDIT",
+                    "items": items_list,
+                    "tax_summary": list(tax_slab_map.values()),
+                    "taxable_amt": b_taxable_tot,
+                    "cgst_amt": b_cgst_tot,
+                    "sgst_amt": b_sgst_tot,
+                    "total_gst": b_gst_tot,
+                    "discount_amount": b_disc,
+                    "net_amount": bill_final_net,
+                    "bill_total": b_net_tot,
+                    "bill_net": bill_final_net,
+                    "sort_key": b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo) else (b_dt or datetime.min)
+                })
 
-            if not items_list:
-                continue
+            b_out.sort(key=lambda x: (x["sort_key"], x["bill_no"]))
+            for bo in b_out:
+                if "sort_key" in bo:
+                    del bo["sort_key"]
 
-            b_taxable_tot = round(b_taxable_tot, 2)
-            b_cgst_tot = round(b_cgst_tot, 2)
-            b_sgst_tot = round(b_sgst_tot, 2)
-            b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
-            b_net_tot = round(b_net_tot, 2)
+            return b_out, f_items, round(tax_grand, 2), round(cgst_grand, 2), round(sgst_grand, 2), round(net_grand, 2)
 
-            # Check for bill-level discount and stored net amount
-            b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
-            stored_net = clean_num(b.get('net_amount'))
-
-            # Net amount reflects any discount applied; only use stored_net if consistent with item totals within round-off
-            expected_net = round(b_net_tot - b_disc, 2)
-            if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
-                bill_final_net = stored_net
-            else:
-                bill_final_net = expected_net
-
-            tot_taxable_grand += b_taxable_tot
-            tot_cgst_grand += b_cgst_tot
-            tot_sgst_grand += b_sgst_tot
-            tot_net_grand += bill_final_net
-
-            bills_output.append({
-                "bill_no": b_no,
-                "bill_date": b_date_str,
-                "payment_mode": b.get('payment_mode') or "Credit",
-                "billing_mode": b.get('billing_mode') or "IP CREDIT",
-                "items": items_list,
-                "tax_summary": list(tax_slab_map.values()),
-                "taxable_amt": b_taxable_tot,
-                "cgst_amt": b_cgst_tot,
-                "sgst_amt": b_sgst_tot,
-                "total_gst": b_gst_tot,
-                "discount_amount": b_disc,
-                "net_amount": bill_final_net,
-                "bill_total": b_net_tot,
-                "bill_net": bill_final_net,
-                "sort_key": b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo) else (b_dt or datetime.min)
-            })
-
-        bills_output.sort(key=lambda x: (x["sort_key"], x["bill_no"]))
-        for bo in bills_output:
-            if "sort_key" in bo:
-                del bo["sort_key"]
-
-        tot_taxable_grand = round(tot_taxable_grand, 2)
-        tot_cgst_grand = round(tot_cgst_grand, 2)
-        tot_sgst_grand = round(tot_sgst_grand, 2)
-        tot_net_grand = round(tot_net_grand, 2)
+        bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=True)
+        if not bills_output and (dt_start or dt_end):
+            bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=False)
 
         return Response({
             "success": True,
@@ -693,8 +816,10 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 "net_amount": tot_net_grand
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -851,8 +976,10 @@ def lab_abstract_api(request):
                 "total_amount": tot_amt
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # Alias for backwards compatibility with urls.py
 lab_abstract_report_api = lab_abstract_api
@@ -1080,8 +1207,10 @@ def occupancy_company_wise_api(request):
             "total_occupied_beds": len(raw_occupancy),
             "total_beds_occupied": len(raw_occupancy)
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -1186,8 +1315,10 @@ def insurance_bills_status_api(request):
                 "total_due_amount": round(tot_due, 2)
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -1302,8 +1433,10 @@ def insurance_branch_dues_api(request):
                 "total_due_amount": round(tot_due, 2)
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -1481,17 +1614,25 @@ def companywise_registration_api(request):
 
             return None
 
-        # 2. Fetch live records for the date range
+        # 2. Fetch live records for the date range with lean projections
         # OP Registrations
+        reg_proj = {
+            'uhid': 1, 'billed_date': 1, 'patient_name': 1, 'doctorName': 1,
+            'company_code': 1, 'company_name': 1, 'customer_type': 1, '_id': 0
+        }
         bills = list(hms_db['hospital_billing'].find({
             '$or': [{'bill_name': 'REGISTRATION'}, {'bill_type': 5}],
             'billed_date': {'$gte': dt_start, '$lte': dt_end}
-        }).sort('billed_date', 1))
+        }, reg_proj).sort('billed_date', 1))
 
         # IP Admissions
+        adm_cur_proj = {
+            'uhid': 1, 'admissionDateTime': 1, 'admittingDoctor': 1, 'consultingDoctor': 1,
+            'company_code': 1, 'insurance_company': 1, 'customer_type': 1, '_id': 0
+        }
         adms_cur = list(hms_db['hospital_admission'].find({
             'admissionDateTime': {'$gte': dt_start, '$lte': dt_end}
-        }).sort('admissionDateTime', 1))
+        }, adm_cur_proj).sort('admissionDateTime', 1))
 
         # Collect unique UHIDs
         all_uhids = list(set(
@@ -1499,24 +1640,71 @@ def companywise_registration_api(request):
             [a.get('uhid') for a in adms_cur if a.get('uhid')]
         ))
 
-        # Batch queries for instant performance (<100ms)
-        patients_map = {p['uhid']: p for p in hms_db['hospital_patient'].find({'uhid': {'$in': all_uhids}})}
-
+        # Batch queries in chunks with lean projections for ultra-fast, socket-safe retrieval
+        patients_map = {}
         adms_hist = defaultdict(list)
-        for a in hms_db['hospital_admission'].find({'uhid': {'$in': all_uhids}}).sort('admissionDateTime', -1):
-            adms_hist[a['uhid']].append(a)
-
         claims_hist = defaultdict(list)
-        for c in hms_db['hospital_insuranceclaim'].find({'uhid': {'$in': all_uhids}}).sort('claim_date', -1):
-            claims_hist[c['uhid']].append(c)
-
         mems_hist = defaultdict(list)
-        for m in hms_db['hospital_insurancemember'].find({'uhid': {'$in': all_uhids}}):
-            mems_hist[m['uhid']].append(m)
-
         visits_hist = defaultdict(list)
-        for v in hms_db['hospital_insurancemembervisit'].find({'uhid': {'$in': all_uhids}}).sort('visit_date', -1):
-            visits_hist[v['uhid']].append(v)
+
+        pat_proj = {
+            "uhid": 1, "firstName": 1, "lastName": 1, "name": 1, "patient_name": 1,
+            "permanent_address": 1, "doctorName": 1, "company_code": 1, "company_name": 1,
+            "customer_type": 1, "_id": 0
+        }
+        adm_proj = {
+            "uhid": 1, "company_code": 1, "insurance_company": 1, "customer_type": 1,
+            "admissionDateTime": 1, "admittingDoctor": 1, "consultingDoctor": 1, "_id": 0
+        }
+        claim_proj = {
+            "uhid": 1, "company_code": 1, "company_name": 1, "insurance_company": 1,
+            "claim_date": 1, "_id": 0
+        }
+        mem_proj = {
+            "uhid": 1, "company_code": 1, "company_name": 1, "insurance_company": 1, "_id": 0
+        }
+        visit_proj = {
+            "uhid": 1, "company_code": 1, "company_name": 1, "visit_date": 1, "_id": 0
+        }
+
+        # Chunk UHIDs to prevent socket buffer exhaustion
+        batch_size = 400
+        for i in range(0, len(all_uhids), batch_size):
+            u_chunk = all_uhids[i:i + batch_size]
+            try:
+                for p in hms_db['hospital_patient'].find({'uhid': {'$in': u_chunk}}, pat_proj):
+                    if p.get('uhid'):
+                        patients_map[p['uhid']] = p
+            except Exception:
+                pass
+
+            try:
+                for a in hms_db['hospital_admission'].find({'uhid': {'$in': u_chunk}}, adm_proj):
+                    if a.get('uhid'):
+                        adms_hist[a['uhid']].append(a)
+            except Exception:
+                pass
+
+            try:
+                for c in hms_db['hospital_insuranceclaim'].find({'uhid': {'$in': u_chunk}}, claim_proj):
+                    if c.get('uhid'):
+                        claims_hist[c['uhid']].append(c)
+            except Exception:
+                pass
+
+            try:
+                for m in hms_db['hospital_insurancemember'].find({'uhid': {'$in': u_chunk}}, mem_proj):
+                    if m.get('uhid'):
+                        mems_hist[m['uhid']].append(m)
+            except Exception:
+                pass
+
+            try:
+                for v in hms_db['hospital_insurancemembervisit'].find({'uhid': {'$in': u_chunk}}, visit_proj):
+                    if v.get('uhid'):
+                        visits_hist[v['uhid']].append(v)
+            except Exception:
+                pass
 
         grouped_by_date = {}
         seen_ops = set()
@@ -1622,8 +1810,10 @@ def companywise_registration_api(request):
             "companies": company_names,
             "total_registrations": total_pats
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -1861,8 +2051,10 @@ def insurance_discharge_bill_all_api(request):
                 "net_insurance_claim": round(gross_tot - adv_paid, 2)
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 
@@ -1983,8 +2175,10 @@ def prescription_details_api(request):
                 "total_items": sum(len(p['items']) for p in prescriptions)
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2023,29 +2217,93 @@ def medicine_abstract_api(request):
         dt_end = parse_date(to_date_str, is_end=True)
 
         # 1. Resolve Admission & Patient Info
-        adm_doc = hms_db['hospital_admission'].find_one(
-            {"$or": [
-                {"ipNumber": search_term},
-                {"ipNumber": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)},
-                {"uhid": search_term},
-                {"uhid": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)}
-            ]},
-            sort=[("admissionDateTime", -1)]
-        )
+        adm_doc = None
 
-        target_ip = (adm_doc.get('ipNumber') if adm_doc else search_ip) or search_term
-        target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_term
+        # Disambiguate if search_ip is actually a UHID
+        if search_ip:
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"ipNumber": search_ip},
+                    {"ipNumber": re.compile(f"^{re.escape(search_ip)}$", re.IGNORECASE)}
+                ]}
+            )
+            if not adm_doc:
+                uhid_cand = hms_db['hospital_admission'].find_one(
+                    {"$or": [
+                        {"uhid": search_ip},
+                        {"uhid": re.compile(f"^{re.escape(search_ip)}$", re.IGNORECASE)}
+                    ]},
+                    sort=[("admissionDateTime", -1)]
+                )
+                if uhid_cand:
+                    adm_doc = uhid_cand
+                    if not search_uhid:
+                        search_uhid = search_ip
+                    search_ip = adm_doc.get('ipNumber') or ''
 
-        all_adms = list(hms_db['hospital_admission'].find({"$or": [
-            {"uhid": target_uhid},
-            {"uhid": target_ip},
-            {"ipNumber": target_ip},
-            {"ipNumber": target_uhid}
-        ]}))
-        all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
-        all_ips.add(target_ip)
-        all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
-        all_uhids.add(target_uhid)
+        if not search_ip and search_uhid:
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"uhid": search_uhid},
+                    {"uhid": re.compile(f"^{re.escape(search_uhid)}$", re.IGNORECASE)}
+                ]},
+                sort=[("admissionDateTime", -1)]
+            )
+            if adm_doc and adm_doc.get('ipNumber'):
+                search_ip = adm_doc.get('ipNumber')
+
+        if search_ip:
+            target_ip = search_ip
+            target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_uhid
+            all_ips = {search_ip}
+            if adm_doc and adm_doc.get('ipNumber'):
+                all_ips.add(adm_doc['ipNumber'])
+            all_uhids = {target_uhid} if target_uhid else set()
+        else:
+            adm_doc = hms_db['hospital_admission'].find_one(
+                {"$or": [
+                    {"ipNumber": search_term},
+                    {"ipNumber": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)},
+                    {"uhid": search_term},
+                    {"uhid": re.compile(f"^{re.escape(search_term)}$", re.IGNORECASE)}
+                ]},
+                sort=[("admissionDateTime", -1)]
+            )
+            target_ip = (adm_doc.get('ipNumber') if adm_doc else search_ip) or search_term
+            target_uhid = (adm_doc.get('uhid') if adm_doc else search_uhid) or search_term
+
+            all_adms = list(hms_db['hospital_admission'].find({"$or": [
+                {"uhid": target_uhid},
+                {"uhid": target_ip},
+                {"ipNumber": target_ip},
+                {"ipNumber": target_uhid}
+            ]}))
+            all_ips = {a.get('ipNumber') for a in all_adms if a.get('ipNumber')}
+            all_ips.add(target_ip)
+            all_ips.discard('')
+            all_ips.discard(None)
+            all_uhids = {a.get('uhid') for a in all_adms if a.get('uhid')}
+            all_uhids.add(target_uhid)
+            all_uhids.discard('')
+            all_uhids.discard(None)
+
+            for pb_cand in hms_db['hospital_pharmacybilling'].find({"$or": [
+                {"uhid": {"$in": list(all_uhids)}},
+                {"inpatient_number": {"$in": list(all_ips)}}
+            ]}, {"inpatient_number": 1, "uhid": 1}).limit(50):
+                if pb_cand.get('inpatient_number'):
+                    all_ips.add(pb_cand.get('inpatient_number'))
+                if pb_cand.get('uhid'):
+                    all_uhids.add(pb_cand.get('uhid'))
+
+        adm_day_start = None
+        adm_dt = adm_doc.get('admissionDateTime') if adm_doc else None
+        if isinstance(adm_dt, datetime):
+            adm_day_start = datetime.combine(adm_dt.date(), time.min)
+        elif adm_dt:
+            parsed_d = parse_date(str(adm_dt)[:10])
+            if parsed_d:
+                adm_day_start = datetime.combine(parsed_d.date(), time.min)
 
         patient_doc = hms_db['hospital_patient'].find_one({"uhid": target_uhid})
         if not patient_doc:
@@ -2055,12 +2313,15 @@ def medicine_abstract_api(request):
 
         # 2. Ward requests dispatches for this patient across admissions
         wr_or = []
-        for u in all_uhids:
-            wr_or.append({"uhid": u})
-            wr_or.append({"inpatient_number": u})
-        for ip in all_ips:
-            wr_or.append({"uhid": ip})
-            wr_or.append({"inpatient_number": ip})
+        if search_ip:
+            wr_or.append({"inpatient_number": {"$in": list(all_ips)}})
+        else:
+            for u in all_uhids:
+                wr_or.append({"uhid": u})
+                wr_or.append({"inpatient_number": u})
+            for ip in all_ips:
+                wr_or.append({"uhid": ip})
+                wr_or.append({"inpatient_number": ip})
 
         wr_docs = list(hms_db['hospital_pharmacybilling'].find({
             "$or": wr_or,
@@ -2087,27 +2348,33 @@ def medicine_abstract_api(request):
 
         # 3. Query all candidate bills
         bill_query_or = []
-        for u in all_uhids:
-            bill_query_or.append({"uhid": u})
-        for ip in all_ips:
-            bill_query_or.append({"uhid": ip})
-            bill_query_or.append({"inpatient_number": ip})
-        if wr_dispatch_map:
-            bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
-        if patient_name:
-            bill_query_or.append({"patient_name": patient_name})
-            bill_query_or.append({"patientname": patient_name})
+        if search_ip:
+            bill_query_or.append({"inpatient_number": {"$in": list(all_ips)}})
+            if wr_dispatch_map:
+                bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
+        else:
+            for u in all_uhids:
+                bill_query_or.append({"uhid": u})
+                bill_query_or.append({"inpatient_number": u})
+            for ip in all_ips:
+                bill_query_or.append({"uhid": ip})
+                bill_query_or.append({"inpatient_number": ip})
+            if wr_dispatch_map:
+                bill_query_or.append({"bill_no": {"$in": list(wr_dispatch_map.keys())}})
+            if patient_name:
+                bill_query_or.append({"patient_name": patient_name})
+                bill_query_or.append({"patientname": patient_name})
 
         raw_bills = list(hms_db['hospital_pharmacybilling'].find({
             "$and": [
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
-                {"billing_status": {"$nin": ["Paid", "Cancelled", "deleted"]}},
+                {"billing_status": {"$nin": ["Cancelled", "deleted"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
                         {"dispatch_history": {"$in": [None, []]}},
-                        {"billing_status": {"$in": ["Billed", "Completed"]}}
+                        {"billing_status": {"$in": ["Billed", "Completed", "Paid"]}}
                     ]
                 }
             ]
@@ -2148,22 +2415,27 @@ def medicine_abstract_api(request):
                 if not b_no or b_no in seen_bids:
                     continue
 
-                b_status = str(b.get('billing_status') or '').strip()
-                if b_status == 'Paid':
-                    continue
-
                 b_mode = str(b.get('billing_mode') or '').upper()
                 b_type = b.get('bill_type')
                 b_pmode = str(b.get('payment_mode') or '').upper()
-                
-                # Exclude purely counter direct cash/UPI sales unless IP credit or part of patient's IP ledger
-                if b_pmode in ('CASH', 'UPI') and 'IP' not in b_mode and b_no not in wr_dispatch_map:
+                b_ip = str(b.get('inpatient_number') or '').strip()
+                is_ins = b.get('is_insurance') or str(b.get('customer_type') or '').upper() == 'INSURANCE'
+
+                # Must be IP credit, linked to patient's admission / ward requests, or tagged with inpatient_number
+                is_ip_bill = (
+                    (b_ip and (b_ip == target_ip or b_ip in all_ips)) or
+                    b_no in wr_dispatch_map or
+                    'IP' in b_mode or
+                    'CREDIT' in b_mode or
+                    'CREDIT' in b_pmode or
+                    b_type == 18 or
+                    is_ins or
+                    (patient_name and str(b.get('patient_name') or '').strip().lower() == patient_name.lower())
+                )
+                if not is_ip_bill:
                     continue
 
-                # Must be IP credit or linked to patient's admission / ward requests
-                if not (b_no in wr_dispatch_map or 'IP' in b_mode or b_type == 18 or (patient_name and b.get('patient_name') == patient_name)):
-                    continue
-
+                b_ip = str(b.get('inpatient_number') or '').strip()
                 # Determine bill date
                 b_dt = dispatch_dates.get(b_no)
                 if not b_dt:
@@ -2175,6 +2447,11 @@ def medicine_abstract_api(request):
                             b_dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
                         except Exception:
                             b_dt = parse_date(raw_date[:10])
+
+                if adm_day_start and b_dt and (b_ip != target_ip):
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
+                    if b_check_date < adm_day_start.date():
+                        continue
 
                 if apply_dates and dt_start and b_dt:
                     b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
@@ -2285,6 +2562,8 @@ def medicine_abstract_api(request):
                 out_bills.append({
                     "bill_date": b_date_str,
                     "bill_number": b_no,
+                    "uhid": target_uhid,
+                    "ip_number": target_ip,
                     "credit_status": "IP CREDITS",
                     "taxable_amt": b_taxable_tot,
                     "cgst": b_cgst_tot,
@@ -2313,9 +2592,23 @@ def medicine_abstract_api(request):
         total_discount = round(sum(b.get('discount_amount', 0) for b in bills), 2)
         total_bill_amount = round(sum(b['bill_amount'] for b in bills), 2)
 
-        fallback_doc = (patient_doc.get('doctorName') if patient_doc else '') or ''
-        doc_raw = (adm_doc.get('admittingDoctor') if adm_doc else '') or (adm_doc.get('consultingDoctor') if adm_doc else '') or fallback_doc
+        fallback_doc = (
+            (patient_doc.get('doctorName') if patient_doc else '') or 
+            (patient_doc.get('doctor') if patient_doc else '') or
+            (patient_doc.get('consultingDoctor') if patient_doc else '') or
+            ''
+        )
+        doc_raw = (
+            (adm_doc.get('doctorName') if adm_doc else '') or
+            (adm_doc.get('admittingDoctor') if adm_doc else '') or 
+            (adm_doc.get('consultingDoctor') if adm_doc else '') or 
+            (adm_doc.get('doctor') if adm_doc else '') or
+            fallback_doc
+        )
         doc_name = resolve_doctor_display_name(doc_raw, global_db, fallback_name=fallback_doc)
+        if doc_name and doc_name.isdigit():
+            if fallback_doc and not str(fallback_doc).strip().isdigit():
+                doc_name = str(fallback_doc).strip()
         comp_name = (adm_doc.get('insurance_company') if adm_doc else '') or (patient_doc.get('company_name') if patient_doc else '') or ''
 
         return Response({
@@ -2328,6 +2621,7 @@ def medicine_abstract_api(request):
             "patient_info": {
                 "patient_name": patient_name,
                 "ip_number": target_ip,
+                "uhid": target_uhid,
                 "op_number": target_uhid,
                 "doctor_name": doc_name,
                 "doctor": doc_name,
@@ -2345,8 +2639,92 @@ def medicine_abstract_api(request):
                 "total_bill_amount": total_bill_amount
             }
         }, status=status.HTTP_200_OK)
-    finally:
-        client.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. GET IP NUMBERS BY UHID API
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([HasRoleAndDataPermission])
+def get_ip_numbers_by_uhid_api(request):
+    """
+    Given a UHID (or IP number/search term), returns matching IP admissions 
+    so users can pick the exact admission for reports.
+    """
+    uhid = (request.GET.get('uhid') or request.GET.get('term') or '').strip()
+    if not uhid or len(uhid) < 2:
+        return Response({"success": True, "admissions": []}, status=status.HTTP_200_OK)
+
+    client, hms_db, global_db = get_db()
+    try:
+        # Search admissions matching uhid or ipNumber
+        query = {
+            "$or": [
+                {"uhid": uhid},
+                {"uhid": re.compile(f"^{re.escape(uhid)}", re.IGNORECASE)},
+                {"ipNumber": uhid},
+                {"ipNumber": re.compile(f"^{re.escape(uhid)}", re.IGNORECASE)}
+            ]
+        }
+        adms = list(hms_db['hospital_admission'].find(query).sort("admissionDateTime", -1).limit(30))
+        
+        # If no admission found, check if uhid belongs to hospital_patient and get their admissions
+        if not adms:
+            pat = hms_db['hospital_patient'].find_one({
+                "$or": [
+                    {"uhid": uhid},
+                    {"uhid": re.compile(f"^{re.escape(uhid)}", re.IGNORECASE)}
+                ]
+            })
+            if pat and pat.get('uhid'):
+                p_uhid = pat['uhid']
+                adms = list(hms_db['hospital_admission'].find({"uhid": p_uhid}).sort("admissionDateTime", -1).limit(30))
+
+        seen_ips = set()
+        pat_name_cache = {}
+        out = []
+        for a in adms:
+            ip = a.get('ipNumber')
+            if not ip or ip in seen_ips:
+                continue
+            seen_ips.add(ip)
+
+            p_uhid = a.get('uhid') or uhid
+            p_name = a.get('patientName') or a.get('patient_name') or ''
+            if not p_name and p_uhid:
+                if p_uhid not in pat_name_cache:
+                    pat_doc = hms_db['hospital_patient'].find_one({"uhid": p_uhid}, {"firstName": 1, "lastName": 1, "name": 1})
+                    if pat_doc:
+                        pat_name_cache[p_uhid] = f"{pat_doc.get('firstName', '')} {pat_doc.get('lastName', '')}".strip() or pat_doc.get('name', '')
+                    else:
+                        pat_name_cache[p_uhid] = ''
+                p_name = pat_name_cache[p_uhid]
+            
+            adm_dt = a.get('admissionDateTime')
+            adm_dt_str = adm_dt.strftime('%d/%m/%Y %I:%M %p') if isinstance(adm_dt, datetime) else str(adm_dt or '')
+            dis_dt = a.get('dischargeDateTime')
+            dis_dt_str = dis_dt.strftime('%d/%m/%Y %I:%M %p') if isinstance(dis_dt, datetime) else str(dis_dt or '')
+            
+            out.append({
+                "ip_number": ip,
+                "uhid": p_uhid,
+                "patient_name": p_name,
+                "admission_date": adm_dt_str,
+                "discharge_date": dis_dt_str,
+                "doctor_name": a.get('doctorName') or a.get('admittingDoctor') or a.get('consultingDoctor') or '',
+                "room_no": a.get('roomNo') or a.get('bedNo') or ''
+            })
+        
+        return Response({"success": True, "admissions": out}, status=status.HTTP_200_OK)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e), "admissions": []}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 

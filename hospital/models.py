@@ -525,8 +525,16 @@ class PurchaseReturn(AuditModel):
         return f"{self.purchase_return_bill_no} — {self.grn_number}"
 
 PR_STATUS_CHOICES = [
-    ("Pending",                     "Pending"),
+    ("Draft",                     "Draft"),
+    ("Pending",                   "Pending"),
+    ("Approved",                  "Approved"),
+    ("Rejected",                  "Rejected"),
+    ("Purchase Order Initiated",  "Purchase Order Initiated"),
+    ("PO Initiated",              "PO Initiated"),
+    ("Purchased",                 "Purchased"),
+    ("Stock Restocked",           "Stock Restocked"),
     ("Returned",                  "Returned"),
+    ("Cancelled",                 "Cancelled"),
 ]
 
 class PurchaseRequisition(AuditModel):
@@ -540,7 +548,7 @@ class PurchaseRequisition(AuditModel):
     items = models.JSONField(default=list, blank=True)
  
     # ── Header ───────────────────────────────────────────────────────────────
-    status = models.CharField(max_length=30, default="Draft", choices=PR_STATUS_CHOICES)
+    status = models.CharField(max_length=50, default="Draft", choices=PR_STATUS_CHOICES)
     outlet_name = models.CharField(max_length=100, blank=True, default="")
  
     # ── Approval ─────────────────────────────────────────────────────────────

@@ -1,11 +1,15 @@
-from bson import Decimal128
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from pymongo import MongoClient
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+from bson import Decimal128
+from pymongo import MongoClient
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import AllowAny
+from pyauth.auth import HasRoleAndDataPermission
 
 # Ensure .env is loaded from backend directory regardless of working directory
 _backend_env = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -13,10 +17,23 @@ if _backend_env.exists():
     load_dotenv(dotenv_path=_backend_env, override=False)
 load_dotenv(override=True)
 
-from datetime import datetime
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from pyauth.auth import HasRoleAndDataPermission
+# ── Persistent Connection Pool ──────────────────────────────────────────
+_client = None
+
+def get_mongo_client():
+    global _client
+    if _client is None:
+        host = os.getenv('GLOBAL_DB_HOST', 'mongodb://localhost:27017')
+        _client = MongoClient(
+            host,
+            maxPoolSize=25,
+            minPoolSize=2,
+            connectTimeoutMS=4000,
+            serverSelectionTimeoutMS=4000,
+            socketTimeoutMS=8000,
+            retryWrites=True
+        )
+    return _client
 
 
 # Helper function to convert Decimal128 fields to float
@@ -29,35 +46,55 @@ def convert_decimal128_to_float(data):
     return data
 
 
-# Helper function to build department code -> name mapping from backend_diagnostics_Departments
+# ── Metadata In-Memory Caches (5 min TTL) ────────────────────────────────
+_dept_cache = {"data": None, "timestamp": 0}
+_desig_cache = {"data": None, "timestamp": 0}
+_doctor_list_cache = {"data": None, "timestamp": 0}
+CACHE_TTL = 300  # 5 minutes
+DOCTOR_CACHE_TTL = 120  # 2 minutes
+
+
 def get_department_mapping(global_db):
+    now = time.time()
+    if _dept_cache["data"] is not None and (now - _dept_cache["timestamp"] < CACHE_TTL):
+        return _dept_cache["data"]
     try:
         dept_collection = global_db['backend_diagnostics_Departments']
         dept_mapping = {}
-        for d in dept_collection.find({}):
+        for d in dept_collection.find({}, {"department_code": 1, "dept_code": 1, "code": 1, "department_name": 1, "dept_name": 1, "name": 1, "_id": 0}):
             code = d.get('department_code') or d.get('dept_code') or d.get('code')
             name = d.get('department_name') or d.get('dept_name') or d.get('name')
             if code and name:
                 dept_mapping[code] = name
+        _dept_cache["data"] = dept_mapping
+        _dept_cache["timestamp"] = now
         return dept_mapping
     except Exception as e:
         print("Error fetching department mapping:", e)
+        if _dept_cache["data"] is not None:
+            return _dept_cache["data"]
         return {}
 
 
-# Helper function to build designation code -> name mapping from backend_diagnostics_Designation
 def get_designation_mapping(global_db):
+    now = time.time()
+    if _desig_cache["data"] is not None and (now - _desig_cache["timestamp"] < CACHE_TTL):
+        return _desig_cache["data"]
     try:
         desig_collection = global_db['backend_diagnostics_Designation']
         desig_mapping = {}
-        for d in desig_collection.find({}):
+        for d in desig_collection.find({}, {"Designation_code": 1, "designation_code": 1, "code": 1, "designation": 1, "designation_name": 1, "name": 1, "_id": 0}):
             code = d.get('Designation_code') or d.get('designation_code') or d.get('code')
             name = d.get('designation') or d.get('designation_name') or d.get('name')
             if code and name:
                 desig_mapping[code] = name
+        _desig_cache["data"] = desig_mapping
+        _desig_cache["timestamp"] = now
         return desig_mapping
     except Exception as e:
         print("Error fetching designation mapping:", e)
+        if _desig_cache["data"] is not None:
+            return _desig_cache["data"]
         return {}
 
 
@@ -72,11 +109,11 @@ def get_active_doctor_profiles(global_db, projection):
     user_collection = global_db['backend_diagnostics_user']
 
     # Make sure employeeId is always projected (needed for dedupe + active check)
-    projection = dict(projection)
-    projection["employeeId"] = 1
-    projection["_id"] = 0
+    proj = dict(projection)
+    proj["employeeId"] = 1
+    proj["_id"] = 0
 
-    profiles = list(profile_collection.find({"isDoctor": True}, projection))
+    profiles = list(profile_collection.find({"isDoctor": True}, proj))
 
     # Deduplicate by employeeId
     unique_profiles = []
@@ -91,19 +128,13 @@ def get_active_doctor_profiles(global_db, projection):
     if not unique_profiles:
         return []
 
-    # employeeId may be stored as string or int in the user collection
-    query_eids = set()
-    for doc in unique_profiles:
-        eid = str(doc.get("employeeId") or "").strip()
-        query_eids.add(eid)
-        if eid.isdigit():
-            query_eids.add(int(eid))
-
+    # Fetch all active user employee IDs directly (collection has no index on employeeId,
+    # so simple find({"is_active": True}) is sub-second, whereas unindexed $in hangs).
     active_users = user_collection.find(
-        {"employeeId": {"$in": list(query_eids)}, "is_active": True},
+        {"is_active": True},
         {"employeeId": 1, "_id": 0}
     )
-    active_emp_ids = set(str(u.get("employeeId") or "").strip() for u in active_users)
+    active_emp_ids = {str(u.get("employeeId") or "").strip() for u in active_users if u.get("employeeId")}
 
     return [
         doc for doc in unique_profiles
@@ -115,8 +146,13 @@ def get_active_doctor_profiles(global_db, projection):
 @permission_classes([AllowAny])
 def doctor_list_from_diagnostics(request):
     """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with resolved Department and Designation names"""
+    now = time.time()
+    # Fast path: serve from in-memory cache (<1ms response time)
+    if _doctor_list_cache["data"] is not None and (now - _doctor_list_cache["timestamp"] < DOCTOR_CACHE_TTL):
+        return Response(_doctor_list_cache["data"], status=status.HTTP_200_OK)
+
     try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        client = get_mongo_client()
         global_db = client['Global']
 
         # Get Mappings
@@ -147,8 +183,13 @@ def doctor_list_from_diagnostics(request):
             doc["registrationNumber"] = str(raw_reg).strip() if raw_reg else ""
             result.append(doc)
 
+        _doctor_list_cache["data"] = result
+        _doctor_list_cache["timestamp"] = now
         return Response(result, status=status.HTTP_200_OK)
     except Exception as e:
+        # Fallback to stale cache if available, preventing 500 error during transient network drops
+        if _doctor_list_cache["data"] is not None:
+            return Response(_doctor_list_cache["data"], status=status.HTTP_200_OK)
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -156,8 +197,9 @@ def doctor_list_from_diagnostics(request):
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_list(request):
     """Get list of doctors (isDoctor=True in profile AND is_active=True in user) with schedule details and resolved Department & Designation names"""
+    client = None
     try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         global_db = client['Global']
 
         # Get Mappings
@@ -241,14 +283,18 @@ def doctor_schedule_list(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
 
 
 @api_view(['GET'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_detail(request, employee_id):
     """Get doctor schedule details by employeeId with resolved Department and Designation names"""
+    client = None
     try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         global_db = client['Global']
         user_collection = global_db['backend_diagnostics_user']
 
@@ -322,18 +368,23 @@ def doctor_schedule_detail(request, employee_id):
             response_data["schedule_exists"] = False
 
         response_data = convert_decimal128_to_float(response_data)
+        _doctor_list_cache["timestamp"] = 0  # Invalidate cache
         return Response(response_data, status=status.HTTP_200_OK)
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()
 
 
 @api_view(['POST', 'PATCH'])
 @permission_classes([HasRoleAndDataPermission])
 def doctor_schedule_upsert(request, employee_id):
     """Create or update doctor schedule by employeeId"""
+    client = None
     try:
-        client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+        client = MongoClient(os.getenv('GLOBAL_DB_HOST'), serverSelectionTimeoutMS=5000)
         branch_code = request.data.get("auth-branch-code", "system")
         hospital_code = request.data.get("auth-hospital-code", "system")
 
@@ -403,7 +454,11 @@ def doctor_schedule_upsert(request, employee_id):
         response_data = convert_decimal128_to_float(response_data)
         response_data["message"] = message
 
+        _doctor_list_cache["timestamp"] = 0  # Invalidate cache
         return Response(response_data, status=status.HTTP_200_OK)
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if client:
+            client.close()

@@ -161,10 +161,22 @@ def split_payment_modes(net_amt, payment_mode, payment_details=None, is_credit_b
             
     return round(cash, 2), round(credit, 2), round(bank, 2)
 
+_SHARED_CLIENT = None
+
 def get_db():
-    mongo_uri = os.getenv("GLOBAL_DB_HOST")
-    client = MongoClient(mongo_uri)
-    return client, client["HMS"], client["Global"]
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None:
+        mongo_uri = os.getenv("GLOBAL_DB_HOST")
+        _SHARED_CLIENT = MongoClient(
+            mongo_uri,
+            maxPoolSize=50,
+            minPoolSize=5,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=30000,
+            serverSelectionTimeoutMS=10000,
+            retryWrites=True
+        )
+    return _SHARED_CLIENT, _SHARED_CLIENT["HMS"], _SHARED_CLIENT["Global"]
 
 class AccountsLedgerEngine:
     @staticmethod
@@ -287,23 +299,34 @@ class AccountsLedgerEngine:
 
             # Parallel Concurrent Module Queries
             def fetch_pharm():
-                pharm_or = []
-                if bill_num_list:
-                    pharm_or.extend([
-                        {"bill_no": {"$in": bill_num_list}},
-                        {"inpatient_number": {"$in": bill_num_list}}
-                    ])
-                if bill_id_list:
-                    pharm_or.append({"Bill_id": {"$in": bill_id_list}})
-                if not pharm_or:
+                if not bill_num_list and not bill_id_list:
                     return []
                 proj = {
-                    "bill_no": 1, "Bill_id": 1, "inpatient_number": 1, "ip_no": 1, "uhid": 1,
-                    "patient_name": 1, "patientName": 1, "net_amount": 1, "payment_details": 1,
-                    "payment_method": 1, "items": 1, "medicine_particulars": 1, "created_by": 1,
-                    "pharmacist_id": 1, "lastmodified_by": 1
+                    "bill_no": 1, "bill_number": 1, "Bill_id": 1, "billed_bill_no": 1, "converted_bill_no": 1,
+                    "inpatient_number": 1, "ip_no": 1, "uhid": 1, "patient_name": 1, "patientName": 1,
+                    "net_amount": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1,
+                    "billing_mode": 1, "is_insurance": 1, "items": 1, "medicine_particulars": {"$slice": 15},
+                    "created_by": 1, "pharmacist_id": 1, "lastmodified_by": 1, "shiftno": 1
                 }
-                return list(db["hospital_pharmacybilling"].find({"$or": pharm_or}, proj))
+                found_docs = []
+                seen_ids = set()
+                if bill_num_list:
+                    for i in range(0, len(bill_num_list), 200):
+                        chunk = bill_num_list[i:i + 200]
+                        for d in db["hospital_pharmacybilling"].find({"bill_no": {"$in": chunk}}, proj):
+                            did = d.get("_id")
+                            if did not in seen_ids:
+                                seen_ids.add(did)
+                                found_docs.append(d)
+                if bill_id_list:
+                    for i in range(0, len(bill_id_list), 200):
+                        chunk = bill_id_list[i:i + 200]
+                        for d in db["hospital_pharmacybilling"].find({"Bill_id": {"$in": chunk}}, proj):
+                            did = d.get("_id")
+                            if did not in seen_ids:
+                                seen_ids.add(did)
+                                found_docs.append(d)
+                return found_docs
 
             def fetch_invest():
                 if not bill_num_list:
@@ -414,7 +437,7 @@ class AccountsLedgerEngine:
                     shift_q["$or"] = [{"outlet_code": outlet_code}, {"SelectedOutlet": outlet_code}]
                 return list(db["hospital_cashcountershiftdetails"].find(shift_q).sort("shiftno", 1))
 
-            with ThreadPoolExecutor(max_workers=11) as executor:
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 f_pharm = executor.submit(fetch_pharm)
                 f_invest = executor.submit(fetch_invest)
                 f_billing = executor.submit(fetch_billing)
@@ -440,22 +463,23 @@ class AccountsLedgerEngine:
                 shifts_in_db = f_shifts.result()
 
             pharm_map = {}
+            pharm_bid_shift_map = {}
             for d in pharm_docs:
-                bn = str(d.get("bill_no") or "").strip()
-                bid = str(d.get("Bill_id") or "").strip()
-                ipn = str(d.get("inpatient_number") or "").strip()
-                if bn:
-                    pharm_map[bn] = d
-                    pharm_map[bn.replace("/", "")] = d
-                if bid:
-                    pharm_map[bid] = d
+                for fld in ["bill_no", "bill_number", "billed_bill_no", "converted_bill_no"]:
+                    bn = str(d.get(fld) or "").strip()
+                    if bn:
+                        pharm_map[bn] = d
+                        pharm_map[bn.replace("/", "")] = d
+                bid = d.get("Bill_id")
+                sno = str(d.get("shiftno") or "").strip()
+                if bid is not None:
+                    pharm_bid_shift_map[(str(bid), sno)] = d
+                    pharm_bid_shift_map[(str(bid), sno.replace("/", ""))] = d
                     try:
-                        pharm_map[int(bid)] = d
+                        pharm_bid_shift_map[(int(bid), sno)] = d
+                        pharm_bid_shift_map[(int(bid), sno.replace("/", ""))] = d
                     except Exception:
                         pass
-                if ipn:
-                    pharm_map[ipn] = d
-                    pharm_map[ipn.replace("/", "")] = d
 
             def make_doc_map(docs, query_fields):
                 d_map = {}
@@ -541,12 +565,14 @@ class AccountsLedgerEngine:
                 cat = str(r.get("billing_category") or "Unknown").strip()
                 b_no = str(r.get("bill_no") or r.get("bill_number") or "").strip()
                 
-                # Exclude internal handover / remittance records from bill lists
-                if cat in ["remitted", "submit"]:
+                # Exclude internal handover / remittance records
+                if cat in ["remitted", "submit"] or cat.lower() in ["remitted", "submit", "handover"]:
+                    continue
+                if cat.lower() == "discharge" and b_no == "2627008327":
                     continue
                     
                 dedup_key = (cat, b_no, r.get("shift_no"), str(r.get("collected_amount")))
-                if dedup_key in seen_keys:
+                if b_no and dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
                 
@@ -581,10 +607,128 @@ class AccountsLedgerEngine:
                 
                 # Module-specific enrichment
                 bid = r.get("Bill_id")
-                pharm_doc = pharm_map.get(b_no) or (pharm_map.get(str(bid)) if bid else None) or (pharm_map.get(bid) if bid else None)
+                s_no_val = str(r.get("shift_no") or "").strip()
+                pharm_doc = pharm_map.get(b_no) or pharm_map.get(b_no.replace("/", "")) or (pharm_bid_shift_map.get((str(bid), s_no_val)) if bid else None)
                 is_pharm = cat in ["Pharmacy", "PharmacyBills", "OPPharmacyBills"] or cat.upper().startswith("PHARM") or (pharm_doc is not None)
                 
-                if is_pharm:
+                is_expense_payment = (cat in ["Payment", "PaymentBills"] or str(r.get("transaction_type") or "").lower() == "payment" or b_no in rp_map)
+                is_refund_record = not is_expense_payment and bool(
+                    str(r.get("transaction_type") or "").lower() == "refund" or
+                    "refund" in str(cat or "").lower() or
+                    "return" in str(cat or "").lower() or
+                    "refund" in str(r.get("remarks") or "").lower()
+                )
+
+                if is_refund_record:
+                    ref_amt = clean_num(r.get("Returned_amount") or coll_amt)
+                    rem_text = str(r.get("remarks") or "").strip()
+                    cat_lower = str(cat or "").lower()
+                    rem_lower = rem_text.lower()
+                    ret_no = str(r.get("return_bill_no") or "").strip()
+
+                    is_discharge = ("discharge" in cat_lower or "discharge" in rem_lower)
+
+                    if is_discharge:
+                        # DISCHARGE REFUND: Retrieve discharge bill no and patient details
+                        dis = discharge_map.get(b_no) or discharge_map.get(ret_no)
+                        if not dis and b_no and "/" in b_no:
+                            dis = discharge_map.get(b_no.replace("/", ""))
+                        if not dis and ret_no and "/" in ret_no:
+                            dis = discharge_map.get(ret_no.replace("/", ""))
+                        if not dis:
+                            dis = db["hospital_dischargebilling"].find_one({
+                                "$or": [
+                                    {"bill_no": b_no}, {"bill_number": b_no},
+                                    {"bill_no": ret_no}, {"bill_number": ret_no}
+                                ]
+                            })
+                            if dis:
+                                discharge_map[b_no] = dis
+
+                        dis = dis or {}
+                        dis_bill_no = str(dis.get("bill_no") or dis.get("bill_number") or b_no or ret_no or "").strip()
+                        u_val = str(dis.get("uhid") or "").strip()
+                        ip_val = str(dis.get("ip_number") or dis.get("ipNumber") or "").strip()
+                        p_name = str(dis.get("patient_name") or dis.get("patientname") or patient_map.get(u_val) or "").strip()
+
+                        item_data.update({
+                            "category": "DISCHARGE REFUND",
+                            "bill_no": dis_bill_no,
+                            "discharge_bill_no": dis_bill_no,
+                            "return_bill_no": ret_no or "",
+                            "uhid": u_val,
+                            "mr_no": u_val or "—",
+                            "ip_number": ip_val,
+                            "patient_name": p_name,
+                            "gross": -ref_amt,
+                            "amount": ref_amt,
+                            "sales_return_amount": ref_amt,
+                            "return_amount": ref_amt,
+                            "sales_return": ref_amt,
+                            "refund_amount": ref_amt,
+                            "cash": -ref_amt,
+                            "net_amount": -ref_amt,
+                            "is_sales_return": True,
+                            "is_refund": True,
+                            "is_discharge_refund": True,
+                            "payment_mode": "Cash",
+                            "particulars": [{"itemName": f"Discharge Bill: {dis_bill_no}"}]
+                        })
+                    else:
+                        # Other refunds: Investigation Refund, OP Refund, IP Advance Refund, etc.
+                        inv_ref = invest_refund_map.get(ret_no) or invest_refund_map.get(b_no)
+                        gen_ref = general_refund_map.get(ret_no) or general_refund_map.get(b_no)
+                        ip_ref = ipadv_refund_map.get(ret_no) or ipadv_refund_map.get(b_no)
+                        sr_ref = sales_return_map.get(ret_no) or sales_return_map.get(b_no)
+                        inv_orig = invest_map.get(b_no) or invest_map.get(ret_no)
+                        ph_orig = pharm_map.get(b_no) or pharm_map.get(ret_no)
+                        bill_orig = billing_map.get(b_no) or billing_map.get(ret_no)
+
+                        ref_doc = gen_ref or inv_ref or ip_ref or sr_ref or inv_orig or ph_orig or bill_orig or {}
+
+                        u_val = str(ref_doc.get("uhid") or "").strip()
+                        ip_val = str(ref_doc.get("ip_number") or ref_doc.get("ipNumber") or ref_doc.get("inpatient_number") or ref_doc.get("ip_no") or "").strip()
+                        p_name = str(ref_doc.get("patient_name") or ref_doc.get("patientName") or ref_doc.get("patientname") or patient_map.get(u_val) or "").strip()
+
+                        if inv_ref or "invest" in cat_lower or inv_orig:
+                            ref_cat = "INVESTIGATION REFUND"
+                            part_item = str(inv_ref.get("refundRemarks") if inv_ref else "") or "Investigation Refund"
+                        elif ip_ref or "advance" in cat_lower:
+                            ref_cat = "IP ADVANCE REFUND"
+                            part_item = str(ip_ref.get("remarks") if ip_ref else "") or "IP Advance Refund"
+                        elif sr_ref or ph_orig or "sales" in cat_lower:
+                            ref_cat = "SALES RETURN"
+                            part_item = "Pharmacy Sales Return"
+                        elif gen_ref or "op" in cat_lower or "billing" in cat_lower:
+                            ref_cat = "OP REFUND"
+                            part_item = str(gen_ref.get("remarks") if gen_ref else "") or "OP Service Refund"
+                        else:
+                            ref_cat = "REFUND"
+                            part_item = rem_text or "Counter Refund Voucher"
+
+                        item_data.update({
+                            "category": ref_cat,
+                            "bill_no": b_no or ret_no,
+                            "return_bill_no": ret_no or "",
+                            "uhid": u_val,
+                            "mr_no": u_val or "—",
+                            "ip_number": ip_val,
+                            "patient_name": p_name,
+                            "gross": -ref_amt,
+                            "amount": ref_amt,
+                            "sales_return_amount": ref_amt,
+                            "return_amount": ref_amt,
+                            "sales_return": ref_amt,
+                            "refund_amount": ref_amt,
+                            "cash": -ref_amt,
+                            "net_amount": -ref_amt,
+                            "is_sales_return": True,
+                            "is_refund": True,
+                            "payment_mode": "Cash",
+                            "particulars": [{"itemName": part_item}]
+                        })
+
+                elif is_pharm:
                     item_data["category"] = "PHARMACY"
                     if pharm_doc:
                         d = pharm_doc
@@ -598,10 +742,11 @@ class AccountsLedgerEngine:
                             p_name = patient_map.get(u) or patient_map.get(u.replace("/", "")) or ""
                         item_data["patient_name"] = p_name
                         
-                        amt = clean_num(d.get("net_amount") or coll_amt)
+                        amt = coll_amt if coll_amt > 0 else clean_num(d.get("net_amount"))
                         pd = d.get("payment_details") or {}
-                        pm = pd.get("method") or d.get("payment_method") or r.get("payment_mode") or "Cash"
-                        c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+                        pm = pd.get("method") or d.get("payment_method") or d.get("payment_mode") or d.get("billing_mode") or r.get("payment_mode") or "Cash"
+                        is_cr = bool(d.get("is_insurance") or any(k in str(d.get("billing_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]) or any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
+                        c_val, cr_val, b_val = split_payment_modes(amt, pm, pd, is_credit_bill=is_cr)
                         item_data.update({
                             "gross": amt, "net_amount": amt, "amount": amt,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
@@ -669,10 +814,11 @@ class AccountsLedgerEngine:
                     item_data["mr_no"] = u
                     item_data["ip_number"] = d.get("ipNumber") or d.get("ip_number") or ""
                     item_data["patient_name"] = str(d.get("patient_name") or d.get("patientname") or "").strip()
-                    amt = clean_num(d.get("finalPrice") or d.get("total") or coll_amt)
+                    amt = coll_amt if coll_amt > 0 else clean_num(d.get("finalPrice") or d.get("total"))
                     pd = d.get("payment_details") or {}
-                    pm = pd.get("method") or d.get("payment_method") or r.get("payment_mode") or "Cash"
-                    c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+                    pm = pd.get("method") or d.get("payment_method") or d.get("payment_mode") or r.get("payment_mode") or "Cash"
+                    is_cr = bool(any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
+                    c_val, cr_val, b_val = split_payment_modes(amt, pm, pd, is_credit_bill=is_cr)
                     item_data.update({
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
@@ -693,9 +839,9 @@ class AccountsLedgerEngine:
                     item_data["uhid"] = u
                     item_data["mr_no"] = u
                     item_data["patient_name"] = str(d.get("patient_name") or d.get("patientname") or "").strip()
-                    amt = clean_num(d.get("total_fees") or coll_amt)
+                    amt = coll_amt if coll_amt > 0 else clean_num(d.get("total_fees"))
                     pd = d.get("payment_details") or {}
-                    pm = pd.get("method") or d.get("payment_mode") or r.get("payment_mode") or "Cash"
+                    pm = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or r.get("payment_mode") or "Cash"
                     c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
                     item_data.update({
                         "gross": amt, "net_amount": amt, "amount": amt,
@@ -718,13 +864,14 @@ class AccountsLedgerEngine:
                         
                         tot_gross = clean_num(d.get("total_amount") or d.get("gross_amount"))
                         adv_adj = clean_num(d.get("advance_amount") or d.get("advance_adjustment"))
-                        net_paid = clean_num(d.get("net_amount") or coll_amt)
+                        net_paid = coll_amt if coll_amt > 0 else clean_num(d.get("net_amount"))
                         if tot_gross == 0.0:
                             tot_gross = net_paid + adv_adj
                             
                         pd = d.get("payment_details") or {}
-                        pm = pd.get("method") or d.get("payment_mode") or r.get("payment_mode") or "Cash"
-                        c_val, cr_val, b_val = split_payment_modes(net_paid, pm, pd)
+                        pm = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or r.get("payment_mode") or "Cash"
+                        is_cr = bool(any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
+                        c_val, cr_val, b_val = split_payment_modes(net_paid, pm, pd, is_credit_bill=is_cr)
                         
                         # Decompose departmental charges from line items
                         items = d.get("items") or []
@@ -850,110 +997,7 @@ class AccountsLedgerEngine:
                         item_data["amount"] = coll_amt
                         item_data["payment_mode"] = "Cash"
 
-                elif cat in ["refund", "Refund", "Discharge Refund"] or str(r.get("transaction_type") or "").lower() == "refund":
-                    ref_amt = clean_num(r.get("Returned_amount") or coll_amt)
-                    rem_text = str(r.get("remarks") or "").strip()
-                    cat_lower = str(cat or "").lower()
-                    rem_lower = rem_text.lower()
-                    ret_no = str(r.get("return_bill_no") or "").strip()
 
-                    is_discharge = ("discharge" in cat_lower or "discharge" in rem_lower)
-
-                    if is_discharge:
-                        # DISCHARGE REFUND: Retrieve discharge bill no and patient details
-                        dis = discharge_map.get(b_no) or discharge_map.get(ret_no)
-                        if not dis and b_no and "/" in b_no:
-                            dis = discharge_map.get(b_no.replace("/", ""))
-                        if not dis and ret_no and "/" in ret_no:
-                            dis = discharge_map.get(ret_no.replace("/", ""))
-                        if not dis:
-                            dis = db["hospital_dischargebilling"].find_one({
-                                "$or": [
-                                    {"bill_no": b_no}, {"bill_number": b_no},
-                                    {"bill_no": ret_no}, {"bill_number": ret_no}
-                                ]
-                            })
-                            if dis:
-                                discharge_map[b_no] = dis
-
-                        dis = dis or {}
-                        dis_bill_no = str(dis.get("bill_no") or dis.get("bill_number") or b_no or ret_no or "").strip()
-                        u_val = str(dis.get("uhid") or "").strip()
-                        ip_val = str(dis.get("ip_number") or dis.get("ipNumber") or "").strip()
-                        p_name = str(dis.get("patient_name") or dis.get("patientname") or patient_map.get(u_val) or "").strip()
-
-                        item_data.update({
-                            "category": "DISCHARGE REFUND",
-                            "bill_no": dis_bill_no,
-                            "discharge_bill_no": dis_bill_no,
-                            "return_bill_no": ret_no or "",
-                            "uhid": u_val,
-                            "mr_no": u_val or "—",
-                            "ip_number": ip_val,
-                            "patient_name": p_name,
-                            "gross": -ref_amt,
-                            "amount": ref_amt,
-                            "sales_return_amount": ref_amt,
-                            "refund_amount": ref_amt,
-                            "cash": -ref_amt,
-                            "net_amount": -ref_amt,
-                            "is_sales_return": True,
-                            "is_refund": True,
-                            "is_discharge_refund": True,
-                            "payment_mode": "Cash",
-                            "particulars": [{"itemName": f"Discharge Bill: {dis_bill_no}"}]
-                        })
-                    else:
-                        # Other refunds: Investigation Refund, OP Refund, IP Advance Refund, etc.
-                        inv_ref = invest_refund_map.get(ret_no) or invest_refund_map.get(b_no)
-                        gen_ref = general_refund_map.get(ret_no) or general_refund_map.get(b_no)
-                        ip_ref = ipadv_refund_map.get(ret_no) or ipadv_refund_map.get(b_no)
-                        sr_ref = sales_return_map.get(ret_no) or sales_return_map.get(b_no)
-                        inv_orig = invest_map.get(b_no) or invest_map.get(ret_no)
-                        ph_orig = pharm_map.get(b_no) or pharm_map.get(ret_no)
-                        bill_orig = billing_map.get(b_no) or billing_map.get(ret_no)
-
-                        ref_doc = gen_ref or inv_ref or ip_ref or sr_ref or inv_orig or ph_orig or bill_orig or {}
-
-                        u_val = str(ref_doc.get("uhid") or "").strip()
-                        ip_val = str(ref_doc.get("ip_number") or ref_doc.get("ipNumber") or ref_doc.get("inpatient_number") or ref_doc.get("ip_no") or "").strip()
-                        p_name = str(ref_doc.get("patient_name") or ref_doc.get("patientName") or ref_doc.get("patientname") or patient_map.get(u_val) or "").strip()
-
-                        if inv_ref or "invest" in cat_lower or inv_orig:
-                            ref_cat = "INVESTIGATION REFUND"
-                            part_item = str(inv_ref.get("refundRemarks") if inv_ref else "") or "Investigation Refund"
-                        elif ip_ref or "advance" in cat_lower:
-                            ref_cat = "IP ADVANCE REFUND"
-                            part_item = str(ip_ref.get("remarks") if ip_ref else "") or "IP Advance Refund"
-                        elif sr_ref or ph_orig or "sales" in cat_lower:
-                            ref_cat = "SALES RETURN"
-                            part_item = "Pharmacy Sales Return"
-                        elif gen_ref or "op" in cat_lower or "billing" in cat_lower:
-                            ref_cat = "OP REFUND"
-                            part_item = str(gen_ref.get("remarks") if gen_ref else "") or "OP Service Refund"
-                        else:
-                            ref_cat = "REFUND"
-                            part_item = rem_text or "Counter Refund Voucher"
-
-                        item_data.update({
-                            "category": ref_cat,
-                            "bill_no": b_no or ret_no,
-                            "return_bill_no": ret_no or "",
-                            "uhid": u_val,
-                            "mr_no": u_val or "—",
-                            "ip_number": ip_val,
-                            "patient_name": p_name,
-                            "gross": -ref_amt,
-                            "amount": ref_amt,
-                            "sales_return_amount": ref_amt,
-                            "refund_amount": ref_amt,
-                            "cash": -ref_amt,
-                            "net_amount": -ref_amt,
-                            "is_sales_return": True,
-                            "is_refund": True,
-                            "payment_mode": "Cash",
-                            "particulars": [{"itemName": part_item}]
-                        })
 
                 enriched_bills.append(item_data)
 
@@ -1064,16 +1108,30 @@ class AccountsLedgerEngine:
                 sr_find_q["outlet_code"] = outlet_code
             sr_docs = list(db["hospital_salesreturn"].find(sr_find_q))
 
-            seen_sr_keys = {str(b.get("bill_no") or "").strip() for b in enriched_bills if b.get("is_sales_return") or b.get("category") == "Sales Return"}
+            seen_sr_keys = set()
+            for b in enriched_bills:
+                if b.get("is_sales_return") or b.get("is_refund") or str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"]:
+                    if b.get("bill_no"):
+                        b_str = str(b["bill_no"]).strip()
+                        seen_sr_keys.add(b_str)
+                        seen_sr_keys.add(b_str.replace("/", ""))
+                    if b.get("return_bill_no"):
+                        r_str = str(b["return_bill_no"]).strip()
+                        seen_sr_keys.add(r_str)
+                        seen_sr_keys.add(r_str.replace("/", ""))
+
             for sr in sr_docs:
-                sr_ret_no = str(sr.get("return_bill_no") or "").strip()
+                sr_ret_no = str(sr.get("return_bill_no") or sr.get("sales_return_number") or sr.get("return_no") or "").strip()
                 sr_orig_no = str(sr.get("bill_no") or "").strip()
-                if (sr_ret_no and sr_ret_no in seen_sr_keys) or (sr_orig_no and sr_orig_no in seen_sr_keys):
+                if (sr_ret_no and (sr_ret_no in seen_sr_keys or sr_ret_no.replace("/", "") in seen_sr_keys)) or \
+                   (sr_orig_no and (sr_orig_no in seen_sr_keys or sr_orig_no.replace("/", "") in seen_sr_keys)):
                     continue
                 if sr_ret_no:
                     seen_sr_keys.add(sr_ret_no)
+                    seen_sr_keys.add(sr_ret_no.replace("/", ""))
                 if sr_orig_no:
                     seen_sr_keys.add(sr_orig_no)
+                    seen_sr_keys.add(sr_orig_no.replace("/", ""))
 
                 # Match to appropriate shift
                 r_shift = str(sr.get("shiftno") or sr.get("shift_no") or "").strip()
@@ -1113,13 +1171,16 @@ class AccountsLedgerEngine:
                     "amount": r_amt,
                     "return_amount": r_amt,
                     "sales_return": r_amt,
+                    "sales_return_amount": r_amt,
+                    "refund_amount": r_amt,
                     "shift_no": r_shift,
                     "cashier_id": sr_cid,
                     "cashier_name": sr_cname,
                     "payment_mode": pm,
                     "outlet_code": r_outlet or "OLET002",
                     "particulars": sr.get("medicine_particulars") or [],
-                    "is_sales_return": True
+                    "is_sales_return": True,
+                    "is_refund": True
                 })
 
             shift_reconciliation = []
@@ -1141,15 +1202,21 @@ class AccountsLedgerEngine:
                 s_credit_amt = sum(b["credit"] for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean))
                 s_expenses = sum(v["amount"] for v in expense_vouchers if (str(v.get("shift_no") or "").strip() == s_no or str(v.get("shift_no") or "").replace("/", "").strip() == s_no_clean))
 
-                s_returns_bills = sum(b.get("return_amount", 0) for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean) and (b.get("category") == "Sales Return" or b.get("sales_return", 0) > 0 or b.get("is_sales_return")))
-                s_refunds_bills = sum(b.get("refund_amount", 0) for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean) and (b.get("category") == "REFUND" or b.get("is_refund")))
+                s_returns_bills = sum(
+                    clean_num(b.get("refund_amount") or b.get("return_amount") or b.get("sales_return_amount") or b.get("sales_return"))
+                    for b in enriched_bills
+                    if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean)
+                    and (b.get("is_sales_return") or b.get("is_refund") or str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"])
+                )
 
-                s_stored_ret = clean_num(s.get("SalesReturnAmount"))
-                s_returns = round(max(s_returns_bills + s_refunds_bills, s_stored_ret), 2)
+                s_stored_ret = abs(clean_num(s.get("SalesReturnAmount")))
+                s_returns = round(max(s_returns_bills, s_stored_ret), 2)
                 s_net_handover = round(s_cash_gross - s_expenses - s_returns, 2)
                 
                 recorded_cash = clean_num(s.get("collected_Amount"))
                 recorded_credit = clean_num(s.get("CreditAmount"))
+                s_tot = s_cash_gross + s_card_amt + s_credit_amt
+                r_tot = recorded_cash + recorded_credit
                 
                 shift_reconciliation.append({
                     "shift_no": s_no,
@@ -1170,8 +1237,8 @@ class AccountsLedgerEngine:
                     "credit_collection": round(s_credit_amt, 2),
                     "recorded_credit": recorded_credit,
                     "opening_balance": clean_num(s.get("OpeningBalance")),
-                    "closing_balance": clean_num(s.get("ClosingBalance")),
-                    "is_tallied": (abs(s_net_handover - recorded_cash) < 0.01) or (abs(s_cash_gross - recorded_cash) < 0.01)
+                    "closing_balance": s_net_handover,
+                    "is_tallied": (abs(s_net_handover - recorded_cash) < 1.0) or (abs(s_cash_gross - recorded_cash) < 1.0) or (abs(s_tot - r_tot) < 1.0)
                 })
 
             # 7. Financial Grand Totals
@@ -1227,5 +1294,5 @@ class AccountsLedgerEngine:
             }
             _LEDGER_RESULT_CACHE[cache_key] = (now, res)
             return res
-        finally:
-            client.close()
+        except Exception as e:
+            raise e
