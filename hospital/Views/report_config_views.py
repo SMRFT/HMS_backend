@@ -66,11 +66,11 @@ def serialize_doc(doc):
         if not any(p.get('route') == '/StoresDateGrnReport' for p in pages):
             stores_date_card = {
                 'page_id': 21,
-                'name': 'Date-Based Stores GRN Report',
+                'name': 'Date-Based GRN Report',
                 'route': '/StoresDateGrnReport',
                 'icon': 'CalendarDays',
                 'description': 'Chronological Goods Received Note (GRN) report categorized by Date with active suppliers, gross purchases, returns, and net purchases.',
-                'permissions': {'Date-Based Stores GRN Report': 'HMS-P-SGRN'}
+                'permissions': {'Date-Based GRN Report': 'HMS-P-SGRN'}
             }
             s_idx = next((i for i, p in enumerate(pages) if p.get('route') == '/StoresSupplierGrnReport'), -1)
             if s_idx != -1:
