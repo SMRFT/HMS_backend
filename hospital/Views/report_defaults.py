@@ -92,9 +92,9 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                                         'categorized by Date with active suppliers, '
                                         'gross purchases, returns, and net purchases.',
                          'icon': 'CalendarDays',
-                         'name': 'Date-Based Stores GRN Report',
+                         'name': 'Date-Based GRN Report',
                          'page_id': 21,
-                         'permissions': {   'Date-Based Stores GRN Report': 'HMS-P-SGRN'},
+                         'permissions': {   'Date-Based GRN Report': 'HMS-P-SGRN'},
                          'route': '/StoresDateGrnReport'},
                      {   'description': 'Store item requisitions (indents) '
                                         'grouped by Department with approval '
