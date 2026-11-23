@@ -1985,13 +1985,23 @@ def post_receipt_payments(request):
                 "remarks": remarks_str,
             }
 
-            cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
-            if cc_serializer.is_valid():
-                cc_serializer.save()
+            # 🛑 Idempotency Guard: Prevent duplicate voucher recording
+            _cc_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
+            existing_cc = _cc_client["HMS"]["hospital_cashcountercollection"].find_one({
+                "$or": [{"bill_no": str(voucher_no).strip()}, {"bill_number": str(voucher_no).strip()}],
+                "billing_category": "Payment" if is_payment_type else "Receipt",
+                "transaction_type": "Payment" if is_payment_type else "collected"
+            })
+            if existing_cc:
+                print(f"[CashCounterCollection] Voucher {voucher_no} already recorded, skipping duplicate insert")
+                _cc_client.close()
             else:
-                print(f"[CashCounterCollection] Warning for voucher {voucher_no}: {cc_serializer.errors}")
-                _cc_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
-                _cc_client["HMS"]["hospital_cashcountercollection"].insert_one(cash_counter_data)
+                cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
+                if cc_serializer.is_valid():
+                    cc_serializer.save()
+                else:
+                    print(f"[CashCounterCollection] Warning for voucher {voucher_no}: {cc_serializer.errors}")
+                    _cc_client["HMS"]["hospital_cashcountercollection"].insert_one(cash_counter_data)
                 _cc_client.close()
         except Exception as cc_err:
             print(f"[CashCounterCollection] Error saving collection for voucher {voucher_no}: {cc_err}")
@@ -3368,6 +3378,34 @@ def update_mainblock_pendingbills(request):
         target_category = str(data.get("type") or data.get("bill_category") or data.get("category") or "").strip().lower()
 
         def update_billing(billing_doc):
+            b_no = str(bill_no or billing_doc.get("bill_number") or billing_doc.get("bill_no") or "").strip()
+            # 🛑 Idempotency Guard: Prevent duplicate collection or double entry
+            existing_cc = hms_db["hospital_cashcountercollection"].find_one({
+                "$or": [{"bill_no": b_no}, {"bill_number": b_no}],
+                "billing_category": "Billing",
+                "transaction_type": "collected"
+            })
+            if existing_cc or (str(billing_doc.get("payment_status", "")).lower() == "paid" and pending_amount == 0):
+                print(f"[CashCounterCollection] Already collected for Billing {b_no}, preventing duplicate insert.")
+                if str(billing_doc.get("payment_status", "")).lower() != "paid":
+                    billing_col.update_one(
+                        {"_id": billing_doc["_id"]},
+                        {"$set": {
+                            "payment_status": "Paid",
+                            "payment_details": payment_details,
+                            "lastmodified_by": CashierID,
+                            "lastmodified_date": datetime.utcnow()
+                        }}
+                    )
+                return Response({
+                    "status": "success",
+                    "type": "Billing",
+                    "bill_type": billing_doc.get("bill_type", 1),
+                    "bill_no": b_no,
+                    "new_payment_status": "Paid",
+                    "message": "Bill already paid and collected."
+                }, status=status.HTTP_200_OK)
+
             new_status = "Paid" if pending_amount == 0 else "Partial"
             billing_col.update_one(
                 {"_id": billing_doc["_id"]},
@@ -3429,6 +3467,34 @@ def update_mainblock_pendingbills(request):
             }, status=status.HTTP_200_OK)
 
         def update_investigation(invest_doc):
+            i_no = str(bill_no or invest_doc.get("investBillNo") or invest_doc.get("bill_no") or "").strip()
+            # 🛑 Idempotency Guard: Prevent duplicate collection or double entry
+            existing_cc = hms_db["hospital_cashcountercollection"].find_one({
+                "$or": [{"bill_no": i_no}, {"bill_number": i_no}],
+                "billing_category": "Investigation",
+                "transaction_type": "collected"
+            })
+            if existing_cc or (str(invest_doc.get("paymentStatus", "")).lower() == "paid" and pending_amount == 0):
+                print(f"[CashCounterCollection] Already collected for Investigation {i_no}, preventing duplicate insert.")
+                if str(invest_doc.get("paymentStatus", "")).lower() != "paid":
+                    invest_col.update_one(
+                        {"_id": invest_doc["_id"]},
+                        {"$set": {
+                            "paymentStatus": "Paid",
+                            "payment_details": payment_details,
+                            "lastmodified_by": CashierID,
+                            "lastmodified_date": datetime.utcnow()
+                        }}
+                    )
+                return Response({
+                    "status": "success",
+                    "type": "Investigation",
+                    "bill_type": invest_doc.get("bill_type", 6),
+                    "bill_no": i_no,
+                    "new_payment_status": "Paid",
+                    "message": "Investigation already paid and collected."
+                }, status=status.HTTP_200_OK)
+
             new_status = "Paid" if pending_amount == 0 else "Partial"
             invest_col.update_one(
                 {"_id": invest_doc["_id"]},
@@ -3498,8 +3564,45 @@ def update_mainblock_pendingbills(request):
             if is_refund:
                 payment_details["Paid_amount"] = -abs(paid_amount)
                 payment_details["is_refund"] = True
+                final_billing_category = "refund"
+                final_tx_type = "Refund"
+                final_collected_amt = "0.00"
+                final_returned_amt = f"{abs(paid_amount):.2f}"
             else:
                 payment_details["Paid_amount"] = abs(paid_amount)
+                final_billing_category = "Discharge"
+                final_tx_type = "collected"
+                final_collected_amt = f"{paid_amount:.2f}"
+                final_returned_amt = "0.00"
+
+            d_no = str(bill_no or discharge_doc.get("bill_no") or "").strip()
+            # 🛑 Idempotency Guard: Prevent duplicate collection or double entry
+            existing_cc = hms_db["hospital_cashcountercollection"].find_one({
+                "$or": [{"bill_no": d_no}, {"bill_number": d_no}],
+                "billing_category": final_billing_category,
+                "transaction_type": final_tx_type
+            })
+            if existing_cc or (str(discharge_doc.get("status", "")).lower() == "paid" and pending_amount == 0):
+                print(f"[CashCounterCollection] Already processed for Discharge {d_no}, preventing duplicate insert.")
+                if str(discharge_doc.get("status", "")).lower() != "paid":
+                    discharge_col.update_one(
+                        {"_id": discharge_doc["_id"]},
+                        {"$set": {
+                            "status": "Paid",
+                            "items.$[].payment_status": "Paid",
+                            "lastmodified_by": CashierID,
+                            "lastmodified_date": datetime.utcnow()
+                        }}
+                    )
+                return Response({
+                    "status": "success",
+                    "type": "Discharge",
+                    "bill_type": discharge_doc.get("items", [{}])[0].get("bill_type", 2) if discharge_doc.get("items") else 2,
+                    "bill_no": d_no,
+                    "new_payment_status": "Paid",
+                    "is_refund": is_refund,
+                    "message": "Discharge bill already processed."
+                }, status=status.HTTP_200_OK)
 
             discharge_col.update_one(
                 {"_id": discharge_doc["_id"]},
@@ -4204,6 +4307,22 @@ def _save_cash_counter(
         # ── misc ────────────────────────────────────────────────────────
         "remarks":          remarks,
     }
+
+    # 🛑 Idempotency Guard: Prevent duplicate refund collection
+    target_bill = return_bill_no or bill_no
+    if target_bill:
+        check_refund_q = {
+            "$or": [
+                {"return_bill_no": str(target_bill).strip()},
+                {"bill_no": str(target_bill).strip()},
+                {"bill_number": str(target_bill).strip()}
+            ],
+            "transaction_type": "Refund"
+        }
+        existing_ref = mongo_db["hospital_cashcountercollection"].find_one(check_refund_q)
+        if existing_ref:
+            print(f"[CashCounterCollection] Refund already exists for bill={target_bill}, skipping duplicate insert")
+            return True, None
 
     serializer = CashCounterCollectionSerializer(data=cash_counter_data)
     if serializer.is_valid():
@@ -5358,6 +5477,26 @@ def ipadvance_bills(request):
 
                 # ✅ Resolve bill_no
                 bill_no_value = paid_payment.get("bill_no") or None
+
+                # 🛑 Idempotency Guard: Prevent duplicate advance collection
+                check_q = {
+                    "billing_category": "IPAdvance Payment",
+                    "transaction_type": "Advance Amount collected"
+                }
+                if bill_no_value:
+                    check_q["$or"] = [
+                        {"bill_no": str(bill_no_value).strip()},
+                        {"bill_number": str(bill_no_value).strip()}
+                    ]
+                else:
+                    check_q["shift_no"] = str(shiftno) if shiftno else None
+                    check_q["bill_number"] = str(admission.ipserial_number or admission.ipNumber)
+                    check_q["collected_amount"] = collected_amount
+
+                existing_adv = db["hospital_cashcountercollection"].find_one(check_q)
+                if existing_adv:
+                    print(f"[CashCounterCollection] Already collected IP Advance for bill_no={bill_no_value}, skipping duplicate insert")
+                    continue
 
                 cashcounter_collection_payload = {
                     "bill_no":           bill_no_value,
