@@ -1103,6 +1103,37 @@ def save_pharmacy_bill(request):
         old_meds = record.get("medicine_particulars") or []
         updated_meds = build_edit_history(old_meds, medicines, employee_id)
 
+        existing_bm = str(record.get("billing_mode") or "").strip().upper()
+        req_no = str(record.get("request_no") or "").strip().upper()
+        is_ward_rec = bool(
+            record.get("is_ward_request")
+            or existing_bm in ["WARD REQUEST", "OT REQUEST", "DISCHARGE MEDICINE"]
+            or req_no.startswith("MR")
+            or req_no.startswith("OT")
+        )
+        if is_ward_rec:
+            old_med_map = {}
+            for om in old_meds:
+                if isinstance(om, dict) and om.get("item_id") is not None:
+                    old_med_map[str(om.get("item_id"))] = om
+                    try:
+                        old_med_map[int(om.get("item_id"))] = om
+                    except Exception:
+                        pass
+            for um in updated_meds:
+                if isinstance(um, dict):
+                    om = old_med_map.get(um.get("item_id")) or old_med_map.get(str(um.get("item_id")))
+                    if om:
+                        prev_disp = float(om.get("dispatched_qty", 0) or 0)
+                        req_q = float(om.get("requested_qty") or om.get("qty") or om.get("quantity") or 0)
+                        curr_disp = float(um.get("dispatched_qty", 0) or 0)
+                        if curr_disp > prev_disp:
+                            um["dispatched_qty"] = curr_disp
+                        elif prev_disp > 0:
+                            um["dispatched_qty"] = prev_disp
+                        if req_q > 0:
+                            um["qty"] = req_q
+
         qty_changed = old_meds != medicines
 
         is_estimate_to_bill = (
@@ -4393,7 +4424,15 @@ def finalize_bill(request):
         # ✅ DISPATCH TRACKING & RETRY GUARD (For Ward Requests)
         # =====================================================
         now_ts = datetime.utcnow()
-        is_ward = bool(bill.get("is_ward_request"))
+        existing_bm = str(bill.get("billing_mode") or data.get("billing_mode") or "").strip().upper()
+        req_no = str(bill.get("request_no") or data.get("request_no") or "").strip().upper()
+        is_ward = bool(
+            bill.get("is_ward_request")
+            or data.get("is_ward_request")
+            or existing_bm in ["WARD REQUEST", "OT REQUEST", "DISCHARGE MEDICINE"]
+            or req_no.startswith("MR")
+            or req_no.startswith("OT")
+        )
         orig_particulars = bill.get("medicine_particulars", [])
 
         # Build lookup of actual items billed in this transaction
@@ -4410,15 +4449,16 @@ def finalize_bill(request):
                 except Exception:
                     pass
 
-        # Idempotency / Retry Guard:
-        # Check if identical dispatch occurred in the last 10 seconds on this bill
-        if is_ward and bill.get("bill_no") and bill.get("lastmodified_date"):
+        # Idempotency Guard: ONLY trigger if bill was ALREADY fully finalized/billed and has zero pending items.
+        # NEVER block active "Processing" or partial dispatches!
+        is_already_billed = str(bill.get("billing_status", "")).strip().lower() in ["billed", "paid", "completed"] and bill.get("is_dispatched") is True
+        if is_ward and is_already_billed and bill.get("bill_no") and bill.get("lastmodified_date"):
             try:
                 last_time = bill.get("lastmodified_date")
                 if isinstance(last_time, str):
                     last_time = datetime.fromisoformat(last_time)
                 sec_diff = (now_ts - last_time).total_seconds()
-                if 0 <= sec_diff <= 10:
+                if 0 <= sec_diff <= 3:
                     doc_id = bill.get("doctor_id") or data.get("doctor_id")
                     doc_name = get_employee_name_by_id(doc_id) if doc_id else ""
                     if doc_name and doc_name != "Unknown" and not doc_name.lower().startswith("dr"):
@@ -4456,14 +4496,19 @@ def finalize_bill(request):
                 if is_del:
                     continue  # Deleted items do NOT count towards pending dispatch!
 
-                orig_req_qty = float(orig_m.get("qty") or orig_m.get("quantity") or 0)
+                orig_req_qty = float(orig_m.get("requested_qty") or orig_m.get("qty") or orig_m.get("quantity") or 0)
                 prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
 
                 # Actual quantity entered and billed right now
-                billed_qty = float(billed_items_map.get(m_iid) or billed_items_map.get(str(m_iid)) or 0)
+                billed_qty = float(
+                    billed_items_map.get(m_iid)
+                    or billed_items_map.get(str(m_iid))
+                    or (billed_items_map.get(int(m_iid)) if str(m_iid).isdigit() else 0)
+                    or 0
+                )
 
                 # Ensure dispatched quantities never exceed requested quantity
-                new_disp = min(orig_req_qty, prev_disp + billed_qty)
+                new_disp = min(orig_req_qty, prev_disp + billed_qty) if orig_req_qty > 0 else (prev_disp + billed_qty)
                 pending_qty = max(0.0, orig_req_qty - new_disp)
 
                 if pending_qty > 0:
@@ -4825,7 +4870,11 @@ def finalize_bill(request):
                 orig_req_qty = float(orig_m.get("requested_qty") or orig_m.get("qty") or orig_m.get("quantity") or 0)
                 prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
 
-                billed_sm = billed_map.get(m_iid) or billed_map.get(str(m_iid))
+                billed_sm = (
+                    billed_map.get(m_iid)
+                    or billed_map.get(str(m_iid))
+                    or (billed_map.get(int(m_iid)) if str(m_iid).isdigit() else None)
+                )
                 billed_qty = float(billed_sm.get("qty", 0)) if billed_sm else 0.0
 
                 new_disp = min(orig_req_qty, prev_disp + billed_qty) if orig_req_qty > 0 else (prev_disp + billed_qty)
@@ -4834,8 +4883,25 @@ def finalize_bill(request):
                 if billed_sm and billed_qty > 0:
                     # Item was billed: copy full billing fields (pricing, batch, tax) and set quantities
                     item_entry = dict(billed_sm)
-                    item_entry["qty"] = orig_req_qty if orig_req_qty > 0 else billed_qty
+                    item_entry["qty"] = orig_req_qty if orig_req_qty > 0 else (prev_disp + billed_qty)
                     item_entry["dispatched_qty"] = new_disp
+                    unit_mrp = float(item_entry.get("mrp") or item_entry.get("price") or 0)
+                    if unit_mrp > 0 and new_disp > 0:
+                        calc_p = round(unit_mrp * new_disp, 2)
+                        item_entry["calculated_price"] = calc_p
+                        cgst_p = float(item_entry.get("CGST_Percentage") or 0)
+                        sgst_p = float(item_entry.get("SGST_Percentage") or 0)
+                        tot_gst = cgst_p + sgst_p
+                        p_val = round(calc_p / (1.0 + tot_gst / 100.0), 4) if tot_gst > 0 else calc_p
+                        item_entry["product_value"] = p_val
+                        disc_a = float(item_entry.get("discount_amount") or 0)
+                        taxable_val = max(0.0, p_val - disc_a)
+                        item_entry["taxable_value"] = taxable_val
+                        if cgst_p > 0:
+                            item_entry["CGST_Amt"] = round((taxable_val * cgst_p) / 100.0, 2)
+                        if sgst_p > 0:
+                            item_entry["SGST_Amt"] = round((taxable_val * sgst_p) / 100.0, 2)
+                        item_entry["total"] = calc_p
                 else:
                     # Item was NOT billed in this transaction (e.g. out of stock): preserve original request item with updated dispatch
                     item_entry = dict(orig_m)
@@ -4899,8 +4965,17 @@ def finalize_bill(request):
         set_payload["billed_id"]            = employee_id
         set_payload["lastmodified_date"]    = now_ts
         set_payload["lastmodified_by"]      = employee_id
-        set_payload["total_amount"]         = total_amount_to_use
-        set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
+        cumulative_bill_total = sum(
+            float(it.get("total") or it.get("calculated_price") or 0)
+            for it in (final_particulars if is_ward else sanitized_meds)
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        )
+        if is_ward and cumulative_bill_total > 0:
+            set_payload["total_amount"]         = round(cumulative_bill_total, 2)
+            set_payload["net_amount"]           = round(cumulative_bill_total, 2)
+        else:
+            set_payload["total_amount"]         = total_amount_to_use
+            set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
 
         # Do NOT save patient details when UHID is present (dynamically compared & displayed from patient collection by UHID).
         # Do NOT save billed_bill_no, converted_bill_no, or dispatch_history.
