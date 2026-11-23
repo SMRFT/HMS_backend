@@ -1724,121 +1724,133 @@ def get_return_bills(request):
 
         # ---------------------------------------------------
         # FETCH SALES RETURN
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         salesreturn_docs = list(
             salesreturn_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$return_bill_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$return_bill_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         refund_docs = list(
             refund_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refund_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refund_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH IP ADVANCE REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         ipadvance_docs = list(
             ipadvance_refund_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refund_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refund_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH INVEST REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         investrefund_docs = list(
             investrefund_collection.find(
                 {
-                    "paymentStatus": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
                     "is_approved": {"$in": [True, "true", "True"]},
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refundBillDate",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"paymentStatus": "Pending"},
+                        {
+                            "paymentStatus": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refundBillDate"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
