@@ -2818,42 +2818,47 @@ def collect_oppharmacy_payment(request):
             "remarks": remarks
         }
 
-        # Fast Direct PyMongo Insert to hospital_cashcountercollection
+        # Check if cash counter record already exists for this bill to prevent double entry
         try:
-            mongo_cc_data = {
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": resolved_outlet,
-                "created_by": str(cashier_id),
-                "created_date": datetime.utcnow(),
-                "lastmodified_by": str(cashier_id),
-                "lastmodified_date": datetime.utcnow(),
-                "Bill_id": bill.get("Bill_id"),
-                "bill_no": bill.get("bill_no"),
-                "bill_type": bill.get("bill_type"),
-                "bill_number": bill.get("bill_no"),
-                "counter_code": str(counter_id),
-                "shift_no": str(shiftno),
+            b_no_clean = str(bill.get("bill_no", "")).strip()
+            existing_cc = hms_db["hospital_cashcountercollection"].find_one({
+                "$or": [
+                    {"bill_no": b_no_clean},
+                    {"bill_number": b_no_clean}
+                ],
                 "billing_category": "OPPharmacyBills",
-                "transaction_type": "collected",
-                "collected_amount": Decimal128(str(payment_details.get("Paid_amount", 0))),
-                "Returned_amount": Decimal128("0.00"),
-                "RemittedToBank": Decimal128("0.00"),
-                "HandOverAmount": Decimal128("0.00"),
-                "remarks": remarks
-            }
-            hms_db["hospital_cashcountercollection"].insert_one(mongo_cc_data)
-            print(f"✅ CashCounterCollection saved directly to MongoDB for bill {bill.get('bill_no')}")
+                "transaction_type": "collected"
+            })
+
+            if not existing_cc:
+                mongo_cc_data = {
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "outlet_code": resolved_outlet,
+                    "created_by": str(cashier_id),
+                    "created_date": datetime.utcnow(),
+                    "lastmodified_by": str(cashier_id),
+                    "lastmodified_date": datetime.utcnow(),
+                    "Bill_id": bill.get("Bill_id"),
+                    "bill_no": bill.get("bill_no"),
+                    "bill_type": bill.get("bill_type"),
+                    "bill_number": bill.get("bill_no"),
+                    "counter_code": str(counter_id),
+                    "shift_no": str(shiftno),
+                    "billing_category": "OPPharmacyBills",
+                    "transaction_type": "collected",
+                    "collected_amount": Decimal128(str(payment_details.get("Paid_amount", 0))),
+                    "Returned_amount": Decimal128("0.00"),
+                    "RemittedToBank": Decimal128("0.00"),
+                    "HandOverAmount": Decimal128("0.00"),
+                    "remarks": remarks
+                }
+                hms_db["hospital_cashcountercollection"].insert_one(mongo_cc_data)
+                print(f"✅ CashCounterCollection saved directly to MongoDB for bill {bill.get('bill_no')}")
+            else:
+                print(f"⚠️ CashCounterCollection already exists for bill {bill.get('bill_no')}, skipping duplicate insert")
         except Exception as e_cc:
             print("Direct PyMongo cashcountercollection save error:", e_cc)
-
-        # Djongo serializer save (safe non-blocking attempt)
-        try:
-            cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
-            if cc_serializer.is_valid():
-                cc_serializer.save()
-        except Exception as dj_err:
-            print("Djongo CashCounterCollectionSerializer save error (ignored):", dj_err)
 
         # Recalculate shift totals in background daemon thread so response returns instantly
         try:
