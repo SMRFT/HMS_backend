@@ -1168,23 +1168,33 @@ def grn_view(request, pk=None):
             status_f = str(request.GET.get("status", "")).strip()
             if status_f and status_f.upper() != "ALL":
                 status_lower = status_f.lower()
-                if status_lower == "pending":
+                if status_lower in ("pending", "draft"):
                     filter_q.setdefault("$and", []).append({
                         "$or": [
-                            {"status": {"$regex": r"^pending$", "$options": "i"}},
                             {"status": {"$regex": r"^draft$", "$options": "i"}},
+                            {"status": {"$regex": r"^pending$", "$options": "i"}},
                             {"status": {"$in": [None, ""]}}
                         ]
                     })
-                elif status_lower == "verified":
+                elif status_lower in ("verified", "approved"):
                     filter_q.setdefault("$and", []).append({
                         "$or": [
                             {"status": {"$regex": r"^verified$", "$options": "i"}},
                             {"status": {"$regex": r"^approved$", "$options": "i"}}
                         ]
                     })
+                elif status_lower == "received":
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": r"^received$", "$options": "i"}}
+                        ]
+                    })
                 else:
-                    filter_q["status"] = {"$regex": f"^{re.escape(status_f)}$", "$options": "i"}
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": f"^{re.escape(status_f)}$", "$options": "i"}}
+                        ]
+                    })
 
             vendor_f = str(request.GET.get("vendor", "") or request.GET.get("vendor_id", "")).strip()
             if vendor_f and vendor_f.upper() != "ALL":
@@ -1201,10 +1211,9 @@ def grn_view(request, pk=None):
                 filter_q.setdefault("$and", []).append({"$or": vendor_or})
 
             # Outlet / Purchase Category filtering
-            outlet_req = (
-                str(request.GET.get("outlet_code", "")).strip()
-                or str(request.headers.get("Outlet-Code", "")).strip()
-            )
+            # Note: Only filter by outlet if explicitly requested in query params (e.g. from GRNReceive)
+            # General views (GRNAnalysis, GRNGeneration) do not pass outlet_code, displaying all GRNs
+            outlet_req = str(request.GET.get("outlet_code", "")).strip()
             cat_f = str(request.GET.get("purchase_category", "") or request.GET.get("type", "")).strip()
 
             if not cat_f and outlet_req and outlet_req.upper() not in ("ALL", "OLET003", "MAIN BLOCK"):
@@ -1244,12 +1253,50 @@ def grn_view(request, pk=None):
                     ]
                 filter_q.setdefault("$and", []).append({"$or": cat_or})
 
-            filter_q = apply_date_filter(filter_q, request, "created_date")
+            # Date Range Filtering (matches either created_date or date)
+            from_date = str(request.GET.get("from_date", "") or request.GET.get("fromDate", "") or "").strip()
+            to_date = str(request.GET.get("to_date", "") or request.GET.get("toDate", "") or "").strip()
+            single_date = str(request.GET.get("date", "")).strip()
+
+            from_val = from_date or single_date
+            to_val = to_date or single_date
+
+            if from_val or to_val:
+                dt_start = None
+                dt_end = None
+                try:
+                    if from_val:
+                        dt_start = datetime.strptime(from_val[:10], "%Y-%m-%d")
+                except Exception:
+                    pass
+                try:
+                    if to_val:
+                        dt_end = datetime.strptime(to_val[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                except Exception:
+                    pass
+
+                date_conds = []
+                if dt_start and dt_end:
+                    date_conds.append({"created_date": {"$gte": dt_start, "$lte": dt_end}})
+                    date_conds.append({"date": {"$gte": dt_start, "$lte": dt_end}})
+                elif dt_start:
+                    date_conds.append({"created_date": {"$gte": dt_start}})
+                    date_conds.append({"date": {"$gte": dt_start}})
+                elif dt_end:
+                    date_conds.append({"created_date": {"$lte": dt_end}})
+                    date_conds.append({"date": {"$lte": dt_end}})
+
+                if from_val and to_val:
+                    date_conds.append({"created_date": {"$gte": from_val[:10], "$lte": to_val[:10] + " 23:59:59.999999"}})
+                    date_conds.append({"date": {"$gte": from_val[:10], "$lte": to_val[:10] + " 23:59:59.999999"}})
+
+                if date_conds:
+                    filter_q.setdefault("$and", []).append({"$or": date_conds})
 
             return Response(paginate_mongo_query(
                 "hospital_grn",
                 filter_q,
-                sort=[("created_date", DESCENDING)],
+                sort=[("created_date", DESCENDING), ("date", DESCENDING), ("_id", DESCENDING)],
                 request=request,
                 enrich_fn=_enrich_grn_items
             ))
