@@ -165,6 +165,8 @@ urlpatterns = [
 
     
     # GRN URLs
+    path('grn-receive/', inventory.grn_receive_view, name='grn_receive'),
+    re_path(r'^_b_a_c_k_e_n_d/HMS/grn-receive/?$', inventory.grn_receive_view, name='grn_receive_prefix'),
     path('grn/', inventory.grn_view, name='grn_list'),
     re_path(r'^grn/(?P<pk>.+)/$', inventory.grn_view, name='grn_detail'),
     path("pharmacy_stock_history/", inventory.pharmacy_stock_history, name="pharmacy_stock_history"),

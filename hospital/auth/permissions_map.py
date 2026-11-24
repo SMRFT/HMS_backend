@@ -214,6 +214,7 @@ PAGE_MAPPING = DynamicPageMapping({
 
     r'^/_b_a_c_k_e_n_d/HMS/grn/?(\?.*)?$': 'HMS-P-GRN',
     r'^/_b_a_c_k_e_n_d/HMS/grn(?:/[^/]+)+/$': 'HMS-P-GRNA',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/grn-receive/?(\?.*)?$': 'HMS-P-GRNA',
     r'^/_b_a_c_k_e_n_d/HMS/grn-items/?(\?.*)?$': 'HMS-P-GRNR',
     r'^/_b_a_c_k_e_n_d/HMS/pharmacy_stock_history/?(\?.*)?$': 'HMS-P-PSH',
     r'^/_b_a_c_k_e_n_d/HMS/grn-ocr/?(\?.*)?$': 'HMS-P-OCR',
