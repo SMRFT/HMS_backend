@@ -764,7 +764,7 @@ def _enrich_grn_items(data_list):
 
     emp_ids = set()
     for r in data_list:
-        for k in ("created_by", "entered_by", "verified_by", "lastmodified_by", "edited_by"):
+        for k in ("created_by", "entered_by", "verified_by", "lastmodified_by", "edited_by", "received_by"):
             val = r.get(k)
             if val and any(c.isdigit() for c in str(val)):
                 emp_ids.add(str(val).strip())
@@ -821,9 +821,14 @@ def _enrich_grn_items(data_list):
         r["entered_by_name"] = _get_emp_name(c_by)
         r["created_by_name"] = _get_emp_name(r.get("created_by"))
 
-        v_by = r.get("verified_by") or (r.get("lastmodified_by") if r.get("status") == "Verified" else "")
+        v_by = r.get("verified_by") or (r.get("lastmodified_by") if r.get("status") in ("Verified", "Received") else "")
         r["verified_by"] = _get_emp_name(v_by) if v_by else ""
         r["verified_by_name"] = _get_emp_name(v_by) if v_by else ""
+
+        r_by = r.get("received_by") or ""
+        r["received_by"] = _get_emp_name(r_by) if r_by else ""
+        r["received_by_name"] = _get_emp_name(r_by) if r_by else ""
+
         if r.get("lastmodified_by"):
             r["lastmodified_by_name"] = _get_emp_name(r.get("lastmodified_by"))
 
@@ -831,6 +836,115 @@ def _enrich_grn_items(data_list):
             r["edited_by_name"] = _get_emp_name(r.get("edited_by"))
 
     return data_list
+
+
+def _create_pharmacy_stock_for_grn(grn_obj, employee_id, hospital_code=None, branch_code=None, override_outlet_code=None):
+    category = str(
+        getattr(grn_obj, "purchase_category", "")
+        or (grn_obj.get("purchase_category") if isinstance(grn_obj, dict) else "")
+        or ""
+    ).strip().upper()
+
+    DEPT_CODE_MAP = {
+        "OP PHARMACY":   "OLET002",
+        "IP PHARMACY":   "OLET001",
+        "DRUG PURCHASE": "OLET006",
+    }
+    outlet_code = override_outlet_code or DEPT_CODE_MAP.get(category)
+    client, hms_db = get_hms_db()
+    if not outlet_code:
+        try:
+            if hms_db is not None:
+                out_doc = hms_db["hospital_outlets"].find_one({
+                    "outlet_name": {"$regex": f"^{re.escape(category)}$", "$options": "i"},
+                    "is_active": True
+                })
+                if out_doc and out_doc.get("outlet_code"):
+                    outlet_code = out_doc.get("outlet_code")
+        except Exception:
+            pass
+    if not outlet_code:
+        outlet_code = "OLET006" if category == "DRUG PURCHASE" else "OLET002"
+
+    assigned_grn_no = (
+        getattr(grn_obj, "grn_number", "")
+        or getattr(grn_obj, "draft_number", "")
+        or (grn_obj.get("grn_number") if isinstance(grn_obj, dict) else "")
+        or (grn_obj.get("draft_number") if isinstance(grn_obj, dict) else "")
+    )
+
+    items_raw = getattr(grn_obj, "items", None) if not isinstance(grn_obj, dict) else grn_obj.get("items")
+    if isinstance(items_raw, str):
+        try:
+            items = json.loads(items_raw)
+        except Exception:
+            items = []
+    elif isinstance(items_raw, list):
+        items = items_raw
+    else:
+        items = []
+
+    h_code = hospital_code or (getattr(grn_obj, "hospital_code", None) if not isinstance(grn_obj, dict) else grn_obj.get("hospital_code"))
+    b_code = branch_code or (getattr(grn_obj, "branch_code", None) if not isinstance(grn_obj, dict) else grn_obj.get("branch_code"))
+
+    now = timezone.now()
+    created_count = 0
+    for it in items:
+        expiry_date = None
+        expiry_raw  = it.get("expiry", "")
+
+        if expiry_raw:
+            parts = str(expiry_raw).split("/")
+            if len(parts) == 2:
+                try:
+                    expiry_date = datetime.strptime(
+                        f"01/{parts[0]}/{parts[1]}", "%d/%m/%Y"
+                    ).date()
+                except Exception:
+                    expiry_date = None
+
+        cgst_pct = float(it.get("selling_cgst_percent", 0) or 0)
+        sgst_pct = float(it.get("selling_sgst_percent", 0) or 0)
+
+        qty_val = float(it.get("quantity") or 0)
+        free_val = float(it.get("free") or 0)
+        free_pack_val = float(it.get("free_pack") or 0)
+        packing_val = float(it.get("packing") or 1) if float(it.get("packing") or 1) > 0 else 1.0
+
+        if it.get("total_stock") is not None and float(it.get("total_stock") or 0) > 0:
+            total_stock_qty = int(round(float(it.get("total_stock"))))
+        else:
+            free_addition = free_val if free_val > 0 else (free_pack_val * packing_val)
+            total_stock_qty = int(round(qty_val + free_addition))
+
+        PharmacyStock.objects.create(
+            hospital_code            = h_code,
+            branch_code              = b_code,
+            outlet_code              = outlet_code,
+            item_id                  = int(it.get("item_id") or 0),
+            batch_number             = str(it.get("batch") or ""),
+            expiry_date              = expiry_date,
+            mrp                      = float(it.get("unit_mrp") or it.get("mrp") or 0),
+            grn_number               = assigned_grn_no,
+            total_stock              = total_stock_qty,
+            sold_quantity            = 0,
+            transferred_out_quantity = 0,
+            stock_type               = "grn",
+            stock_ref_id             = 0,
+            grn_return_quantity      = 0,
+            blocked_quantity         = 0,
+            sales_return_quantity    = 0,
+            CGST_Percentage          = cgst_pct,
+            SGST_Percentage          = sgst_pct,
+            CGST_Amt                 = float(it.get("selling_cgst_amt", 0) or 0),
+            SGST_Amt                 = float(it.get("selling_sgst_amt", 0) or 0),
+            Selling_Price            = float(it.get("selling_price", 0) or 0),
+            created_by               = employee_id,
+            created_date             = now,
+        )
+        created_count += 1
+
+    return created_count, outlet_code
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1040,28 +1154,45 @@ def grn_view(request, pk=None):
         ):
             return Response({"success": False, "error": "GRN not found"}, status=404)
  
-        # Verified guard — no edits once verified
-        if grn.status == "Verified":
+        # Received guard — no edits once received
+        if grn.status == "Received":
+            return Response(
+                {"success": False, "error": "Received GRN cannot be edited."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        incoming_status = incoming.get("status", grn.status)
+        action = str(incoming.get("action", "")).strip().lower()
+        going_verified = (grn.status == "Draft" and incoming_status == "Verified")
+        going_received = (grn.status == "Verified" and (incoming_status == "Received" or action == "receive"))
+
+        # Verified guard — no edits once verified unless receiving
+        if grn.status == "Verified" and not going_received:
             return Response(
                 {"success": False, "error": "Verified GRN cannot be edited."},
                 status=status.HTTP_403_FORBIDDEN,
             )
- 
-        incoming_status = incoming.get("status", grn.status)
-        going_verified  = (grn.status == "Draft" and incoming_status == "Verified")
- 
+
         if going_verified:
             # ── Draft → Verified: assign GRN number, clear edit-audit fields ──
             category = incoming.get("purchase_category") or grn.purchase_category or ""
             incoming["grn_number"]   = _grn_number_from_draft(grn.draft_number, category)
             incoming["draft_number"] = grn.draft_number
             incoming["status"]       = "Verified"
- 
+
             # Edit-audit fields should not be touched during verification
             incoming.pop("edited_by",     None)
             incoming.pop("edited_date",   None)
             incoming.pop("edited_reason", None)
- 
+
+        elif going_received:
+            # ── Verified → Received ───────────────────────────────────────────
+            incoming["draft_number"] = grn.draft_number
+            incoming["status"]       = "Received"
+            incoming.pop("edited_by",     None)
+            incoming.pop("edited_date",   None)
+            incoming.pop("edited_reason", None)
+
         else:
             # ── Draft → Draft (edit): require edited_reason ──────────────────
             edited_reason = str(incoming.get("edited_reason", "")).strip()
@@ -1073,116 +1204,203 @@ def grn_view(request, pk=None):
                     },
                     status=400,
                 )
- 
+
             incoming["edited_reason"] = edited_reason
             incoming["edited_by"]     = employee_id
             incoming["edited_date"]   = timezone.now()
- 
+
             incoming["grn_number"]   = ""
             incoming["draft_number"] = grn.draft_number
             incoming["status"]       = "Draft"
- 
+
         # Immutable fields — never allow overwrite
         for field in ("created_by", "created_date", "hospital_code", "branch_code"):
             incoming.pop(field, None)
- 
+
         incoming["lastmodified_by"]   = employee_id
         incoming["lastmodified_date"] = timezone.now()
- 
+
         serializer = GRNSerializer(grn, data=incoming, partial=True)
- 
+
         if not serializer.is_valid():
             logger.error("GRN PUT errors: %s", serializer.errors)
             return Response({"success": False, "error": serializer.errors}, status=400)
- 
-        saved = serializer.save()
- 
-        # ── Auto-create PharmacyStock on Verification ─────────────────────────
-        if going_verified:
- 
-            DEPT_CODE_MAP = {
-                "OP PHARMACY":   "OLET002",
-                "IP PHARMACY":   "OLET001",
-                "DRUG PURCHASE": "OLET006",
-            }
 
-            outlet_code = DEPT_CODE_MAP.get(saved.purchase_category)
-            if not outlet_code:
+        saved = serializer.save()
+
+        now_ts = timezone.now()
+        client, hms_db = get_hms_db()
+
+        if going_verified:
+            # Stock is NOT added on verification. Only status and verified audit info updated.
+            if hms_db is not None:
                 try:
-                    client, hms_db = get_hms_db()
-                    out_doc = hms_db["hospital_outlets"].find_one({
-                        "outlet_name": {"$regex": f"^{re.escape(str(saved.purchase_category or ''))}$", "$options": "i"},
-                        "is_active": True
-                    })
-                    if out_doc and out_doc.get("outlet_code"):
-                        outlet_code = out_doc.get("outlet_code")
-                except Exception:
-                    pass
-            if not outlet_code:
-                outlet_code = "OLET006" if str(saved.purchase_category or "").strip().upper() == "DRUG PURCHASE" else "OLET002"
-            assigned_grn_no = saved.grn_number
- 
+                    hms_db["hospital_grn"].update_one(
+                        {"draft_number": saved.draft_number},
+                        {"$set": {
+                            "status": "Verified",
+                            "grn_number": saved.grn_number,
+                            "verified_by": employee_id,
+                            "verified_date": now_ts,
+                            "lastmodified_by": employee_id,
+                            "lastmodified_date": now_ts,
+                        }}
+                    )
+                except Exception as e:
+                    logger.error("Failed to update MongoDB verified_by: %s", e)
+
+        elif going_received:
+            # Stock IS added on Receive
             try:
-                items = json.loads(saved.items or "[]")
-            except Exception:
-                items = []
- 
-            for it in items:
-                expiry_date = None
-                expiry_raw  = it.get("expiry", "")
- 
-                if expiry_raw:
-                    parts = expiry_raw.split("/")
-                    if len(parts) == 2:
-                        try:
-                            expiry_date = datetime.strptime(
-                                f"01/{parts[0]}/{parts[1]}", "%d/%m/%Y"
-                            ).date()
-                        except Exception:
-                            expiry_date = None
- 
-                cgst_pct = float(it.get("selling_cgst_percent", 0) or 0)
-                sgst_pct = float(it.get("selling_sgst_percent", 0) or 0)
- 
-                PharmacyStock.objects.create(
-                    hospital_code            = hospital_code,
-                    branch_code              = branch_code,
-                    outlet_code              = outlet_code,
-                    item_id                  = int(it.get("item_id") or 0),
-                    batch_number             = str(it.get("batch") or ""),
-                    expiry_date              = expiry_date,
-                    mrp                      = float(it.get("unit_mrp") or it.get("mrp") or 0),
-                    grn_number               = assigned_grn_no,
-                    total_stock              = (lambda it_data: int(round(
-                                                    float(it_data.get("total_stock"))
-                                                    if (it_data.get("total_stock") is not None and float(it_data.get("total_stock") or 0) > 0)
-                                                    else (
-                                                        float(it_data.get("quantity") or 0) + (
-                                                            float(it_data.get("free") or 0)
-                                                            if float(it_data.get("free") or 0) > 0
-                                                            else (
-                                                                float(it_data.get("free_pack") or 0) * (float(it_data.get("packing") or 1) if float(it_data.get("packing") or 1) > 0 else 1.0)
-                                                            )
-                                                        )
-                                                    )
-                                                )))(it),
-                    sold_quantity            = 0,
-                    transferred_out_quantity = 0,
-                    stock_type               = "grn",
-                    stock_ref_id             = 0,
-                    grn_return_quantity      = 0,
-                    blocked_quantity         = 0,
-                    sales_return_quantity    = 0,
-                    CGST_Percentage          = cgst_pct,
-                    SGST_Percentage          = sgst_pct,
-                    CGST_Amt                 = float(it.get("selling_cgst_amt", 0) or 0),
-                    SGST_Amt                 = float(it.get("selling_sgst_amt", 0) or 0),
-                    Selling_Price            = float(it.get("selling_price", 0) or 0),
-                    created_by               = employee_id,
-                    created_date             = timezone.now(),
+                created_count, target_outlet = _create_pharmacy_stock_for_grn(
+                    saved,
+                    employee_id,
+                    hospital_code=hospital_code,
+                    branch_code=branch_code,
+                    override_outlet_code=incoming.get("outlet_code")
                 )
- 
+                if target_outlet and getattr(saved, "outlet_code", None) != target_outlet:
+                    saved.outlet_code = target_outlet
+                    saved.save()
+            except Exception as e:
+                logger.exception("Failed to create pharmacy stock on receive: %s", e)
+                return Response({"success": False, "error": f"Failed to add stock: {str(e)}"}, status=500)
+
+            if hms_db is not None:
+                try:
+                    hms_db["hospital_grn"].update_one(
+                        {"draft_number": saved.draft_number},
+                        {"$set": {
+                            "status": "Received",
+                            "received_by": employee_id,
+                            "received_date": now_ts,
+                            "lastmodified_by": employee_id,
+                            "lastmodified_date": now_ts,
+                            "outlet_code": target_outlet or saved.outlet_code
+                        }}
+                    )
+                except Exception as e:
+                    logger.error("Failed to update MongoDB received_by: %s", e)
+
         return Response({"success": True, "data": _enrich_grn_items([GRNSerializer(saved).data])[0]})
+
+
+@api_view(["POST"])
+@permission_classes([HasRoleAndDataPermission])
+@csrf_exempt
+def grn_receive_view(request):
+    """
+    Dedicated endpoint to Receive a Verified GRN into outlet pharmacy stock.
+    Payload:
+        draft_number: str (or grn_number: str)
+        outlet_code: str (optional)
+    """
+    employee_id = (
+        request.data.get('auth-user-id') or
+        request.headers.get('auth-user-id') or
+        "system"
+    )
+
+    hospital_code = (
+        request.data.get("auth-hospital-code") or
+        request.headers.get("auth-hospital-code") or
+        "system"
+    )
+
+    branch_code = (
+        request.data.get("auth-branch-code") or
+        request.headers.get("Branch-Code") or
+        "system"
+    )
+
+    draft_number = str(request.data.get("draft_number", "")).strip()
+    grn_number = str(request.data.get("grn_number", "")).strip()
+    outlet_code_override = str(request.data.get("outlet_code", "")).strip() or None
+
+    if not draft_number and not grn_number:
+        return Response({"success": False, "error": "draft_number or grn_number is required."}, status=400)
+
+    grn = None
+    if draft_number:
+        try:
+            grn = GRN.objects.get(draft_number=draft_number)
+        except GRN.DoesNotExist:
+            pass
+    if grn is None and grn_number:
+        try:
+            grn = GRN.objects.get(grn_number=grn_number)
+        except GRN.DoesNotExist:
+            pass
+
+    if grn is None:
+        return Response({"success": False, "error": "GRN not found."}, status=404)
+
+    # Hospital / Branch security check
+    if (
+        getattr(grn, "hospital_code", None) != hospital_code or
+        getattr(grn, "branch_code", None) != branch_code
+    ):
+        return Response({"success": False, "error": "GRN not found in current hospital/branch context."}, status=404)
+
+    if grn.status == "Received":
+        return Response({
+            "success": False,
+            "error": f"GRN {grn.grn_number or grn.draft_number} has already been received into stock."
+        }, status=400)
+
+    if grn.status != "Verified":
+        return Response({
+            "success": False,
+            "error": f"Cannot receive GRN with status '{grn.status}'. Only 'Verified' GRNs can be received into stock."
+        }, status=400)
+
+    now_ts = timezone.now()
+    client, hms_db = get_hms_db()
+
+    # Create pharmacy stock for destination outlet
+    try:
+        created_count, target_outlet = _create_pharmacy_stock_for_grn(
+            grn,
+            employee_id,
+            hospital_code=hospital_code,
+            branch_code=branch_code,
+            override_outlet_code=outlet_code_override
+        )
+    except Exception as e:
+        logger.exception("Failed to create stock for GRN %s: %s", grn.draft_number, e)
+        return Response({"success": False, "error": f"Failed to create stock: {str(e)}"}, status=500)
+
+    # Update GRN status in ORM
+    grn.status = "Received"
+    grn.lastmodified_by = employee_id
+    grn.lastmodified_date = now_ts
+    if target_outlet:
+        grn.outlet_code = target_outlet
+    grn.save()
+
+    # Update GRN in Mongo
+    if hms_db is not None:
+        try:
+            hms_db["hospital_grn"].update_one(
+                {"draft_number": grn.draft_number},
+                {"$set": {
+                    "status": "Received",
+                    "received_by": employee_id,
+                    "received_date": now_ts,
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": now_ts,
+                    "outlet_code": target_outlet or grn.outlet_code
+                }}
+            )
+        except Exception as e:
+            logger.error("Failed to update MongoDB GRN status to Received: %s", e)
+
+    enriched = _enrich_grn_items([GRNSerializer(grn).data])
+    return Response({
+        "success": True,
+        "message": f"Successfully received {created_count} items into outlet {target_outlet or grn.outlet_code}.",
+        "data": enriched[0] if enriched else GRNSerializer(grn).data
+    })
     
 
 @api_view(["GET"])
