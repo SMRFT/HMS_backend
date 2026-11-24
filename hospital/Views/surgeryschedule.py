@@ -1316,21 +1316,43 @@ def get_ot_medicine_ward_requests(request):
     try:
         uhid = request.query_params.get("uhid")
         ip_number = request.query_params.get("ipNumber")
-
-        if not uhid:
-            return Response(
-                {"success": False, "error": "UHID is required"},
-                status=400
-            )
+        from_date_str = request.query_params.get("from_date") or request.query_params.get("fromDate")
+        to_date_str = request.query_params.get("to_date") or request.query_params.get("toDate")
+        pending_only = (request.query_params.get("pending_only") == "true" or
+                        request.query_params.get("pendingOnly") == "true")
 
         query_params = {
-            "uhid": uhid,
             "is_ward_request": True,
             "billing_mode": "OT REQUEST",
+            "is_cancelled": {"$ne": True},
+            "is_deleted": {"$ne": True},
         }
+
+        if uhid:
+            query_params["uhid"] = uhid
 
         if ip_number:
             query_params["inpatient_number"] = ip_number
+
+        if from_date_str or to_date_str:
+            date_cond = {}
+            if from_date_str:
+                try:
+                    f_dt = datetime.strptime(str(from_date_str).strip()[:10], "%Y-%m-%d")
+                    date_cond["$gte"] = f_dt
+                except Exception:
+                    pass
+            if to_date_str:
+                try:
+                    t_dt = datetime.strptime(str(to_date_str).strip()[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                    date_cond["$lte"] = t_dt
+                except Exception:
+                    pass
+            if date_cond:
+                query_params["$or"] = [
+                    {"ward_request_date": date_cond},
+                    {"created_date": date_cond}
+                ]
 
         # ✅ Two DB connections
         hms_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
@@ -1470,6 +1492,23 @@ def get_ot_medicine_ward_requests(request):
                 package_map[pkg.get("medPackage_id")] = pkg.get("medPackage_name", "")
 
         # ✅ -------------------------------
+        # STEP 4c: Fetch patient names for any uhid referenced
+        # ✅ -------------------------------
+        all_uhids = {
+            doc.get("uhid")
+            for doc in requests_data
+            if doc.get("uhid")
+        }
+        patient_map = {}
+        if all_uhids:
+            for p in hms_db["hospital_patient"].find(
+                {"uhid": {"$in": list(all_uhids)}},
+                {"uhid": 1, "firstName": 1, "lastName": 1, "_id": 0}
+            ):
+                pname = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+                patient_map[p.get("uhid")] = pname
+
+        # ✅ -------------------------------
         # STEP 5: Format response
         # ✅ -------------------------------
         formatted_data = []
@@ -1485,6 +1524,7 @@ def get_ot_medicine_ward_requests(request):
                     items = []
 
             medicines = []
+            has_pending_items = False
 
             for itm in items:
                 if isinstance(itm, str):
@@ -1497,6 +1537,20 @@ def get_ot_medicine_ward_requests(request):
                     continue
 
                 item_id = itm.get("item_id")
+                try:
+                    q_val = float(itm.get("qty", itm.get("quantity", 0)) or 0)
+                except (ValueError, TypeError):
+                    q_val = 0.0
+                try:
+                    d_val = float(itm.get("dispatched_qty", 0) or 0)
+                except (ValueError, TypeError):
+                    d_val = 0.0
+                p_qty = max(0.0, q_val - d_val)
+                if p_qty > 0:
+                    has_pending_items = True
+
+                rate_val = itm.get("price") or itm.get("rate") or itm.get("mrp") or 0.0
+                amt_val = itm.get("total") or itm.get("amount") or itm.get("calculated_price") or (q_val * float(rate_val or 0))
 
                 medicines.append({
                     "item_id": item_id,
@@ -1504,17 +1558,28 @@ def get_ot_medicine_ward_requests(request):
                         item_id,
                         itm.get("itemName", itm.get("item_name", ""))
                     ),
-                    "qty": itm.get("qty", itm.get("quantity", "")),
+                    "qty": q_val,
+                    "dispatched_qty": d_val,
+                    "pending_qty": p_qty,
+                    "price": rate_val,
+                    "rate": rate_val,
+                    "amount": amt_val,
+                    "total": amt_val,
                     "doctor": itm.get("doctor", ""),
                     "dosage": itm.get("dosage", ""),
                     "noOfDays": itm.get("noOfDays", ""),
                     "dose": itm.get("dose", ""),
                     "doseUnit": itm.get("doseUnit", ""),
                     "route": itm.get("route", ""),
-                    "dispatched_qty": itm.get("dispatched_qty", ""),
                     "instruction": itm.get("instruction", ""),
                     "remark": itm.get("remark", "")
                 })
+
+            # If pending_only filter is active, skip requests with 0 pending items or cancelled
+            b_status = str(doc.get("billing_status", "")).strip()
+            if pending_only:
+                if b_status.lower() == "cancelled" or not has_pending_items:
+                    continue
 
             bill_type = doc.get("bill_type")
             bill_name = billtype_map.get(bill_type, "")
@@ -1537,12 +1602,14 @@ def get_ot_medicine_ward_requests(request):
                 req_date = ward_request_date.strftime("%d-%m-%Y")
                 req_time = ward_request_date.strftime("%I:%M %p")
 
+            p_name = doc.get("patient_name") or patient_map.get(doc.get("uhid"), "") or "N/A"
+
             formatted_doc = {
                 "id": str(doc.get("_id")),
                 "bill_id": doc.get("Bill_id", ""),
                 "uhid": doc.get("uhid", ""),
                 "ipNumber": doc.get("inpatient_number", ""),
-                "patientName": doc.get("patient_name", ""),
+                "patientName": p_name,
                 "billType": bill_type,
                 "billName": bill_name,
                 "reqDate": req_date,

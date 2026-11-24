@@ -379,6 +379,35 @@ def get_admitted_doctor_fee_patients(request):
             ))
             patient_by_uhid = {p.get('uhid'): p for p in patients if p.get('uhid')}
 
+        # 7.1 Batch fetch surgery schedules for all candidate IPs
+        surgery_schedules = list(db['hospital_surgeryschedule'].find(
+            {"ip_number": {"$in": candidate_ips}, "is_active": {"$ne": False}},
+            {"ip_number": 1, "surgery_name": 1, "diagnosis": 1}
+        ))
+        surg_by_ip = {}
+        surg_diag_by_ip = {}
+        for s in surgery_schedules:
+            sip = (s.get('ip_number') or '').strip()
+            sname = (s.get('surgery_name') or '').strip()
+            sdiag = (s.get('diagnosis') or '').strip()
+            if sip:
+                if sname and sname not in surg_by_ip.get(sip, []):
+                    surg_by_ip.setdefault(sip, []).append(sname)
+                if sdiag and sdiag not in surg_diag_by_ip.get(sip, []):
+                    surg_diag_by_ip.setdefault(sip, []).append(sdiag)
+
+        # 7.2 Batch fetch discharge summary diagnosis for all candidate IPs
+        summaries = list(db['hospital_summary'].find(
+            {"ipNo": {"$in": candidate_ips}, "is_active": {"$ne": False}},
+            {"ipNo": 1, "disease": 1, "fieldsData": 1}
+        ))
+        summary_diag_by_ip = {}
+        for sm in summaries:
+            sip = (sm.get('ipNo') or '').strip()
+            disease = (sm.get('disease') or '').strip()
+            if sip and disease and sip not in summary_diag_by_ip:
+                summary_diag_by_ip[sip] = disease
+
         # 8. Process items & collect doctor IDs
         parsed_items = []
         all_doctor_ids = set()
@@ -551,10 +580,34 @@ def get_admitted_doctor_fee_patients(request):
                     "doctor_fee": fee_val
                 })
 
+            # Resolve Surgery Name & Diagnosis for this IP
+            surg_list = list(surg_by_ip.get(ip_number, []))
+            for it in (item.get('bill', {}).get('items') or []):
+                if isinstance(it, dict):
+                    btype = str(it.get('billTypeNo') or it.get('bill_type') or '')
+                    iname = str(it.get('itemName') or it.get('name') or it.get('package_name') or '').strip()
+                    if (btype.upper().startswith('SUR') or 'surgery' in iname.lower() or 'operation' in iname.lower()) and iname:
+                        if iname not in surg_list:
+                            surg_list.append(iname)
+            surgery_name = " / ".join(dict.fromkeys(surg_list)) if surg_list else ""
+
+            diag_list = []
+            if ip_number in summary_diag_by_ip:
+                diag_list.append(summary_diag_by_ip[ip_number])
+            for sd in surg_diag_by_ip.get(ip_number, []):
+                if sd and sd not in diag_list:
+                    diag_list.append(sd)
+            adm_reason = adm.get('reasonForAdmission') or adm.get('diagnosis')
+            if not diag_list and adm_reason:
+                diag_list.append(str(adm_reason).strip())
+            diagnosis = ", ".join(dict.fromkeys(diag_list)) if diag_list else ""
+
             results.append({
                 "ipNumber": ip_number,
                 "uhid": uhid,
                 "patient_name": item['patient_name'],
+                "surgery_name": surgery_name,
+                "diagnosis": diagnosis,
                 "admission_date": adm.get('admissionDateTime'),
                 "bill_date": item.get('bill_date'),
                 "admitting_doctor": adm.get('admittingDoctor', ''),
