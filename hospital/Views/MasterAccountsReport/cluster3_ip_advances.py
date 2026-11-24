@@ -699,25 +699,57 @@ def discharge_bills_summary_api(request):
             to_str=data.get("to_date") or data.get("end_date"),
             outlet_code=data.get("outlet_code") or data.get("outlet")
         )
-        all_dis_bills = [b for b in res["bills"] if b["category"] == "DISCHARGE"]
+        all_dis_bills = [
+            b for b in res["bills"] 
+            if b.get("category") in ["DISCHARGE", "DISCHARGE REFUND"] or b.get("is_discharge_refund")
+        ]
         for b in all_dis_bills:
+            is_ref = (
+                b.get("category") == "DISCHARGE REFUND" or 
+                b.get("is_discharge_refund") or 
+                b.get("is_refund") or
+                "refund" in str(b.get("category") or "").lower() or
+                "refund" in str(b.get("remarks") or "").lower()
+            )
             g_amt = clean_num(b.get("gross_amount") or b.get("gross") or b.get("bill_amount") or b.get("total_amount") or 0.0)
             adv_adj = clean_num(b.get("advance_adjustment") or b.get("advance_adjusted") or b.get("advance_amount") or 0.0)
             c_val = clean_num(b.get("cash"))
             k_val = clean_num(b.get("credit") or b.get("bank") or b.get("card"))
-            net_amt = clean_num(b.get("net_paid") or b.get("net_settlement") or (c_val + k_val) or b.get("amount") or 0.0)
-            if c_val == 0.0 and k_val == 0.0:
+            net_amt = clean_num(b.get("net_paid") or b.get("net_settlement") or b.get("net_amount") or (c_val + k_val) or b.get("amount") or 0.0)
+
+            ref_amt = 0.0
+            if is_ref:
+                ref_amt = abs(clean_num(b.get("refund_amount") or b.get("return_amount") or b.get("amount") or g_amt or b.get("net_amount") or c_val))
+                g_amt = 0.0
+                adv_adj = 0.0
+                if c_val == 0.0 and k_val == 0.0:
+                    c_val = -ref_amt
+                net_amt = -abs(ref_amt)
+            elif net_amt < 0:
+                ref_amt = abs(net_amt)
+                is_ref = True
+            elif clean_num(b.get("refund_amount") or b.get("discharge_refund")) > 0:
+                ref_amt = clean_num(b.get("refund_amount") or b.get("discharge_refund"))
+                is_ref = True
+
+            if not is_ref and c_val == 0.0 and k_val == 0.0:
                 pm = str(b.get("payment_mode") or "").lower()
                 if "cash" in pm or not pm:
                     c_val = net_amt
                 else:
                     k_val = net_amt
+
             b["bill_amount"] = g_amt
             b["gross_amount"] = g_amt
             b["gross_bill"] = g_amt
             b["gross"] = g_amt
             b["advance_adjusted"] = adv_adj
             b["advance_adjustment"] = adv_adj
+            b["discharge_refund"] = round(ref_amt, 2)
+            b["refund_amount"] = round(ref_amt, 2)
+            b["refund"] = round(ref_amt, 2)
+            b["is_refund"] = bool(is_ref or ref_amt > 0)
+            b["is_discharge_refund"] = bool(is_ref or ref_amt > 0)
             b["net_settlement"] = net_amt
             b["net_paid"] = net_amt
             b["cash_amount"] = round(c_val, 2)
@@ -732,7 +764,10 @@ def discharge_bills_summary_api(request):
             dis_bills = []
             for b in all_dis_bills:
                 bm = str(b.get("payment_mode") or "").strip().lower()
-                if fm == "cash":
+                if fm in ["refund", "discharge refund", "discharge_refund"]:
+                    if b.get("is_refund") or b.get("discharge_refund", 0) > 0 or "refund" in bm:
+                        dis_bills.append(b)
+                elif fm == "cash":
                     if bm == "cash":
                         dis_bills.append(b)
                 elif fm in ["card", "credit card", "bank", "online", "pos"]:
@@ -751,6 +786,7 @@ def discharge_bills_summary_api(request):
 
         tot_gross = round(sum(b["bill_amount"] for b in dis_bills), 2)
         tot_adv = round(sum(b["advance_adjusted"] for b in dis_bills), 2)
+        tot_refund = round(sum(b.get("discharge_refund", 0.0) for b in dis_bills), 2)
         tot_net = round(sum(b["net_settlement"] for b in dis_bills), 2)
         tot_cash = round(sum(b["cash"] for b in dis_bills), 2)
         tot_credit = round(sum(b["credit"] for b in dis_bills), 2)
@@ -763,6 +799,8 @@ def discharge_bills_summary_api(request):
             "summary": {
                 "total_gross_bill": tot_gross,
                 "total_advance_adjusted": tot_adv,
+                "total_discharge_refund": tot_refund,
+                "total_refund": tot_refund,
                 "total_net_settlement": tot_net,
                 "total_settlement": tot_net,
                 "total_cash": tot_cash,
@@ -772,6 +810,8 @@ def discharge_bills_summary_api(request):
             },
             "total_amount": tot_gross,
             "total_cash": tot_cash,
+            "total_refund": tot_refund,
+            "total_discharge_refund": tot_refund,
             "total_card": round(sum(b.get("bank", 0) for b in dis_bills), 2),
             "total_credit": tot_credit,
             "data": dis_bills

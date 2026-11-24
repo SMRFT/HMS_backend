@@ -1024,6 +1024,8 @@ def discharge_bills_report(request):
                 cred_val = round(max(0.0, gross_val - adv_val - disc_amt), 2)
             flag_val = "C" if (cred_val == 0 and bank_val == 0) else "R"
 
+            refund_val = abs(net_val) if net_val < 0 else _to_float(doc.get("refund_amount") or doc.get("discharge_refund") or doc.get("refund") or 0)
+
             filtered.append({
                 "id": doc.get("discharge_id"),
                 "bill_no": bill_no,
@@ -1050,6 +1052,10 @@ def discharge_bills_report(request):
                 "advance": adv_val,
                 "sales_return": sr_amt,
                 "patient_debit": pdebit_amt,
+                "discharge_refund": refund_val,
+                "refund_amount": refund_val,
+                "refund": refund_val,
+                "is_refund": bool(refund_val > 0),
                 "net_amount": net_val,
                 "card_number": adm.get("policy_no") or adm.get("insurance_card_no") or adm.get("card_number") or doc.get("card_number") or "",
                 "service_no": adm.get("service_no") or adm.get("serviceNo") or doc.get("service_no") or "",
