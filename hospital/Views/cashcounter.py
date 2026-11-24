@@ -29,7 +29,8 @@ from .dbcollection import (
     filter_bills_by_employee_counter,
     extract_aud_employee_id,
     admission_collection,
-    patient_collection
+    patient_collection,
+    hospital_CardPaymentList
 )
 def format_dt(val):
     if not val: return None
@@ -5577,18 +5578,54 @@ import os
 @api_view(["GET"])
 @permission_classes([HasRoleAndDataPermission])
 def OPPharmacy_pending_bills(request):
+    """
+    Endpoint to retrieve pending, unpaid, and received outpatient (OP) pharmacy cash bills.
+    Validates cashier counter assignment, verifies an active shift, dynamically filters
+    by hospital/branch/outlet/payment_mode, and enriches raw bill records.
+    """
     try:
+        # Extract parsed request data if available; fallback to empty dict
         data = request.data if hasattr(request, "data") and isinstance(request.data, dict) else {}
-        employee_id = data.get("auth-user-id") or request.headers.get("auth-user-id") or request.GET.get("auth-user-id") or extract_aud_employee_id(request)
 
-        # ✅ AUTH CODES
-        hospital_code = data.get("auth-hospital-code") or request.headers.get("auth-hospital-code") or request.GET.get("auth-hospital-code") or "SH001"
-        branch_code   = data.get("auth-branch-code") or request.headers.get("auth-branch-code") or request.GET.get("auth-branch-code") or "SHB001"
-        outlet_code   = data.get("auth-outlet-code") or request.headers.get("auth-outlet-code") or request.GET.get("auth-outlet-code")
+        # Dynamically resolve employee ID from payload, headers, query params, or JWT
+        employee_id = (
+            data.get("auth-user-id")
+            or request.headers.get("User-Id")
+            or request.headers.get("user-id")
+            or request.headers.get("auth-user-id")
+            or request.GET.get("auth-user-id")
+            or request.GET.get("user_id")
+            or request.GET.get("employee_id")
+            or extract_aud_employee_id(request)
+        )
 
-        # =========================================================
-        # ✅ MongoDB Collections (Using shared pooled connection)
-        # =========================================================
+        # ✅ DYNAMIC AUTH CODES (Tenant & Branch Context - No Hardcoding)
+        hospital_code = (
+            data.get("auth-hospital-code")
+            or request.headers.get("Hospital-Code")
+            or request.headers.get("hospital-code")
+            or request.headers.get("auth-hospital-code")
+            or request.GET.get("auth-hospital-code")
+            or request.GET.get("hospital_code")
+        )
+        branch_code = (
+            data.get("auth-branch-code")
+            or request.headers.get("Branch-Code")
+            or request.headers.get("branch-code")
+            or request.headers.get("auth-branch-code")
+            or request.GET.get("auth-branch-code")
+            or request.GET.get("branch_code")
+        )
+        outlet_code = (
+            data.get("auth-outlet-code")
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("outlet-code")
+            or request.headers.get("auth-outlet-code")
+            or request.GET.get("auth-outlet-code")
+            or request.GET.get("outlet_code")
+            or request.GET.get("outlet")
+        )
+
         from .dbcollection import (
             hms_db,
             global_db,
@@ -5601,28 +5638,19 @@ def OPPharmacy_pending_bills(request):
             hms_billtype as billtype_collection
         )
 
-        # =========================================================
-        # ✅ Employee Cashcounter & Bill Type Permission Check
-        # =========================================================
+        # Look up cashier permissions, assigned counter ID, and allowed bill types
         emp_perms = get_employee_cashcounter_permissions(
             employee_id or request,
             hospital_code=hospital_code,
-            branch_code=branch_code
+            branch_code=branch_code,
+            outlet_code=outlet_code
         )
 
         requested_counter = data.get("CashCounter") or request.GET.get("CashCounter")
-        if requested_counter and emp_perms.get("success") and emp_perms.get("counter_id"):
-            if str(requested_counter).strip().upper() != str(emp_perms["counter_id"]).strip().upper():
-                return Response({
-                    "status": "error",
-                    "code": "COUNTER_ACCESS_DENIED",
-                    "message": f"Access blocked: Cashier {emp_perms['employee_id']} is assigned to counter '{emp_perms['counter_id']}' ({emp_perms['counter_name']}) and cannot access counter '{requested_counter}'.",
-                    "cashcounter": emp_perms.get("cashcounter_details"),
-                    "allowed_bill_type_details": emp_perms.get("bill_type_details", []),
-                    "data": []
-                }, status=status.HTTP_403_FORBIDDEN)
 
         if emp_perms.get("success"):
+            hospital_code             = hospital_code or emp_perms.get("hospital_code")
+            branch_code               = branch_code or emp_perms.get("branch_code")
             cashcounter_details       = emp_perms["cashcounter_details"]
             allowed_bill_type_details = emp_perms["bill_type_details"]
             allowed_bill_types        = emp_perms["allowed_bill_types"]
@@ -5630,22 +5658,29 @@ def OPPharmacy_pending_bills(request):
             matched_outlet            = emp_perms["outlet"] or outlet_code
             emp_name                  = emp_perms.get("employee_name") or str(employee_id)
         else:
-            # Dynamically resolve cash counter without hardcoding
-            counter_filter = {"hospital_code": hospital_code, "branch_code": branch_code, "is_active": True}
+            # Fallback: Dynamically resolve cash counter from DB without hardcoding
+            counter_filter = {"is_active": True}
+            if hospital_code: counter_filter["hospital_code"] = hospital_code
+            if branch_code: counter_filter["branch_code"] = branch_code
+
             if requested_counter:
                 counter_filter["counter_id"] = str(requested_counter).strip()
             elif outlet_code and isinstance(outlet_code, str):
                 counter_filter["outlet"] = outlet_code
 
-            counter_doc = cashcounter_collection.find_one(counter_filter) or cashcounter_collection.find_one({
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "is_active": True
-            })
+            counter_doc = cashcounter_collection.find_one(counter_filter)
+            if not counter_doc and (hospital_code or branch_code):
+                counter_doc = cashcounter_collection.find_one({
+                    "hospital_code": hospital_code,
+                    "branch_code": branch_code,
+                    "is_active": True
+                })
 
             if counter_doc:
                 emp_cashcounter     = counter_doc.get("counter_id", "")
                 matched_outlet      = counter_doc.get("outlet") or outlet_code
+                hospital_code       = hospital_code or counter_doc.get("hospital_code")
+                branch_code         = branch_code or counter_doc.get("branch_code")
                 cashcounter_details = {
                     "counter_id": emp_cashcounter,
                     "counter_name": counter_doc.get("counter_name", ""),
@@ -5673,30 +5708,67 @@ def OPPharmacy_pending_bills(request):
 
             emp_name = str(employee_id or "")
 
+        # Check counter requested by frontend
+        if requested_counter and emp_perms.get("success") and emp_perms.get("counter_id"):
+            if str(requested_counter).strip().upper() != str(emp_perms["counter_id"]).strip().upper():
+                return Response({
+                    "status": "error",
+                    "code": "COUNTER_ACCESS_DENIED",
+                    "message": f"Access blocked: Cashier {emp_perms['employee_id']} is assigned to counter '{emp_perms['counter_id']}' ({emp_perms['counter_name']}) and cannot access counter '{requested_counter}'.",
+                    "cashcounter": emp_perms.get("cashcounter_details"),
+                    "allowed_bill_type_details": emp_perms.get("bill_type_details", []),
+                    "data": []
+                }, status=status.HTTP_403_FORBIDDEN)
+
         # =========================================================
-        # ✅ VERIFY ACTIVE SHIFT IN DB (DO NOT DISPLAY UNTIL SHIFT START)
+        # ✅ VERIFY ACTIVE SHIFT IN DB (DYNAMIC LOOKUP)
         # =========================================================
         shift_col = hms_db["hospital_cashcountershiftdetails"]
-        counter_id_check = cashcounter_details.get("counter_id") if cashcounter_details else emp_cashcounter
-        shift_filter = {
-            "ShiftStatus": {"$regex": "^active$", "$options": "i"},
-            "is_active": True,
-            "hospital_code": hospital_code,
-            "branch_code": branch_code
-        }
+        counter_id_check = (cashcounter_details.get("counter_id") if cashcounter_details else None) or emp_cashcounter or requested_counter
+
+        active_shift = None
         if counter_id_check:
-            shift_filter["CashCounter"] = counter_id_check
-        active_shift = shift_col.find_one(shift_filter)
-        if not active_shift and employee_id:
-            active_shift = shift_col.find_one({
-                "CashierID": str(employee_id),
+            sq = {
                 "ShiftStatus": {"$regex": "^active$", "$options": "i"},
                 "is_active": True,
-                "hospital_code": hospital_code,
-                "branch_code": branch_code
-            })
+                "CashCounter": counter_id_check
+            }
+            if hospital_code: sq["hospital_code"] = hospital_code
+            if branch_code: sq["branch_code"] = branch_code
+            active_shift = shift_col.find_one(sq)
 
-        if not active_shift:
+        if not active_shift and employee_id:
+            sq = {
+                "CashierID": str(employee_id),
+                "ShiftStatus": {"$regex": "^active$", "$options": "i"},
+                "is_active": True
+            }
+            if hospital_code: sq["hospital_code"] = hospital_code
+            if branch_code: sq["branch_code"] = branch_code
+            active_shift = shift_col.find_one(sq)
+
+        if not active_shift and (counter_id_check or employee_id):
+            if counter_id_check:
+                active_shift = shift_col.find_one({
+                    "ShiftStatus": {"$regex": "^active$", "$options": "i"},
+                    "is_active": True,
+                    "CashCounter": counter_id_check
+                })
+            if not active_shift and employee_id:
+                active_shift = shift_col.find_one({
+                    "CashierID": str(employee_id),
+                    "ShiftStatus": {"$regex": "^active$", "$options": "i"},
+                    "is_active": True
+                })
+
+        if active_shift:
+            hospital_code = hospital_code or active_shift.get("hospital_code")
+            branch_code   = branch_code or active_shift.get("branch_code")
+            if not emp_cashcounter:
+                emp_cashcounter = active_shift.get("CashCounter")
+                if cashcounter_details:
+                    cashcounter_details["counter_id"] = emp_cashcounter
+        else:
             return Response({
                 "employee_id": employee_id,
                 "employee_name": emp_name,
@@ -5708,7 +5780,7 @@ def OPPharmacy_pending_bills(request):
             }, status=status.HTTP_200_OK)
 
         # =========================================================
-        # ✅ Query Pharmacy Bills via PyMongo (payment_mode: "Cash" only)
+        # ✅ Query Pharmacy Bills via PyMongo (Dynamic & Robust)
         # =========================================================
         date_str = request.GET.get("date") or data.get("date")
         from_date_str = request.GET.get("from_date") or data.get("from_date")
@@ -5731,7 +5803,6 @@ def OPPharmacy_pending_bills(request):
                 pass
 
         import pytz
-        from datetime import date
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
         today_date_ist = now_ist.date()
@@ -5742,88 +5813,147 @@ def OPPharmacy_pending_bills(request):
         today_end_ist = ist.localize(today_end_local)
         today_start_utc = today_start_ist.astimezone(pytz.utc).replace(tzinfo=None)
         today_end_utc = today_end_ist.astimezone(pytz.utc).replace(tzinfo=None)
+        today_str = today_date_ist.strftime("%Y-%m-%d")
 
+        # Base MongoDB filter: exclude deleted records
         mongo_filter = {
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
-            # 🎯 1. PAYMENT MODE: CASH ALONE
-            "payment_mode": {"$in": ["Cash", "cash", "CASH"]},
-            "$or": [
-                {"is_deleted": False},
-                {"is_deleted": {"$exists": False}}
-            ]
+            "is_deleted": {"$ne": True}
         }
+        if hospital_code:
+            mongo_filter["hospital_code"] = hospital_code
+        if branch_code:
+            mongo_filter["branch_code"] = branch_code
 
-        if allowed_bill_types:
-            mongo_filter["bill_type"] = {"$in": allowed_bill_types}
+        # Dynamic Payment Mode filter
+        req_pm = (
+            request.GET.get("payment_mode")
+            or request.GET.get("paymentMode")
+            or request.GET.get("PaymentType")
+            or request.GET.get("payment_method")
+            or data.get("payment_mode")
+            or ""
+        ).strip()
 
-        if matched_outlet:
-            if isinstance(matched_outlet, (list, tuple)):
-                parsed_matched = [str(x).strip() for x in matched_outlet if str(x).strip()]
-                if len(parsed_matched) == 1:
-                    mongo_filter["outlet_code"] = parsed_matched[0]
-                elif parsed_matched:
-                    mongo_filter["outlet_code"] = {"$in": parsed_matched}
-            elif str(matched_outlet).strip().upper() not in ["ALL", ""]:
-                mongo_filter["outlet_code"] = str(matched_outlet).strip()
+        if req_pm and req_pm.lower() not in ["all", ""]:
+            pm_regex = {"$regex": f"^{re.escape(req_pm)}$", "$options": "i"}
+            mongo_filter["$or"] = [
+                {"payment_mode": pm_regex},
+                {"payment_details.method": pm_regex},
+                {"payment_details.payment_mode": pm_regex},
+            ]
+        elif req_pm.lower() == "all":
+            pass
+        else:
+            # Default for cash counter: cash-eligible bills (exclude Credit & Insurance)
+            mongo_filter["payment_mode"] = {"$nin": ["Credit", "credit", "CREDIT", "Insurance", "insurance"]}
+
+        # Dynamic Bill Type Filter
+        req_bill_type = request.GET.get("bill_type") or request.GET.get("billType") or data.get("bill_type")
+        if req_bill_type:
+            bt_val = int(req_bill_type) if str(req_bill_type).isdigit() else str(req_bill_type).strip()
+            mongo_filter["bill_type"] = {"$in": [bt_val, str(bt_val)]}
+        elif allowed_bill_types:
+            expanded_bts = []
+            for bt in allowed_bill_types:
+                expanded_bts.append(bt)
+                if str(bt).isdigit():
+                    expanded_bts.append(int(bt))
+                expanded_bts.append(str(bt))
+            mongo_filter["bill_type"] = {"$in": list(set(expanded_bts))}
+
+        # Dynamic Outlet Code Filter
+        req_outlet = (
+            request.GET.get("outlet_code")
+            or request.GET.get("outlet")
+            or matched_outlet
+            or outlet_code
+            or ""
+        )
+        if isinstance(req_outlet, (list, tuple)):
+            clean_outlets = [str(x).strip() for x in req_outlet if str(x).strip() and str(x).strip().upper() != "ALL"]
+            if len(clean_outlets) == 1:
+                mongo_filter["outlet_code"] = clean_outlets[0]
+            elif clean_outlets:
+                mongo_filter["outlet_code"] = {"$in": clean_outlets}
+        elif req_outlet and str(req_outlet).strip().upper() not in ["ALL", ""]:
+            mongo_filter["outlet_code"] = str(req_outlet).strip()
+
+        # Dynamic Search Filter (matches bill_no, uhid, patient_name, inpatient_number, Bill_id)
+        search_query = (request.GET.get("search") or request.GET.get("q") or "").strip()
+        search_conditions = []
+        if search_query:
+            s_regex = {"$regex": re.escape(search_query), "$options": "i"}
+            search_conditions = [
+                {"bill_no": s_regex},
+                {"uhid": s_regex},
+                {"patient_name": s_regex},
+                {"inpatient_number": s_regex},
+            ]
+            if search_query.isdigit():
+                search_conditions.append({"Bill_id": int(search_query)})
+
+        def make_date_conditions(field_name, s_dt, e_dt, s_utc, e_utc, date_prefix):
+            return [
+                {field_name: {"$gte": s_dt, "$lte": e_dt}},
+                {field_name: {"$gte": s_utc, "$lte": e_utc}},
+                {field_name: {"$regex": f"^{re.escape(date_prefix)}"}},
+            ]
+
+        status_and_conditions = []
+        if search_conditions:
+            status_and_conditions.append({"$or": search_conditions})
 
         if from_dt and to_dt:
             mongo_filter["billing_status"] = {"$in": ["Billed", "Paid", "Processing", "Pending"]}
-            mongo_filter["$and"] = [
-                {"$or": [
-                    {"paid_date": {"$gte": from_dt, "$lte": to_dt}},
-                    {"paid_datetime": {"$gte": from_dt, "$lte": to_dt}},
-                    {"bill_date": {"$gte": from_dt, "$lte": to_dt}},
-                    {"created_date": {"$gte": from_dt, "$lte": to_dt}},
-                ]}
-            ]
+            date_ors = []
+            for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
+                date_ors.append({fld: {"$gte": from_dt, "$lte": to_dt}})
+            status_and_conditions.append({"$or": date_ors})
         elif req_status == "pending":
-            # 🎯 Pending Bills: Current date alone in Indian Time
+            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid)
             mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
-            mongo_filter["$or"] = [
-                {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"bill_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                {"created_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
-            ]
+            date_ors = []
+            for fld in ["bill_date", "created_date"]:
+                date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
+            status_and_conditions.append({"$or": date_ors})
         elif req_status == "unpaid":
-            # 🎯 Unpaid Bills: Prior dates before today
+            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid bills)
             mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
-            mongo_filter["$or"] = [
+            status_and_conditions.append({"$or": [
                 {"bill_date": {"$lt": today_start_local}},
                 {"created_date": {"$lt": today_start_local}},
-            ]
+                {"bill_date": {"$lt": today_start_utc}},
+                {"created_date": {"$lt": today_start_utc}},
+                {"created_date": {"$lt": today_str}},
+            ]})
         elif req_status in ["received", "paid"]:
-            # 🎯 Received Bills: Current date paid bills
+            # 🎯 Received Bills: Current date paid cash bills
             mongo_filter["billing_status"] = "Paid"
-            mongo_filter["$or"] = [
-                {"paid_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"paid_datetime": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                {"paid_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                {"paid_datetime": {"$gte": today_start_utc, "$lte": today_end_utc}},
-            ]
-        else:
-            # 🎯 Unpaid cash bills + Paid cash bills (current date)
-            mongo_filter["$and"] = [
-                {"$or": [
-                    {"billing_status": {"$in": ["Billed", "Processing", "Pending"]}},
-                    {
-                        "billing_status": "Paid",
-                        "$or": [
-                            {"paid_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                            {"paid_datetime": {"$gte": today_start_local, "$lte": today_end_local}},
-                            {"bill_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                            {"created_date": {"$gte": today_start_local, "$lte": today_end_local}},
-                            {"paid_date": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                            {"paid_datetime": {"$gte": today_start_utc, "$lte": today_end_utc}},
-                        ]
-                    }
-                ]}
-            ]
+            date_ors = []
+            for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
+                date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
+            status_and_conditions.append({"$or": date_ors})
+        elif not search_query:
+            # 🎯 Default: All unpaid cash bills + Paid cash bills from current date
+            today_paid_ors = []
+            for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
+                today_paid_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
+            status_and_conditions.append({"$or": [
+                {"billing_status": {"$in": ["Billed", "Processing", "Pending"]}},
+                {
+                    "billing_status": "Paid",
+                    "$or": today_paid_ors
+                }
+            ]})
 
-        raw_bills = list(oppharmacy_collection.find(mongo_filter).sort("created_date", -1).limit(500))
+        if status_and_conditions:
+            if "$and" in mongo_filter:
+                mongo_filter["$and"].extend(status_and_conditions)
+            else:
+                mongo_filter["$and"] = status_and_conditions
+
+        limit_val = int(request.GET.get("limit") or 500)
+        raw_bills = list(oppharmacy_collection.find(mongo_filter).sort("created_date", -1).limit(limit_val))
 
         if not raw_bills:
             return Response({
@@ -5836,7 +5966,7 @@ def OPPharmacy_pending_bills(request):
             }, status=status.HTTP_200_OK)
 
         # =========================================================
-        # ✅ Patient Mapping (Fast direct PyMongo fetch)
+        # ✅ Patient Mapping (Batch fetch)
         # =========================================================
         uhids_to_fetch = set()
         for b in raw_bills:
@@ -5863,7 +5993,7 @@ def OPPharmacy_pending_bills(request):
                 pass
 
         # =========================================================
-        # ✅ Doctor Mapping (Batch fetch from profile_collection)
+        # ✅ Doctor Mapping (Batch fetch)
         # =========================================================
         doctor_ids = []
         for b in raw_bills:
@@ -5895,30 +6025,31 @@ def OPPharmacy_pending_bills(request):
         # =========================================================
         bill_types = []
         for b in raw_bills:
-            bt_val = b.get("bill_type")
-            if bt_val is not None:
-                if str(bt_val).isdigit():
-                    bill_types.append(int(bt_val))
-                else:
-                    bill_types.append(bt_val)
+            bt = b.get("bill_type")
+            if bt is not None:
+                bill_types.append(bt)
+                if str(bt).isdigit():
+                    bill_types.append(int(bt))
+                bill_types.append(str(bt))
         bill_types = list(set(bill_types))
 
         billtype_map = {}
         if bill_types:
             try:
-                billtype_cursor = billtype_collection.find(
+                bt_cursor = billtype_collection.find(
                     {"bill_type": {"$in": bill_types}},
                     {"bill_type": 1, "bill_name": 1, "_id": 0}
                 )
-                billtype_map = {
-                    bt["bill_type"]: bt.get("bill_name", "")
-                    for bt in billtype_cursor
-                }
+                for doc in bt_cursor:
+                    bt_val = doc.get("bill_type")
+                    billtype_map[bt_val] = doc.get("bill_name", "")
+                    if str(bt_val).isdigit():
+                        billtype_map[int(bt_val)] = doc.get("bill_name", "")
             except Exception:
                 pass
 
         # =========================================================
-        # ✅ Collect Items Name Mapping (Batched & Lightweight)
+        # ✅ Item Names Resolution
         # =========================================================
         missing_item_ids = set()
         for b in raw_bills:
@@ -5959,12 +6090,15 @@ def OPPharmacy_pending_bills(request):
                 if val and hasattr(val, "isoformat"):
                     serialized[d_key] = val.isoformat()
 
+            # Bill totals decimal normalization
+            for amt_key in ["total_amount", "net_amount", "round_off", "discount_amount", "overall_discount_amount", "overall_discount_value", "total_item_discount"]:
+                if amt_key in serialized:
+                    serialized[amt_key] = convert_decimal(serialized.get(amt_key, 0))
+
             b_status = str(bill.get("billing_status") or "").strip()
             is_unpaid_status = b_status in ["Billed", "Processing", "Pending"]
             is_paid_status = (b_status == "Paid")
 
-            # 🎯 Evaluate date against current date strictly in Indian Standard Time (IST):
-            # For paid bills, evaluate using paid_date
             if is_paid_status:
                 raw_bdate = bill.get("paid_date") or bill.get("paid_datetime") or bill.get("lastmodified_date") or bill.get("bill_date") or bill.get("created_date")
             else:
@@ -6027,7 +6161,8 @@ def OPPharmacy_pending_bills(request):
             serialized["patientname"]  = p_name
             serialized["uhid"]         = bill.get("uhid") or ""
             serialized["uhid_no"]      = bill.get("uhid") or ""
-            serialized["doctor_name"]  = doctor_map.get(doc_id_str, "")
+            # ✅ Preserve stored doctor name if profile lookup yields nothing
+            serialized["doctor_name"]  = doctor_map.get(doc_id_str) or bill.get("doctor_name") or ""
             serialized["bill_type_name"] = billtype_map.get(bt_key, "")
 
             medicine_list = bill.get("medicine_particulars", [])
@@ -6037,20 +6172,20 @@ def OPPharmacy_pending_bills(request):
                     continue
                 it_dict = dict(item)
                 iid_val = int(it_dict["item_id"]) if str(it_dict.get("item_id", "")).isdigit() else it_dict.get("item_id")
-                batch_number = str(it_dict.get("batch_number") or "").strip()
 
                 it_dict["item_name"] = it_dict.get("item_name") or item_map.get(iid_val, "")
 
-                it_dict["CGST_Percentage"] = convert_decimal(it_dict.get("CGST_Percentage", 0))
-                it_dict["SGST_Percentage"] = convert_decimal(it_dict.get("SGST_Percentage", 0))
-                it_dict["CGST_Amt"]        = convert_decimal(it_dict.get("CGST_Amt", 0))
-                it_dict["SGST_Amt"]        = convert_decimal(it_dict.get("SGST_Amt", 0))
+                # Normalize all item numeric fields using convert_decimal
+                for f_num in ["price", "mrp", "calculated_price", "product_value", "taxable_value", "total", "discount_amount", "discount_value", "discount", "CGST_Percentage", "SGST_Percentage", "CGST_Amt", "SGST_Amt"]:
+                    if f_num in it_dict:
+                        it_dict[f_num] = convert_decimal(it_dict.get(f_num, 0))
 
                 updated_items.append(it_dict)
 
             serialized["medicine_particulars"] = updated_items
             bills_result.append(serialized)
 
+        # Apply final post-serialization filter according to requested tab/status
         req_status = (request.GET.get("status") or (data.get("status") if isinstance(data, dict) else "") or request.GET.get("type") or "").strip().lower()
         if req_status == "pending":
             bills_result = [b for b in bills_result if b.get("is_pending")]
@@ -6077,4 +6212,29 @@ def OPPharmacy_pending_bills(request):
             "details": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+
+
+@api_view(["GET"])
+# @permission_classes([HasRoleAndDataPermission])
+def get_card_payment_list(request):
+    """
+    Fetch all active card machines/providers (Paytm, Bajaj, 360, PNB)
+    """
+    try:
+        cards = list(hospital_CardPaymentList.find(
+            {"is_active": True},
+            {"_id": 0, "card_id": 1, "card_name": 1, "display_name": 1}
+        ))
+        
+        return Response({
+            "status": "success",
+            "data": cards
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({
+            "status": "error",
+            "message": str(e),
+            "data": []
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

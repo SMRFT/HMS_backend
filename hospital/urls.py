@@ -247,6 +247,7 @@ urlpatterns = [
     path("get_registration_bills/", cashcounter.get_registration_bills),
     path('OPPharmacy_pending_bills/', cashcounter.OPPharmacy_pending_bills, name='OPPharmacy_pending_bills'),
     path('collectpayment_return_bills/', cashcounter.collectpayment_return_bills, name='collectpayment_return_bills'),
+    path('get_card_payment_list/', cashcounter.get_card_payment_list, name='get_card_payment_list'),
 
 
     # Medicine Package Master
