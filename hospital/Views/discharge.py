@@ -2632,11 +2632,26 @@ def search_discharge_patient(request):
                     "end_dt": now_dt,
                 })
 
-            # Batch pre-fetch all room documents in ONE query!
+            # Batch pre-fetch all room documents with normalized fallback!
             room_numbers_set = list({s["room_no"] for s in room_stays if s.get("room_no")})
-            room_docs_cursor = list(db["hospital_room"].find({"room_number": {"$in": room_numbers_set}})) if room_numbers_set else []
-            room_doc_map = {str(rd.get("room_number")).strip(): rd for rd in room_docs_cursor if rd.get("room_number")}
-            room_doc_lower_map = {k.lower(): v for k, v in room_doc_map.items()}
+            all_active_rooms = list(db["hospital_room"].find({"is_active": True}))
+            room_doc_map = {}
+            room_doc_clean_map = {}
+            room_doc_digit_map = {}
+            for rd in all_active_rooms:
+                rn_str = str(rd.get("room_number") or "").strip()
+                if not rn_str:
+                    continue
+                room_doc_map[rn_str] = rd
+                ck = re.sub(r'[\s\-_]+', '', rn_str).upper()
+                room_doc_clean_map[ck] = rd
+                ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', rn_str, flags=re.IGNORECASE).strip()
+                if ps:
+                    room_doc_clean_map[re.sub(r'[\s\-_]+', '', ps).upper()] = rd
+                m_d = re.search(r'(\d{2,4})', ck)
+                d_str = m_d.group(1) if m_d else re.sub(r'\D+', '', ck)
+                if d_str and d_str not in room_doc_digit_map:
+                    room_doc_digit_map[d_str] = rd
 
             for idx, stay in enumerate(room_stays):
                 r_no = stay["room_no"]
@@ -2655,7 +2670,10 @@ def search_discharge_patient(request):
                 if stay_days <= 0:
                     continue
 
-                room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_lower_map.get(str(r_no).strip().lower())
+                r_clean = re.sub(r'[\s\-_]+', '', str(r_no or '')).upper()
+                m_rd = re.search(r'(\d{2,4})', r_clean)
+                r_digit = m_rd.group(1) if m_rd else re.sub(r'\D+', '', r_clean)
+                room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_clean_map.get(r_clean) or (room_doc_digit_map.get(r_digit) if r_digit else None)
 
                 if room_doc:
                     room_cat = room_doc.get("room_category", "")

@@ -381,6 +381,9 @@ def get_admission_list(request):
             r_num = str(r.get("room_number") or "").strip()
             exact_room_map[r_num] = r
             clean_room_map[_clean_key(r_num)] = r
+            ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', r_num, flags=re.IGNORECASE).strip()
+            if ps:
+                clean_room_map[_clean_key(ps)] = r
             n = _extract_num(r_num)
             if n is not None and n not in num_room_map:
                 num_room_map[n] = r
@@ -406,6 +409,14 @@ def get_admission_list(request):
                 return clean_room_map[ck]
             if ck in room_aliases and room_aliases[ck]:
                 return room_aliases[ck]
+            # Normalized prefix stripped match (e.g. 'TS-507' vs '507', 'SR-509' vs '509')
+            # Prevents loose numeric collision where any room ending in '1' matches the first room
+            prefix_stripped = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', s, flags=re.IGNORECASE).strip()
+            if prefix_stripped:
+                ps_ck = _clean_key(prefix_stripped)
+                if ps_ck in clean_room_map:
+                    return clean_room_map[ps_ck]
+            # Check numeric digits fallback for old migrated data (e.g. '507' -> 'TS-507', '520' -> '3S-520')
             n = _extract_num(s)
             if n is not None and n in num_room_map:
                 return num_room_map[n]
