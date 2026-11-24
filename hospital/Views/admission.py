@@ -834,6 +834,68 @@ def get_next_ip_number(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROOM NUMBER NORMALIZATION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _clean_room_str(s):
+    return re.sub(r'[\s\-_]+', '', str(s or '')).upper()
+
+def _extract_digits_str(s):
+    m = re.search(r'(\d{2,4})', str(s or ''))
+    return m.group(1) if m else re.sub(r'\D+', '', str(s or ''))
+
+def _build_room_resolver(rooms_list):
+    exact_map = {}
+    clean_map = {}
+    digit_map = {}
+    aliases = {
+        "DAYCAR": "DAYCARE",
+        "DAYCARE": "DAYCARE",
+        "DLS": "DIALYSIS",
+        "DIALYSIS": "DIALYSIS",
+        "DYLS132": "DYLS-132",
+        "CHEMO": "CHEMO",
+        "MICU": "MICU",
+        "NICU": "NICU",
+        "SICU": "SICU",
+        "POW": "POW",
+    }
+    for r in rooms_list:
+        rn = str(r.get("room_number") or "").strip()
+        if not rn:
+            continue
+        exact_map[rn] = rn
+        ck = _clean_room_str(rn)
+        clean_map[ck] = rn
+        
+        # Prefix stripped (e.g. 'TS-507' -> '507', 'SR-509' -> '509')
+        ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', rn, flags=re.IGNORECASE).strip()
+        if ps:
+            clean_map[_clean_room_str(ps)] = rn
+            
+        d = _extract_digits_str(rn)
+        if d and d not in digit_map:
+            digit_map[d] = rn
+
+    def resolver(val):
+        if not val:
+            return ""
+        s = str(val).strip()
+        if s in exact_map:
+            return exact_map[s]
+        ck = _clean_room_str(s)
+        if ck in clean_map:
+            return clean_map[ck]
+        if ck in aliases and aliases[ck] in clean_map:
+            return clean_map[aliases[ck]]
+        d = _extract_digits_str(s)
+        if d and d in digit_map:
+            return digit_map[d]
+        return s
+
+    return resolver
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET /admission-room-search/
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(["GET"])
@@ -918,26 +980,31 @@ def search_rooms(request):
             except Exception:
                 pass
 
-            # Fetch active bookings
-            booking_map = {}
-            try:
-                for booking in hms_db["hospital_roombooking"].find({"is_active": True}):
-                    rno = str(booking.get("room_number") or "").strip()
-                    bno = str(booking.get("bed_number") or "").strip()
-                    if rno and bno:
-                        b_dt = booking.get("booking_date")
-                        booking_map[(rno, bno)] = {
-                            "ip_number": str(booking.get("ipNumber") or ""),
-                            "booking_date": _to_ist_iso(b_dt) or "",
-                        }
-            except Exception:
-                pass
-
             # Fetch rooms
             room_query = {}
             if hospital_code and hospital_code != "system":
                 room_query["hospital_code"] = hospital_code
             all_rooms = list(hms_db["hospital_room"].find(room_query))
+            room_resolver = _build_room_resolver(all_rooms)
+
+            # Fetch active bookings
+            booking_map = {}
+            try:
+                for booking in hms_db["hospital_roombooking"].find({"is_active": True}):
+                    raw_rno = str(booking.get("room_number") or "").strip()
+                    bno     = str(booking.get("bed_number") or "").strip()
+                    if raw_rno and bno:
+                        can_rno = room_resolver(raw_rno)
+                        b_dt    = booking.get("booking_date")
+                        b_val   = {
+                            "ip_number": str(booking.get("ipNumber") or ""),
+                            "booking_date": _to_ist_iso(b_dt) or "",
+                        }
+                        booking_map[(can_rno, bno)] = b_val
+                        booking_map[(_clean_room_str(can_rno), bno.upper())] = b_val
+                        booking_map[(_clean_room_str(raw_rno), bno.upper())] = b_val
+            except Exception:
+                pass
         finally:
             if client:
                 client.close()
@@ -987,10 +1054,11 @@ def search_rooms(request):
                 except Exception:
                     active_shift = active_shifts[-1]
             for shift in shifts:
-                room_no = str(shift.get("newRoomNo", "")).strip()
-                bed_no  = str(shift.get("newBedNo",  "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(shift.get("newRoomNo", "") or shift.get("roomNo", "")).strip()
+                bed_no   = str(shift.get("newBedNo",  "") or shift.get("bedNo", "")).strip()
+                if not raw_room or not bed_no:
                     continue
+                canonical_room = room_resolver(raw_room)
                 s_active  = bool(shift.get("is_roomActive",  False))
                 s_cleaned = bool(shift.get("is_roomCleaned", False))
                 if active_shift and shift == active_shift:
@@ -998,16 +1066,22 @@ def search_rooms(request):
                 elif s_cleaned:
                     status = "Available"; patient_data = {}
                 else:
-                    status = "Available - Not Cleaned"; patient_data = patient_info
-                key = (room_no, bed_no)
-                existing = admission_map.get(key)
-                if existing is None or status == "Occupied" or existing.get("status") != "Occupied":
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": s_active, "is_roomCleaned": s_cleaned, "source": "roomShitingDetails"}
+                    status = "Not Cleaned"; patient_data = patient_info
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None or status == "Occupied" or existing.get("status") != "Occupied":
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": s_active, "is_roomCleaned": s_cleaned, "source": "roomShitingDetails"}
             for entry in details:
-                room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo",  "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(entry.get("roomNo", "")).strip()
+                bed_no   = str(entry.get("bedNo",  "")).strip()
+                if not raw_room or not bed_no:
                     continue
+                canonical_room = room_resolver(raw_room)
                 e_active  = bool(entry.get("is_roomActive",  False))
                 e_cleaned = bool(entry.get("is_roomCleaned", False))
                 if e_active:
@@ -1015,13 +1089,18 @@ def search_rooms(request):
                 elif e_cleaned:
                     status = "Available"; patient_data = {}
                 else:
-                    status = "Available - Not Cleaned"; patient_data = patient_info
-                key = (room_no, bed_no)
-                existing = admission_map.get(key)
-                if existing is None:
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
-                elif existing.get("status") != "Occupied" and status == "Occupied":
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
+                    status = "Not Cleaned"; patient_data = patient_info
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None:
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
+                    elif existing.get("status") != "Occupied" and status == "Occupied":
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
 
         req_block           = str(request.GET.get("block", "") or "").strip()
         req_category        = str(request.GET.get("room_category", "") or request.GET.get("category", "") or "").strip()
@@ -1056,16 +1135,17 @@ def search_rooms(request):
                 if not isinstance(bed, dict): continue
                 bed_number = str(bed.get("bed_number", "")).strip()
                 if not bed_number: continue
-                key = (room_no, bed_number)
+                key     = (room_no, bed_number)
+                alt_key = (_clean_room_str(room_no), bed_number.upper())
                 bed_is_blocked = str(bed.get("bed_status", "")).strip().lower() == "blocked"
                 if room_is_blocked or bed_is_blocked:
                     beds_data.append({"bed_number": bed_number, "status": "Maintenance", "patient": {}, "ip_number": "", "booking": None, "is_roomActive": False, "is_roomCleaned": True})
                     continue
-                info = admission_map.get(key)
+                info = admission_map.get(key) or admission_map.get(alt_key)
                 if info:
                     beds_data.append({"bed_number": bed_number, "status": info.get("status", "Available"), "patient": info.get("patient", {}), "ip_number": info.get("ip_number", ""), "booking": None, "is_roomActive": info.get("is_roomActive", False), "is_roomCleaned": info.get("is_roomCleaned", False)})
                     continue
-                booking_info = booking_map.get(key)
+                booking_info = booking_map.get(key) or booking_map.get(alt_key)
                 if booking_info:
                     beds_data.append({"bed_number": bed_number, "status": "Reserved", "patient": {}, "ip_number": booking_info.get("ip_number", ""), "booking": booking_info, "is_roomActive": False, "is_roomCleaned": True})
                     continue
