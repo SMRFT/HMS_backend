@@ -1183,13 +1183,14 @@ def advance_registration_report(request):
                 ip_num = ""
             pat_name = (pay.get("patient_name") if pay and pay.get("patient_name") else None) or (adm.get("patient_name") if adm else None) or (adm.get("patientName") if adm else None) or patient_map.get(uhid_val) or (f"Patient #{uhid_val}" if uhid_val else "Cash Counter Advance")
 
-            is_card = any(k in str(p_mode).lower() for k in ["card", "upi", "pos", "credit", "online", "gpay", "netbanking"]) or b_no in ["2627003031", "2627003033", "2627003041"]
-            if is_card:
-                cash_amt = 0.0
-                card_amt = amt
-            else:
-                cash_amt = amt
-                card_amt = 0.0
+            # Parse payment breakdown cleanly via core payment ledger
+            from hospital.services.core_payment_ledger import parse_transaction_breakdown
+            pd = c.get("payment_details") or (pay.get("payment_details") if pay else {}) or {}
+            eff_pm = p_mode or (pay.get("payment_mode") if pay else "") or "Cash"
+            parsed_pay = parse_transaction_breakdown(amt, eff_pm, pd)
+            cash_amt = parsed_pay["cash_amount"]
+            card_amt = parsed_pay["credit_amount"]  # Encompasses bank, card, upi, credit
+            bank_amt = parsed_pay["bank_amount"]
 
             cid = str(c.get("created_by") or (pay.get("created_by") if pay else "") or "STAFF")
             user_name = cashier_name_map.get(cid) or cid.upper()
@@ -1206,17 +1207,20 @@ def advance_registration_report(request):
                 "uhid": uhid_val,
                 "patientname": pat_name,
                 "patient_name": pat_name,
+                "cash": cash_amt,
                 "cash_amount": cash_amt,
+                "credit": card_amt,
                 "credit_amount": card_amt,
                 "credit_card_amount": card_amt,
-                "bank_amount": 0.0,
+                "bank": bank_amt,
+                "bank_amount": bank_amt,
                 "amount": amt,
                 "date": date_ist_str,
                 "paid_date": _format_dt(c_date),
                 "user": user_name,
                 "cashier_id": cid,
                 "outlet_code": c.get("outlet_code", "OLET003"),
-                "payment_mode": "CARD" if is_card else "CASH",
+                "payment_mode": eff_pm,
                 "status": "Paid"
             })
 
@@ -1237,11 +1241,12 @@ def advance_registration_report(request):
                 p_mode = str(pay.get("payment_mode") or pay.get("mode") or "").strip()
                 pd = pay.get("payment_details") or {}
 
-                is_card = any(k in str(p_mode).lower() for k in ["card", "upi", "pos", "credit", "online", "gpay", "netbanking"]) or (isinstance(pd, dict) and pd.get("method") == "card")
-                if is_card:
-                    cash_amt = 0.0; card_amt = amt
-                else:
-                    cash_amt = amt; card_amt = 0.0
+                from hospital.services.core_payment_ledger import parse_transaction_breakdown
+                eff_pm = p_mode or (pd.get("method") if isinstance(pd, dict) else "") or "Cash"
+                parsed_pay = parse_transaction_breakdown(amt, eff_pm, pd)
+                cash_amt = parsed_pay["cash_amount"]
+                card_amt = parsed_pay["credit_amount"]  # Encompasses bank, card, upi, credit
+                bank_amt = parsed_pay["bank_amount"]
 
                 uhid_val = str(adm.get("uhid") or pay.get("uhid") or "").strip()
                 pat_name = pay.get("patient_name") or patient_map.get(uhid_val) or "Patient"
@@ -1256,17 +1261,20 @@ def advance_registration_report(request):
                     "uhid": uhid_val,
                     "patientname": pat_name,
                     "patient_name": pat_name,
+                    "cash": cash_amt,
                     "cash_amount": cash_amt,
+                    "credit": card_amt,
                     "credit_amount": card_amt,
                     "credit_card_amount": card_amt,
-                    "bank_amount": 0.0,
+                    "bank": bank_amt,
+                    "bank_amount": bank_amt,
                     "amount": amt,
                     "date": str(p_date) if p_date else "",
                     "paid_date": _format_dt(p_date_val),
                     "user": user_name,
                     "cashier_id": cid,
                     "outlet_code": pay.get("outlet_code") or adm.get("outlet_code") or "OLET003",
-                    "payment_mode": "CARD" if is_card else "CASH",
+                    "payment_mode": eff_pm,
                     "status": pay.get("status") or "Paid"
                 })
 

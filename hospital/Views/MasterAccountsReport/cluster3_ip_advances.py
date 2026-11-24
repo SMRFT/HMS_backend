@@ -36,16 +36,26 @@ def advance_registration_api(request):
         
         adv_bills = [b for b in res["bills"] if b["category"] == "ADVANCE"]
         for b in adv_bills:
-            adv_val = b.get("gross") or b.get("amount") or (clean_num(b.get("cash")) + clean_num(b.get("bank"))) or 0.0
+            adv_val = b.get("gross") or b.get("amount") or (clean_num(b.get("cash")) + clean_num(b.get("bank")) + clean_num(b.get("credit"))) or 0.0
             b["amount"] = adv_val
             b["advance_amount"] = adv_val
             b["advance"] = adv_val
             b["gross"] = adv_val
             b["mr_no"] = b.get("uhid") or "-"
             b["ip_number"] = b.get("ip_number") or b.get("inpatient_number") or "-"
+            
+            # Ensure unified cash/credit breakdown is explicit
+            c_val = clean_num(b.get("cash_amount") if b.get("cash_amount") is not None else b.get("cash"))
+            cr_val = clean_num(b.get("credit_amount") if b.get("credit_amount") is not None else (clean_num(b.get("credit")) + clean_num(b.get("bank")) + clean_num(b.get("card"))))
+            b["cash_amount"] = c_val
+            b["credit_amount"] = cr_val
+            b["cash"] = c_val
+            b["credit"] = cr_val
+            b["bank"] = clean_num(b.get("bank"))
+            b["card"] = clean_num(b.get("card") or b.get("bank"))
         
-        tot_cash = round(sum(b["cash"] for b in adv_bills), 2)
-        tot_card = round(sum(b["bank"] for b in adv_bills), 2)
+        tot_cash = round(sum(b["cash_amount"] for b in adv_bills), 2)
+        tot_card = round(sum(b["credit_amount"] for b in adv_bills), 2)
         tot_adv = round(sum(b.get("advance_amount", 0) for b in adv_bills), 2)
         
         return Response({

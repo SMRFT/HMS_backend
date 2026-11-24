@@ -461,6 +461,8 @@ def build_specialized_insurance_report(request, report_key):
             else:
                 ph_query["inpatient_number"] = {"$exists": True, "$ne": None, "$nin": ["", "0"]}
 
+            ph_query["payment_mode"] = {"$nin": ["Cash", "cash", "CASH"]}
+
             ph_bills = list(hms_db['hospital_pharmacybilling'].find(ph_query).sort("bill_date", -1).limit(10))
 
             target_ip = ip_number_filter or (ph_bills[0].get('inpatient_number') if ph_bills else '')
@@ -535,6 +537,10 @@ def build_specialized_insurance_report(request, report_key):
             overall_sgst = 0.0
 
             for b in ph_bills:
+                p_mode_raw = str(b.get('payment_mode') or b.get('payment_method') or (b.get('payment_details', {}).get('method') if isinstance(b.get('payment_details'), dict) else '') or '').strip().lower()
+                if p_mode_raw == 'cash':
+                    continue
+
                 b_no = str(b.get('bill_no', ''))
                 b_dt = format_dt(b.get('bill_date'))
                 b_items = []

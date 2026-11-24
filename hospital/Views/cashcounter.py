@@ -81,6 +81,55 @@ def get_shift_pymongo(query, sort_field=None):
         print(f"PyMongo Error: {e}")
         return None
 
+def _enrich_cash_counter_doc(hms_db, bill_no, billing_category, shiftno, payment_details, amount=0.0, patient_info=None, is_refund=False):
+    """
+    Directly enriches the hospital_cashcountercollection MongoDB document with parsed
+    payment ledger breakdown (cash_amount, credit_amount, bank_amount, card_amount, etc.)
+    and patient identifiers (uhid, ip_number, patient_name) without violating Django model schema.
+    """
+    try:
+        if not bill_no:
+            return
+        from hospital.services.core_payment_ledger import parse_transaction_breakdown, clean_numeric
+        b_str = str(bill_no).strip()
+        pd = payment_details if isinstance(payment_details, dict) else {}
+        pm = pd.get("method") or pd.get("payment_mode") or "Cash"
+        tot_amt = clean_numeric(amount or pd.get("Paid_amount") or 0.0)
+        
+        parsed = parse_transaction_breakdown(tot_amt, pm, pd)
+        
+        set_payload = {
+            "payment_mode": pm,
+            "cash_amount": parsed["cash_amount"],
+            "credit_amount": parsed["credit_amount"],
+            "bank_amount": parsed["bank_amount"],
+            "card_amount": parsed["card_amount"],
+            "upi_amount": parsed["upi_amount"],
+            "cheque_amount": parsed["cheque_amount"],
+            "credit_due_amount": parsed["credit_due_amount"],
+            "advance_adjusted_amount": parsed.get("advance_adjusted", 0.0),
+            "payment_details": pd
+        }
+        
+        if is_refund:
+            set_payload["is_refund"] = True
+            set_payload["refund_mode"] = parsed.get("refund_mode", pm)
+            
+        if patient_info and isinstance(patient_info, dict):
+            if patient_info.get("uhid"):
+                set_payload["uhid"] = str(patient_info.get("uhid")).strip()
+            if patient_info.get("ip_number") or patient_info.get("ipNumber"):
+                set_payload["ip_number"] = str(patient_info.get("ip_number") or patient_info.get("ipNumber")).strip()
+            if patient_info.get("patient_name") or patient_info.get("patientname"):
+                set_payload["patient_name"] = str(patient_info.get("patient_name") or patient_info.get("patientname")).strip()
+                
+        hms_db["hospital_cashcountercollection"].update_many(
+            {"$or": [{"bill_no": b_str}, {"bill_number": b_str}], "billing_category": billing_category},
+            {"$set": set_payload}
+        )
+    except Exception as e:
+        print(f"[_enrich_cash_counter_doc] non-fatal error for bill {bill_no}: {e}")
+
 # Auth/permissions
 
 from pyauth.auth import HasRoleAndDataPermission
@@ -636,10 +685,14 @@ def cash_counter_shiftdetails(request):
         shift.CreditAmount = safe_dec(totals.get('total_credit', 0))
         shift.SalesReturnAmount = safe_dec(totals.get('sales_return', 0))
         
-        # RemittedToBank, SubmittedToAccount, HandOverAmount are not used/subtracted
-        shift.RemittedToBank = Decimal('0.00')
-        shift.SubmittedToAccount = Decimal('0.00')
-        shift.HandOverAmount = Decimal('0.00')
+        # RemittedToBank, SubmittedToAccount, HandOverAmount are preserved if supplied by cashier
+        if "RemittedToBank" in data:
+            shift.RemittedToBank = safe_dec(data.get("RemittedToBank"))
+        if "SubmittedToAccount" in data:
+            shift.SubmittedToAccount = safe_dec(data.get("SubmittedToAccount"))
+        if "HandOverAmount" in data:
+            shift.HandOverAmount = safe_dec(data.get("HandOverAmount"))
+
         # Formula: Opening Balance + Cash Collected - Sales Return
         shift.ClosingBalance = safe_dec(shift.OpeningBalance) + safe_dec(shift.collected_Amount) - safe_dec(shift.SalesReturnAmount)
         
@@ -664,10 +717,18 @@ def cash_counter_shiftdetails(request):
             m_db["hospital_cashcountershiftdetails"].update_one(
                 {"shiftno": str(shift_no)},
                 {"$set": {
+                    "ShiftStatus": "inactive",
+                    "is_active": False,
+                    "closingTime": closing_time,
                     "collected_Amount": Decimal128(str(shift.collected_Amount)),
                     "CreditAmount": Decimal128(str(shift.CreditAmount)),
                     "ClosingBalance": Decimal128(str(shift.ClosingBalance)),
                     "SalesReturnAmount": Decimal128(str(shift.SalesReturnAmount)),
+                    "RemittedToBank": Decimal128(str(shift.RemittedToBank)),
+                    "SubmittedToAccount": Decimal128(str(shift.SubmittedToAccount)),
+                    "HandOverAmount": Decimal128(str(shift.HandOverAmount)),
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": timezone.now(),
                 }}
             )
             m_client.close()
@@ -868,17 +929,11 @@ def calculate_shift_collection(shift_no):
 
     try:
         from .dbcollection import hms_db as db
+        from hospital.services.core_payment_ledger import get_shift_aliases, is_cash_return_or_refund
 
-        shift_vals = [shift_no]
-        try:
-            shift_vals.append(int(shift_no))
-        except (ValueError, TypeError):
-            pass
-        try:
-            shift_vals.append(str(shift_no))
-        except (ValueError, TypeError):
-            pass
-        shift_vals = list(set(shift_vals))
+        shift_vals = get_shift_aliases(shift_no)
+        if not shift_vals:
+            shift_vals = [shift_no]
 
         # 1. Billing (Registration/Consultation)
         paid_bills = list(db["hospital_billing"].find(
@@ -1019,7 +1074,8 @@ def calculate_shift_collection(shift_no):
                 if amt == 0.0 and isinstance(r.get("payment_details"), dict):
                     amt = to_float(r["payment_details"].get("Paid_amount", 0))
 
-                results["sales_return"] += amt
+                if is_cash_return_or_refund(r):
+                    results["sales_return"] += amt
                 # Sales returns are recorded separately in results["sales_return"] and subtracted during closing balance computation (ClosingBalance = OpeningBalance + collected_Amount - SalesReturnAmount)
 
         # 7. Receipt and Payment
@@ -3455,6 +3511,11 @@ def update_mainblock_pendingbills(request):
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                _enrich_cash_counter_doc(
+                    hms_db, bill_no, "Billing", shiftno, payment_details,
+                    amount=payment_details.get("Paid_amount", 0),
+                    patient_info={"uhid": bill_doc.get("uhid"), "patient_name": bill_doc.get("patient_name")}
+                )
             else:
                 print(f"[CashCounterCollection] Warning for bill {bill_no}: {cc_serializer.errors}")
             recalculate_and_update_shift_details(shiftno)
@@ -3544,6 +3605,11 @@ def update_mainblock_pendingbills(request):
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                _enrich_cash_counter_doc(
+                    hms_db, bill_no, "Investigation", shiftno, payment_details,
+                    amount=payment_details.get("Paid_amount", 0),
+                    patient_info={"uhid": invest_doc.get("uhid"), "patient_name": invest_doc.get("patient_name")}
+                )
             else:
                 print(f"[CashCounterCollection] Warning for invest {bill_no}: {cc_serializer.errors}")
             recalculate_and_update_shift_details(shiftno)
@@ -3670,6 +3736,16 @@ def update_mainblock_pendingbills(request):
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                _enrich_cash_counter_doc(
+                    hms_db, bill_no, final_billing_category, shiftno, payment_details,
+                    amount=paid_amount,
+                    patient_info={
+                        "uhid": discharge_doc.get("uhid"),
+                        "ip_number": discharge_doc.get("ip_number") or discharge_doc.get("ipNumber"),
+                        "patient_name": discharge_doc.get("patient_name") or discharge_doc.get("patientname")
+                    },
+                    is_refund=is_refund
+                )
             else:
                 print(f"[CashCounterCollection] Warning for discharge {bill_no}: {cc_serializer.errors}")
             recalculate_and_update_shift_details(shiftno)
@@ -4327,6 +4403,13 @@ def _save_cash_counter(
     serializer = CashCounterCollectionSerializer(data=cash_counter_data)
     if serializer.is_valid():
         serializer.save()
+        _enrich_cash_counter_doc(
+            mongo_db, target_bill, cash_counter_data.get("billing_category"),
+            cash_counter_data.get("shift_no"),
+            {"method": cash_counter_data.get("remarks") or "Cash", "Paid_amount": cash_counter_data.get("Returned_amount")},
+            amount=cash_counter_data.get("Returned_amount"),
+            is_refund=True
+        )
         return True, None
     return False, serializer.errors
 
@@ -5525,6 +5608,16 @@ def ipadvance_bills(request):
 
                 if cc_serializer.is_valid():
                     cc_serializer.save()
+                    _enrich_cash_counter_doc(
+                        mongo_db, paid_payment.get("bill_number") or paid_payment.get("bill_no") or admission.ipserial_number or admission.ipNumber,
+                        "IPAdvance Payment", shiftno, paid_payment.get("payment_details"),
+                        amount=collected_amount,
+                        patient_info={
+                            "uhid": getattr(admission, "uhid", None),
+                            "ip_number": getattr(admission, "ipNumber", None) or getattr(admission, "ipserial_number", None),
+                            "patient_name": getattr(admission, "patient_name", None)
+                        }
+                    )
                 else:
                     # ✅ Log but do NOT fail the main payment — just warn
                     print(
