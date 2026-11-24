@@ -182,7 +182,7 @@ def get_pharmacy_stock(request):
                     "is_blocked": False
                 },
                 {"item_id": 1, "item_name": 1, "_id": 0}
-            ).sort("item_name", 1).limit(100))
+            ).sort("item_name", 1).limit(1000))
 
             # Fallback if no starting-letter matches: match word boundary
             if not search_items:
@@ -195,7 +195,7 @@ def get_pharmacy_stock(request):
                         "is_blocked": False
                     },
                     {"item_id": 1, "item_name": 1, "_id": 0}
-                ).sort("item_name", 1).limit(60))
+                ).sort("item_name", 1).limit(1000))
 
             # Fallback: substring match anywhere
             if not search_items:
@@ -208,7 +208,7 @@ def get_pharmacy_stock(request):
                         "is_blocked": False
                     },
                     {"item_id": 1, "item_name": 1, "_id": 0}
-                ).sort("item_name", 1).limit(60))
+                ).sort("item_name", 1).limit(1000))
 
             matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
             if not matching_ids:
@@ -281,7 +281,7 @@ def get_pharmacy_stock(request):
                                                 "$subtract": [
                                                     {
                                                         "$subtract": [
-                                                            "$total_stock",
+                                                            {"$ifNull": ["$total_stock", 0]},
                                                             {"$ifNull": ["$sold_quantity", 0]}
                                                         ]
                                                     },
@@ -843,18 +843,29 @@ def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_
         if diff == 0:
             continue
 
-        stock_collection.update_one(
-            {
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code,
-                "item_id": item_id_val,
-                "batch_number": str(batch_number)
-            },
-            {
-                "$inc": {"blocked_quantity": diff}
-            }
+        stock_filter = {
+            "outlet_code": str(outlet_code or "").strip(),
+            "item_id": item_id_val,
+            "batch_number": str(batch_number).strip()
+        }
+        if hospital_code:
+            stock_filter["hospital_code"] = str(hospital_code).strip()
+        if branch_code:
+            stock_filter["branch_code"] = str(branch_code).strip()
+
+        res = stock_collection.update_one(
+            stock_filter,
+            {"$inc": {"blocked_quantity": diff}}
         )
+        if res.matched_count == 0:
+            stock_collection.update_one(
+                {
+                    "outlet_code": str(outlet_code or "").strip(),
+                    "item_id": item_id_val,
+                    "batch_number": str(batch_number).strip()
+                },
+                {"$inc": {"blocked_quantity": diff}}
+            )
 
 
 # ----------------------------------------------------------
@@ -1008,10 +1019,15 @@ def save_pharmacy_bill(request):
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code")
-    branch_code   = data.get("auth-branch-code")
-    outlet_code   = resolve_request_outlet(request, data)
-
+    hospital_code = (
+        data.get("auth-hospital-code")
+        
+    )
+    branch_code   = (
+        data.get("auth-branch-code")
+        
+    )
+    outlet_code   = resolve_request_outlet(request, data) 
     # --------------------------------------------------
     # STATUS NORMALIZATION
     # --------------------------------------------------
@@ -1075,10 +1091,7 @@ def save_pharmacy_bill(request):
     # ✅ Save patient_name ONLY when billing WITHOUT UHID
     raw_pname = (
         data.get("patient_name")
-        or data.get("patientname")
-        or data.get("patientName")
-        or data.get("customer_name")
-        or ""
+        
     )
     if isinstance(raw_pname, str):
         raw_pname = raw_pname.strip()
@@ -2789,32 +2802,55 @@ def collect_oppharmacy_payment(request):
             bill_payment_mode = "Cash"
 
         # =====================================================
-        # UPDATE STOCK
+        # UPDATE STOCK: Add sold_quantity, release/minus blocked_quantity
         # =====================================================
-
-        is_from_estimate = bool(bill.get("estimate_no"))
         for med in bill.get("medicine_particulars", []):
-            qty = float(med.get("qty", 0) or 0)
+            if med.get("is_deleted") or med.get("deleted_is"):
+                continue
+            qty = float(med.get("qty", 0) or med.get("quantity", 0) or 0)
+            if qty <= 0:
+                continue
             item_id = med.get("item_id")
             try:
                 item_id = int(item_id)
             except (ValueError, TypeError):
                 pass
 
-            inc_payload = {"sold_quantity": qty}
-            if is_from_estimate:
-                inc_payload["blocked_quantity"] = -qty
+            bn_str = str(med.get("batch_number", "") or med.get("batch", "")).strip()
 
-            stock_collection.update_one(
-                {
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code,
+            stock_filter = {
+                "outlet_code": resolved_outlet,
+                "item_id": item_id,
+                "batch_number": bn_str
+            }
+            if hospital_code:
+                stock_filter["hospital_code"] = hospital_code
+            if branch_code:
+                stock_filter["branch_code"] = branch_code
+
+            stock = stock_collection.find_one(stock_filter)
+            if not stock:
+                stock = stock_collection.find_one({
                     "outlet_code": resolved_outlet,
-                    "item_id": item_id,
-                    "batch_number": str(med.get("batch_number", "")).strip()
-                },
-                {"$inc": inc_payload}
-            )
+                    "item_id": {"$in": [item_id, str(item_id)]},
+                    "batch_number": bn_str
+                })
+
+            if stock:
+                curr_blocked = float(stock.get("blocked_quantity", 0) or 0)
+                release_qty = min(qty, curr_blocked) if curr_blocked > 0 else 0.0
+                inc_payload = {"sold_quantity": qty}
+                if release_qty > 0:
+                    inc_payload["blocked_quantity"] = -release_qty
+                stock_collection.update_one(
+                    {"_id": stock["_id"]},
+                    {"$inc": inc_payload}
+                )
+            else:
+                stock_collection.update_one(
+                    stock_filter,
+                    {"$inc": {"sold_quantity": qty, "blocked_quantity": -qty}}
+                )
 
         # =====================================================
         # UPDATE BILL
@@ -5771,10 +5807,13 @@ def pharmacy_view_bills(request):
                 p["uhid"] for p in patient_collection.find(
                     {"$or": [
                         {"firstName": {"$regex": sv, "$options": "i"}},
-                        {"lastName": {"$regex": sv, "$options": "i"}}
+                        {"lastName": {"$regex": sv, "$options": "i"}},
+                        {"patient_name": {"$regex": sv, "$options": "i"}},
+                        {"name": {"$regex": sv, "$options": "i"}},
                     ]},
                     {"uhid": 1, "_id": 0}
-                ).limit(300)
+                ).limit(10000)
+                if p.get("uhid")
             ]
             or_conds = [
                 {"patient_name": {"$regex": sv, "$options": "i"}},
@@ -6332,7 +6371,7 @@ def pharmacy_expiry_report(request):
                                                 "$subtract": [
                                                     {
                                                         "$subtract": [
-                                                            "$total_stock",
+                                                            {"$ifNull": ["$total_stock", 0]},
                                                             {"$ifNull": ["$sold_quantity", 0]}
                                                         ]
                                                     },
