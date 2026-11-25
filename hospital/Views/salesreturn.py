@@ -1015,6 +1015,15 @@ def OP_salesreturn_billdetails(request):
                 "message": "bill_no and medicine_particulars are required"
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # ✅ Look up original bill document from MongoDB
+        orig_b = None
+        if bill_no:
+            try:
+                from .dbcollection import pharmacy_billing_collection as temp_col
+                orig_b = temp_col.find_one({"bill_no": bill_no})
+            except Exception:
+                orig_b = None
+
         # =========================
         # ✅ AUTH
         # =========================
@@ -1077,14 +1086,8 @@ def OP_salesreturn_billdetails(request):
             or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
             or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
         )
-        if not resolved_outlet and bill_no:
-            try:
-                from .dbcollection import pharmacy_billing_collection as temp_col
-                orig_b = temp_col.find_one({"bill_no": bill_no}, {"outlet_code": 1})
-                if orig_b and orig_b.get("outlet_code"):
-                    resolved_outlet = orig_b.get("outlet_code")
-            except Exception:
-                pass
+        if not resolved_outlet and orig_b and orig_b.get("outlet_code"):
+            resolved_outlet = orig_b.get("outlet_code")
 
         if not resolved_outlet:
             resolved_outlet = "OLET002"
