@@ -23,6 +23,7 @@ from pyauth.auth import HasRoleAndDataPermission
 from ..models import Admission, Room, Patient, InsuranceProvider, RoomBooking, IpAdvance_Refund
 from ..serializers import AdmissionSerializer
 from .discharge import _resolve_employee_name
+from .mongo_utils import resolve_canonical_patient
 import traceback
 import json
 import ast
@@ -81,7 +82,33 @@ def _resolve_doctor_name(val, doc_map=None):
     cleaned_id = re.sub(r'^(dr[.\s]*)+', '', v_str, flags=re.IGNORECASE).strip()
     if cleaned_id in doc_map:
         return doc_map[cleaned_id]
-    # 3. For old data, doctor name is already stored directly as text (e.g. 'DR.SANGEETHA M.D')
+    if cleaned_id.upper() in doc_map:
+        return doc_map[cleaned_id.upper()]
+
+    # 3. Direct lookup in Global database if not found in cached doc_map
+    is_id = cleaned_id.isdigit() or (bool(re.match(r'^[A-Za-z]{1,4}\d+$', cleaned_id)) and len(cleaned_id) <= 8)
+    if is_id:
+        try:
+            client, _ = _get_hms_db()
+            g_db = client["Global"]
+            prof = g_db["backend_diagnostics_profile"].find_one({
+                "$or": [
+                    {"employeeId": cleaned_id},
+                    {"employeeId": cleaned_id.upper()},
+                    {"employeeId": {"$regex": f"^{re.escape(cleaned_id)}$", "$options": "i"}},
+                    {"employeeId": int(cleaned_id) if cleaned_id.isdigit() else -1}
+                ]
+            })
+            if prof and prof.get("employeeName"):
+                ename = str(prof.get("employeeName")).strip()
+                if doc_map is not None:
+                    doc_map[v_str] = ename
+                    doc_map[cleaned_id] = ename
+                return ename
+        except Exception:
+            pass
+
+    # 4. For old data, doctor name is already stored directly as text (e.g. 'DR.SANGEETHA M.D')
     return v_str
 
 
@@ -703,11 +730,19 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         # ── 1. Doctor Name Resolution (Match ID from profile, or keep existing name for old data) ──
         raw_admitting = str(adm_data.get("admittingDoctor") or "").strip()
         admitting_name = str(adm_data.get("admittingDoctorName") or "").strip()
-        resolved_admitting = admitting_name or _resolve_doctor_name(raw_admitting, doc_map)
+        is_adm_id = admitting_name.isdigit() or bool(re.match(r'^[A-Za-z]{1,4}\d+$', re.sub(r'^(dr[.\s]*)+', '', admitting_name, flags=re.IGNORECASE).strip()))
+        if is_adm_id or not admitting_name:
+            resolved_admitting = _resolve_doctor_name(admitting_name or raw_admitting, doc_map)
+        else:
+            resolved_admitting = admitting_name
 
         raw_consulting = str(adm_data.get("consultingDoctor") or "").strip()
         consulting_name = str(adm_data.get("consultingDoctorName") or "").strip()
-        resolved_consulting = consulting_name or _resolve_doctor_name(raw_consulting, doc_map)
+        is_con_id = consulting_name.isdigit() or bool(re.match(r'^[A-Za-z]{1,4}\d+$', re.sub(r'^(dr[.\s]*)+', '', consulting_name, flags=re.IGNORECASE).strip()))
+        if is_con_id or not consulting_name:
+            resolved_consulting = _resolve_doctor_name(consulting_name or raw_consulting, doc_map)
+        else:
+            resolved_consulting = consulting_name
 
         adm_data["admittingDoctor"]     = resolved_admitting
         adm_data["admittingDoctorName"] = resolved_admitting
@@ -1184,10 +1219,7 @@ def op_patient_detail_by_uhid(request, uhid):
 
         client, hms_db = _get_hms_db()
         try:
-            patient = hms_db["hospital_patient"].find_one(query)
-            if not patient:
-                # Try without branch/hospital filter as fallback
-                patient = hms_db["hospital_patient"].find_one({"uhid": str(uhid)})
+            patient, canonical_uhid = resolve_canonical_patient(hms_db, uhid)
             if not patient:
                 return Response({"error": "Patient not found"}, status=404)
 
@@ -1208,7 +1240,7 @@ def op_patient_detail_by_uhid(request, uhid):
 
             data = {
                 "id": str(patient.get("_id") or patient.get("pk") or patient.get("id") or ""),
-                "uhid": patient.get("uhid"),
+                "uhid": canonical_uhid or patient.get("uhid"),
                 "salutation": patient.get("salutation") or "",
                 "firstName": patient.get("firstName") or "",
                 "middleName": patient.get("middleName") or "",
@@ -1548,14 +1580,25 @@ def admission_view(request):
     elif request.method == 'POST':
         try:
             data = {k: request.data.get(k) for k in request.data}
-            uhid = str(data.get('uhid', '')).strip()
-            clean_uhid = str(uhid).strip()
-            if not clean_uhid:
-                return JsonResponse({"error": "UHID is required"}, status=400)
+            uhid_raw = str(data.get('uhid', '')).strip()
+            if not uhid_raw:
+                return JsonResponse({"error": "UHID is required", "success": False}, status=400)
 
             client, hms_db = _get_hms_db()
             try:
-                # ── Fast check for existing active admission with index ──
+                # ── 1. Strictly validate patient against Patient Master & resolve canonical UHID ──
+                patient_obj, canonical_uhid = resolve_canonical_patient(hms_db, uhid_raw)
+                if not patient_obj or not canonical_uhid:
+                    return JsonResponse({
+                        "error": f"Invalid UHID '{uhid_raw}'. Patient not found in Patient Master. Please register the patient before admitting.",
+                        "success": False
+                    }, status=400)
+
+                clean_uhid = canonical_uhid
+                uhid = canonical_uhid
+                data['uhid'] = canonical_uhid
+
+                # ── 2. Fast check for existing active admission with canonical index ──
                 # A patient identified by UHID cannot be physically admitted more than once across the hospital!
                 # Do NOT restrict by outlet_code or branch_code so multi-outlet active admissions are caught.
                 active_adm_q = {
@@ -1600,14 +1643,6 @@ def admission_view(request):
                         "roomNo": r_no,
                         "bedNo":  b_no,
                     }, status=400)
-
-                # ── Patient info lookup ──
-                patient_obj = hms_db["hospital_patient"].find_one({
-                    "hospital_code": hospital_code,
-                    "uhid": uhid
-                })
-                if not patient_obj:
-                    patient_obj = hms_db["hospital_patient"].find_one({"uhid": uhid})
             finally:
                 if client:
                     client.close()
@@ -1768,10 +1803,17 @@ def admission_view(request):
                 "is_discharged": False,
                 "is_admitted": True,
             })
+            resolved_adm_doc = _resolve_doctor_name(adm.admittingDoctor)
+            resolved_con_doc = _resolve_doctor_name(adm.consultingDoctor)
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
                 "admissionDateTime": _to_ist_iso(adm.admissionDateTime),
-                "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
+                "admittingDoctor": resolved_adm_doc,
+                "admittingDoctorName": resolved_adm_doc,
+                "admittingDoctorId": str(adm.admittingDoctor or ""),
+                "consultingDoctor": resolved_con_doc,
+                "consultingDoctorName": resolved_con_doc,
+                "consultingDoctorId": str(adm.consultingDoctor or ""),
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
                 "customer_type": customer_type, "customerType": customer_type,
                 "company_code": company_code,

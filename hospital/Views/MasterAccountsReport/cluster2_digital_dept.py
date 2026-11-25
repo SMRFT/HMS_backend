@@ -245,16 +245,26 @@ def date_wise_collection_summary_api(request):
                 sales_ret = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(sales_ret)
-                cash = 0.0
-                bank = 0.0
+                p_m = str(b.get("payment_mode") or b.get("payment_type") or "").strip().lower()
+                if any(term in p_m for term in ["bank", "card", "online", "pos", "upi", "neft", "rtgs"]):
+                    bank = -abs(sales_ret)
+                    cash = 0.0
+                else:
+                    cash = -abs(sales_ret)
+                    bank = 0.0
                 credit = 0.0
                 cat = "SALES RETURNS"
             elif any(k in cat_upper for k in ["EXPENSE", "PAYMENT"]):
                 adv_refd = abs(cash) if cash < 0 else abs(gross)
                 gross = 0.0
                 net = -abs(adv_refd)
-                cash = 0.0
-                bank = 0.0
+                p_m = str(b.get("payment_mode") or b.get("payment_type") or "").strip().lower()
+                if any(term in p_m for term in ["bank", "card", "online", "pos", "upi", "neft", "rtgs"]):
+                    bank = -abs(adv_refd)
+                    cash = 0.0
+                else:
+                    cash = -abs(adv_refd)
+                    bank = 0.0
                 credit = 0.0
                 cat = "MISCELLANEOUS EXPENSE"
                 

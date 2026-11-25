@@ -1014,15 +1014,24 @@ def OP_salesreturn_billdetails(request):
                 "status":  "error",
                 "message": "bill_no and medicine_particulars are required"
             }, status=status.HTTP_400_BAD_REQUEST)
- 
+
         # =========================
         # ✅ AUTH
         # =========================
-        hospital_code = data.get("auth-hospital-code")
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
-        employee_id   = data.get("auth-user-id")
- 
+        hospital_code = data.get("auth-hospital-code") or data.get("hospital_code")
+        branch_code   = data.get("auth-branch-code") or data.get("branch_code")
+        outlet_code   = data.get("auth-outlet-code") or data.get("outlet_code")
+        employee_id   = data.get("auth-user-id") or data.get("created_by") or data.get("pharmacist_id")
+
+        if orig_b:
+            if not hospital_code:
+                hospital_code = orig_b.get("hospital_code") or "SH001"
+            if not branch_code:
+                branch_code = orig_b.get("branch_code") or "SHB001"
+            if not outlet_code:
+                outlet_code = orig_b.get("outlet_code")
+            if not employee_id:
+                employee_id = orig_b.get("lastmodified_by") or orig_b.get("billed_id") or "60129"
         # =========================
         # ✅ VALIDATE & CLEAN ITEMS
         # =========================
@@ -1100,14 +1109,24 @@ def OP_salesreturn_billdetails(request):
             billed_qty     = float(item.get("billed_qty", 0))
             return_qty_val = int(return_qty) if return_qty.is_integer() else return_qty
 
-            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number ───
-            stock_filter = {
-                "item_id":      {"$in": [item_id, str(item_id)]},
-                "batch_number": {"$in": [batch_number, str(item.get("batch_number", ""))]},
-                "outlet_code":  outlet_code
-            }
+            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number (or stock_id) ───
+            existing_stock = None
+            stock_id_val = item.get("stock_id") or item.get("id")
+            if stock_id_val:
+                try:
+                    s_id_int = int(stock_id_val)
+                    existing_stock = stock_col.find_one({"$or": [{"stock_id": s_id_int}, {"id": s_id_int}], "outlet_code": outlet_code})
+                except Exception:
+                    pass
 
-            existing_stock = stock_col.find_one(stock_filter)
+            if not existing_stock:
+                stock_filter = {
+                    "item_id":      {"$in": [item_id, str(item_id)]},
+                    "batch_number": {"$in": [batch_number, str(item.get("batch_number", "")).strip()]},
+                    "outlet_code":  outlet_code
+                }
+                existing_stock = stock_col.find_one(stock_filter)
+
             if not existing_stock:
                 # Fallback to direct equality match
                 existing_stock = stock_col.find_one({
@@ -1302,6 +1321,8 @@ def OP_salesreturn_billdetails(request):
                 patient_name = p_dict.get("name", "")
         except Exception:
             pass
+        if not patient_name and orig_b:
+            patient_name = orig_b.get("patient_name", "")
 
         if not patient_name:
             try:

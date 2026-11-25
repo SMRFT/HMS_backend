@@ -111,15 +111,83 @@ def mrd_discharged_files(request):
         to_date_str   = request.GET.get("to_date", "").strip()
         search_query  = request.GET.get("q", "").strip().lower()
 
-        # 1. Fetch discharged admissions only (is_discharged: True)
+        # 1. Date range filter for MongoDB
+        date_conditions = []
+        if from_date_str or to_date_str:
+            str_cond = {}
+            if from_date_str:
+                str_cond["$gte"] = from_date_str[:10]
+            if to_date_str:
+                str_cond["$lte"] = to_date_str[:10]
+            if str_cond:
+                date_conditions.append({"discharge_date": str_cond})
+
+            try:
+                dt_from = None
+                dt_to = None
+                if from_date_str:
+                    f_d = datetime.datetime.strptime(from_date_str[:10], "%Y-%m-%d")
+                    dt_from = f_d - datetime.timedelta(hours=5, minutes=30)
+                if to_date_str:
+                    t_d = datetime.datetime.strptime(to_date_str[:10], "%Y-%m-%d") + datetime.timedelta(days=1)
+                    dt_to = t_d - datetime.timedelta(hours=5, minutes=30)
+
+                dt_cond = {}
+                if dt_from:
+                    dt_cond["$gte"] = dt_from
+                if dt_to:
+                    dt_cond["$lt"] = dt_to
+
+                if dt_cond:
+                    date_conditions.append({"dischargeDateTime": dt_cond})
+                    date_conditions.append({"lastmodified_date": dt_cond})
+            except Exception as e:
+                print(f"[MRD] Date parse error: {e}")
+
         adm_query = {
             "is_discharged": True,
             "is_cancelled": {"$ne": True}
         }
-        admissions = list(db["hospital_admission"].find(adm_query))
+        if date_conditions:
+            adm_query["$or"] = date_conditions
 
-        # 2. Fetch all MRD records
-        mrd_records = list(db["hospital_mrd"].find({"is_active": {"$ne": False}}))
+        # Projection to load only necessary fields (drastically reduces payload and memory)
+        adm_projection = {
+            "_id": 1,
+            "ipNumber": 1,
+            "uhid": 1,
+            "patient_name": 1,
+            "age": 1,
+            "gender": 1,
+            "consultingDoctor": 1,
+            "admittingDoctor": 1,
+            "primary_doctor": 1,
+            "doctor": 1,
+            "admissionDateTime": 1,
+            "discharge_date": 1,
+            "dischargeDateTime": 1,
+            "lastmodified_date": 1,
+            "created_date": 1,
+            "created_by": 1,
+            "lastmodified_by": 1,
+            "room_details": 1,
+            "ward_status": 1,
+            "company_code": 1,
+            "customer_type": 1,
+        }
+
+        adm_cursor = db["hospital_admission"].find(adm_query, adm_projection).sort("_id", -1)
+        if not (from_date_str or to_date_str or search_query):
+            # Safe limit if All Time is queried with no dates or search
+            adm_cursor = adm_cursor.limit(1000)
+        admissions = list(adm_cursor)
+
+        # 2. Fetch MRD records (targeted by matching IP numbers when filtered)
+        ip_list = [str(a.get("ipNumber") or "").strip() for a in admissions if a.get("ipNumber")]
+        mrd_query = {"is_active": {"$ne": False}}
+        if ip_list and (from_date_str or to_date_str):
+            mrd_query["ip_no"] = {"$in": ip_list}
+        mrd_records = list(db["hospital_mrd"].find(mrd_query))
         mrd_map = {str(m.get("ip_no", "")).strip(): m for m in mrd_records if m.get("ip_no")}
 
         # 3. Doctor lookup map based on employeeId
@@ -131,23 +199,23 @@ def mrd_discharged_files(request):
 
         doc_map = _resolve_doctor_map(db, doc_ids)
 
-        # 4. Collect unique UHIDs for patient details lookup
-        all_uhids = set()
-        for a in admissions:
-            if a.get("uhid"):
-                all_uhids.add(str(a.get("uhid")).strip())
-
-        patient_docs = list(db["hospital_patient"].find({"uhid": {"$in": list(all_uhids)}}))
+        # 4. Collect unique UHIDs for patient details lookup with projection
+        all_uhids = list({str(a.get("uhid")).strip() for a in admissions if a.get("uhid")})
         patient_map = {}
-        for p in patient_docs:
-            u = str(p.get("uhid", "")).strip()
-            p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
-            patient_map[u] = {
-                "patient_name": p_name,
-                "age": p.get("age"),
-                "gender": p.get("gender"),
-                "mobile": p.get("mobilePhone") or p.get("mobile_number") or "",
-            }
+        if all_uhids:
+            patient_docs = list(db["hospital_patient"].find(
+                {"uhid": {"$in": all_uhids}},
+                {"uhid": 1, "firstName": 1, "lastName": 1, "age": 1, "gender": 1, "mobilePhone": 1, "mobile_number": 1, "_id": 0}
+            ))
+            for p in patient_docs:
+                u = str(p.get("uhid", "")).strip()
+                p_name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+                patient_map[u] = {
+                    "patient_name": p_name,
+                    "age": p.get("age"),
+                    "gender": p.get("gender"),
+                    "mobile": p.get("mobilePhone") or p.get("mobile_number") or "",
+                }
 
         # 5. Build records list from hospital_admission
         all_records = []
@@ -184,7 +252,7 @@ def mrd_discharged_files(request):
                 if not ward_name and active_r.get("wardName"):
                     ward_name = active_r.get("wardName")
 
-            discharge_dt = adm.get("lastmodified_date") or adm.get("discharge_date") or adm.get("admissionDateTime")
+            discharge_dt = adm.get("discharge_date") or adm.get("dischargeDateTime") or adm.get("lastmodified_date") or adm.get("admissionDateTime")
 
             item = {
                 "ip_no": ip_no,
@@ -293,11 +361,12 @@ def mrd_discharged_files(request):
 
 
             # Date Range Filter on discharge_date
-            if from_date_str and r["discharge_date"]:
-                if r["discharge_date"] < from_date_str:
+            d_str = str(r.get("discharge_date") or "")[:10]
+            if from_date_str and d_str:
+                if d_str < from_date_str[:10]:
                     continue
-            if to_date_str and r["discharge_date"]:
-                if r["discharge_date"] > to_date_str:
+            if to_date_str and d_str:
+                if d_str > to_date_str[:10]:
                     continue
 
             # Global Search Filter

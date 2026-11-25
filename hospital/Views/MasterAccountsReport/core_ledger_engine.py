@@ -913,18 +913,25 @@ class AccountsLedgerEngine:
                         pd = pay.get("payment_details") or {}
                         pm = pd.get("method") or pay.get("payment_mode") or r.get("payment_mode") or "Cash"
                         c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+                        # Under unified ledger taxonomy, non-cash receivables and cards/banks are grouped under credit_amount
+                        all_credit_val = round(cr_val + b_val, 2)
                         item_data.update({
                             "gross": amt, "net_amount": amt, "amount": amt, "advance_amount": amt,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
-                            "card": b_val, "card_amount": b_val, "payment_mode": pm
+                            "card": b_val, "card_amount": b_val, "bank_amount": b_val,
+                            "cash_amount": c_val, "credit_amount": all_credit_val,
+                            "payment_mode": pm
                         })
                     else:
                         pm = r.get("payment_mode") or "Cash"
                         c_val, cr_val, b_val = split_payment_modes(coll_amt, pm)
+                        all_credit_val = round(cr_val + b_val, 2)
                         item_data.update({
                             "gross": coll_amt, "net_amount": coll_amt, "amount": coll_amt, "advance_amount": coll_amt,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
-                            "card": b_val, "card_amount": b_val, "payment_mode": pm
+                            "card": b_val, "card_amount": b_val, "bank_amount": b_val,
+                            "cash_amount": c_val, "credit_amount": all_credit_val,
+                            "payment_mode": pm
                         })
 
                 elif cat in ["Sales Return", "sales_return", "SalesReturn"]:
