@@ -428,23 +428,27 @@ def patient_op_visits(request, uhid):
             b_date_str = ""
             b_time_str = ""
             if b_date:
-                if hasattr(b_date, "astimezone"):
-                    try:
-                        b_date_ist = b_date.astimezone(kolkata_tz)
-                        b_date_str = b_date_ist.strftime("%d-%m-%Y")
-                        b_time_str = b_date_ist.strftime("%I:%M %p")
-                    except Exception:
-                        b_date_str = str(b_date)[:10]
-                        b_time_str = str(b_date)[11:16]
-                elif isinstance(b_date, str):
+                if isinstance(b_date, str):
                     try:
                         dt_obj = datetime.fromisoformat(b_date.replace("Z", "+00:00"))
+                        if dt_obj.tzinfo is None:
+                            dt_obj = pytz.UTC.localize(dt_obj)
                         dt_ist = dt_obj.astimezone(kolkata_tz)
                         b_date_str = dt_ist.strftime("%d-%m-%Y")
                         b_time_str = dt_ist.strftime("%I:%M %p")
                     except Exception:
                         b_date_str = b_date[:10]
                         b_time_str = b_date[11:16] if len(b_date) > 16 else ""
+                elif hasattr(b_date, "astimezone"):
+                    try:
+                        if b_date.tzinfo is None:
+                            b_date = pytz.UTC.localize(b_date)
+                        b_date_ist = b_date.astimezone(kolkata_tz)
+                        b_date_str = b_date_ist.strftime("%d-%m-%Y")
+                        b_time_str = b_date_ist.strftime("%I:%M %p")
+                    except Exception:
+                        b_date_str = str(b_date)[:10]
+                        b_time_str = str(b_date)[11:16]
 
             # Resolve Doctor Name
             raw_did = str(b.get("doctor_id") or b.get("doctorId") or "").strip()

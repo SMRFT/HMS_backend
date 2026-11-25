@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from rest_framework import status
 from django.utils import timezone
 from pymongo import MongoClient
+import pytz
 from django.utils.timezone import now
 from rest_framework.parsers import MultiPartParser, FormParser
 from bson import Decimal128
@@ -847,6 +848,29 @@ def patient_registration_stats(request):
         return Response({"error": str(e)}, status=500)
 
 
+def _to_utc_aware(dt):
+    """Ensure a naive MongoDB datetime (stored in UTC) or ISO string is UTC-aware."""
+    if not dt:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except Exception:
+            return None
+    if timezone.is_naive(dt):
+        return pytz.UTC.localize(dt)
+    return dt
+
+
+def _format_ist_str(dt, fmt="%d-%m-%Y %I:%M %p"):
+    """Convert a MongoDB UTC datetime/string to IST string."""
+    aware_dt = _to_utc_aware(dt)
+    if not aware_dt:
+        return ""
+    ist_tz = pytz.timezone("Asia/Kolkata")
+    return aware_dt.astimezone(ist_tz).strftime(fmt)
+
+
 @api_view(['GET'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
@@ -857,7 +881,8 @@ def patient_visit_list(request):
         to_date_str = request.GET.get('toDate')
         doctor_id = request.GET.get('doctorId')
 
-        today = timezone.localdate()
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        today = timezone.now().astimezone(ist_tz).date()
 
         if from_date_str:
             from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
@@ -869,18 +894,8 @@ def patient_visit_list(request):
         else:
             to_date = today
 
-        start_naive = datetime.combine(from_date, time.min)
-        end_naive = datetime.combine(to_date, time.max)
-
-        if timezone.is_naive(start_naive):
-            start_dt = timezone.make_aware(start_naive)
-        else:
-            start_dt = start_naive
-
-        if timezone.is_naive(end_naive):
-            end_dt = timezone.make_aware(end_naive)
-        else:
-            end_dt = end_naive
+        start_dt = ist_tz.localize(datetime.combine(from_date, time.min)).astimezone(pytz.UTC)
+        end_dt = ist_tz.localize(datetime.combine(to_date, time.max)).astimezone(pytz.UTC)
 
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         if not mongo_host:
@@ -993,16 +1008,7 @@ def patient_visit_list(request):
             if not p:
                 continue
 
-            p_created = p.get('created_date')
-            if p_created and hasattr(p_created, 'tzinfo') and timezone.is_naive(p_created):
-                p_created = timezone.make_aware(p_created)
-            elif p_created and isinstance(p_created, str):
-                try:
-                    p_created = datetime.fromisoformat(p_created)
-                    if timezone.is_naive(p_created):
-                        p_created = timezone.make_aware(p_created)
-                except Exception:
-                    pass
+            p_created = _to_utc_aware(p.get('created_date'))
 
             if p_created and start_dt:
                 visit_type = "New" if p_created >= start_dt else "Review"
@@ -1035,12 +1041,7 @@ def patient_visit_list(request):
                 except Exception:
                     pass
 
-                ref_dt_str = ''
-                ref_dt = r.get('refund_date')
-                if ref_dt:
-                    if hasattr(ref_dt, 'tzinfo') and timezone.is_naive(ref_dt):
-                        ref_dt = timezone.make_aware(ref_dt)
-                    ref_dt_str = timezone.localtime(ref_dt).strftime("%d-%m-%Y %I:%M %p")
+                ref_dt_str = _format_ist_str(r.get('refund_date'))
 
                 refund_data.append({
                     "refund_bill_no": r.get('refund_bill_no'),
@@ -1070,10 +1071,10 @@ def patient_visit_list(request):
                             formatted_changes[f_key] = f_val
 
                 h_date = h.get('date')
-                if isinstance(h_date, datetime):
-                    if timezone.is_naive(h_date):
-                        h_date = timezone.make_aware(h_date)
-                    h_date = timezone.localtime(h_date).strftime("%d-%m-%Y %I:%M %p")
+                if isinstance(h_date, (datetime, str)):
+                    formatted_h_dt = _format_ist_str(h_date)
+                    if formatted_h_dt:
+                        h_date = formatted_h_dt
 
                 reason_val = h.get('reason', '') or ''
                 if not reason_val and isinstance(h.get('changes'), dict):
@@ -1098,12 +1099,7 @@ def patient_visit_list(request):
             city_val = p.get('city') or ''
             dist_val = p.get('district') or ''
 
-            billed_dt_str = ''
-            b_dt = bill.get('billed_date')
-            if b_dt:
-                if hasattr(b_dt, 'tzinfo') and timezone.is_naive(b_dt):
-                    b_dt = timezone.make_aware(b_dt)
-                billed_dt_str = timezone.localtime(b_dt).strftime("%d-%m-%Y %I:%M %p")
+            billed_dt_str = _format_ist_str(bill.get('billed_date'))
 
             data.append({
                 "uhid": p.get('uhid'),
