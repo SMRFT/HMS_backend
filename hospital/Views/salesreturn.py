@@ -1,5 +1,8 @@
+import logging
 from django.http import JsonResponse
 from pymongo import MongoClient
+
+logger = logging.getLogger(__name__)
 import os
 import re
 import json
@@ -1377,8 +1380,9 @@ def OP_salesreturn_billdetails(request):
                 "doctor_name": b_info.get("doctor_name"),
             }
 
-            from .dbcollection import salesreturn_collection
-            salesreturn_collection.update_one(
+            from .dbcollection import hms_db
+            salesreturn_col = hms_db["hospital_salesreturn"]
+            salesreturn_col.update_one(
                 {"return_bill_no": return_bill_no},
                 {"$set": salesreturn_doc},
                 upsert=True
