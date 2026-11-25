@@ -1843,20 +1843,31 @@ def billing_report_view(request):
                 orig_total = float(doc.get("total", 0) or 0)
                 orig_disc = float(doc.get("discount", 0) or 0)
                 disc_pct = float(doc.get("discountPercent", 0) or 0)
+                orig_final = float(doc.get("finalPrice", 0) or 0)
 
                 doc["original_total"] = orig_total
-                doc["original_finalPrice"] = float(doc.get("finalPrice", 0) or 0)
-                doc["total"] = new_total
+                doc["original_finalPrice"] = orig_final
 
-                if disc_pct > 0:
-                    new_disc = round((new_total * disc_pct) / 100.0, 2)
-                elif orig_total > 0 and orig_disc > 0:
-                    new_disc = round((new_total / orig_total) * orig_disc, 2)
+                is_package_bill = bool(doc.get("package_id") or doc.get("billTypeNo") == "PACK" or doc.get("billType") == "PACK")
+                if is_package_bill or (new_total == 0 and orig_total > 0 and len(filtered_items) > 0):
+                    if not filtered_items:
+                        doc["total"] = 0.0
+                        doc["discount"] = 0.0
+                        doc["finalPrice"] = 0.0
+                    else:
+                        doc["total"] = orig_total
+                        doc["discount"] = orig_disc
+                        doc["finalPrice"] = orig_final if orig_final > 0 else max(0.0, round(orig_total - orig_disc, 2))
                 else:
-                    new_disc = 0.0
-
-                doc["discount"] = new_disc
-                doc["finalPrice"] = max(0.0, round(new_total - new_disc, 2))
+                    doc["total"] = new_total
+                    if disc_pct > 0:
+                        new_disc = round((new_total * disc_pct) / 100.0, 2)
+                    elif orig_total > 0 and orig_disc > 0:
+                        new_disc = round((new_total / orig_total) * orig_disc, 2)
+                    else:
+                        new_disc = 0.0
+                    doc["discount"] = new_disc
+                    doc["finalPrice"] = max(0.0, round(new_total - new_disc, 2))
             else:
                 doc["item"] = items
 
