@@ -603,6 +603,75 @@ def miscellaneous_payment_api(request):
                     "cashier_name": c_name,
                     "narration": narration
                 })
+
+            # Ingest Sales Returns as Payments (counter cash refund)
+            sr_q = {"$or": [
+                {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                {"return_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                {"return_bill_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                {"paid_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                {"refund_datetime": {"$gte": f_dt_utc, "$lte": t_dt_utc}}
+            ]}
+            if outlet_code and str(outlet_code).lower() != "all":
+                sr_q["outlet_code"] = outlet_code
+                
+            sr_docs = list(db["hospital_salesreturn"].find(sr_q))
+            sr_uhids = [str(s.get("uhid") or "").strip() for s in sr_docs if s.get("uhid")]
+            patient_map = {}
+            if sr_uhids:
+                try:
+                    p_docs = list(db["hospital_patient"].find({"$or": [{"uhid": {"$in": sr_uhids}}, {"patient_id": {"$in": sr_uhids}}]}))
+                    for p in p_docs:
+                        u1 = str(p.get("uhid") or "").strip()
+                        u2 = str(p.get("patient_id") or "").strip()
+                        pname = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or str(p.get("patient_name") or p.get("name") or "").strip()
+                        if u1: patient_map[u1] = pname
+                        if u2: patient_map[u2] = pname
+                    missing_uhids = [u for u in sr_uhids if u not in patient_map]
+                    if missing_uhids:
+                        reg_docs = list(db["hospital_patientregistration"].find({"$or": [{"uhid": {"$in": missing_uhids}}, {"PatientId": {"$in": missing_uhids}}]}))
+                        for pr in reg_docs:
+                            uid = str(pr.get("uhid") or pr.get("PatientId") or "").strip()
+                            fname = " ".join([x for x in [(pr.get("firstName") or "").strip(), (pr.get("middleName") or "").strip(), (pr.get("lastName") or "").strip()] if x]).strip()
+                            if fname: patient_map[uid] = fname
+                except Exception:
+                    pass
+
+            for sr in sr_docs:
+                sr_amt = clean_num(sr.get("refund_amount") or sr.get("return_amount") or sr.get("total_amount") or sr.get("net_amount"))
+                if sr_amt <= 0:
+                    continue
+                sr_date = sr.get("return_date") or sr.get("return_bill_date") or sr.get("created_date") or sr.get("paid_date") or sr.get("refund_datetime")
+                dt_str = format_ist_datetime(sr_date) if sr_date else ""
+                d_only = format_ist_date(sr_date) if sr_date else ""
+                t_only = format_ist_time(sr_date) if sr_date else ""
+                
+                sr_no = str(sr.get("sales_return_number") or sr.get("return_no") or sr.get("return_bill_no") or (f"SR-{sr.get('bill_no')}" if sr.get('bill_no') else str(sr.get("_id"))[-8:]))
+                orig_bno = str(sr.get("bill_no") or sr.get("original_bill_no") or "")
+                u_val = str(sr.get("uhid") or "").strip()
+                p_name = str(sr.get("patient_name") or sr.get("patientname") or patient_map.get(u_val) or "").strip()
+                if not p_name or p_name == "-":
+                    p_name = f"Patient ({u_val})" if u_val else "Walk-in Patient"
+                
+                c_id = str(sr.get("CashierID") or sr.get("pharmacist_id") or sr.get("created_by") or "")
+                c_name = cashier_map.get(c_id, c_id)
+                narr = f"Pharmacy Sales Return for Bill {orig_bno}" if orig_bno else "Pharmacy Sales Return"
+                
+                vouchers.append({
+                    "voucher_no": sr_no,
+                    "date": dt_str,
+                    "voucher_date": d_only or (dt_str.split(" ")[0] if " " in dt_str else dt_str),
+                    "voucher_time": t_only or (dt_str.split(" ", 1)[1] if " " in dt_str else ""),
+                    "voucher_type": "Payment",
+                    "account_head": "Sales Return",
+                    "paid_to_or_received_from": p_name,
+                    "amount": sr_amt,
+                    "cashier_id": c_id,
+                    "cashier_name": c_name,
+                    "narration": narr,
+                    "is_sales_return": True,
+                    "original_bill_no": orig_bno
+                })
                 
             # Sort vouchers naturally by date and voucher_no
             import re
@@ -614,6 +683,8 @@ def miscellaneous_payment_api(request):
                 
             tot_receipts = round(sum(v["amount"] for v in vouchers if v["voucher_type"] == "Receipt"), 2)
             tot_payments = round(sum(v["amount"] for v in vouchers if v["voucher_type"] == "Payment"), 2)
+            tot_sales_returns = round(sum(v["amount"] for v in vouchers if v.get("is_sales_return")), 2)
+            tot_expenses = round(sum(v["amount"] for v in vouchers if v["voucher_type"] == "Payment" and not v.get("is_sales_return")), 2)
             net_sundry = round(tot_receipts - tot_payments, 2)
             
             return Response({
@@ -623,6 +694,8 @@ def miscellaneous_payment_api(request):
                 "summary": {
                     "total_receipts": tot_receipts,
                     "total_payments": tot_payments,
+                    "total_sales_returns": tot_sales_returns,
+                    "total_expenses": tot_expenses,
                     "net_sundry_cash": net_sundry
                 },
                 "count": len(vouchers),

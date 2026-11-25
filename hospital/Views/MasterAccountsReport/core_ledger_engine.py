@@ -161,6 +161,99 @@ def split_payment_modes(net_amt, payment_mode, payment_details=None, is_credit_b
             
     return round(cash, 2), round(credit, 2), round(bank, 2)
 
+def extract_card_metadata(pd, pm_str="", b_val=0.0):
+    if isinstance(pd, str):
+        try:
+            pd = _json.loads(pd)
+        except Exception:
+            pd = {}
+    if not isinstance(pd, dict):
+        pd = {}
+    pm_upper = str(pm_str or "").strip().upper()
+
+    # Search for card / digital breakdown item if present
+    breakdown_item = None
+    breakdown = pd.get("breakdown")
+    if isinstance(breakdown, list):
+        for item in breakdown:
+            if isinstance(item, dict):
+                m_str = str(item.get("method") or item.get("payment_mode") or "").strip().lower()
+                if (
+                    any(k in m_str for k in ["card", "bank", "pos", "upi", "paytm", "online", "cheque", "neft", "gpay", "phonepe"]) or
+                    item.get("Card Machine") or item.get("card_machine") or item.get("cardMachine") or item.get("pos_machine") or
+                    (m_str != "cash" and float(item.get("Paid_amount") or item.get("amount") or 0) > 0)
+                ):
+                    breakdown_item = item
+                    break
+
+    def _get_val(*keys):
+        for k in keys:
+            v = pd.get(k)
+            if v and str(v).strip():
+                return str(v).strip()
+        if breakdown_item:
+            for k in keys:
+                v = breakdown_item.get(k)
+                if v and str(v).strip():
+                    return str(v).strip()
+        return ""
+
+    # 1. Card Machine / Terminal
+    c_mach = _get_val(
+        "Card Machine", "card_machine", "cardMachine", "pos_machine",
+        "machine_name", "machine", "pos", "terminal", "terminal_machine", "card_name"
+    )
+
+    combined_pm = pm_upper
+    if breakdown_item:
+        b_m = str(breakdown_item.get("method") or breakdown_item.get("payment_mode") or "").strip().upper()
+        if b_m:
+            combined_pm = f"{combined_pm} {b_m}"
+
+    if not c_mach:
+        if "PAYTM" in combined_pm: c_mach = "Paytm"
+        elif "BAJAJ" in combined_pm: c_mach = "Bajaj"
+        elif "360" in combined_pm: c_mach = "360 POS"
+        elif "PNB" in combined_pm: c_mach = "PNB"
+        elif "HDFC" in combined_pm: c_mach = "HDFC POS"
+        elif "SBI" in combined_pm: c_mach = "SBI POS"
+        elif "PINE" in combined_pm: c_mach = "PINELABS"
+        elif any(k in combined_pm for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "BHIM", "QR"]): c_mach = "UPI"
+        elif b_val > 0: c_mach = "POS"
+        else: c_mach = ""
+    else:
+        c_mach = str(c_mach).strip()
+
+    # 2. Card Type
+    c_type = _get_val("card_type", "cardType")
+    if not c_type and breakdown_item:
+        b_m = str(breakdown_item.get("method") or "").strip().upper()
+        if b_m and b_m not in ["CASH", "MULTIPLE PAYMENT", "MULTIPLE"]:
+            if any(k in b_m for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "BHIM", "QR"]):
+                c_type = "UPI"
+            elif "CARD" in b_m:
+                c_type = b_m
+            else:
+                c_type = "CARD"
+    if not c_type:
+        if any(k in combined_pm for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "BHIM", "QR"]) or c_mach == "UPI":
+            c_type = "UPI"
+        elif "RUPAY" in combined_pm: c_type = "RUPAY CARD"
+        elif "VISA" in combined_pm: c_type = "VISA CARD"
+        elif "MASTER" in combined_pm: c_type = "MASTER CARD"
+        elif "AMEX" in combined_pm or "AMERICAN" in combined_pm: c_type = "AMEX CARD"
+        elif "DEBIT" in combined_pm: c_type = "DEBIT CARD"
+        elif "CREDIT" in combined_pm: c_type = "CREDIT CARD"
+        elif b_val > 0: c_type = "CARD"
+        else: c_type = ""
+    else:
+        c_type = str(c_type).strip().upper()
+
+    # 3. Card Number
+    c_num = _get_val("card_number", "cardNumber", "card_no")
+
+    return c_mach, c_type, str(c_num).strip()
+
 _SHARED_CLIENT = None
 
 def get_db():
@@ -747,10 +840,13 @@ class AccountsLedgerEngine:
                         pm = pd.get("method") or d.get("payment_method") or d.get("payment_mode") or d.get("billing_mode") or r.get("payment_mode") or "Cash"
                         is_cr = bool(d.get("is_insurance") or any(k in str(d.get("billing_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]) or any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
                         c_val, cr_val, b_val = split_payment_modes(amt, pm, pd, is_credit_bill=is_cr)
+                        c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
                         item_data.update({
                             "gross": amt, "net_amount": amt, "amount": amt,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
                             "card": b_val, "card_amount": b_val, "payment_mode": pm,
+                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                            "payment_details": pd,
                             "particulars": d.get("items") or d.get("medicine_particulars") or [],
                             "created_by": d.get("created_by") or "",
                             "lastmodified_by": d.get("pharmacist_id") or d.get("lastmodified_by") or ""
@@ -778,8 +874,11 @@ class AccountsLedgerEngine:
                     # Breakdown for PACKAGE and CARDIOLOGY
                     disp_upper = disp_type.upper()
                     items_list = d.get("item") or d.get("particulars") or []
+                    pkg_name = None
+                    is_pkg = False
                     
                     if "PACKAGE" in disp_upper or str(bt_no).upper() == "PACK":
+                        is_pkg = True
                         pkg_id = d.get("package_id")
                         pkg_name = d.get("package_name") or d.get("packageName")
                         if not pkg_name and pkg_id is not None:
@@ -790,10 +889,11 @@ class AccountsLedgerEngine:
                                     pkg_name = package_map.get(it.get("package_id")) or package_map.get(str(it.get("package_id")))
                                     if pkg_name:
                                         break
-                        if pkg_name:
-                            disp_type = f"PACKAGE - {str(pkg_name).strip().upper()} (SH)"
-                        else:
-                            disp_type = "PACKAGE (SH)"
+                        # User request: Packages collection under LAB collections
+                        lab_category = billtype_map.get("LAB01") or "LAB BILL (CREDIT/TKT/GENERAL)"
+                        if "(SH)" not in lab_category:
+                            lab_category = f"{lab_category} (SH)"
+                        disp_type = lab_category
                             
                     elif "CARDIO" in disp_upper or str(bt_no).upper() == "CAR01":
                         test_names = []
@@ -819,14 +919,19 @@ class AccountsLedgerEngine:
                     pm = pd.get("method") or d.get("payment_method") or d.get("payment_mode") or r.get("payment_mode") or "Cash"
                     is_cr = bool(any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
                     c_val, cr_val, b_val = split_payment_modes(amt, pm, pd, is_credit_bill=is_cr)
+                    c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
                     item_data.update({
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
                         "card": b_val, "card_amount": b_val, "payment_mode": pm,
+                        "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                        "payment_details": pd,
                         "particulars": d.get("item") or [],
                         "bill_type": bt_no or "INVEST",
                         "bill_type_name": bt_name or disp_type,
                         "is_investigation": True,
+                        "package_name": pkg_name or "",
+                        "is_package": is_pkg,
                         "doctor": d.get("doctor") or d.get("referredBy") or "",
                         "created_by": d.get("created_by") or "",
                         "lastmodified_by": d.get("CashierID") or d.get("lastmodified_by") or ""
@@ -843,10 +948,13 @@ class AccountsLedgerEngine:
                     pd = d.get("payment_details") or {}
                     pm = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or r.get("payment_mode") or "Cash"
                     c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+                    c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
                     item_data.update({
                         "gross": amt, "net_amount": amt, "amount": amt,
                         "cash": c_val, "credit": cr_val, "bank": b_val,
                         "card": b_val, "card_amount": b_val, "payment_mode": pm,
+                        "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                        "payment_details": pd,
                         "particulars": d.get("items") or [],
                         "created_by": d.get("created_by") or "",
                         "lastmodified_by": d.get("lastmodified_by") or ""
@@ -872,6 +980,7 @@ class AccountsLedgerEngine:
                         pm = pd.get("method") or d.get("payment_mode") or d.get("payment_method") or r.get("payment_mode") or "Cash"
                         is_cr = bool(any(k in str(d.get("payment_mode") or "").upper() for k in ["CREDIT", "INSURANCE"]))
                         c_val, cr_val, b_val = split_payment_modes(net_paid, pm, pd, is_credit_bill=is_cr)
+                        c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
                         
                         # Decompose departmental charges from line items
                         items = d.get("items") or []
@@ -894,6 +1003,8 @@ class AccountsLedgerEngine:
                             "net_amount": net_paid, "amount": net_paid,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
                             "card": b_val, "card_amount": b_val, "payment_mode": pm,
+                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                            "payment_details": pd,
                             "room_charges": round(room_c, 2), "nursing_charges": round(nursing_c, 2),
                             "doctor_charges": round(doctor_c, 2), "doctor_fees": round(doctor_c, 2),
                             "lab_charges": round(lab_c, 2), "pharmacy_charges": round(pharm_c, 2),
@@ -913,6 +1024,7 @@ class AccountsLedgerEngine:
                         pd = pay.get("payment_details") or {}
                         pm = pd.get("method") or pay.get("payment_mode") or r.get("payment_mode") or "Cash"
                         c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+                        c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
                         # Under unified ledger taxonomy, non-cash receivables and cards/banks are grouped under credit_amount
                         all_credit_val = round(cr_val + b_val, 2)
                         item_data.update({
@@ -920,18 +1032,23 @@ class AccountsLedgerEngine:
                             "cash": c_val, "credit": cr_val, "bank": b_val,
                             "card": b_val, "card_amount": b_val, "bank_amount": b_val,
                             "cash_amount": c_val, "credit_amount": all_credit_val,
-                            "payment_mode": pm
+                            "payment_mode": pm,
+                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                            "payment_details": pd
                         })
                     else:
                         pm = r.get("payment_mode") or "Cash"
                         c_val, cr_val, b_val = split_payment_modes(coll_amt, pm)
+                        c_mach, c_type, c_num = extract_card_metadata(None, pm, b_val)
                         all_credit_val = round(cr_val + b_val, 2)
                         item_data.update({
                             "gross": coll_amt, "net_amount": coll_amt, "amount": coll_amt, "advance_amount": coll_amt,
                             "cash": c_val, "credit": cr_val, "bank": b_val,
                             "card": b_val, "card_amount": b_val, "bank_amount": b_val,
                             "cash_amount": c_val, "credit_amount": all_credit_val,
-                            "payment_mode": pm
+                            "payment_mode": pm,
+                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                            "payment_details": {}
                         })
 
                 elif cat in ["Sales Return", "sales_return", "SalesReturn"]:
