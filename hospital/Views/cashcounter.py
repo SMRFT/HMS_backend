@@ -3430,7 +3430,7 @@ def update_mainblock_pendingbills(request):
                 "billing_category": "Billing",
                 "transaction_type": "collected"
             })
-            if existing_cc or (str(billing_doc.get("payment_status", "")).lower() == "paid" and pending_amount == 0):
+            if existing_cc:
                 print(f"[CashCounterCollection] Already collected for Billing {b_no}, preventing duplicate insert.")
                 if str(billing_doc.get("payment_status", "")).lower() != "paid":
                     billing_col.update_one(
@@ -3486,8 +3486,8 @@ def update_mainblock_pendingbills(request):
                 "outlet_code": final_outlet,
                 "created_by": final_cashier,
                 "lastmodified_by": final_cashier,
-                "bill_no": bill_no,
-                "bill_number": bill_no,
+                "bill_no": b_no,
+                "bill_number": b_no,
                 "bill_type": bill_type,
                 "counter_code": _clean_str(counter_id, "CC0001"),
                 "shift_no": _clean_str(shiftno, ""),
@@ -3500,19 +3500,28 @@ def update_mainblock_pendingbills(request):
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                pat_name = billing_doc.get("patient_name") or billing_doc.get("patientname") or ""
+                if not pat_name and billing_doc.get("uhid"):
+                    try:
+                        p_doc = patient_collection.find_one({"uhid": str(billing_doc.get("uhid")).strip()})
+                        if p_doc:
+                            pat_name = p_doc.get("PatientName") or p_doc.get("name") or f"{p_doc.get('salutation', '')} {p_doc.get('firstName', '')} {p_doc.get('lastName', '')}".strip()
+                    except Exception:
+                        pass
+
                 _enrich_cash_counter_doc(
-                    hms_db, bill_no, "Billing", shiftno, payment_details,
+                    hms_db, b_no, "Billing", shiftno, payment_details,
                     amount=payment_details.get("Paid_amount", 0),
-                    patient_info={"uhid": bill_doc.get("uhid"), "patient_name": bill_doc.get("patient_name")}
+                    patient_info={"uhid": billing_doc.get("uhid"), "patient_name": pat_name}
                 )
             else:
-                print(f"[CashCounterCollection] Warning for bill {bill_no}: {cc_serializer.errors}")
+                print(f"[CashCounterCollection] Warning for bill {b_no}: {cc_serializer.errors}")
             recalculate_and_update_shift_details(shiftno)
             return Response({
                 "status": "success",
                 "type": "Billing",
                 "bill_type": bill_type,
-                "bill_no": bill_no,
+                "bill_no": b_no,
                 "new_payment_status": new_status
             }, status=status.HTTP_200_OK)
 
