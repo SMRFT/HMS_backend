@@ -43,6 +43,9 @@ def credit_card_report_api(request):
             return raw_s[:10], raw_s[:10]
 
         # Extract and normalize card/bank bills
+        card_type_param = str(data.get("card_type") or data.get("cardType") or "").strip().lower()
+        card_machine_param = str(data.get("card_machine") or data.get("cardMachine") or "").strip().lower()
+
         normalized_bills = []
         for b in res["bills"]:
             if b.get("bank", 0) > 0:
@@ -73,7 +76,66 @@ def credit_card_report_api(request):
                 else:
                     card_type = str(card_type).upper()
 
-                card_number = b.get("card_number") or b.get("terminal_machine") or "POS"
+                # Card machine resolution
+                card_machine = b.get("card_machine")
+                if not card_machine or card_machine == "POS":
+                    pd = b.get("payment_details") or {}
+                    if isinstance(pd, str):
+                        try:
+                            pd = json.loads(pd)
+                        except Exception:
+                            pd = {}
+                    found_mach = (
+                        pd.get("Card Machine") or pd.get("card_machine") or pd.get("cardMachine") or
+                        pd.get("pos_machine") or pd.get("machine_name") or pd.get("machine") or
+                        pd.get("pos") or pd.get("terminal") or pd.get("terminal_machine") or ""
+                    )
+                    if not found_mach and isinstance(pd.get("breakdown"), list):
+                        for item in pd["breakdown"]:
+                            if isinstance(item, dict):
+                                found_mach = (
+                                    item.get("Card Machine") or item.get("card_machine") or item.get("cardMachine") or
+                                    item.get("pos_machine") or item.get("machine_name") or item.get("machine") or
+                                    item.get("pos") or item.get("terminal") or item.get("terminal_machine") or ""
+                                )
+                                if found_mach:
+                                    break
+                    if found_mach:
+                        card_machine = str(found_mach).strip()
+                    elif not card_machine:
+                        if "PAYTM" in p_mode: card_machine = "Paytm"
+                        elif "BAJAJ" in p_mode: card_machine = "Bajaj"
+                        elif "360" in p_mode: card_machine = "360 POS"
+                        elif "PNB" in p_mode: card_machine = "PNB"
+                        elif any(k in p_mode for k in ["UPI", "GPAY", "GOOGLE", "PHONEPE", "BHIM", "QR"]): card_machine = "UPI"
+                        else: card_machine = "POS"
+
+                card_number = b.get("card_number") or ""
+                if not card_number:
+                    pd = b.get("payment_details") or {}
+                    if isinstance(pd, str):
+                        try:
+                            pd = json.loads(pd)
+                        except Exception:
+                            pd = {}
+                    card_number = str(pd.get("card_number") or pd.get("cardNumber") or pd.get("card_no") or "").strip()
+                    if not card_number and isinstance(pd.get("breakdown"), list):
+                        for item in pd["breakdown"]:
+                            if isinstance(item, dict):
+                                c_n = str(item.get("card_number") or item.get("cardNumber") or item.get("card_no") or "").strip()
+                                if c_n:
+                                    card_number = c_n
+                                    break
+                if not card_number:
+                    card_number = card_machine
+
+                # Apply card_type or card_machine filter if supplied via query params
+                if card_type_param and card_type_param != "all":
+                    if card_type.lower() != card_type_param and card_type_param not in card_type.lower():
+                        continue
+                if card_machine_param and card_machine_param != "all":
+                    if card_machine.lower() != card_machine_param and card_machine_param not in card_machine.lower():
+                        continue
                 
                 normalized_bills.append({
                     **b,
@@ -86,6 +148,7 @@ def credit_card_report_api(request):
                     "ip_number": ip_val,
                     "patient_name": b.get("patient_name") or "General / Cash Patient",
                     "card_type": card_type,
+                    "card_machine": card_machine,
                     "card_number": card_number,
                     "amount": amt,
                     "card_amount": amt,
@@ -163,8 +226,11 @@ def credit_card_report_api(request):
 
         machine_summary = {}
         for r in flat_rows_with_slno:
-            m_key = r.get("card_number") or r.get("card_type") or "Main POS"
+            m_key = r.get("card_machine") or r.get("card_number") or r.get("card_type") or "Main POS"
             machine_summary[m_key] = round(machine_summary.get(m_key, 0.0) + r["amount"], 2)
+
+        distinct_card_types = sorted(list({r["card_type"] for r in flat_rows_with_slno if r.get("card_type")}))
+        distinct_card_machines = sorted(list({r["card_machine"] for r in flat_rows_with_slno if r.get("card_machine")}))
 
         summary = {
             **res["financial_summary"],
@@ -173,7 +239,9 @@ def credit_card_report_api(request):
             "total_card_collection": grand_total,
             "total_card_amount": grand_total,
             "by_category": by_category_summary,
-            "by_machine": machine_summary
+            "by_machine": machine_summary,
+            "card_types": distinct_card_types,
+            "card_machines": distinct_card_machines
         }
 
         return Response({
