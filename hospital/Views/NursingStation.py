@@ -3612,6 +3612,20 @@ def remove_individual_test_from_radiology_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+def _format_rs_amount(val):
+    """Safely converts BSON Decimal128 / numeric / string totals to formatted 'Rs. X,XXX.XX'."""
+    if val is None or val == "":
+        return ""
+    try:
+        if hasattr(val, "to_decimal"):
+            num = float(val.to_decimal())
+        else:
+            num = float(str(val).strip())
+        return f"Rs. {num:,.2f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
 def get_patient_billing_clearance_data(ip_number, uhid=None):
     """
     Evaluates inpatient clearance across 6 streams:
@@ -3669,7 +3683,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("investBillDate") or d.get("created_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         status_str = d.get("status") or "Result Pending"
 
         raw_items = d.get("item", [])
@@ -3726,7 +3740,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("investBillDate") or d.get("created_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         status_str = d.get("status") or "Result Pending"
 
         raw_items = d.get("item", [])
@@ -3823,7 +3837,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("net_amount") if d.get("net_amount") is not None else d.get("total_amount")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         st_str = d.get("billing_status") or "Pending"
 
         item_details = []
