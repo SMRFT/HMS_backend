@@ -1009,10 +1009,10 @@ def OP_salesreturn_billdetails(request):
                 "message": "medicine_particulars must be an array"
             }, status=status.HTTP_400_BAD_REQUEST)
  
-        if not bill_no or not uhid or not medicine_particulars:
+        if not bill_no or not medicine_particulars:
             return Response({
                 "status":  "error",
-                "message": "bill_no, uhid and medicine_particulars are required"
+                "message": "bill_no and medicine_particulars are required"
             }, status=status.HTTP_400_BAD_REQUEST)
  
         # =========================
@@ -1302,6 +1302,65 @@ def OP_salesreturn_billdetails(request):
                 patient_name = p_dict.get("name", "")
         except Exception:
             pass
+
+        if not patient_name:
+            try:
+                b_doc = bill_col.find_one({"bill_no": bill_no}, {"patient_name": 1, "patientname": 1})
+                if b_doc:
+                    patient_name = b_doc.get("patient_name") or b_doc.get("patientname") or ""
+            except Exception:
+                pass
+
+        # Sync document into MongoDB hospital_salesreturn collection for Cash Counter
+        try:
+            tax_amt = 0.0
+            for it in cleaned_particulars:
+                try:
+                    c_amt = float(it.get("CGST_Amt") or it.get("cgst_amt") or 0)
+                    s_amt = float(it.get("SGST_Amt") or it.get("sgst_amt") or 0)
+                    tax_amt += (c_amt + s_amt)
+                except Exception:
+                    pass
+
+            b_info = bill_col.find_one({"bill_no": bill_no}, {"patient_name": 1, "patientname": 1, "doctor_id": 1, "doctor_name": 1, "inpatient_number": 1}) or {}
+            ret_patient_name = patient_name or b_info.get("patient_name") or b_info.get("patientname") or ""
+
+            salesreturn_doc = {
+                "sales_return_number": return_bill_no,
+                "return_no": return_bill_no,
+                "return_bill_no": return_bill_no,
+                "bill_no": bill_no,
+                "uhid": uhid or None,
+                "inpatient_number": b_info.get("inpatient_number") or "",
+                "patient_name": ret_patient_name,
+                "outlet_code": outlet_code,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "total_amount": float(return_amount or 0),
+                "return_amount": float(return_amount or 0),
+                "refund_amount": float(return_amount or 0),
+                "tax_amount": round(tax_amt, 2),
+                "payment_type": payment_type,
+                "status": "Pending",
+                "returned_items": cleaned_particulars,
+                "medicine_particulars": cleaned_particulars,
+                "created_by": employee_id,
+                "created_date": datetime.utcnow(),
+                "return_bill_date": datetime.utcnow(),
+                "return_date": datetime.utcnow(),
+                "bill_type": bill_type,
+                "doctor_id": b_info.get("doctor_id"),
+                "doctor_name": b_info.get("doctor_name"),
+            }
+
+            from .dbcollection import salesreturn_collection
+            salesreturn_collection.update_one(
+                {"return_bill_no": return_bill_no},
+                {"$set": salesreturn_doc},
+                upsert=True
+            )
+        except Exception as err:
+            logger.error(f"Error syncing to hospital_salesreturn: {err}")
 
         user_name = get_employee_name_by_id(str(employee_id).strip()) if employee_id else ""
         if not user_name or user_name == "Unknown":
@@ -1698,7 +1757,7 @@ def get_return_bills(request):
                 # ---------------------------------------------------
 
                 doc["collection_name"] = collection_name
-                doc["patient_name"] = patient_name
+                doc["patient_name"] = patient_name or doc.get("patient_name") or doc.get("patientname") or ""
                 doc["counter_id"] = counter_id
                 doc["counter_name"] = counter_name
                 doc["bill_type_name"] = bill_type_name

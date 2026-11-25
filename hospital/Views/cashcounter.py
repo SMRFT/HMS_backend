@@ -5590,40 +5590,21 @@ def OPPharmacy_pending_bills(request):
         # Dynamically resolve employee ID from payload, headers, query params, or JWT
         employee_id = (
             data.get("auth-user-id")
-            or request.headers.get("User-Id")
-            or request.headers.get("user-id")
-            or request.headers.get("auth-user-id")
-            or request.GET.get("auth-user-id")
-            or request.GET.get("user_id")
-            or request.GET.get("employee_id")
-            or extract_aud_employee_id(request)
+            
         )
 
         # ✅ DYNAMIC AUTH CODES (Tenant & Branch Context - No Hardcoding)
         hospital_code = (
             data.get("auth-hospital-code")
-            or request.headers.get("Hospital-Code")
-            or request.headers.get("hospital-code")
-            or request.headers.get("auth-hospital-code")
-            or request.GET.get("auth-hospital-code")
-            or request.GET.get("hospital_code")
+            
         )
         branch_code = (
             data.get("auth-branch-code")
-            or request.headers.get("Branch-Code")
-            or request.headers.get("branch-code")
-            or request.headers.get("auth-branch-code")
-            or request.GET.get("auth-branch-code")
-            or request.GET.get("branch_code")
+            
         )
         outlet_code = (
             data.get("auth-outlet-code")
-            or request.headers.get("Outlet-Code")
-            or request.headers.get("outlet-code")
-            or request.headers.get("auth-outlet-code")
-            or request.GET.get("auth-outlet-code")
-            or request.GET.get("outlet_code")
-            or request.GET.get("outlet")
+            
         )
 
         from .dbcollection import (
@@ -5904,21 +5885,23 @@ def OPPharmacy_pending_bills(request):
             status_and_conditions.append({"$or": search_conditions})
 
         if from_dt and to_dt:
-            mongo_filter["billing_status"] = {"$in": ["Billed", "Paid", "Processing", "Pending"]}
+            mongo_filter["billing_status"] = {"$in": ["Billed", "Paid"]}
             date_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 date_ors.append({fld: {"$gte": from_dt, "$lte": to_dt}})
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "pending":
-            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid)
-            mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
+            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid billed)
+            mongo_filter["billing_status"] = "Billed"
+            mongo_filter["bill_no"] = {"$nin": [None, ""]}
             date_ors = []
             for fld in ["bill_date", "created_date"]:
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "unpaid":
-            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid bills)
-            mongo_filter["billing_status"] = {"$in": ["Billed", "Processing", "Pending"]}
+            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid billed bills)
+            mongo_filter["billing_status"] = "Billed"
+            mongo_filter["bill_no"] = {"$nin": [None, ""]}
             status_and_conditions.append({"$or": [
                 {"bill_date": {"$lt": today_start_local}},
                 {"created_date": {"$lt": today_start_local}},
@@ -5934,12 +5917,15 @@ def OPPharmacy_pending_bills(request):
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif not search_query:
-            # 🎯 Default: All unpaid cash bills + Paid cash bills from current date
+            # 🎯 Default: All unpaid billed cash bills + Paid cash bills from current date
             today_paid_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 today_paid_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": [
-                {"billing_status": {"$in": ["Billed", "Processing", "Pending"]}},
+                {
+                    "billing_status": "Billed",
+                    "bill_no": {"$nin": [None, ""]}
+                },
                 {
                     "billing_status": "Paid",
                     "$or": today_paid_ors
@@ -6096,7 +6082,7 @@ def OPPharmacy_pending_bills(request):
                     serialized[amt_key] = convert_decimal(serialized.get(amt_key, 0))
 
             b_status = str(bill.get("billing_status") or "").strip()
-            is_unpaid_status = b_status in ["Billed", "Processing", "Pending"]
+            is_unpaid_status = (b_status == "Billed" and bool(bill.get("bill_no")))
             is_paid_status = (b_status == "Paid")
 
             if is_paid_status:
