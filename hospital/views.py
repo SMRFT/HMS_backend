@@ -782,7 +782,9 @@ def patient_registration_stats(request):
         patient_coll = hms_db['hospital_patient']
 
         bill_query = {
-            'billed_date': {'$gte': start_dt, '$lte': end_dt}
+            'billed_date': {'$gte': start_dt, '$lte': end_dt},
+            'is_active': {'$ne': False},
+            'payment_status': {'$ne': 'Cancelled'}
         }
         if doctor_id:
             d_str = str(doctor_id).strip()
@@ -1052,7 +1054,11 @@ def patient_visit_list(request):
                 })
 
             formatted_history = []
+            cancel_reason = ""
+            has_cancel_history = False
             for h in (bill.get('edit_history') or []):
+                if not isinstance(h, dict):
+                    continue
                 raw_user = str(h.get('user', '')).strip()
                 resolved_user = emp_map.get(raw_user, raw_user)
 
@@ -1076,14 +1082,22 @@ def patient_visit_list(request):
                     if formatted_h_dt:
                         h_date = formatted_h_dt
 
-                reason_val = h.get('reason', '') or ''
+                reason_val = h.get('reason', '') or h.get('cancel_reason', '') or ''
                 if not reason_val and isinstance(h.get('changes'), dict):
                     reason_val = h.get('changes', {}).get('refund', {}).get('reason', '')
+
+                if h.get('is_cancelled'):
+                    has_cancel_history = True
+                    cancel_reason = str(h.get('cancel_reason') or reason_val or cancel_reason).strip()
 
                 formatted_history.append({
                     'date': h_date,
                     'user': resolved_user,
                     'reason': reason_val,
+                    'is_cancelled': bool(h.get('is_cancelled', False)),
+                    'cancel_reason': h.get('cancel_reason', ''),
+                    'cancelled_by': h.get('cancelled_by', ''),
+                    'cancelled_date': _format_ist_str(h.get('cancelled_date')) if h.get('cancelled_date') else '',
                     'changes': formatted_changes
                 })
 
@@ -1100,6 +1114,10 @@ def patient_visit_list(request):
             dist_val = p.get('district') or ''
 
             billed_dt_str = _format_ist_str(bill.get('billed_date'))
+
+            is_active_flag = bill.get('is_active', True) is not False
+            pay_stat = bill.get('payment_status')
+            is_cancelled_flag = (not is_active_flag) or (str(pay_stat or '').lower() == 'cancelled') or has_cancel_history
 
             data.append({
                 "uhid": p.get('uhid'),
@@ -1122,8 +1140,11 @@ def patient_visit_list(request):
                 "registrationFee": str(bill.get('registration_fee') or 0),
                 "consultingFee": str(bill.get('consulting_fee') or 0),
                 "billAmount": str(bill.get('total_fees') or 0),
-                "paymentStatus": bill.get('payment_status'),
+                "paymentStatus": "Cancelled" if is_cancelled_flag else pay_stat,
                 "paymentMethod": bill.get('payment_method') or 'Cash',
+                "isActive": is_active_flag,
+                "isCancelled": is_cancelled_flag,
+                "cancelReason": cancel_reason,
                 "date": billed_dt_str,
                 "created_by": str(bill.get('created_by') or ''),
                 "preparedBy": emp_map.get(str(bill.get('created_by') or '').strip()) or str(bill.get('created_by') or 'Staff'),

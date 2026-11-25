@@ -128,7 +128,9 @@ def advanced_dashboard_stats(request):
         })
 
         period_op = mongo_db["hospital_billing"].count_documents({
-            "billed_date": {"$gte": range_start_utc, "$lte": range_end_utc}
+            "billed_date": {"$gte": range_start_utc, "$lte": range_end_utc},
+            "is_active": {"$ne": False},
+            "payment_status": {"$ne": "Cancelled"}
         })
 
         period_discharge = mongo_db["hospital_admission"].count_documents({

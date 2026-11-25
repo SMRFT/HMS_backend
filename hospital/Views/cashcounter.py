@@ -942,7 +942,7 @@ def calculate_shift_collection(shift_no):
 
         # 1. Billing (Registration/Consultation)
         paid_bills = list(db["hospital_billing"].find(
-            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}},
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}, "is_active": {"$ne": False}},
             {"total_fees": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
         ))
         for b in paid_bills:
@@ -955,7 +955,7 @@ def calculate_shift_collection(shift_no):
         
         # Pending
         pending_bills = list(db["hospital_billing"].find(
-            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}},
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}, "is_active": {"$ne": False}},
             {"total_fees": 1}
         ))
         for b in pending_bills:
@@ -2769,7 +2769,8 @@ def get_mainblock_pendingbills(request):
         def build_module_query(status_key, status_val, date_key):
             conds = [
                 {status_key: status_val},
-                {"is_cancelled": {"$ne": True}}
+                {"is_cancelled": {"$ne": True}},
+                {"is_active": {"$ne": False}}
             ]
             if is_received_req:
                 conds.append(received_payment_filter)
