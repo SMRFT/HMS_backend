@@ -6121,12 +6121,25 @@ def pharmacy_view_bills(request):
             if active_r:
                 serialized["room_no"] = " | ".join(filter(None, [active_r.get("ward"), active_r.get("room_no") or active_r.get("room")]))
 
-        # Line items
+        # Line items (exclude deleted medicines)
         updated_items = []
         for item in (b.get("medicine_particulars") or []):
             if not isinstance(item, dict):
                 continue
             it = dict(item)
+
+            # Exclude deleted medicines from particulars
+            if it.get("is_deleted") is True or it.get("deleted_is") is True or it.get("is_active") is False:
+                continue
+            del_qty = sum(
+                float(h.get("qty_deleted") or h.get("qty") or 0)
+                for h in (it.get("edit_history") or [])
+                if isinstance(h, dict) and h.get("action") == "medicine_deleted"
+            )
+            orig_qty = float(it.get("qty") or it.get("quantity") or 0)
+            if del_qty >= orig_qty and orig_qty > 0:
+                continue
+
             item_id_val = it.get("item_id")
             bn_val = str(it.get("batch_number") or it.get("batch_no") or it.get("batch") or "").strip()
             master_item = item_map.get(item_id_val, {})
@@ -7317,10 +7330,21 @@ def PharmacyBillanalysis(request):
             tot_ip_return += ip_ret_amt
             tot_sales_return += sales_ret_amt
 
-            # Serialized medicine items
+            # Serialized medicine items (exclude deleted medicines)
             serialized_meds = []
             for m in med_list:
                 if isinstance(m, dict):
+                    if m.get("is_deleted") is True or m.get("deleted_is") is True or m.get("is_active") is False:
+                        continue
+                    del_qty = sum(
+                        float(h.get("qty_deleted") or h.get("qty") or 0)
+                        for h in (m.get("edit_history") or [])
+                        if isinstance(h, dict) and h.get("action") == "medicine_deleted"
+                    )
+                    orig_qty = float(m.get("qty") or m.get("quantity") or 0)
+                    if del_qty >= orig_qty and orig_qty > 0:
+                        continue
+
                     m_id = m.get("item_id")
                     m_name = m.get("item_name")
                     if not m_name and m_id is not None:

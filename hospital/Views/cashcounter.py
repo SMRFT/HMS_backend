@@ -6260,6 +6260,19 @@ def OPPharmacy_pending_bills(request):
                 if not isinstance(item, dict):
                     continue
                 it_dict = dict(item)
+
+                # ✅ Exclude deleted medicines from billing and print
+                if it_dict.get("is_deleted") is True or it_dict.get("deleted_is") is True or it_dict.get("is_active") is False:
+                    continue
+                del_qty = sum(
+                    float(h.get("qty_deleted") or h.get("qty") or 0)
+                    for h in (it_dict.get("edit_history") or [])
+                    if isinstance(h, dict) and h.get("action") == "medicine_deleted"
+                )
+                orig_qty = float(it_dict.get("qty") or it_dict.get("quantity") or 0)
+                if del_qty >= orig_qty and orig_qty > 0:
+                    continue
+
                 iid_val = int(it_dict["item_id"]) if str(it_dict.get("item_id", "")).isdigit() else it_dict.get("item_id")
 
                 it_dict["item_name"] = it_dict.get("item_name") or item_map.get(iid_val, "")
