@@ -62,7 +62,9 @@ def dashboard_stats(request):
         })
 
         op_count = mongo_db["hospital_billing"].count_documents({
-            "billed_date": {"$gte": start_utc, "$lte": end_utc}
+            "billed_date": {"$gte": start_utc, "$lte": end_utc},
+            "is_active": {"$ne": False},
+            "payment_status": {"$ne": "Cancelled"}
         })
 
         renewals = max(0, op_count - new_patients)
@@ -103,7 +105,9 @@ def dashboard_stats(request):
                 "created_date": {"$gte": d_start, "$lte": d_end}
             })
             c_op = mongo_db["hospital_billing"].count_documents({
-                "billed_date": {"$gte": d_start, "$lte": d_end}
+                "billed_date": {"$gte": d_start, "$lte": d_end},
+                "is_active": {"$ne": False},
+                "payment_status": {"$ne": "Cancelled"}
             })
             c_ip = mongo_db["hospital_admission"].count_documents({
                 "is_admitted": True,

@@ -136,7 +136,7 @@ def doctor_dashboard_stats(request):
             return doctor_metrics_map[did]
 
         # 2. Aggregate OP Consultations & Revenue (hospital_billing)
-        op_match = {}
+        op_match = {"is_active": {"$ne": False}, "payment_status": {"$ne": "Cancelled"}}
         if start_utc and end_utc:
             op_match["billed_date"] = {"$gte": start_utc, "$lte": end_utc}
 
