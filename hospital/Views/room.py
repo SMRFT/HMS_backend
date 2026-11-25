@@ -1964,6 +1964,7 @@ def get_active_admission(request):
         # ── Active room (prioritize active room shifting over initial room_details) ─
         shiftings   = _safe_list(admission.get("roomShitingDetails"))
         has_shifted = any(isinstance(s, dict) for s in shiftings)
+        shift_count = len([s for s in shiftings if isinstance(s, dict)])
         room_details = _safe_list(admission.get("room_details"))
         active_room  = {}
         for s in reversed(shiftings):
@@ -2162,6 +2163,7 @@ def get_active_admission(request):
                 "bedNo":            active_room.get("bedNo", ""),
                 "room_details":     _normalize_ist_timestamps(room_details),
                 "has_shifted":      has_shifted,
+                "shift_count":      shift_count,
                 # ── Financial summary ──────────────────────────────────────
                 "total_advance":        total_advance,
                 "advance_count":        len(advances_summary),
@@ -2389,55 +2391,84 @@ def room_shifting_view(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # ── Guard: only one active shift allowed ──────────────────────────
+            # ── Multiple Shifting Support: resolve current active room ────────
             existing_shiftings = _safe_list(admission.roomShitingDetails)
-            active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
+            room_details       = _safe_list(admission.room_details)
 
-            if active_shiftings:
-                return Response(
-                    {
-                        "success": False,
-                        "error": "Room already shifted. Use Edit for the existing shifting record.",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            # ── Old room ──────────────────────────────────────────────────────
-            room_details = _safe_list(admission.room_details)
-            old_room_no  = old_bed_no = ""
-            for r in reversed(room_details):
-                if isinstance(r, dict) and r.get("is_roomActive"):
-                    old_room_no = str(r.get("roomNo", ""))
-                    old_bed_no  = str(r.get("bedNo",  ""))
+            old_room_no = old_bed_no = ""
+            # Prioritize active room from previous shiftings
+            for s in reversed(existing_shiftings):
+                if isinstance(s, dict) and s.get("is_roomActive"):
+                    old_room_no = str(s.get("newRoomNo", ""))
+                    old_bed_no  = str(s.get("newBedNo", ""))
                     break
+
+            if not old_room_no:
+                for r in reversed(room_details):
+                    if isinstance(r, dict) and r.get("is_roomActive"):
+                        old_room_no = str(r.get("roomNo", ""))
+                        old_bed_no  = str(r.get("bedNo", ""))
+                        break
+
             if not old_room_no and room_details:
                 last = room_details[-1]
                 if isinstance(last, dict):
                     old_room_no = str(last.get("roomNo", ""))
-                    old_bed_no  = str(last.get("bedNo",  ""))
+                    old_bed_no  = str(last.get("bedNo", ""))
 
-            # ── Deactivate current room in room_details & set endDateTime ─────
+            # Prevent shifting to the identical room and bed
+            if old_room_no and old_room_no == new_room and old_bed_no == new_bed:
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Patient is already in Room {new_room} / Bed {new_bed}.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             now_iso = _now_ist_iso()
+
+            # ── Deactivate previous active room in room_details & append new active room ──
             updated_room_details = []
+            max_entry_id = 0
             for room in room_details:
                 if not isinstance(room, dict):
                     continue
                 obj = dict(room)
+                try:
+                    eid = int(obj.get("room_entry_id") or 0)
+                    if eid > max_entry_id:
+                        max_entry_id = eid
+                except (ValueError, TypeError):
+                    pass
                 if obj.get("is_roomActive"):
                     obj["is_roomActive"] = False
                     obj["endDateTime"]   = now_iso
                 updated_room_details.append(obj)
 
+            updated_room_details.append({
+                "room_entry_id":  max_entry_id + 1,
+                "roomNo":         new_room,
+                "bedNo":          new_bed,
+                "is_roomActive":  True,
+                "is_roomCleaned": False,
+                "startDateTime":  now_iso,
+                "endDateTime":    None,
+            })
             admission.room_details = updated_room_details
 
-            # ── Build new shifting entry ──────────────────────────────────────
-            new_shifting_id = generate_shifting_id(existing_shiftings)
-
+            # ── Deactivate previous active shift in roomShitingDetails & append new shift ──
             cleaned_shiftings = []
             for shift in existing_shiftings:
-                if isinstance(shift, dict):
-                    cleaned_shiftings.append(dict(shift))
+                if not isinstance(shift, dict):
+                    continue
+                obj = dict(shift)
+                if obj.get("is_roomActive"):
+                    obj["is_roomActive"] = False
+                    obj["endDateTime"]   = now_iso
+                cleaned_shiftings.append(obj)
 
+            new_shifting_id = generate_shifting_id(existing_shiftings)
             cleaned_shiftings.append({
                 "shifting_id":      new_shifting_id,
                 "bill_number":      new_shifting_id,
