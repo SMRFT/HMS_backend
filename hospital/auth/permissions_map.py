@@ -67,7 +67,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/patient-visit-list/?(\?.*)?$': 'HMS-P-AIN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/patient-master-list/?(\?.*)?$': 'HMS-P-AIN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/patient-master-update(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
-    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-op-visits(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIIN',
+    r'^(/_b_a_c_k_e_n_d/HMS)?/patient-op-visits(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/cancel-registration-visit(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
     r'^(/_b_a_c_k_e_n_d/HMS)?/patient-bill-update(?:/[^/]+)+/?(\?.*)?$': 'HMS-P-AIN',
     r'^/_b_a_c_k_e_n_d/HMS/get-pending-qr-registrations/?(\?.*)?$': 'HMS-P-AIN',
