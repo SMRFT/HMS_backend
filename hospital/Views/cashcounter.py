@@ -4419,8 +4419,10 @@ def _save_cash_counter(
 
 def _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status):
     now_dt = datetime.utcnow()
+    doc_status = "Partial" if new_status == "Partial" else "Refund"
     return {
         "status":            "Paid",            # was "Pending" → always "Paid" after cashier processes
+        "document_status":   doc_status,        # was "Pending" → "Refund" (or "Partial")
         "payment_status":    new_status,        # "Refund" or "Partial"
         "paymentStatus":     "Paid",            # for collections using camelCase (hospital_investrefund)
         "payment_details":   payment_details,

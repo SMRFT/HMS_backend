@@ -1514,10 +1514,11 @@ def get_return_bills(request):
         print("all keys     :", list(data.keys()))
 
         # ---------------------------------------------------
-        # CURRENT DATE
+        # CURRENT DATE (Asia/Kolkata timezone to match queries)
         # ---------------------------------------------------
 
-        current_date = datetime.utcnow().date()
+        ist = pytz.timezone("Asia/Kolkata")
+        current_date = datetime.now(ist).date()
 
         # ---------------------------------------------------
         # VALIDATION
