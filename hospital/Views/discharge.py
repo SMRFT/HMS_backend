@@ -2914,6 +2914,9 @@ def search_discharge_patient(request):
         # ── 1. hospital_investbilling ─────────────────────────────────────────
         # Strictly only active bills (is_active: True), paymentMethod: "Credit", paymentStatus: "Pending", with IP number
         # If is_active is false, don't get that data
+        # For customer type INSURANCE alone: match nabh_code in insurance packages collections
+        # (and hospital_lab_nabh_rate for lab alone) and display that name.
+        # If not insurance: do NOT replace with insurance package names.
         inv_q = None
         if effective_ip:
             inv_q = {
@@ -2923,9 +2926,9 @@ def search_discharge_patient(request):
                         {"inpatient_number": effective_ip},
                         {"ip_number": effective_ip}
                     ]},
-                    {"is_active": True},
-                    {"paymentMethod": "Credit"},
-                    {"paymentStatus": "Pending"}
+                    {"is_active": {"$in": [True, "true", "True"]}},
+                    {"paymentMethod": {"$regex": "^credit$", "$options": "i"}},
+                    {"paymentStatus": {"$regex": "^pending$", "$options": "i"}}
                 ]
             }
 
@@ -2953,22 +2956,29 @@ def search_discharge_patient(request):
 
                 parsed_items = []
                 for it in raw_items:
-                    it_btn = str(it.get("billTypeNo", "") or b_btn or "LAB01").strip().upper()
+                    it_btn = str(it.get("billTypeNo", "") or b_btn or "").strip().upper()
                     nc = str(it.get("nabh_code") or it.get("nabhCode") or bill.get("nabh_code") or bill.get("nabhCode") or "").strip()
                     tid = it.get("test_id") or it.get("item_id")
 
-                    is_lab = it_btn.startswith("LAB") or b_btn.startswith("LAB") or b_bt in ("16", "33") or b_wtype == "LAB" or nc.upper().startswith("LB")
-                    if is_lab:
-                        if tid is not None and str(tid).strip():
-                            t_str = str(tid).strip()
-                            lab_test_ids.add(t_str)
-                            if t_str.isdigit():
-                                lab_test_ids.add(int(t_str))
-                        if nc:
-                            lab_codes.add(nc.upper())
-                    else:
-                        if nc:
-                            pkg_codes.add(nc.upper())
+                    is_lab = (
+                        it_btn.startswith("LAB") or
+                        b_btn.startswith("LAB") or
+                        b_bt in ("6", "16", "33", "61") or
+                        b_wtype == "LAB" or
+                        nc.upper().startswith("LB")
+                    )
+                    if is_insurance:
+                        if is_lab:
+                            if tid is not None and str(tid).strip():
+                                t_str = str(tid).strip()
+                                lab_test_ids.add(t_str)
+                                if t_str.isdigit():
+                                    lab_test_ids.add(int(t_str))
+                            if nc:
+                                lab_codes.add(nc.upper())
+                        else:
+                            if nc:
+                                pkg_codes.add(nc.upper())
 
                     parsed_items.append((it, it_btn, nc, tid, is_lab))
                 parsed_bills.append((bill, parsed_items))
@@ -2976,72 +2986,81 @@ def search_discharge_patient(request):
             # 1. Fetch matching records from hospital_lab_nabh_rate (for lab alone)
             lab_map_tid = {}
             lab_map_code = {}
-            if lab_test_ids or lab_codes:
+            lab_map_name = {}
+            if is_insurance:
                 try:
-                    lab_conds = []
-                    if lab_test_ids:
-                        lab_conds.append({"test_id": {"$in": list(lab_test_ids)}})
-                    if lab_codes:
-                        lab_conds.append({"nabh_code": {"$in": list(lab_codes)}})
-                    q_lab = {"$or": lab_conds} if len(lab_conds) > 1 else lab_conds[0]
-                    for doc in db["hospital_lab_nabh_rate"].find(q_lab):
+                    for doc in db["hospital_lab_nabh_rate"].find():
                         tid = doc.get("test_id")
-                        if tid is not None and str(tid).strip():
+                        if isinstance(tid, list):
+                            for t in tid:
+                                if t is not None and str(t).strip():
+                                    lab_map_tid[str(t).strip()] = doc
+                        elif tid is not None and str(tid).strip():
                             lab_map_tid[str(tid).strip()] = doc
+
                         c = str(doc.get("nabh_code") or "").strip().upper()
-                        if c:
+                        if c and c not in lab_map_code:
                             lab_map_code[c] = doc
+
+                        tname = str(doc.get("test_name") or doc.get("name") or "").strip()
+                        if tname:
+                            norm_t = re.sub(r"[^a-zA-Z0-9]", "", tname.lower())
+                            if norm_t not in lab_map_name:
+                                lab_map_name[norm_t] = doc
                 except Exception as e:
                     print(f"Error querying hospital_lab_nabh_rate: {e}")
 
             # 2. Fetch matching records from insurance packages collections (for non-lab / other investigations)
-            raw_ins_comp = str(
-                patient_info.get("insurance_company") or
-                patient_info.get("company") or
-                patient_info.get("company_code") or
-                admission_doc.get("insurance_company") or
-                admission_doc.get("company_code") or ""
-            ).lower()
-
-            preferred_pkg_colls = []
-            if "echs" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_echs")
-            elif "railway" in raw_ins_comp or "esi" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
-            elif "cghs" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_cghs")
-                preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
-            elif "cm" in raw_ins_comp or "chief minister" in raw_ins_comp or "tnhsp" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_cm_scheme")
-            elif "nhis" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_nhis")
-            elif "gipsa" in raw_ins_comp:
-                preferred_pkg_colls.append("hospital_insurance_packages_general_gipsa")
-
-            all_pkg_colls = [
-                "hospital_insurance_packages_echs",
-                "hospital_insurance_packages_cghs",
-                "hospital_insurance_packages_railway_cghs_esi_esic",
-                "hospital_insurance_packages_cm_scheme",
-                "hospital_insurance_packages_nhis",
-                "hospital_insurance_packages_general_gipsa",
-                "hospital_insurance_packages_implants_and_specified",
-            ]
-            for c in all_pkg_colls:
-                if c not in preferred_pkg_colls:
-                    preferred_pkg_colls.append(c)
-
             pkg_map_code = {}
-            if pkg_codes:
+            pkg_map_name = {}
+            if is_insurance:
+                raw_ins_comp = str(
+                    patient_info.get("insurance_company") or
+                    patient_info.get("company") or
+                    patient_info.get("company_code") or
+                    admission_doc.get("insurance_company") or
+                    admission_doc.get("company_code") or ""
+                ).lower()
+
+                preferred_pkg_colls = []
+                if "railway" in raw_ins_comp or "esi" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
+                elif "echs" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_echs")
+                elif "cghs" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_cghs")
+                    preferred_pkg_colls.append("hospital_insurance_packages_railway_cghs_esi_esic")
+                elif "cm" in raw_ins_comp or "chief minister" in raw_ins_comp or "tnhsp" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_cm_scheme")
+                elif "nhis" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_nhis")
+                elif "gipsa" in raw_ins_comp:
+                    preferred_pkg_colls.append("hospital_insurance_packages_general_gipsa")
+
+                all_pkg_colls = [
+                    "hospital_insurance_packages_railway_cghs_esi_esic",
+                    "hospital_insurance_packages_cghs",
+                    "hospital_insurance_packages_echs",
+                    "hospital_insurance_packages_cm_scheme",
+                    "hospital_insurance_packages_nhis",
+                    "hospital_insurance_packages_general_gipsa",
+                    "hospital_insurance_packages_implants_and_specified",
+                ]
+                for c in all_pkg_colls:
+                    if c not in preferred_pkg_colls:
+                        preferred_pkg_colls.append(c)
+
                 try:
                     for coll_name in preferred_pkg_colls:
-                        rem_codes = [c for c in pkg_codes if c not in pkg_map_code]
-                        if not rem_codes:
-                            break
-                        for doc in db[coll_name].find({"nabh_code": {"$in": rem_codes}}):
+                        for doc in db[coll_name].find():
                             c_code = str(doc.get("nabh_code") or "").strip().upper()
                             if c_code and c_code not in pkg_map_code:
                                 pkg_map_code[c_code] = doc
+                            pname = str(doc.get("name") or doc.get("itemName") or "").strip()
+                            if pname:
+                                norm_p = re.sub(r"[^a-zA-Z0-9]", "", pname.lower())
+                                if norm_p not in pkg_map_name:
+                                    pkg_map_name[norm_p] = doc
                 except Exception as e:
                     print(f"Error querying insurance package collections: {e}")
 
@@ -3057,34 +3076,70 @@ def search_discharge_patient(request):
                     item_name = orig_name
                     price     = _to_float(it.get("price", 0) or it.get("rate", 0))
                     matched_rec = None
+                    norm_orig = re.sub(r"[^a-zA-Z0-9]", "", orig_name.lower())
 
-                    if is_lab:
-                        t_s = str(test_id).strip() if test_id is not None else ""
-                        matched_rec = lab_map_tid.get(t_s) or (lab_map_code.get(nabh_code.upper()) if nabh_code else None)
-                        if matched_rec:
-                            lab_name = matched_rec.get("test_name") or matched_rec.get("name")
-                            if lab_name:
-                                item_name = str(lab_name).strip()
-                            if matched_rec.get("nabh_code"):
-                                nabh_code = str(matched_rec.get("nabh_code")).strip()
-                            if item_btn == "LAB02" and matched_rec.get("nabh_rate") is not None:
-                                price = _to_float(matched_rec.get("nabh_rate"))
-                            elif item_btn == "LAB03" and matched_rec.get("non_nabh_rate") is not None:
-                                price = _to_float(matched_rec.get("non_nabh_rate"))
-                    else:
-                        if nabh_code:
-                            matched_rec = pkg_map_code.get(nabh_code.upper())
+                    if is_insurance:
+                        if is_lab:
+                            t_s = str(test_id).strip() if test_id is not None else ""
+                            if t_s and t_s in lab_map_tid:
+                                matched_rec = lab_map_tid[t_s]
+                            elif nabh_code and nabh_code.upper() in lab_map_code:
+                                matched_rec = lab_map_code[nabh_code.upper()]
+                            elif norm_orig in lab_map_name:
+                                matched_rec = lab_map_name[norm_orig]
+                            elif "hcv" in norm_orig or "hepatitisc" in norm_orig:
+                                matched_rec = lab_map_code.get("LB043")
+                            elif "urea" in norm_orig and "bun" not in norm_orig:
+                                matched_rec = lab_map_code.get("LB057")
+                            elif "creatinine" in norm_orig:
+                                matched_rec = lab_map_code.get("LB058")
+                            elif "hba1c" in norm_orig:
+                                matched_rec = lab_map_code.get("LB122")
+
                             if matched_rec:
-                                pkg_item_name = matched_rec.get("name") or matched_rec.get("itemName")
+                                lab_name = matched_rec.get("test_name") or matched_rec.get("name")
+                                if lab_name:
+                                    item_name = str(lab_name).strip()
+                                if matched_rec.get("nabh_code"):
+                                    nabh_code = str(matched_rec.get("nabh_code")).strip()
+                                if matched_rec.get("nabh_rate") is not None:
+                                    price = _to_float(matched_rec.get("nabh_rate"))
+                        else:
+                            if nabh_code and nabh_code.upper() in pkg_map_code:
+                                matched_rec = pkg_map_code[nabh_code.upper()]
+                            elif norm_orig in pkg_map_name:
+                                matched_rec = pkg_map_name[norm_orig]
+                            elif norm_orig == "ecg" or "electrocardio" in norm_orig:
+                                matched_rec = pkg_map_code.get("CI001")
+                            elif "mrifistulo" in norm_orig or ("mri" in norm_orig and "fistul" in norm_orig):
+                                matched_rec = pkg_map_code.get("RI143")
+                            elif "chestpa" in norm_orig or ("chest" in norm_orig and "pa" in norm_orig):
+                                matched_rec = pkg_map_code.get("RI034") or pkg_map_code.get("RI035")
+                            elif "echo" in norm_orig:
+                                matched_rec = pkg_map_code.get("RI001")
+
+                            if matched_rec:
+                                pkg_item_name = matched_rec.get("name") or matched_rec.get("itemName") or matched_rec.get("package_name")
                                 if pkg_item_name:
                                     item_name = str(pkg_item_name).strip()
                                 if matched_rec.get("nabh_code"):
                                     nabh_code = str(matched_rec.get("nabh_code")).strip()
-                                if price == 0 and matched_rec.get("nabh_rate") is not None:
+                                if matched_rec.get("nabh_rate") is not None:
                                     price = _to_float(matched_rec.get("nabh_rate"))
 
                     qty   = int(it.get("quantity", 1) or 1)
                     disc  = _to_float(it.get("discount", 0))
+
+                    resolved_pkg_name = ""
+                    if is_insurance:
+                        if matched_rec and not is_lab:
+                            resolved_pkg_name = str(matched_rec.get("name") or matched_rec.get("itemName") or item_name).strip()
+                        elif matched_rec and is_lab:
+                            resolved_pkg_name = str(matched_rec.get("test_name") or item_name).strip()
+                        else:
+                            resolved_pkg_name = str(it.get("packageName", "") or bill.get("packageName", "")).strip()
+                    else:
+                        resolved_pkg_name = str(it.get("packageName", "") or bill.get("packageName", "")).strip()
 
                     # Group duplicate investigation items by itemName and price
                     g_key = (item_name.upper(), round(price, 2))
@@ -3103,6 +3158,7 @@ def search_discharge_patient(request):
                             "invest_bill_no": bill_no,
                             "bill_object_id": str(bill.get("_id")),
                             "itemName":       item_name,
+                            "name":           item_name,
                             "price":          price,
                             "rate":           str(price),
                             "quantity":       qty,
@@ -3111,12 +3167,13 @@ def search_discharge_patient(request):
                             "billTypeNo":     item_btn,
                             "bill_type":      bill.get("bill_type", 16),
                             "test_id":        test_id,
+                            "code":           nabh_code or (str(test_id) if test_id else ""),
                             "nabh_code":      nabh_code,
                             "nabh_rate":      _to_float(matched_rec.get("nabh_rate")) if matched_rec and matched_rec.get("nabh_rate") is not None else None,
                             "non_nabh_rate":  _to_float(matched_rec.get("non_nabh_rate")) if matched_rec and matched_rec.get("non_nabh_rate") is not None else None,
                             "doctor":         doctor,
                             "payment_status": bill.get("paymentStatus", ""),
-                            "package_name":   matched_rec.get("name") if (matched_rec and not is_lab) else (it.get("packageName", "") or bill.get("packageName", "")),
+                            "package_name":   resolved_pkg_name,
                             "source":         "hospital_investbilling",
                         }
                         if item_name:
