@@ -1632,6 +1632,17 @@ def _apply_fields(obj, data, existing=None, request=None):
     elif existing and getattr(existing, "discharge_date", None):
         obj.discharge_date = existing.discharge_date
 
+    # Handle bill_date (default: today's date if creating, or data.get("bill_date"))
+    raw_bd = data.get("bill_date")
+    if raw_bd:
+        parsed_bd = _parse_discharge_dt(raw_bd)
+        if parsed_bd:
+            obj.bill_date = parsed_bd
+    elif existing and getattr(existing, "bill_date", None):
+        obj.bill_date = existing.bill_date
+    elif not getattr(obj, "bill_date", None):
+        obj.bill_date = timezone.now()
+
     # ── Audit & Organization Fields ──────────────────────────────────────────
     user_id = None
     if request:
@@ -4393,14 +4404,19 @@ def discharge_billing_list_create(request):
         _apply_fields(obj, data, request=request)
         obj.status    = billing_status
 
-        raw_dd = data.get("discharge_date") or data.get("date_of_discharge") or data.get("bill_date") or data.get("dischargeDateTime")
-        parsed_dd = _parse_discharge_dt(raw_dd)
+        raw_dd = data.get("discharge_date") or data.get("date_of_discharge") or data.get("dischargeDateTime")
+        parsed_dd = _parse_discharge_dt(raw_dd) if raw_dd else None
         if parsed_dd:
             obj.discharge_date = parsed_dd
-            obj.bill_date = parsed_dd
-        else:
+        elif not getattr(obj, "discharge_date", None):
+            obj.discharge_date = timezone.now()
+
+        raw_bd = data.get("bill_date")
+        parsed_bd = _parse_discharge_dt(raw_bd) if raw_bd else None
+        if parsed_bd:
+            obj.bill_date = parsed_bd
+        elif not getattr(obj, "bill_date", None):
             obj.bill_date = timezone.now()
-            obj.discharge_date = obj.bill_date
 
         if billing_status == "Estimate":
             obj.estimate_number = generate_estimate_number()
@@ -4463,12 +4479,17 @@ def discharge_billing_detail(request, pk):
         else:
             billing.status = curr_status
 
-        raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("bill_date") or request.data.get("dischargeDateTime")
+        raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("dischargeDateTime")
         if raw_dd:
             parsed_dd = _parse_discharge_dt(raw_dd)
             if parsed_dd:
                 billing.discharge_date = parsed_dd
-                billing.bill_date = parsed_dd
+
+        raw_bd = request.data.get("bill_date")
+        if raw_bd:
+            parsed_bd = _parse_discharge_dt(raw_bd)
+            if parsed_bd:
+                billing.bill_date = parsed_bd
 
         _normalise_decimals(billing)
 
@@ -4552,14 +4573,19 @@ def convert_estimate_to_bill(request, pk):
     estimate.status    = "Billed"
     estimate.bill_no   = generate_bill_number()
 
-    raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("bill_date") or getattr(estimate, "discharge_date", None)
-    parsed_dd = _parse_discharge_dt(raw_dd)
+    raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("dischargeDateTime") or getattr(estimate, "discharge_date", None)
+    parsed_dd = _parse_discharge_dt(raw_dd) if raw_dd else None
     if parsed_dd:
         estimate.discharge_date = parsed_dd
-        estimate.bill_date = parsed_dd
+    elif not getattr(estimate, "discharge_date", None):
+        estimate.discharge_date = timezone.now()
+
+    raw_bd = request.data.get("bill_date")
+    parsed_bd = _parse_discharge_dt(raw_bd) if raw_bd else None
+    if parsed_bd:
+        estimate.bill_date = parsed_bd
     else:
         estimate.bill_date = timezone.now()
-        estimate.discharge_date = estimate.bill_date
 
     estimate.shiftno   = request.data.get("shiftno")
     if request.data.get("payment_method"):
