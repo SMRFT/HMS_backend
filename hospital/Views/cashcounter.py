@@ -2535,7 +2535,7 @@ def get_mainblock_pendingbills(request):
     try:
 
         data = request.data if isinstance(request.data, dict) else {}
-        employee_id = data.get("auth-user-id") or request.GET.get("auth-user-id")
+        employee_id = data.get("auth-user-id") 
         hospital_code = data.get("auth-hospital-code") or request.GET.get("auth-hospital-code")
         branch_code = data.get("auth-branch-code") or request.GET.get("auth-branch-code")
         outlet_code = data.get("auth-outlet-code") or request.GET.get("auth-outlet-code")
