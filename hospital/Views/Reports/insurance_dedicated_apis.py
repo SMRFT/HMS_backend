@@ -612,16 +612,18 @@ def patient_wise_pharmacy_ip_bill_api(request):
 
                 # Apply date filters
                 if adm_day_start and b_dt and (b_ip != target_ip):
-                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    if b_check_date < adm_day_start.date():
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    adm_check_date = adm_day_start.date() if hasattr(adm_day_start, 'date') else (parse_date(str(adm_day_start)[:10]).date() if parse_date(str(adm_day_start)[:10]) else None)
+                    if b_check_date and adm_check_date and b_check_date < adm_check_date:
                         continue
 
                 if apply_dates and dt_start and b_dt:
-                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
-                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
-                    if not (s_date_only <= b_date_only <= e_date_only):
-                        continue
+                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else (parse_date(str(dt_start)[:10]).date() if parse_date(str(dt_start)[:10]) else None)
+                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else (parse_date(str(dt_end)[:10]).date() if parse_date(str(dt_end)[:10]) else None)
+                    if b_date_only and s_date_only and e_date_only:
+                        if not (s_date_only <= b_date_only <= e_date_only):
+                            continue
 
                 b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
 
@@ -3008,16 +3010,18 @@ def medicine_abstract_api(request):
                             b_dt = parse_date(raw_date[:10])
 
                 if adm_day_start and b_dt and (b_ip != target_ip):
-                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    if b_check_date < adm_day_start.date():
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    adm_check_date = adm_day_start.date() if hasattr(adm_day_start, 'date') else (parse_date(str(adm_day_start)[:10]).date() if parse_date(str(adm_day_start)[:10]) else None)
+                    if b_check_date and adm_check_date and b_check_date < adm_check_date:
                         continue
 
                 if apply_dates and dt_start and b_dt:
-                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
-                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
-                    if not (s_date_only <= b_date_only <= e_date_only):
-                        continue
+                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else (parse_date(str(dt_start)[:10]).date() if parse_date(str(dt_start)[:10]) else None)
+                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else (parse_date(str(dt_end)[:10]).date() if parse_date(str(dt_end)[:10]) else None)
+                    if b_date_only and s_date_only and e_date_only:
+                        if not (s_date_only <= b_date_only <= e_date_only):
+                            continue
 
                 b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
 

@@ -52,6 +52,37 @@ def parse_date(date_str, is_end=False):
             continue
     return None
 
+def _to_naive_dt(val):
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None)
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
+    if isinstance(val, str):
+        s = val.strip()
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %I:%M %p",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+        ):
+            try:
+                return datetime.strptime(s[:19], fmt)
+            except Exception:
+                continue
+    return None
+
 def to_ist(val):
     if not val:
         return None
@@ -1447,13 +1478,14 @@ class AccountsLedgerEngine:
                 r_shift = str(sr.get("shiftno") or sr.get("shift_no") or "").strip()
                 rc_dt = sr.get("created_date") or sr.get("return_date")
                 r_outlet = str(sr.get("outlet_code") or "").strip()
-                if not r_shift and isinstance(rc_dt, datetime):
+                rc_dt_safe = _to_naive_dt(rc_dt)
+                if not r_shift and rc_dt_safe:
                     for sh in shifts_in_db:
                         sh_outlet = str(sh.get("SelectedOutlet") or sh.get("outlet_code") or "").strip()
                         if not r_outlet or sh_outlet == r_outlet:
-                            sh_start = sh.get("StartingTime")
-                            sh_end = sh.get("closingTime") or (sh_start + timedelta(hours=14) if sh_start else None)
-                            if sh_start and sh_end and (sh_start <= rc_dt <= sh_end):
+                            sh_start = _to_naive_dt(sh.get("StartingTime"))
+                            sh_end = _to_naive_dt(sh.get("closingTime")) or (sh_start + timedelta(hours=14) if sh_start else None)
+                            if sh_start and sh_end and (sh_start <= rc_dt_safe <= sh_end):
                                 r_shift = str(sh.get("shiftno") or "").strip()
                                 break
 

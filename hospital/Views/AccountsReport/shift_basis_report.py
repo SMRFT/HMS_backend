@@ -113,8 +113,8 @@ def shift_basis_accounts_report(request):
 
         client.close()
         
-        # Sort by date
-        report_data.sort(key=lambda x: x["bill_date"] or "", reverse=True)
+        # Sort by date safely
+        report_data.sort(key=lambda x: str(x.get("bill_date") or ""), reverse=True)
 
         return Response({
             "success": True,
