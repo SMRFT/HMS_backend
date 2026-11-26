@@ -803,17 +803,17 @@ def sanitize_medicines(medicines, outlet_code=None):
                 except Exception:
                     pass
 
-        # When NO discount: preserve unit CGST/SGST directly from stock DB
-        # When WITH discount: calculate discounted CGST/SGST on taxable_val!
+        # When NO discount: calculate line CGST/SGST = unit stock DB value * qty
+        # When WITH discount: calculate discounted line CGST/SGST on taxable_val!
         if disc_amt == 0 and cgst_amt_from_stock is not None and cgst_amt_from_stock > 0:
-            cgst_amt = round(cgst_amt_from_stock, 2)
+            cgst_amt = round(cgst_amt_from_stock * qty_val, 2)
         elif cgst_pct > 0 and taxable_val > 0:
-            cgst_amt = round((taxable_val * cgst_pct) / (100.0 * max(1, qty_val)), 2)
+            cgst_amt = round((taxable_val * cgst_pct) / 100.0, 2)
 
         if disc_amt == 0 and sgst_amt_from_stock is not None and sgst_amt_from_stock > 0:
-            sgst_amt = round(sgst_amt_from_stock, 2)
+            sgst_amt = round(sgst_amt_from_stock * qty_val, 2)
         elif sgst_pct > 0 and taxable_val > 0:
-            sgst_amt = round((taxable_val * sgst_pct) / (100.0 * max(1, qty_val)), 2)
+            sgst_amt = round((taxable_val * sgst_pct) / 100.0, 2)
 
         line_gst = round((taxable_val * total_gst_pct) / 100.0, 2) if total_gst_pct > 0 else 0.0
         line_total = round(taxable_val + line_gst, 2) if disc_amt > 0 else calc_price
@@ -6297,10 +6297,7 @@ def pharmacy_view_bills(request):
             sgst_pct = db_sgst_pct if db_sgst_pct > 0 else (to_num(stock_item.get("SGST_Percentage", 0)) or to_num(master_item.get("SGST_Percentage", 0)))
 
             db_cgst_amt = to_num(it.get("CGST_Amt", 0))
-            cgst_amt_val = db_cgst_amt if db_cgst_amt > 0 else to_num(stock_item.get("CGST_Amt", 0))
-
             db_sgst_amt = to_num(it.get("SGST_Amt", 0))
-            sgst_amt_val = db_sgst_amt if db_sgst_amt > 0 else to_num(stock_item.get("SGST_Amt", 0))
 
             product_val = to_num(it.get("product_value", 0))
             taxable_val = to_num(it.get("taxable_value", 0))
@@ -6326,10 +6323,27 @@ def pharmacy_view_bills(request):
             if taxable_val == 0.0:
                 taxable_val = max(0.0, product_val - disc_amt)
 
-            if cgst_amt_val == 0.0 and cgst_pct > 0 and taxable_val > 0:
-                cgst_amt_val = round((taxable_val * cgst_pct) / 100.0, 2)
-            if sgst_amt_val == 0.0 and sgst_pct > 0 and taxable_val > 0:
-                sgst_amt_val = round((taxable_val * sgst_pct) / 100.0, 2)
+            # Calculate line CGST/SGST amounts (multiplied by qty)
+            expected_line_cgst = round((taxable_val * cgst_pct) / 100.0, 2) if taxable_val > 0 and cgst_pct > 0 else 0.0
+            expected_line_sgst = round((taxable_val * sgst_pct) / 100.0, 2) if taxable_val > 0 and sgst_pct > 0 else 0.0
+
+            if db_cgst_amt > 0:
+                if qty_val > 1 and abs(db_cgst_amt * qty_val - expected_line_cgst) < abs(db_cgst_amt - expected_line_cgst) - 0.05:
+                    cgst_amt_val = round(db_cgst_amt * qty_val, 2)
+                else:
+                    cgst_amt_val = db_cgst_amt
+            else:
+                stock_cgst = to_num(stock_item.get("CGST_Amt", 0))
+                cgst_amt_val = round(stock_cgst * qty_val, 2) if stock_cgst > 0 else expected_line_cgst
+
+            if db_sgst_amt > 0:
+                if qty_val > 1 and abs(db_sgst_amt * qty_val - expected_line_sgst) < abs(db_sgst_amt - expected_line_sgst) - 0.05:
+                    sgst_amt_val = round(db_sgst_amt * qty_val, 2)
+                else:
+                    sgst_amt_val = db_sgst_amt
+            else:
+                stock_sgst = to_num(stock_item.get("SGST_Amt", 0))
+                sgst_amt_val = round(stock_sgst * qty_val, 2) if stock_sgst > 0 else expected_line_sgst
 
             it["product_value"]    = product_val
             it["taxable_value"]    = taxable_val
