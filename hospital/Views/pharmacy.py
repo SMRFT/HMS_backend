@@ -115,17 +115,11 @@ def get_pharmacy_stock(request):
         data = request.data if isinstance(getattr(request, "data", None), dict) else {}
         hospital_code = (
             data.get("auth-hospital-code")
-            or (request.headers.get("Hospital-Code") if hasattr(request, "headers") else None)
-            or (request.headers.get("hospital-code") if hasattr(request, "headers") else None)
-            or (request.GET.get("hospital_code") if hasattr(request, "GET") else None)
-            or "SH001"
+            
         )
         branch_code = (
             data.get("auth-branch-code")
-            or (request.headers.get("Branch-Code") if hasattr(request, "headers") else None)
-            or (request.headers.get("branch-code") if hasattr(request, "headers") else None)
-            or (request.GET.get("branch_code") if hasattr(request, "GET") else None)
-            or "SHB001"
+           
         )
         outlet_code = resolve_request_outlet(request, data) or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None) or "OLET001"
         if isinstance(outlet_code, (list, tuple)):
@@ -416,27 +410,8 @@ def get_pharmacy_stock(request):
                     "batch_number": 1,
                     "expiry_date": 1,
                     "total_stock": 1,
-                    "mrp": {
-                        "$cond": [
-                            {"$gt": [{"$ifNull": ["$mrp", 0]}, 0]},
-                            "$mrp",
-                            {"$ifNull": ["$Selling_Price", 0]}
-                        ]
-                    },
-                    "Selling_Price": {
-                        "$cond": [
-                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
-                            "$Selling_Price",
-                            {"$ifNull": ["$mrp", 0]}
-                        ]
-                    },
-                    "price": {
-                        "$cond": [
-                            {"$gt": [{"$ifNull": ["$Selling_Price", 0]}, 0]},
-                            "$Selling_Price",
-                            {"$ifNull": ["$mrp", 0]}
-                        ]
-                    },
+                    "mrp": {"$ifNull": ["$mrp", 0]},
+                    "price": {"$ifNull": ["$mrp", 0]},
 
                     "available_stock": 1,
                     "reorder_level": 1,
@@ -707,9 +682,60 @@ def sanitize_medicines(medicines):
         disc_type = str(med.get("discount_type") or "percent").strip()
         disc_amt = float(med.get("discount_amount", 0) or 0)
         qty_val = int(med.get("qty", 0) or med.get("quantity", 0))
-        price_val = float(med.get("price", 0) or med.get("mrp", 0))
-        calc_price = float(med.get("calculated_price", 0) or (qty_val * price_val))
-        mrp_val = float(med.get("mrp", 0) or (calc_price / qty_val if qty_val > 0 else price_val))
+
+        # Get MRP and GST directly from hospital_pharmacystock without calculation
+        mrp_from_stock = None
+        cgst_pct_from_stock = None
+        sgst_pct_from_stock = None
+        cgst_amt_from_stock = None
+        sgst_amt_from_stock = None
+        if item_id_val and bn_val:
+            stk_doc = stock_collection.find_one(
+                {"item_id": item_id_val, "batch_number": bn_val},
+                {"mrp": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "CGST_Amt": 1, "SGST_Amt": 1}
+            )
+            if not stk_doc and str(item_id_val).isdigit():
+                stk_doc = stock_collection.find_one(
+                    {"item_id": int(item_id_val), "batch_number": bn_val},
+                    {"mrp": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "CGST_Amt": 1, "SGST_Amt": 1}
+                )
+            if stk_doc:
+                if stk_doc.get("mrp") is not None:
+                    try:
+                        val = float(str(stk_doc["mrp"]))
+                        if val > 0:
+                            mrp_from_stock = val
+                    except Exception:
+                        pass
+                if stk_doc.get("CGST_Percentage") is not None:
+                    try:
+                        cgst_pct_from_stock = float(str(stk_doc["CGST_Percentage"]))
+                    except Exception:
+                        pass
+                if stk_doc.get("SGST_Percentage") is not None:
+                    try:
+                        sgst_pct_from_stock = float(str(stk_doc["SGST_Percentage"]))
+                    except Exception:
+                        pass
+                if stk_doc.get("CGST_Amt") is not None:
+                    try:
+                        cgst_amt_from_stock = float(str(stk_doc["CGST_Amt"]))
+                    except Exception:
+                        pass
+                if stk_doc.get("SGST_Amt") is not None:
+                    try:
+                        sgst_amt_from_stock = float(str(stk_doc["SGST_Amt"]))
+                    except Exception:
+                        pass
+
+        mrp_val = mrp_from_stock if mrp_from_stock is not None else float(med.get("mrp") or med.get("price") or 0)
+        price_val = mrp_val
+        calc_price = round(qty_val * mrp_val, 2)
+
+        if cgst_pct_from_stock is not None:
+            cgst_pct = cgst_pct_from_stock
+        if sgst_pct_from_stock is not None:
+            sgst_pct = sgst_pct_from_stock
 
         total_gst_pct = cgst_pct + sgst_pct
         product_val = round(calc_price / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_price
@@ -737,9 +763,15 @@ def sanitize_medicines(medicines):
                 except Exception:
                     pass
 
-        if cgst_amt == 0.0 and cgst_pct > 0 and taxable_val > 0:
+        # If stored in stock DB, use directly from DB without calculation
+        if cgst_amt_from_stock is not None and cgst_amt_from_stock > 0 and disc_amt == 0:
+            cgst_amt = round(qty_val * cgst_amt_from_stock, 2)
+        elif cgst_amt == 0.0 and cgst_pct > 0 and taxable_val > 0:
             cgst_amt = round((taxable_val * cgst_pct) / 100.0, 2)
-        if sgst_amt == 0.0 and sgst_pct > 0 and taxable_val > 0:
+
+        if sgst_amt_from_stock is not None and sgst_amt_from_stock > 0 and disc_amt == 0:
+            sgst_amt = round(qty_val * sgst_amt_from_stock, 2)
+        elif sgst_amt == 0.0 and sgst_pct > 0 and taxable_val > 0:
             sgst_amt = round((taxable_val * sgst_pct) / 100.0, 2)
 
         is_del = bool(med.get("is_deleted") or med.get("deleted_is"))
@@ -753,7 +785,6 @@ def sanitize_medicines(medicines):
             "expiry_date": expiry_val,
             "hsn_code": hsn_val,
             "qty": qty_val,
-            "price": price_val,
             "mrp": mrp_val,
             "calculated_price": calc_price,
             "product_value": round(product_val, 4),
@@ -970,6 +1001,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
             })
 
         new_item = {k: v for k, v in new.items() if k != "item_name" and k != "quantity"}
+        new_item = {k: v for k, v in new.items() if k not in ("item_name", "quantity", "price")}
         new_item["qty"] = new_qty
         new_item["edit_history"] = history
         updated.append(new_item)
@@ -977,7 +1009,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
     # Process additions (in new but not in old)
     for new in unmatched_new:
         new_qty = _get_qty(new)
-        new_item = {k: v for k, v in new.items() if k != "item_name" and k != "quantity"}
+        new_item = {k: v for k, v in new.items() if k not in ("item_name", "quantity", "price")}
         new_item["qty"] = new_qty
         new_item.setdefault("edit_history", [])
         new_item["edit_history"].append({
@@ -992,7 +1024,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
     # Process deletions (in old but not in new)
     for old in unmatched_old:
         old_qty = _get_qty(old)
-        old_item = {k: v for k, v in old.items() if k != "item_name" and k != "quantity"}
+        old_item = {k: v for k, v in old.items() if k not in ("item_name", "quantity", "price")}
         old_item["qty"] = old_qty
         old_item.setdefault("edit_history", [])
         old_item["is_deleted"] = True
@@ -2085,18 +2117,14 @@ def get_estimate_bills(request):
                 unit_mrp = 0.0
                 if med.get("mrp") is not None and float(med.get("mrp")) > 0:
                     unit_mrp = float(med.get("mrp"))
+                elif med.get("price") is not None and float(med.get("price")) > 0:
+                    unit_mrp = float(med.get("price"))
                 elif calc_price > 0 and qty > 0:
                     unit_mrp = round(calc_price / qty, 2)
                 elif med_total > 0 and qty > 0:
                     unit_mrp = round(med_total / qty, 2)
-                elif med.get("Selling_Price") is not None and float(med.get("Selling_Price")) > 0:
-                    unit_mrp = float(med.get("Selling_Price"))
-                elif med.get("selling_price") is not None and float(med.get("selling_price")) > 0:
-                    unit_mrp = float(med.get("selling_price"))
-                elif med.get("price") is not None and float(med.get("price")) > 0:
-                    unit_mrp = float(med.get("price"))
 
-                rate = float(med.get("price") or unit_mrp)
+                rate = float(unit_mrp or med.get("price") or 0)
                 mrp = float(unit_mrp or rate)
 
                 particulars.append({
@@ -2107,10 +2135,7 @@ def get_estimate_bills(request):
                     "batch_number": med.get("batch_number", ""),
                     "qty": qty,
                     "quantity": qty,
-                    "price": rate,
                     "mrp": mrp,
-                    "Selling_Price": mrp,
-                    "selling_price": mrp,
                     "calculated_price": float(calc_price or (qty * mrp)),
                     "total": float(med_total or (qty * mrp)),
                     "CGST_Percentage": float(med.get("CGST_Percentage", 0) or 0),
@@ -2211,16 +2236,12 @@ def convert_estimate_to_bill(request, estimate_no):
             unit_mrp = 0.0
             if m.get("mrp") is not None and float(m.get("mrp")) > 0:
                 unit_mrp = float(m.get("mrp"))
+            elif m.get("price") is not None and float(m.get("price")) > 0:
+                unit_mrp = float(m.get("price"))
             elif calc_price > 0 and qty > 0:
                 unit_mrp = round(calc_price / qty, 2)
             elif m_total > 0 and qty > 0:
                 unit_mrp = round(m_total / qty, 2)
-            elif m.get("Selling_Price") is not None and float(m.get("Selling_Price")) > 0:
-                unit_mrp = float(m.get("Selling_Price"))
-            elif m.get("selling_price") is not None and float(m.get("selling_price")) > 0:
-                unit_mrp = float(m.get("selling_price"))
-            elif m.get("price") is not None and float(m.get("price")) > 0:
-                unit_mrp = float(m.get("price"))
 
             item_name = m.get("item_name") or m.get("medicine_name") or m.get("name") or ""
             if not item_name and item_id:
@@ -2231,7 +2252,7 @@ def convert_estimate_to_bill(request, estimate_no):
                 except Exception:
                     pass
 
-            rate = float(m.get("price") or unit_mrp)
+            rate = float(unit_mrp or m.get("price") or 0)
             mrp = float(unit_mrp or rate)
             converted_items.append({
                 "item_id": item_id,
@@ -2240,10 +2261,7 @@ def convert_estimate_to_bill(request, estimate_no):
                 "batch_number": m.get("batch_number", ""),
                 "qty": qty,
                 "quantity": qty,
-                "price": rate,
                 "mrp": mrp,
-                "Selling_Price": mrp,
-                "selling_price": mrp,
                 "calculated_price": float(calc_price or (qty * mrp)),
                 "total": float(m_total or (qty * mrp)),
                 "edit_history": m.get("edit_history", [])
@@ -4711,6 +4729,25 @@ def finalize_bill(request):
                 except Exception:
                     pass
 
+            # Resolve MRP directly from hospital_pharmacystock
+            resolved_mrp = None
+            resolved_sp = None
+            if item_id and bn_val:
+                try:
+                    stk_rec = bill_collection.database["hospital_pharmacystock"].find_one({"item_id": item_id, "batch_number": bn_val})
+                    if not stk_rec and str(item_id).isdigit():
+                        stk_rec = bill_collection.database["hospital_pharmacystock"].find_one({"item_id": int(item_id), "batch_number": bn_val})
+                    if stk_rec and stk_rec.get("mrp") is not None:
+                        val = float(str(stk_rec["mrp"]))
+                        if val > 0:
+                            resolved_mrp = val
+                except Exception:
+                    pass
+
+            final_mrp = resolved_mrp if resolved_mrp is not None else float(med.get("mrp") or med.get("price") or price or 0)
+            final_price = final_mrp
+            calculated_price = round(qty * final_mrp, 2)
+
             med_is_consumable = med.get("is_consumable_items")
             if med_is_consumable is None:
                 p_item = mongo_db["hospital_pharmacyitem"].find_one(
@@ -4732,11 +4769,10 @@ def finalize_bill(request):
                 "item_id":          item_id,
                 "batch_number":     bn_val,
                 "qty":              qty,
-                "price":            price,
                 "calculated_price": calculated_price,
                 "discount":         med.get("discount", 0),
                 "tax":              med.get("tax", 0),
-                "mrp":              med.get("mrp"),
+                "mrp":              final_mrp,
                 "expiry_date":      med.get("expiry_date"),
                 "dosage":           dosage_val,
                 "noOfDays":         no_days_val,
@@ -5961,7 +5997,7 @@ def pharmacy_view_bills(request):
                 search_iids.append(str(iid))
         for itm in pharmacy_item_collection.find(
             {"item_id": {"$in": search_iids}},
-            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "mrp": 1, "Selling_Price": 1, "_id": 0}
+            {"item_id": 1, "item_name": 1, "is_consumable_items": 1, "hsn": 1, "hsn_code": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "mrp": 1, "_id": 0}
         ):
             raw_id = itm.get("item_id")
             item_map[raw_id] = itm
@@ -6186,42 +6222,51 @@ def pharmacy_view_bills(request):
                     else:
                         it["expiry_date"] = str(exp_val)
 
-            cgst_pct = to_num(it.get("CGST_Percentage", 0))
-            sgst_pct = to_num(it.get("SGST_Percentage", 0))
-            if cgst_pct == 0.0:
-                cgst_pct = to_num(stock_item.get("CGST_Percentage")) or to_num(master_item.get("CGST_Percentage"))
-            if sgst_pct == 0.0:
-                sgst_pct = to_num(stock_item.get("SGST_Percentage")) or to_num(master_item.get("SGST_Percentage"))
-            it["CGST_Percentage"] = cgst_pct
-            it["SGST_Percentage"] = sgst_pct
-
-            price_val = to_num(it.get("price", 0))
-            if price_val == 0.0:
-                price_val = to_num(it.get("mrp", 0)) or to_num(stock_item.get("mrp", 0)) or to_num(master_item.get("Selling_Price", 0)) or to_num(master_item.get("mrp", 0))
+            # Prioritize exact stored DB values
+            db_price = to_num(it.get("price", 0))
+            db_mrp = to_num(it.get("mrp", 0))
+            price_val = db_price if db_price > 0 else (db_mrp if db_mrp > 0 else to_num(stock_item.get("mrp", 0)) or to_num(master_item.get("mrp", 0)))
+            mrp_val = db_mrp if db_mrp > 0 else (db_price if db_price > 0 else price_val)
 
             qty_val  = to_num(it.get("qty", 0) or it.get("quantity", 0))
             calc_val = to_num(it.get("calculated_price", 0))
             if calc_val == 0.0 and price_val > 0 and qty_val > 0:
                 calc_val = round(price_val * qty_val, 2)
 
+            cgst_pct = to_num(it.get("CGST_Percentage", 0))
+            if cgst_pct == 0.0:
+                cgst_pct = to_num(stock_item.get("CGST_Percentage")) or to_num(master_item.get("CGST_Percentage"))
+
+            sgst_pct = to_num(it.get("SGST_Percentage", 0))
+            if sgst_pct == 0.0:
+                sgst_pct = to_num(stock_item.get("SGST_Percentage")) or to_num(master_item.get("SGST_Percentage"))
+
             cgst_amt_val = to_num(it.get("CGST_Amt", 0))
             sgst_amt_val = to_num(it.get("SGST_Amt", 0))
 
-            total_gst_pct = cgst_pct + sgst_pct
-            product_val = round(calc_val / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_val
-            raw_dv = it.get("discount_value")
-            if raw_dv is not None and str(raw_dv).strip() not in ("", "%"):
-                disc_val = to_num(raw_dv)
-            elif it.get("discount") is not None and str(it.get("discount")).strip() not in ("", "%"):
-                disc_val = to_num(it.get("discount"))
-            elif it.get("discount_percent") is not None and str(it.get("discount_percent")).strip() not in ("", "%"):
-                disc_val = to_num(it.get("discount_percent"))
-            else:
-                disc_val = 0.0
+            product_val = to_num(it.get("product_value", 0))
+            taxable_val = to_num(it.get("taxable_value", 0))
             disc_amt = to_num(it.get("discount_amount", 0))
-            if disc_amt == 0.0 and disc_val > 0:
-                disc_amt = round(product_val * (disc_val / 100.0), 4)
-            taxable_val = max(0.0, product_val - disc_amt)
+
+            total_gst_pct = cgst_pct + sgst_pct
+            if product_val == 0.0:
+                product_val = round(calc_val / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_val
+
+            if disc_amt == 0.0:
+                raw_dv = it.get("discount_value")
+                if raw_dv is not None and str(raw_dv).strip() not in ("", "%"):
+                    disc_val = to_num(raw_dv)
+                elif it.get("discount") is not None and str(it.get("discount")).strip() not in ("", "%"):
+                    disc_val = to_num(it.get("discount"))
+                elif it.get("discount_percent") is not None and str(it.get("discount_percent")).strip() not in ("", "%"):
+                    disc_val = to_num(it.get("discount_percent"))
+                else:
+                    disc_val = 0.0
+                if disc_val > 0:
+                    disc_amt = round(product_val * (disc_val / 100.0), 4)
+
+            if taxable_val == 0.0:
+                taxable_val = max(0.0, product_val - disc_amt)
 
             if cgst_amt_val == 0.0 and cgst_pct > 0 and taxable_val > 0:
                 cgst_amt_val = round((taxable_val * cgst_pct) / 100.0, 2)
@@ -6231,11 +6276,14 @@ def pharmacy_view_bills(request):
             it["product_value"]    = product_val
             it["taxable_value"]    = taxable_val
             it["discount_amount"]  = disc_amt
+            it["CGST_Percentage"]  = cgst_pct
+            it["SGST_Percentage"]  = sgst_pct
             it["CGST_Amt"]         = cgst_amt_val
             it["SGST_Amt"]         = sgst_amt_val
             it["price"]            = price_val
-            it["mrp"]              = to_num(it.get("mrp", 0)) or to_num(stock_item.get("mrp", 0)) or to_num(master_item.get("mrp", 0)) or price_val
+            it["mrp"]              = mrp_val
             it["calculated_price"] = calc_val
+            it["total"]            = to_num(it.get("total", 0)) or calc_val
             it["edit_history"]     = it.get("edit_history", [])
             updated_items.append(it)
 
