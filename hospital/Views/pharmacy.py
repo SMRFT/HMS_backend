@@ -776,15 +776,19 @@ def sanitize_medicines(medicines, outlet_code=None):
         total_gst_pct = cgst_pct + sgst_pct
         product_val = round(calc_price / (1.0 + total_gst_pct / 100.0), 4) if total_gst_pct > 0 else calc_price
 
-        if disc_amt == 0 and disc_val > 0:
+        # Discount is calculated on Product Value (base without GST)
+        disc_amt_on_base = 0.0
+        if disc_val > 0:
             if disc_type == "amount":
-                disc_amt = disc_val / (1.0 + total_gst_pct / 100.0) if total_gst_pct > 0 else disc_val
+                disc_amt_on_base = disc_val / (1.0 + total_gst_pct / 100.0) if total_gst_pct > 0 else disc_val
             else:
-                disc_amt = product_val * (disc_val / 100.0)
-        elif disc_type == "amount" and disc_amt > 0 and total_gst_pct > 0:
-            disc_amt = disc_amt / (1.0 + total_gst_pct / 100.0)
+                disc_amt_on_base = product_val * (disc_val / 100.0)
+        elif disc_amt > 0:
+            # If only disc_amt was provided, reverse GST to get discount on base
+            disc_amt_on_base = disc_amt / (1.0 + total_gst_pct / 100.0) if total_gst_pct > 0 else disc_amt
 
-        taxable_val = max(0.0, product_val - disc_amt)
+        disc_amt_on_base = min(product_val, max(0.0, disc_amt_on_base))
+        taxable_val = max(0.0, product_val - disc_amt_on_base)
 
         cgst_amt = 0.0
         for k in ("CGST_Amt", "cgst_amount", "cgst_amt"):
@@ -806,18 +810,18 @@ def sanitize_medicines(medicines, outlet_code=None):
 
         # When NO discount: calculate line CGST/SGST = unit stock DB value * qty
         # When WITH discount: calculate discounted line CGST/SGST on taxable_val!
-        if disc_amt == 0 and cgst_amt_from_stock is not None and cgst_amt_from_stock > 0:
+        if disc_amt_on_base == 0 and cgst_amt_from_stock is not None and cgst_amt_from_stock > 0:
             cgst_amt = round(cgst_amt_from_stock * qty_val, 2)
         elif cgst_pct > 0 and taxable_val > 0:
             cgst_amt = round((taxable_val * cgst_pct) / 100.0, 2)
 
-        if disc_amt == 0 and sgst_amt_from_stock is not None and sgst_amt_from_stock > 0:
+        if disc_amt_on_base == 0 and sgst_amt_from_stock is not None and sgst_amt_from_stock > 0:
             sgst_amt = round(sgst_amt_from_stock * qty_val, 2)
         elif sgst_pct > 0 and taxable_val > 0:
             sgst_amt = round((taxable_val * sgst_pct) / 100.0, 2)
 
         line_gst = round((taxable_val * total_gst_pct) / 100.0, 2) if total_gst_pct > 0 else 0.0
-        line_total = round(taxable_val + line_gst, 2) if disc_amt > 0 else calc_price
+        line_total = round(taxable_val + line_gst, 2) if disc_amt_on_base > 0 else calc_price
         total_mrp_discount = round(max(0.0, calc_price - line_total), 2)
 
         is_del = bool(med.get("is_deleted") or med.get("deleted_is"))
@@ -845,9 +849,9 @@ def sanitize_medicines(medicines, outlet_code=None):
             "discount_type": disc_type,
             "discount_value": disc_val,
             "discount_percent": "%" if disc_type == "percent" else str(med.get("discount_percent") or "%"),
-            "discount_amount": round(total_mrp_discount if total_mrp_discount > 0 else disc_amt, 2),
+            "discount_amount": round(total_mrp_discount, 2),
             "discount": disc_val,
-            "total": float(med.get("total")) if med.get("total") is not None and disc_amt == 0 else line_total,
+            "total": line_total,
         }
         if is_del:
             clean_item["is_deleted"] = True
@@ -1146,6 +1150,22 @@ def save_pharmacy_bill(request):
     if status == "Billed" and not norm_pm:
         norm_pm = "Cash"
 
+    tot_taxable = round(sum(
+        float(m.get("taxable_value") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+    tot_cgst = round(sum(
+        float(m.get("CGST_Amt") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+    tot_sgst = round(sum(
+        float(m.get("SGST_Amt") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+
     fields = {
         # FIX 1: uhid is optional — stored as-is (None if not provided)
         "uhid":                     uhid,
@@ -1156,6 +1176,10 @@ def save_pharmacy_bill(request):
         # FIX 3: age stored as integer; also returned in every response
         "age":                      int(data.get("age", 0) or 0),
         "room_no":                  data.get("room_no"),
+        "taxable_value":            float(data.get("taxable_value") or tot_taxable),
+        "total_taxable_value":      float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable),
+        "total_cgst_amount":        float(data.get("total_cgst_amount") or tot_cgst),
+        "total_sgst_amount":        float(data.get("total_sgst_amount") or tot_sgst),
         "total_amount":             float(data.get("total_amount", 0)),
         "total_item_discount":      float(data.get("total_item_discount", 0) or 0),
         "discount_amount":          float(data.get("discount_amount", 0) or data.get("total_item_discount", 0) or data.get("overall_discount_amount", 0) or 0),
@@ -1782,6 +1806,22 @@ def save_oppharmacy_estimate(request):
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []), outlet_code=data.get("outlet_code"))
 
+    tot_taxable = round(sum(
+        float(m.get("taxable_value") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+    tot_cgst = round(sum(
+        float(m.get("CGST_Amt") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+    tot_sgst = round(sum(
+        float(m.get("SGST_Amt") or 0.0)
+        for m in medicines
+        if not m.get("is_deleted") and not m.get("deleted_is")
+    ), 2)
+
     record_doc = {
         "Bill_id": next_Bill_id,
         "uhid": data.get("uhid"),
@@ -1789,6 +1829,10 @@ def save_oppharmacy_estimate(request):
         "bill_type": data.get("bill_type"),
         "doctor_id": resolve_doctor_id(data.get("doctor_id")),
         "room_no": data.get("room_no"),
+        "taxable_value": float(data.get("taxable_value") or tot_taxable),
+        "total_taxable_value": float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable),
+        "total_cgst_amount": float(data.get("total_cgst_amount") or tot_cgst),
+        "total_sgst_amount": float(data.get("total_sgst_amount") or tot_sgst),
         "total_amount": float(data.get("total_amount", 0)),
         "total_item_discount": float(data.get("total_item_discount", 0) or 0),
         "discount_amount": float(data.get("discount_amount", 0) or data.get("total_item_discount", 0) or data.get("overall_discount_amount", 0) or 0),
@@ -5171,6 +5215,26 @@ def finalize_bill(request):
         else:
             set_payload["total_amount"]         = total_amount_to_use
             set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
+
+        tot_taxable = round(sum(
+            float(it.get("taxable_value") or 0.0)
+            for it in items_to_sum
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+        tot_cgst = round(sum(
+            float(it.get("CGST_Amt") or 0.0)
+            for it in items_to_sum
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+        tot_sgst = round(sum(
+            float(it.get("SGST_Amt") or 0.0)
+            for it in items_to_sum
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+        set_payload["taxable_value"]        = float(data.get("taxable_value") or tot_taxable)
+        set_payload["total_taxable_value"]  = float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable)
+        set_payload["total_cgst_amount"]    = float(data.get("total_cgst_amount") or tot_cgst)
+        set_payload["total_sgst_amount"]    = float(data.get("total_sgst_amount") or tot_sgst)
 
         # Do NOT save patient details when UHID is present (dynamically compared & displayed from patient collection by UHID).
         # Do NOT save billed_bill_no, converted_bill_no, or dispatch_history.
