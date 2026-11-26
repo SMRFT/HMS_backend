@@ -2987,6 +2987,19 @@ def collect_oppharmacy_payment(request):
                 }
                 hms_db["hospital_cashcountercollection"].insert_one(mongo_cc_data)
                 print(f"✅ CashCounterCollection saved directly to MongoDB for bill {bill.get('bill_no')}")
+                try:
+                    from .cashcounter import _enrich_cash_counter_doc
+                    _enrich_cash_counter_doc(
+                        hms_db,
+                        bill.get("bill_no"),
+                        "OPPharmacyBills",
+                        str(shiftno),
+                        payment_details,
+                        amount=payment_details.get("Paid_amount", 0),
+                        patient_info={"uhid": bill.get("uhid"), "patient_name": bill.get("patientname") or bill.get("patient_name")}
+                    )
+                except Exception as e_enrich:
+                    print(f"OP Pharmacy cash counter enrichment warning: {e_enrich}")
             else:
                 print(f"⚠️ CashCounterCollection already exists for bill {bill.get('bill_no')}, skipping duplicate insert")
         except Exception as e_cc:

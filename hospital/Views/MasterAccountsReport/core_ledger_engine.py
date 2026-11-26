@@ -254,6 +254,93 @@ def extract_card_metadata(pd, pm_str="", b_val=0.0):
 
     return c_mach, c_type, str(c_num).strip()
 
+def extract_misc_details(r, ep=None):
+    """
+    Extracts party/patient name, room number, description/narration, and account head
+    giving priority to hospital_cashcountercollection first, then falling back to hospital_receiptandpayment.
+    """
+    p_name = ""
+    r_no = ""
+    desc = ""
+    ac_head = ""
+
+    # 1. First from hospital_cashcountercollection (r)
+    raw_rem = r.get("remarks") if isinstance(r, dict) else None
+    if raw_rem:
+        if isinstance(raw_rem, str) and raw_rem.strip().startswith("{") and raw_rem.strip().endswith("}"):
+            try:
+                import json
+                pj = json.loads(raw_rem)
+                p_name = str(pj.get("patient_name") or pj.get("name") or pj.get("party_name") or "").strip()
+                r_no = str(pj.get("room_no") or pj.get("room") or "").strip()
+                desc = str(pj.get("description") or pj.get("narration") or pj.get("reason") or "").strip()
+            except Exception:
+                desc = str(raw_rem).strip()
+        elif isinstance(raw_rem, dict):
+            p_name = str(raw_rem.get("patient_name") or raw_rem.get("name") or raw_rem.get("party_name") or "").strip()
+            r_no = str(raw_rem.get("room_no") or raw_rem.get("room") or "").strip()
+            desc = str(raw_rem.get("description") or raw_rem.get("narration") or raw_rem.get("reason") or "").strip()
+        else:
+            desc = str(raw_rem).strip()
+
+    # 2. Fallback to hospital_receiptandpayment (ep)
+    if ep and isinstance(ep, dict):
+        ac_head = str(ep.get("account_head") or "").strip()
+        ep_desc = ep.get("description")
+        if ep_desc:
+            if isinstance(ep_desc, str) and ep_desc.strip().startswith("{") and ep_desc.strip().endswith("}"):
+                try:
+                    import json
+                    pj2 = json.loads(ep_desc)
+                    if not p_name:
+                        p_name = str(pj2.get("patient_name") or pj2.get("name") or pj2.get("party_name") or "").strip()
+                    if not r_no:
+                        r_no = str(pj2.get("room_no") or pj2.get("room") or "").strip()
+                    if not desc:
+                        desc = str(pj2.get("description") or pj2.get("narration") or pj2.get("reason") or "").strip()
+                except Exception:
+                    if not desc:
+                        desc = str(ep_desc).strip()
+            elif isinstance(ep_desc, dict):
+                if not p_name:
+                    p_name = str(ep_desc.get("patient_name") or ep_desc.get("name") or ep_desc.get("party_name") or "").strip()
+                if not r_no:
+                    r_no = str(ep_desc.get("room_no") or ep_desc.get("room") or "").strip()
+                if not desc:
+                    desc = str(ep_desc.get("description") or ep_desc.get("narration") or ep_desc.get("reason") or "").strip()
+            else:
+                if not desc:
+                    desc = str(ep_desc).strip()
+
+        if not p_name:
+            p_name = str(ep.get("paid_to_or_received_from") or "").strip()
+            if p_name == "-":
+                p_name = ""
+
+    # Build clean display strings
+    if p_name and r_no:
+        room_label = r_no if r_no.lower().startswith("room") else f"Room {r_no}"
+        display_name = f"{p_name} ({room_label})"
+        item_particular = room_label
+    elif p_name:
+        display_name = p_name
+        item_particular = desc or ac_head or "Miscellaneous"
+    elif desc and r_no:
+        room_label = r_no if r_no.lower().startswith("room") else f"Room {r_no}"
+        display_name = f"{desc} ({room_label})"
+        item_particular = room_label
+    elif desc:
+        display_name = desc
+        item_particular = desc
+    elif ac_head:
+        display_name = ac_head
+        item_particular = ac_head
+    else:
+        display_name = "Sundry / Miscellaneous"
+        item_particular = "Miscellaneous Receipt"
+
+    return display_name, item_particular, p_name, r_no, desc, ac_head
+
 _SHARED_CLIENT = None
 
 def get_db():
@@ -310,7 +397,10 @@ class AccountsLedgerEngine:
                 "bill_no": 1, "bill_number": 1, "Bill_id": 1, "billing_category": 1,
                 "collected_amount": 1, "created_date": 1, "created_by": 1, "payment_mode": 1,
                 "outlet_code": 1, "shift_no": 1, "remarks": 1, "transaction_type": 1,
-                "return_bill_no": 1, "Returned_amount": 1
+                "return_bill_no": 1, "Returned_amount": 1,
+                "uhid": 1, "ip_number": 1, "card_amount": 1, "bank_amount": 1,
+                "cash_amount": 1, "cheque_amount": 1, "credit_amount": 1,
+                "payment_details": 1, "bill_type": 1
             }
             ccc_records = list(db["hospital_cashcountercollection"].find(ccc_q, ccc_proj).sort("created_date", 1))
 
@@ -521,7 +611,10 @@ class AccountsLedgerEngine:
                 ))
 
             def fetch_expenses():
-                rp_q = {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}, "receipt_type": "Payment"}
+                rp_q = {"$or": [
+                    {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                    {"voucher_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}}
+                ]}
                 return list(db["hospital_receiptandpayment"].find(rp_q).sort("created_date", 1))
 
             def fetch_shifts():
@@ -594,7 +687,7 @@ class AccountsLedgerEngine:
 
             # Pre-cache patient details from hospital_patient and registration for ALL known UHIDs
             all_known_uhids = set()
-            for d_list in [pharm_docs, discharge_docs, invest_docs, billing_docs, sales_return_docs, invest_refund_docs, general_refund_docs, ipadv_refund_docs, adms]:
+            for d_list in [ccc_records, pharm_docs, discharge_docs, invest_docs, billing_docs, sales_return_docs, invest_refund_docs, general_refund_docs, ipadv_refund_docs, adms]:
                 for d in d_list:
                     u = str(d.get("uhid") or "").strip()
                     if u and u not in ["—", "-", "None"]:
@@ -649,6 +742,12 @@ class AccountsLedgerEngine:
                 v_no = str(ep.get("voucher_no") or "").strip()
                 if v_no:
                     rp_map[v_no] = ep
+                    try:
+                        rp_map[str(int(v_no))] = ep
+                    except Exception:
+                        pass
+                    if len(v_no) < 8 and v_no.isdigit():
+                        rp_map[v_no.zfill(8)] = ep
 
             # 3. Enrich Every Line Item
             enriched_bills = []
@@ -698,18 +797,80 @@ class AccountsLedgerEngine:
                     "particulars": []
                 }
                 
-                # Module-specific enrichment
+                # Module-specific identification
                 bid = r.get("Bill_id")
                 s_no_val = str(r.get("shift_no") or "").strip()
-                pharm_doc = pharm_map.get(b_no) or pharm_map.get(b_no.replace("/", "")) or (pharm_bid_shift_map.get((str(bid), s_no_val)) if bid else None)
-                is_pharm = cat in ["Pharmacy", "PharmacyBills", "OPPharmacyBills"] or cat.upper().startswith("PHARM") or (pharm_doc is not None)
-                
-                is_expense_payment = (cat in ["Payment", "PaymentBills"] or str(r.get("transaction_type") or "").lower() == "payment" or b_no in rp_map)
-                is_refund_record = not is_expense_payment and bool(
-                    str(r.get("transaction_type") or "").lower() == "refund" or
-                    "refund" in str(cat or "").lower() or
-                    "return" in str(cat or "").lower() or
+                cat_str = str(cat or "").strip()
+                cat_lower = cat_str.lower()
+                trans_lower = str(r.get("transaction_type") or "").lower()
+                b_type = r.get("bill_type")
+
+                is_misc = (
+                    cat_str in ["Receipt", "Payment", "Miscellaneous", "Misc", "Sundry", "Counter Payment", "Counter Receipt", "ReceiptBills", "PaymentBills"] or
+                    cat_lower in ["receipt", "payment", "miscellaneous", "misc", "sundry"] or
+                    trans_lower in ["payment", "receipt"] or
+                    b_no in rp_map
+                ) and not (
+                    "advance" in cat_lower or
+                    "discharge" in cat_lower or
+                    "registration" in cat_lower or
+                    "pharm" in cat_lower or
+                    "invest" in cat_lower
+                )
+                is_expense_payment = (
+                    cat_str in ["Payment", "PaymentBills"] or
+                    trans_lower == "payment" or
+                    (b_no in rp_map and str(rp_map[b_no].get("receipt_type") or "").lower() == "payment")
+                ) and not (
+                    "advance" in cat_lower or
+                    "discharge" in cat_lower or
+                    "registration" in cat_lower
+                )
+                is_explicit_advance = (
+                    cat_str in ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "Advance", "advance"] or
+                    ("advance" in cat_lower) or
+                    ("advance" in trans_lower and not is_misc) or
+                    (b_type == 1 and not is_misc and "receipt" not in cat_lower and "payment" not in cat_lower)
+                ) and not is_misc
+                is_refund_record = not is_expense_payment and not is_misc and bool(
+                    trans_lower == "refund" or
+                    "refund" in cat_lower or
+                    "return" in cat_lower or
                     "refund" in str(r.get("remarks") or "").lower()
+                )
+                is_explicit_registration = (
+                    cat_str in ["Registration", "RegistrationBills", "REGISTRATION"] or
+                    "registration" in cat_lower or
+                    "op registration" in cat_lower or
+                    b_type == 0
+                ) and not is_explicit_advance and not is_misc
+                is_explicit_investigation = (
+                    cat_str in ["Investigation", "InvestigationBills"] or
+                    "invest" in cat_lower or
+                    "scan" in cat_lower or
+                    "lab" in cat_lower or
+                    "x-ray" in cat_lower or
+                    "xray" in cat_lower or
+                    "ecg" in cat_lower
+                ) and not is_explicit_advance and not is_misc
+                is_explicit_discharge = (
+                    cat_str.upper() in ["DISCHARGE", "DISCHARGEBILLS"] or
+                    "discharge" in cat_lower
+                ) and not is_explicit_advance and not is_misc
+
+                # Non-pharmacy records must NEVER be hijacked by slash-stripped pharmacy bill collisions
+                is_non_pharm = is_explicit_advance or is_expense_payment or is_refund_record or is_explicit_registration or is_explicit_investigation or is_explicit_discharge or is_misc
+
+                pharm_doc = None
+                if not is_non_pharm:
+                    pharm_doc = pharm_map.get(b_no) or (pharm_bid_shift_map.get((str(bid), s_no_val)) if bid else None)
+                    if not pharm_doc and "/" in b_no:
+                        pharm_doc = pharm_map.get(b_no.replace("/", ""))
+
+                is_pharm = not is_non_pharm and (
+                    cat_str in ["Pharmacy", "PharmacyBills", "OPPharmacyBills"] or
+                    cat_str.upper().startswith("PHARM") or
+                    (pharm_doc is not None)
                 )
 
                 if is_refund_record:
@@ -1011,45 +1172,59 @@ class AccountsLedgerEngine:
                             "particulars": items
                         })
                     
-                elif cat in ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "Advance", "advance"] or (b_no in advance_map):
-                    adv_info = advance_map.get(b_no) or advance_map.get(b_no.replace("/", ""))
+                elif is_explicit_advance or cat in ["IPAdvance", "IPAdvanceBills", "IPAdvance Payment", "Advance", "advance"] or (b_no in advance_map):
+                    adv_info = advance_map.get(b_no) or (advance_map.get(b_no.replace("/", "")) if "/" in b_no else None)
                     item_data["category"] = "ADVANCE"
+                    
+                    r_uhid = str(r.get("uhid") or "").strip()
+                    r_ip = str(r.get("ip_number") or "").strip()
+                    r_pm = r.get("payment_mode") or "Cash"
+                    r_pd = r.get("payment_details") or {}
+                    r_card = clean_num(r.get("card_amount"))
+                    r_bank = clean_num(r.get("bank_amount"))
+                    r_cash = clean_num(r.get("cash_amount"))
+                    r_credit = clean_num(r.get("credit_amount"))
+
                     if adv_info:
                         adm = adv_info["adm"]
                         pay = adv_info["pay"]
-                        item_data["uhid"] = adm.get("uhid") or ""
-                        item_data["ip_number"] = adm.get("ipNumber") or ""
-                        item_data["patient_name"] = str(pay.get("patient_name") or adm.get("patient_name") or adm.get("patientname") or "").strip()
+                        u_val = adm.get("uhid") or r_uhid
+                        ip_val = adm.get("ipNumber") or r_ip
+                        p_name = str(pay.get("patient_name") or adm.get("patient_name") or adm.get("patientname") or patient_map.get(u_val) or "").strip()
                         amt = clean_num(pay.get("advance_amount") or pay.get("amount") or coll_amt)
-                        pd = pay.get("payment_details") or {}
-                        pm = pd.get("method") or pay.get("payment_mode") or r.get("payment_mode") or "Cash"
-                        c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
-                        c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
-                        # Under unified ledger taxonomy, non-cash receivables and cards/banks are grouped under credit_amount
-                        all_credit_val = round(cr_val + b_val, 2)
-                        item_data.update({
-                            "gross": amt, "net_amount": amt, "amount": amt, "advance_amount": amt,
-                            "cash": c_val, "credit": cr_val, "bank": b_val,
-                            "card": b_val, "card_amount": b_val, "bank_amount": b_val,
-                            "cash_amount": c_val, "credit_amount": all_credit_val,
-                            "payment_mode": pm,
-                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
-                            "payment_details": pd
-                        })
+                        pd = pay.get("payment_details") or r_pd
+                        pm = pd.get("method") or pay.get("payment_mode") or r_pm
                     else:
-                        pm = r.get("payment_mode") or "Cash"
-                        c_val, cr_val, b_val = split_payment_modes(coll_amt, pm)
-                        c_mach, c_type, c_num = extract_card_metadata(None, pm, b_val)
-                        all_credit_val = round(cr_val + b_val, 2)
-                        item_data.update({
-                            "gross": coll_amt, "net_amount": coll_amt, "amount": coll_amt, "advance_amount": coll_amt,
-                            "cash": c_val, "credit": cr_val, "bank": b_val,
-                            "card": b_val, "card_amount": b_val, "bank_amount": b_val,
-                            "cash_amount": c_val, "credit_amount": all_credit_val,
-                            "payment_mode": pm,
-                            "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
-                            "payment_details": {}
-                        })
+                        u_val = r_uhid
+                        ip_val = r_ip
+                        p_name = str(patient_map.get(u_val) or patient_map.get(u_val.replace("/", "")) or "").strip()
+                        amt = coll_amt
+                        pd = r_pd
+                        pm = r_pm
+
+                    if r_card > 0 or r_bank > 0 or (r_cash > 0 and r_cash != coll_amt):
+                        c_val = r_cash
+                        b_val = r_card if r_card > 0 else r_bank
+                        # If credit_amount equals card/bank amount, actual insurance/patient credit is 0
+                        cr_val = max(0.0, round(r_credit - b_val, 2)) if r_credit >= b_val else r_credit
+                    else:
+                        c_val, cr_val, b_val = split_payment_modes(amt, pm, pd)
+
+                    c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
+                    all_credit_val = round(cr_val + b_val, 2)
+                    item_data.update({
+                        "uhid": u_val,
+                        "mr_no": u_val or "—",
+                        "ip_number": ip_val,
+                        "patient_name": p_name,
+                        "gross": amt, "net_amount": amt, "amount": amt, "advance_amount": amt,
+                        "cash": c_val, "credit": cr_val, "bank": b_val,
+                        "card": b_val, "card_amount": b_val, "bank_amount": b_val,
+                        "cash_amount": c_val, "credit_amount": all_credit_val,
+                        "payment_mode": pm,
+                        "card_machine": c_mach, "card_type": c_type, "card_number": c_num,
+                        "payment_details": pd
+                    })
 
                 elif cat in ["Sales Return", "sales_return", "SalesReturn"]:
                     d = sales_return_map.get(b_no) or sales_return_map.get(r.get("return_bill_no")) or {}
@@ -1075,34 +1250,14 @@ class AccountsLedgerEngine:
                         "particulars": d.get("medicine_particulars") or []
                     })
                         
-                elif cat in ["Receipt", "Payment"]:
-                    if cat == "Payment":
-                        ep = rp_map.get(b_no) or {}
-                        pay_amt = clean_num(ep.get("amount") or r.get("Returned_amount") or coll_amt)
-                        
-                        raw_rem = r.get("remarks") or ep.get("description") or ""
-                        pt_name = ""
-                        room_str = ""
-                        desc_str = ""
-                        if isinstance(raw_rem, str) and raw_rem.strip().startswith("{") and raw_rem.strip().endswith("}"):
-                            try:
-                                import json
-                                pj = json.loads(raw_rem)
-                                pt_name = str(pj.get("patient_name") or "").strip()
-                                room_str = str(pj.get("room_no") or "").strip()
-                                desc_str = str(pj.get("description") or "").strip()
-                            except Exception:
-                                desc_str = raw_rem
-                        elif isinstance(raw_rem, dict):
-                            pt_name = str(raw_rem.get("patient_name") or "").strip()
-                            room_str = str(raw_rem.get("room_no") or "").strip()
-                            desc_str = str(raw_rem.get("description") or "").strip()
-                        else:
-                            desc_str = str(raw_rem or "").strip()
+                elif is_misc:
+                    ep = rp_map.get(b_no) or (rp_map.get(str(int(b_no))) if b_no.isdigit() else None)
+                    is_pay = is_expense_payment or (ep and str(ep.get("receipt_type") or "").lower() == "payment")
 
-                        display_name = (pt_name + (f" (Room {room_str})" if room_str else "")) if pt_name else (desc_str or ep.get("account_head") or "Counter Expense Payment")
-                        part_item = f"Room {room_str}" if (room_str and pt_name) else (desc_str or "Counter Payment Voucher")
+                    display_name, item_particular, pt_n, rm_n, ds_t, ac_head = extract_misc_details(r, ep)
 
+                    if is_pay:
+                        pay_amt = clean_num(r.get("Returned_amount") or (ep.get("amount") if ep else 0) or coll_amt)
                         item_data.update({
                             "category": "EXPENSE PAYMENT",
                             "patient_name": display_name,
@@ -1113,13 +1268,44 @@ class AccountsLedgerEngine:
                             "net_amount": -pay_amt,
                             "is_expense": True,
                             "payment_mode": "Cash",
-                            "particulars": [{"itemName": part_item}]
+                            "particulars": [{"itemName": item_particular, "account_head": ac_head}]
                         })
                     else:
-                        item_data["category"] = "MISCELLANEOUS INCOME"
-                        item_data["cash"] = coll_amt
-                        item_data["amount"] = coll_amt
-                        item_data["payment_mode"] = "Cash"
+                        rec_amt = coll_amt if coll_amt > 0 else clean_num(r.get("collected_amount") or (ep.get("amount") if ep else 0))
+                        pm = r.get("payment_mode") or (ep.get("payment_mode") if ep else None) or "Cash"
+                        pd = r.get("payment_details") or {}
+
+                        r_card = clean_num(r.get("card_amount"))
+                        r_bank = clean_num(r.get("bank_amount"))
+                        r_cash = clean_num(r.get("cash_amount"))
+
+                        if r_card > 0 or r_bank > 0 or (r_cash > 0 and r_cash != rec_amt):
+                            c_val = r_cash
+                            b_val = r_card if r_card > 0 else r_bank
+                        else:
+                            c_val, cr_val, b_val = split_payment_modes(rec_amt, pm, pd)
+
+                        c_mach, c_type, c_num = extract_card_metadata(pd, pm, b_val)
+
+                        item_data.update({
+                            "category": "MISCELLANEOUS",
+                            "patient_name": display_name,
+                            "gross": rec_amt,
+                            "amount": rec_amt,
+                            "net_amount": rec_amt,
+                            "cash": c_val,
+                            "bank": b_val,
+                            "card": b_val,
+                            "card_amount": b_val,
+                            "bank_amount": b_val,
+                            "cash_amount": c_val,
+                            "payment_mode": pm,
+                            "card_machine": c_mach,
+                            "card_type": c_type,
+                            "card_number": c_num,
+                            "payment_details": pd,
+                            "particulars": [{"itemName": item_particular, "account_head": ac_head}]
+                        })
 
 
 
