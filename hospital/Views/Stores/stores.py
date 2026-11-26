@@ -2926,12 +2926,23 @@ def stores_grn_supplier_report(request):
     all_vendors = [{'vendor_id': str(v.vendor_id), 'name': v.name} for v in vendors_qs if v.vendor_id and v.name]
     all_vendors.sort(key=lambda x: str(x['name']).lower())
 
-    # Fetch GRNs
-    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
-    if from_date:
-        grn_qs = grn_qs.filter(date__gte=from_date)
-    if to_date:
-        grn_qs = grn_qs.filter(date__lte=to_date)
+    # Fetch GRNs - filter strictly on invoice_date (falling back to date if invoice_date is null)
+    grn_qs = storesGRN.objects.filter(is_active__in=[True])
+    if from_date and to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date, invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date, date__lte=to_date)
+        )
+    elif from_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date)
+        )
+    elif to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__lte=to_date)
+        )
     if vendor_id:
         grn_qs = grn_qs.filter(vendor_id=vendor_id)
     if department_filter and department_filter != 'ALL':
@@ -3086,6 +3097,10 @@ def stores_grn_supplier_report(request):
     supplier_list = list(supplier_groups.values())
     supplier_list.sort(key=lambda s: str(s.get('vendor_name', '')).lower())
     for s in supplier_list:
+        # Sort GRN invoices inside each supplier by invoice date and grn date in ascending order
+        s['grns'].sort(key=lambda g: (str(g.get('invoice_date') or g.get('date') or ''), str(g.get('date') or '')))
+        if 'returns' in s and isinstance(s['returns'], list):
+            s['returns'].sort(key=lambda r: str(r.get('date') or ''))
         s['taxable_amount'] = round(s['taxable_amount'], 2)
         s['tax_amount'] = round(s['tax_amount'], 2)
         s['total_amount'] = round(s['total_amount'], 2)
@@ -3135,11 +3150,22 @@ def stores_grn_date_report(request):
     all_vendors = [{'vendor_id': str(v.vendor_id), 'name': v.name} for v in vendors_qs if v.vendor_id and v.name]
     all_vendors.sort(key=lambda x: str(x['name']).lower())
 
-    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
-    if from_date:
-        grn_qs = grn_qs.filter(date__gte=from_date)
-    if to_date:
-        grn_qs = grn_qs.filter(date__lte=to_date)
+    grn_qs = storesGRN.objects.filter(is_active__in=[True])
+    if from_date and to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date, invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date, date__lte=to_date)
+        )
+    elif from_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date)
+        )
+    elif to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__lte=to_date)
+        )
     if vendor_id and vendor_id != 'all':
         grn_qs = grn_qs.filter(vendor_id=vendor_id)
     if department_filter and department_filter != 'ALL':
@@ -3341,8 +3367,11 @@ def stores_grn_date_report(request):
 
         date_list.append(dg)
 
-    # Sort dates descending (newest date first)
-    date_list.sort(key=lambda x: str(x['date']), reverse=True)
+    # Sort dates ascending (earliest date first) as requested
+    date_list.sort(key=lambda x: str(x['date']))
+    for dg in date_list:
+        dg['grns'].sort(key=lambda g: (str(g.get('invoice_date') or g.get('date') or ''), str(g.get('date') or '')))
+        dg['returns'].sort(key=lambda r: str(r.get('date') or ''))
 
     summary = {
         'total_dates': len(date_list),
@@ -3760,11 +3789,22 @@ def stores_purchase_analysis_report(request):
 
     vendor_map = {v.vendor_id: v.name for v in GeneralStoreVendor.objects.filter(is_active__in=[True]) if v.vendor_id}
 
-    grn_qs = storesGRN.objects.filter(is_active__in=[True]).order_by('-date')
-    if from_date:
-        grn_qs = grn_qs.filter(date__gte=from_date)
-    if to_date:
-        grn_qs = grn_qs.filter(date__lte=to_date)
+    grn_qs = storesGRN.objects.filter(is_active__in=[True])
+    if from_date and to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date, invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date, date__lte=to_date)
+        )
+    elif from_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__gte=from_date) |
+            Q(invoice_date__isnull=True, date__gte=from_date)
+        )
+    elif to_date:
+        grn_qs = grn_qs.filter(
+            Q(invoice_date__lte=to_date) |
+            Q(invoice_date__isnull=True, date__lte=to_date)
+        )
     if vendor_filter:
         grn_qs = grn_qs.filter(vendor_id=vendor_filter)
     if department_filter and department_filter != 'ALL':
