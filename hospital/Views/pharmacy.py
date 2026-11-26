@@ -734,34 +734,35 @@ def sanitize_medicines(medicines, outlet_code=None):
                     {"item_id": int(item_id_val), "batch_number": bn_val},
                     {"mrp": 1, "CGST_Percentage": 1, "SGST_Percentage": 1, "CGST_Amt": 1, "SGST_Amt": 1}
                 )
-            if stk_doc:
-                if stk_doc.get("mrp") is not None:
-                    try:
-                        val = float(str(stk_doc["mrp"]))
-                        if val > 0:
-                            mrp_from_stock = val
-                    except Exception:
-                        pass
-                if stk_doc.get("CGST_Percentage") is not None:
-                    try:
-                        cgst_pct_from_stock = float(str(stk_doc["CGST_Percentage"]))
-                    except Exception:
-                        pass
-                if stk_doc.get("SGST_Percentage") is not None:
-                    try:
-                        sgst_pct_from_stock = float(str(stk_doc["SGST_Percentage"]))
-                    except Exception:
-                        pass
-                if stk_doc.get("CGST_Amt") is not None:
-                    try:
-                        cgst_amt_from_stock = float(str(stk_doc["CGST_Amt"]))
-                    except Exception:
-                        pass
-                if stk_doc.get("SGST_Amt") is not None:
-                    try:
-                        sgst_amt_from_stock = float(str(stk_doc["SGST_Amt"]))
-                    except Exception:
-                        pass
+
+        if stk_doc:
+            if stk_doc.get("mrp") is not None:
+                try:
+                    val = float(str(stk_doc["mrp"]))
+                    if val > 0:
+                        mrp_from_stock = val
+                except Exception:
+                    pass
+            if stk_doc.get("CGST_Percentage") is not None:
+                try:
+                    cgst_pct_from_stock = float(str(stk_doc["CGST_Percentage"]))
+                except Exception:
+                    pass
+            if stk_doc.get("SGST_Percentage") is not None:
+                try:
+                    sgst_pct_from_stock = float(str(stk_doc["SGST_Percentage"]))
+                except Exception:
+                    pass
+            if stk_doc.get("CGST_Amt") is not None:
+                try:
+                    cgst_amt_from_stock = float(str(stk_doc["CGST_Amt"]))
+                except Exception:
+                    pass
+            if stk_doc.get("SGST_Amt") is not None:
+                try:
+                    sgst_amt_from_stock = float(str(stk_doc["SGST_Amt"]))
+                except Exception:
+                    pass
 
         mrp_val = mrp_from_stock if mrp_from_stock is not None else float(med.get("mrp") or med.get("price") or 0)
         price_val = mrp_val
@@ -826,6 +827,9 @@ def sanitize_medicines(medicines, outlet_code=None):
 
         clean_item = {
             "item_id": item_id_val,
+            "item_name": item_name_val,
+            "name": item_name_val,
+            "medicine_name": item_name_val,
             "batch_number": bn_val,
             "expiry_date": expiry_val,
             "hsn_code": hsn_val,
