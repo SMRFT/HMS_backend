@@ -2360,6 +2360,7 @@ def pharmacy_item_purchase_history(request):
                 "grn_number": 1,
                 "date": 1,
                 "vendor_id": 1,
+                "vendor_name": 1,
                 "invoice_no": 1,
                 "invoice_date": 1,
                 "po_number": 1,
@@ -2402,8 +2403,8 @@ def pharmacy_item_purchase_history(request):
 
         for g in grns:
             vid = g.get("vendor_id")
-            vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
-            if vid:
+            vname = g.get("vendor_name") or vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
+            if vid and vname and vname != "—":
                 suppliers_set[str(vid)] = vname
 
             p_date_raw = g.get("date")
@@ -2468,6 +2469,23 @@ def pharmacy_item_purchase_history(request):
                     free_val = str(itm.get("free") if itm.get("free") is not None else "0")
                     p_cst_val = str(itm.get("p_cst") or itm.get("purchase_cst") or itm.get("cgst_percent") or itm.get("CGST_Percentage") or "0")
                     p_tps_val = str(itm.get("p_tps") or itm.get("purchase_tax_rate") or itm.get("purchase_tps") or itm.get("sgst_percent") or itm.get("SGST_Percentage") or "0")
+                    try:
+                        cgst_f = float(p_cst_val)
+                    except (ValueError, TypeError):
+                        cgst_f = 0.0
+                    try:
+                        sgst_f = float(p_tps_val)
+                    except (ValueError, TypeError):
+                        sgst_f = 0.0
+                    tot_tax = cgst_f + sgst_f
+                    tax_disp = f"{int(tot_tax) if tot_tax.is_integer() else tot_tax:.1f}%" if tot_tax > 0 else "0%"
+
+                    type_val = g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE"
+                    if not type_val or type_val.lower() == "grn":
+                        if grn_no.upper().startswith("OP/"):
+                            type_val = "OP PHARMACY"
+                        elif grn_no.upper().startswith("IP/"):
+                            type_val = "IP PHARMACY"
 
                     all_records.append({
                         "ref": grn_no,
@@ -2482,12 +2500,14 @@ def pharmacy_item_purchase_history(request):
                         "mrp": mrp_fmt,
                         "inv_date": inv_date_str,
                         "order_number": g.get("po_number") or g.get("order_number") or "",
-                        "type": g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE (IP)",
+                        "type": type_val,
                         "expiry": exp or "—",
                         "packing": str(itm.get("packing") or itm.get("pack_size") or "1"),
                         "free": free_val,
                         "p_cst": p_cst_val,
                         "p_tps": p_tps_val,
+                        "tax_percent": tax_disp,
+                        "total_tax": tax_disp,
                         "p_cost": p_cost_fmt,
                         "cst": cst_fmt,
                         "tps": tps_fmt,
@@ -2519,11 +2539,38 @@ def pharmacy_item_purchase_history(request):
             if (stk_grn, stk_batch) not in seen_grn_batches and (stk_grn != "—" or stk_batch != "—"):
                 seen_grn_batches.add((stk_grn, stk_batch))
                 vid = stk.get("vendor_id") or stk.get("supplier_id")
-                vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or stk.get("vendor_name") or stk.get("supplier_name") or stk.get("supplier") or str(vid or "—")
-                if vid:
+                vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or stk.get("vendor_name") or stk.get("supplier_name") or stk.get("supplier")
+
+                # Resolve vendor & GRN reference from hospital_grn if missing (common in hospital_pharmacystock)
+                grn_match = None
+                if not vname or vname == "—" or not vid:
+                    if stk_batch and stk_batch != "—":
+                        grn_match = db["hospital_grn"].find_one(
+                            {"items": {"$regex": f'"batch":\\s*"{re.escape(str(stk_batch))}"'}},
+                            {"vendor_id": 1, "vendor_name": 1, "grn_number": 1, "date": 1, "purchase_category": 1, "grn_type": 1, "_id": 0}
+                        )
+                    if not grn_match and stk_grn and stk_grn != "—":
+                        m = re.search(r'(\d{4})/0*(\d+)', str(stk_grn))
+                        if m:
+                            yr, seq = m.groups()
+                            grn_match = db["hospital_grn"].find_one(
+                                {"grn_number": {"$regex": f'/{yr}/0*{seq}$'}},
+                                {"vendor_id": 1, "vendor_name": 1, "grn_number": 1, "date": 1, "purchase_category": 1, "grn_type": 1, "_id": 0}
+                            )
+                    if grn_match:
+                        vid = vid or grn_match.get("vendor_id")
+                        vname = grn_match.get("vendor_name") or vendor_map.get(vid) or vendor_map.get(str(vid)) or vname
+                        if grn_match.get("grn_number"):
+                            stk_grn = grn_match.get("grn_number")
+
+                vname = vname or str(vid or "—")
+                if vid and vname and vname != "—":
                     suppliers_set[str(vid)] = vname
 
                 c_date = stk.get("created_date") or stk.get("entry_date") or stk.get("date")
+                if (not c_date or c_date == "—") and grn_match and grn_match.get("date"):
+                    c_date = grn_match.get("date")
+
                 p_date_str = "—"
                 p_date_sort = ""
                 if c_date:
@@ -2559,6 +2606,28 @@ def pharmacy_item_purchase_history(request):
                 selling_fmt = _safe_fmt(selling_val, fallback="") if selling_val else ""
                 margin_fmt = _safe_fmt(margin_val, fallback="") if margin_val else ""
 
+                p_cst_val = str(stk.get("CGST_Percentage") or stk.get("cgst_percent") or "0")
+                p_tps_val = str(stk.get("SGST_Percentage") or stk.get("sgst_percent") or "0")
+                try:
+                    cgst_f = float(p_cst_val)
+                except (ValueError, TypeError):
+                    cgst_f = 0.0
+                try:
+                    sgst_f = float(p_tps_val)
+                except (ValueError, TypeError):
+                    sgst_f = 0.0
+                tot_tax = cgst_f + sgst_f
+                tax_disp = f"{int(tot_tax) if tot_tax.is_integer() else tot_tax:.1f}%" if tot_tax > 0 else "0%"
+
+                type_val = stk.get("purchase_category") or stk.get("stock_type") or (grn_match.get("purchase_category") if grn_match else None) or (grn_match.get("grn_type") if grn_match else None)
+                if not type_val or str(type_val).lower() == "grn":
+                    if stk_grn.upper().startswith("OP/"):
+                        type_val = "OP PHARMACY"
+                    elif stk_grn.upper().startswith("IP/"):
+                        type_val = "IP PHARMACY"
+                    else:
+                        type_val = "MEDICINE PURCHASE"
+
                 all_records.append({
                     "ref": stk_grn,
                     "p_date": p_date_str,
@@ -2572,12 +2641,14 @@ def pharmacy_item_purchase_history(request):
                     "mrp": mrp_fmt,
                     "inv_date": str(stk.get("invoice_date") or stk.get("inv_date") or ""),
                     "order_number": str(stk.get("po_number") or stk.get("order_number") or ""),
-                    "type": stk.get("purchase_category") or stk.get("stock_type") or "MEDICINE PURCHASE (IP)",
+                    "type": type_val,
                     "expiry": exp_str,
                     "packing": str(stk.get("packing") or stk.get("pack_size") or "1"),
                     "free": str(stk.get("free") or stk.get("free_quantity") or "0"),
-                    "p_cst": str(stk.get("CGST_Percentage") or stk.get("cgst_percent") or "0"),
-                    "p_tps": str(stk.get("SGST_Percentage") or stk.get("sgst_percent") or "0"),
+                    "p_cst": p_cst_val,
+                    "p_tps": p_tps_val,
+                    "tax_percent": tax_disp,
+                    "total_tax": tax_disp,
                     "p_cost": p_cost_fmt,
                     "cst": cst_fmt,
                     "tps": tps_fmt,
