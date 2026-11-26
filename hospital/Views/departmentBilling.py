@@ -23,6 +23,7 @@ from bson.json_util import dumps
 import json
 from pymongo import MongoClient, ReturnDocument
 import re
+from ..counter_service import get_next_est_bill_no
 
 IST = py_timezone(py_timedelta(hours=5, minutes=30))
 
@@ -518,37 +519,24 @@ def estimate_billing_create(request):
         outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
-        with transaction.atomic():
-            last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
+        formatted_bill_no = get_next_est_bill_no()
 
-            if last_bill and last_bill.EstBillNo:
-                last_number = int(last_bill.EstBillNo)
-                next_number = last_number + 1
-            else:
-                next_number = 1
+        request_data = {k: v for k, v in request.data.items()
+                        if not k.startswith('auth-')}
 
-            formatted_bill_no = f"{next_number:06d}"
+        request_data['EstBillNo'] = formatted_bill_no
+        request_data['EstBillDate'] = timezone.now()   # ← server time
+        request_data['created_by'] = current_user      # ← from auth header
+        request_data['branch_code'] = branch_code      # ← from auth header
+        request_data['hospital_code'] = hospital_code      # ← from auth header
+        request_data['outlet_code'] = outlet_code      # ← from auth header
 
-            while EstimateBilling.objects.filter(EstBillNo=formatted_bill_no).exists():
-                next_number += 1
-                formatted_bill_no = f"{next_number:06d}"
+        serializer = EstimateBillingSerializer(data=request_data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'message': 'Form data saved successfully!', 'EstBillNo': formatted_bill_no}, status=201)
 
-            request_data = {k: v for k, v in request.data.items()
-                            if not k.startswith('auth-')}
-
-            request_data['EstBillNo'] = formatted_bill_no
-            request_data['EstBillDate'] = timezone.now()   # ← server time
-            request_data['created_by'] = current_user      # ← from auth header
-            request_data['branch_code'] = branch_code      # ← from auth header
-            request_data['hospital_code'] = hospital_code      # ← from auth header
-            request_data['outlet_code'] = outlet_code      # ← from auth header
-
-            serializer = EstimateBillingSerializer(data=request_data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({'message': 'Form data saved successfully!', 'EstBillNo': formatted_bill_no}, status=201)
-
-            return Response(serializer.errors, status=400)
+        return Response(serializer.errors, status=400)
 
 def serialize_val(val):
     """Make a single value JSON-safe."""
@@ -1334,7 +1322,7 @@ def invest_billing_create(request):
         est_doc = None
         if est_bill_no:
             est_doc = mongo_db['hospital_estimatebilling'].find_one({"EstBillNo": est_bill_no})
-            mongo_db['hospital_estimatebilling'].update_one(
+            mongo_db['hospital_estimatebilling'].update_many(
                 {"EstBillNo": est_bill_no, "is_active": True},
                 {"$set": {
                     "is_active": False,

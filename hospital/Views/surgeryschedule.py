@@ -18,11 +18,18 @@ from django.http import JsonResponse
 from ..models import Admission, Patient, InsuranceProvider
 from .dbcollection import resolve_created_by_name, get_employee_name_by_id
 from pymongo import MongoClient, ReturnDocument
+from ..ward_request_guard import (
+    acquire_ward_request_guard,
+    canonical_item_signature,
+    complete_ward_request_guard,
+    fail_ward_request_guard,
+)
 
 logger = logging.getLogger(__name__)
 
 client   = MongoClient(os.getenv("GLOBAL_DB_HOST"))
 hms_db   = client[os.getenv("HMS_DB_NAME", "HMS")]
+profile_collection = client["Global"]["backend_diagnostics_profile"]
 
 
 # ─── ID Generator ─────────────────────────────────────────────────────────────
@@ -1916,6 +1923,7 @@ def get_implant_items(request):
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
 def save_implant_request(request):
+    lock_key = None
     try:
 
         data          = request.data
@@ -1953,14 +1961,48 @@ def save_implant_request(request):
             except (ValueError, TypeError):
                 ci["quantity"] = 1
 
-        # Resolve Doctor Employee ID
+        # Idempotency & Duplicate Prevention Guard (atomic client_request_id + 60s window)
+        uhid_val = str(data.get("uhid", "") or "").strip()
+        ip_val = str(data.get("ipNumber", "") or "").strip()
+        implant_sig = canonical_item_signature(
+            cleaned_items, id_keys=("item_id",), name_key="", qty_keys=("quantity", "qty")
+        )
+        proceed, early_resp, lock_key = acquire_ward_request_guard(
+            hms_db,
+            req_type="IMPLANT",
+            client_request_id=data.get("client_request_id") or "",
+            uhid=uhid_val,
+            ip_number=ip_val,
+            signature=implant_sig,
+            force_duplicate=bool(data.get("force_duplicate", False)),
+            auto_suppress_seconds=60,
+            check_same_day_warning=False,
+            collection_specs=[{
+                "collection": "hospital_implant_request",
+                "items_field": "items",
+                "date_field": "created_date",
+                "ip_field": "inpatient_number",
+                "pk_field": "ImplantRequest_id",
+                "bill_fields": ("ImplantRequest_id",),
+                "id_keys": ("item_id",),
+                "qty_keys": ("quantity", "qty"),
+                "build_suppressed_payload": lambda cand, bill_val, bill_id: {
+                    "success": True,
+                    "message": "Implant request already recorded",
+                    "request_id": cand.get("ImplantRequest_id"),
+                },
+            }],
+        )
+        if not proceed:
+            return early_resp
+
+        # Resolve Doctor Employee ID using shared connection
         surgeon_id = str(data.get("surgeon_id") or data.get("surgeonId") or "").strip()
         if surgeon_id and not surgeon_id.isdigit():
             try:
-                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
-                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
+                doc_profile = profile_collection.find_one({
                     "$or": [{"employeeName": surgeon_id}, {"employeeId": surgeon_id}]
-                })
+                }, {"employeeId": 1})
                 if doc_profile and doc_profile.get("employeeId"):
                     surgeon_id = str(doc_profile.get("employeeId")).strip()
             except Exception as e:
@@ -1972,8 +2014,8 @@ def save_implant_request(request):
             outlet_code      = data.get("outlet_code", ""),
             created_by       = current_user,
             created_date     = timezone.now(),
-            uhid             = data.get("uhid", ""),
-            inpatient_number = data.get("ipNumber", ""),
+            uhid             = uhid_val,
+            inpatient_number = ip_val,
             surgeon_id       = surgeon_id,
             surgery_ref      = data.get("surgeryRef", ""),
             items            = [],  # set below via raw pymongo write
@@ -1988,16 +2030,16 @@ def save_implant_request(request):
             {"$set": {"items": cleaned_items}},
         )
 
-        return Response(
-            {
-                "success":    True,
-                "message":    "Implant request saved successfully",
-                "request_id": implant_req.ImplantRequest_id,
-            },
-            status=201,
-        )
+        response_payload = {
+            "success":    True,
+            "message":    "Implant request saved successfully",
+            "request_id": implant_req.ImplantRequest_id,
+        }
+        complete_ward_request_guard(hms_db, lock_key, response_payload)
+        return Response(response_payload, status=201)
 
     except Exception as e:
+        fail_ward_request_guard(hms_db, lock_key)
         return Response(
             {"success": False, "error": str(e), "traceback": traceback.format_exc()},
             status=500,

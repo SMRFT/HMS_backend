@@ -16,6 +16,57 @@ mongo_db = client["HMS"]
 global_db = client["Global"]
 profile_collection = global_db["backend_diagnostics_profile"]
 
+SD_REGEX = {"ipNumber": {"$regex": "^SD", "$options": "i"}}
+NON_SD_REGEX = {"ipNumber": {"$not": {"$regex": "^SD", "$options": "i"}}}
+
+
+def _is_sd_ip(doc):
+    return str((doc or {}).get("ipNumber") or "").strip().upper().startswith("SD")
+
+
+def _resolve_active_room(doc):
+    shifts = doc.get("roomShitingDetails") or []
+    if isinstance(shifts, list):
+        for s in reversed(shifts):
+            if isinstance(s, dict) and s.get("is_roomActive"):
+                return (
+                    str(s.get("newRoomNo") or s.get("roomNo") or "").strip(),
+                    str(s.get("newBedNo") or s.get("bedNo") or "").strip(),
+                    str(s.get("newRoomCategory") or s.get("roomCategory") or s.get("room_category") or "").strip(),
+                )
+    rd = doc.get("room_details") or []
+    if isinstance(rd, list):
+        for r in reversed(rd):
+            if isinstance(r, dict) and r.get("is_roomActive"):
+                return (
+                    str(r.get("roomNo") or "").strip(),
+                    str(r.get("bedNo") or "").strip(),
+                    str(r.get("room_category") or r.get("roomCategory") or "").strip(),
+                )
+        if rd and isinstance(rd[-1], dict):
+            last_r = rd[-1]
+            return (
+                str(last_r.get("roomNo") or "").strip(),
+                str(last_r.get("bedNo") or "").strip(),
+                str(last_r.get("room_category") or last_r.get("roomCategory") or "").strip(),
+            )
+    return (
+        str(doc.get("roomNo") or "").strip(),
+        str(doc.get("bedNo") or "").strip(),
+        str(doc.get("room_category") or doc.get("roomCategory") or "").strip(),
+    )
+
+
+def _classify_occupancy_room(room_no):
+    rn = str(room_no or "").strip().upper()
+    if rn == "CHEMO" or "CHEMO" in rn:
+        return "chemo", "Chemo"
+    if rn in ("DIALYSIS", "DLS") or "DIALYSIS" in rn:
+        return "dialysis", "Dialysis"
+    if rn == "DAYCARE" or "DAYCARE" in rn:
+        return "daycare", "Daycare"
+    return "normal_room", "Normal Room"
+
 
 def ensure_aware(dt):
     """Ensures a datetime object is timezone-aware (UTC)."""
@@ -27,8 +78,8 @@ def ensure_aware(dt):
         except ValueError:
             return None
     if not is_aware(dt):
-        return make_aware(dt)
-    return dt
+        return make_aware(dt, pytz.UTC)
+    return dt.astimezone(pytz.UTC)
 
 
 def safe_sum_agg(collection, match_stage, field_expr):
@@ -106,7 +157,7 @@ def advanced_dashboard_stats(request):
         range_start_str = range_start_ist.strftime("%Y-%m-%d")
         range_end_str = range_end_ist.strftime("%Y-%m-%d")
 
-        # Resolve month/year for trend charts (either explicitly passed or synced with range_end_ist)
+        # Resolve month/year for trend charts
         month = request.GET.get("month")
         year = request.GET.get("year")
         if month and year:
@@ -116,16 +167,127 @@ def advanced_dashboard_stats(request):
             month = range_end_ist.month
             year = range_end_ist.year
 
-        # 1. Operational Volume KPIs for Selected Date Range + Live Occupancy
-        current_ip = mongo_db["hospital_admission"].count_documents({
-            "is_admitted": True,
-            "is_discharged": {"$ne": True}
-        })
+        # 1. Operational Volume KPIs (Separating Normal IP vs Day Care IP 'SD' & Active Room Categories)
+        active_occupancy_docs = list(mongo_db["hospital_admission"].find(
+            {
+                "is_admitted": True,
+                "is_discharged": {"$ne": True},
+                "is_cancelled": {"$ne": True}
+            },
+            {
+                "ipNumber": 1,
+                "uhid": 1,
+                "admissionDateTime": 1,
+                "admittingDoctor": 1,
+                "consultingDoctor": 1,
+                "room_details": 1,
+                "roomShitingDetails": 1,
+                "roomNo": 1,
+                "bedNo": 1,
+                "room_category": 1,
+                "roomCategory": 1,
+                "ward_status": 1,
+                "customer_type": 1,
+                "customerType": 1,
+                "_id": 0
+            }
+        ))
+        current_daycare_ip = sum(1 for a in active_occupancy_docs if _is_sd_ip(a))
+        current_normal_ip = len(active_occupancy_docs) - current_daycare_ip
+        current_ip = len(active_occupancy_docs)
 
-        period_ip = mongo_db["hospital_admission"].count_documents({
-            "is_admitted": True,
-            "admissionDateTime": {"$gte": range_start_utc, "$lte": range_end_utc}
+        # Build current occupancy breakdown: Normal Room vs Chemo vs Dialysis vs Daycare
+        active_uhids = list({str(a.get("uhid") or "").strip() for a in active_occupancy_docs if a.get("uhid")})
+        active_patient_map = {}
+        if active_uhids:
+            for pt in mongo_db["hospital_patient"].find(
+                {"uhid": {"$in": active_uhids}},
+                {"uhid": 1, "salutation": 1, "firstName": 1, "middleName": 1, "lastName": 1, "mobilePhone": 1, "_id": 0}
+            ):
+                u = str(pt.get("uhid") or "").strip()
+                if u:
+                    full_name = " ".join(
+                        str(pt.get(k) or "").strip()
+                        for k in ("salutation", "firstName", "middleName", "lastName")
+                        if str(pt.get(k) or "").strip()
+                    )
+                    active_patient_map[u] = {
+                        "name": full_name or u,
+                        "mobile": str(pt.get("mobilePhone") or "").strip()
+                    }
+
+        occ_doc_ids = list({
+            str(a.get("consultingDoctor") or a.get("admittingDoctor") or "").strip()
+            for a in active_occupancy_docs
+            if (a.get("consultingDoctor") or a.get("admittingDoctor"))
         })
+        occ_doc_name_map = {}
+        if occ_doc_ids:
+            for dprof in profile_collection.find(
+                {"employeeId": {"$in": occ_doc_ids}},
+                {"employeeId": 1, "employeeName": 1, "_id": 0}
+            ):
+                eid = str(dprof.get("employeeId") or "").strip()
+                ename = str(dprof.get("employeeName") or "").strip()
+                if eid and ename:
+                    occ_doc_name_map[eid] = ename
+
+        occ_counts = {"normal_room": 0, "chemo": 0, "dialysis": 0, "daycare": 0}
+        occ_patients = []
+        for a in active_occupancy_docs:
+            ip_num = str(a.get("ipNumber") or "").strip()
+            uhid_val = str(a.get("uhid") or "").strip()
+            room_no, bed_no, room_cat = _resolve_active_room(a)
+            cat_key, cat_label = _classify_occupancy_room(room_no)
+            occ_counts[cat_key] += 1
+
+            raw_doc = str(a.get("consultingDoctor") or a.get("admittingDoctor") or "").strip()
+            doc_name = occ_doc_name_map.get(raw_doc, raw_doc)
+            pt_info = active_patient_map.get(uhid_val, {})
+
+            adm_dt = ensure_aware(a.get("admissionDateTime"))
+            adm_ist_str = adm_dt.astimezone(tz).strftime("%d-%m-%Y %I:%M %p") if adm_dt else ""
+            adm_sort_ts = adm_dt.timestamp() if adm_dt else 0
+
+            occ_patients.append({
+                "ipNumber": ip_num,
+                "uhid": uhid_val,
+                "patientName": pt_info.get("name") or uhid_val,
+                "mobile": pt_info.get("mobile") or "",
+                "doctor": doc_name or "-",
+                "roomNo": room_no or "-",
+                "bedNo": bed_no or "-",
+                "roomCategory": room_cat or "-",
+                "category": cat_key,
+                "categoryLabel": cat_label,
+                "isDayCareIp": _is_sd_ip(a),
+                "admissionDateTime": adm_ist_str,
+                "wardStatus": str(a.get("ward_status") or "").strip() or "Admitted",
+                "customerType": str(a.get("customerType") or a.get("customer_type") or "General").strip(),
+                "_sort_ts": adm_sort_ts
+            })
+
+        occ_patients.sort(key=lambda x: x["_sort_ts"], reverse=True)
+        for row in occ_patients:
+            row.pop("_sort_ts", None)
+
+        occupancy_breakdown = {
+            "total": len(occ_patients),
+            "counts": occ_counts,
+            "patients": occ_patients
+        }
+
+        # Period Admissions (All non-cancelled admissions including same-day discharges)
+        period_adm_docs = list(mongo_db["hospital_admission"].find(
+            {
+                "admissionDateTime": {"$gte": range_start_utc, "$lte": range_end_utc},
+                "is_cancelled": {"$ne": True}
+            },
+            {"ipNumber": 1, "_id": 0}
+        ))
+        period_daycare_ip = sum(1 for a in period_adm_docs if _is_sd_ip(a))
+        period_normal_ip = len(period_adm_docs) - period_daycare_ip
+        period_ip = len(period_adm_docs)
 
         period_op = mongo_db["hospital_billing"].count_documents({
             "billed_date": {"$gte": range_start_utc, "$lte": range_end_utc},
@@ -133,14 +295,29 @@ def advanced_dashboard_stats(request):
             "payment_status": {"$ne": "Cancelled"}
         })
 
-        period_discharge = mongo_db["hospital_admission"].count_documents({
-            "is_discharged": True,
-            "$or": [
-                {"dischargeDateTime": {"$gte": range_start_utc, "$lte": range_end_utc}},
-                {"dischargeDateTime": None, "lastmodified_date": {"$gte": range_start_utc, "$lte": range_end_utc}},
-                {"dischargeDateTime": {"$exists": False}, "lastmodified_date": {"$gte": range_start_utc, "$lte": range_end_utc}}
-            ]
-        })
+        def _get_billed_discharge_ips(w_start_utc=None, w_end_utc=None, w_start_str=None, w_end_str=None):
+            q = {
+                "status": {"$in": ["Billed", "Paid"]},
+                "is_cancelled": {"$ne": True}
+            }
+            if w_start_utc is not None and w_end_utc is not None:
+                q["$or"] = [
+                    {"bill_date": {"$gte": w_start_utc, "$lte": w_end_utc}},
+                    {"bill_date": {"$gte": w_start_str, "$lte": f"{w_end_str}\uffff"}}
+                ]
+            cursor = mongo_db["hospital_dischargebilling"].find(q, {"ip_number": 1, "ipNumber": 1, "_id": 0})
+            return {
+                str(d.get("ip_number") or d.get("ipNumber") or "").strip().upper()
+                for d in cursor
+                if (d.get("ip_number") or d.get("ipNumber"))
+            }
+
+        period_dis_ips = _get_billed_discharge_ips(
+            range_start_utc, range_end_utc, range_start_str, range_end_str
+        )
+        period_daycare_discharge = sum(1 for ip in period_dis_ips if ip.startswith("SD"))
+        period_normal_discharge = len(period_dis_ips) - period_daycare_discharge
+        period_discharge = len(period_dis_ips)
 
         # 2. Selected Period Revenue Aggregations (All 4 Streams)
         period_op_income = safe_sum_agg(
@@ -161,7 +338,6 @@ def advanced_dashboard_stats(request):
             "$net_amount"
         )
 
-        # Advance payments in selected date range
         period_advance_income = 0.0
         adv_docs = list(mongo_db["hospital_admission"].find(
             {"advance_payments.date": {"$gte": range_start_str, "$lte": range_end_str}},
@@ -209,13 +385,29 @@ def advanced_dashboard_stats(request):
         lifetime_data = None
         total_op = 0
         total_ip_lifetime = 0
+        total_normal_ip_lifetime = 0
+        total_daycare_ip_lifetime = 0
         total_discharge_lifetime = 0
+        total_normal_discharge_lifetime = 0
+        total_daycare_discharge_lifetime = 0
         total_income_lifetime = 0.0
 
         if include_lifetime:
             total_op = mongo_db["hospital_patient"].count_documents({})
-            total_ip_lifetime = mongo_db["hospital_admission"].count_documents({})
-            total_discharge_lifetime = mongo_db["hospital_admission"].count_documents({"is_discharged": True})
+            total_daycare_ip_lifetime = mongo_db["hospital_admission"].count_documents({
+                "is_cancelled": {"$ne": True},
+                **SD_REGEX
+            })
+            total_normal_ip_lifetime = mongo_db["hospital_admission"].count_documents({
+                "is_cancelled": {"$ne": True},
+                **NON_SD_REGEX
+            })
+            total_ip_lifetime = total_normal_ip_lifetime + total_daycare_ip_lifetime
+
+            lifetime_dis_ips = _get_billed_discharge_ips()
+            total_daycare_discharge_lifetime = sum(1 for ip in lifetime_dis_ips if ip.startswith("SD"))
+            total_normal_discharge_lifetime = len(lifetime_dis_ips) - total_daycare_discharge_lifetime
+            total_discharge_lifetime = len(lifetime_dis_ips)
 
             op_income_lifetime = safe_sum_agg(
                 mongo_db["hospital_billing"],
@@ -253,7 +445,11 @@ def advanced_dashboard_stats(request):
                 "investigation": round(inv_income_lifetime, 2),
                 "total_op_count": total_op,
                 "total_ip_count": total_ip_lifetime,
-                "total_discharge_count": total_discharge_lifetime
+                "total_normal_ip_count": total_normal_ip_lifetime,
+                "total_daycare_ip_count": total_daycare_ip_lifetime,
+                "total_discharge_count": total_discharge_lifetime,
+                "total_normal_discharge_count": total_normal_discharge_lifetime,
+                "total_daycare_discharge_count": total_daycare_discharge_lifetime
             }
 
         revenue_breakdown = {
@@ -273,16 +469,28 @@ def advanced_dashboard_stats(request):
         kpis = {
             "total_op": total_op,
             "total_ip": total_ip_lifetime,
+            "total_normal_ip": total_normal_ip_lifetime,
+            "total_daycare_ip": total_daycare_ip_lifetime,
             "total_discharge": total_discharge_lifetime,
             "current_ip": current_ip,
+            "current_normal_ip": current_normal_ip,
+            "current_daycare_ip": current_daycare_ip,
+            "current_normal_room": occ_counts["normal_room"],
+            "current_chemo": occ_counts["chemo"],
+            "current_dialysis": occ_counts["dialysis"],
+            "current_daycare_room": occ_counts["daycare"],
             "total_income": round(total_income_lifetime, 2),
             "today_revenue": round(period_total_revenue, 2),
             "today_ip": period_ip,
+            "today_normal_ip": period_normal_ip,
+            "today_daycare_ip": period_daycare_ip,
             "today_op": period_op,
-            "today_discharge": period_discharge
+            "today_discharge": period_discharge,
+            "today_normal_discharge": period_normal_discharge,
+            "today_daycare_discharge": period_daycare_discharge
         }
 
-        # 4. Monthly Stats & Trends
+        # 4. Monthly Stats & Trends (Normal IP vs Day Care IP 'SD' separated)
         num_days = calendar.monthrange(year, month)[1]
         monthly_op_ip = []
         monthly_income_expense = []
@@ -291,7 +499,7 @@ def advanced_dashboard_stats(request):
         month_end = now.replace(year=year, month=month, day=num_days, hour=23, minute=59, second=59, microsecond=999999).astimezone(pytz.UTC)
 
         admissions = list(mongo_db["hospital_admission"].find({
-            "is_admitted": True,
+            "is_cancelled": {"$ne": True},
             "admissionDateTime": {"$gte": month_start, "$lte": month_end}
         }))
 
@@ -335,7 +543,16 @@ def advanced_dashboard_stats(request):
             day_admissions = [a for a in admissions if a.get("admissionDateTime") and d_start <= ensure_aware(a.get("admissionDateTime")) <= d_end]
             day_billings = [b for b in billings if b.get("billed_date") and d_start <= ensure_aware(b.get("billed_date")) <= d_end]
 
-            monthly_op_ip.append({"day": day, "OP": len(day_billings), "IP": len(day_admissions)})
+            d_daycare = sum(1 for a in day_admissions if _is_sd_ip(a))
+            d_normal = len(day_admissions) - d_daycare
+
+            monthly_op_ip.append({
+                "day": day,
+                "OP": len(day_billings),
+                "Normal IP": d_normal,
+                "Day Care IP": d_daycare,
+                "IP": len(day_admissions)
+            })
 
             d_income = sum([float(str(b.get("total_fees") or 0)) for b in day_billings])
 
@@ -423,12 +640,13 @@ def advanced_dashboard_stats(request):
         ]
         doctor_wise = sorted(doctor_wise, key=lambda x: x["Amount"], reverse=True)[:10]
 
-        # 7. Bed Occupancy
+        # 7. Bed Occupancy (Separating Normal IP vs Day Care SD vs Vacant)
         total_beds_res = list(mongo_db["hospital_room"].aggregate([{"$group": {"_id": None, "total": {"$sum": "$capacity"}}}]))
         total_beds = total_beds_res[0]["total"] if total_beds_res else 0
 
         bed_occupancy = [
-            {"name": "Occupied", "value": current_ip},
+            {"name": "Normal IP", "value": current_normal_ip},
+            {"name": "Day Care (SD)", "value": current_daycare_ip},
             {"name": "Vacant", "value": max(0, total_beds - current_ip)}
         ]
 
@@ -443,7 +661,8 @@ def advanced_dashboard_stats(request):
             "monthly_income_expense": monthly_income_expense,
             "todays_income_method": todays_income_method,
             "doctor_wise": doctor_wise,
-            "bed_occupancy": bed_occupancy
+            "bed_occupancy": bed_occupancy,
+            "occupancy_breakdown": occupancy_breakdown
         })
 
     except Exception as e:
