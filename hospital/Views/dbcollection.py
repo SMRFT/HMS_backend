@@ -50,6 +50,7 @@ hospital_room                     = hms_db["hospital_room"]
 hospital_tumour_board_collection  = hms_db["hospital_tumourBoard"]
 hospital_tumour_template_collection = hms_db["hospital_tumourTemplate"]
 stores_intent_dept_approval_collection = hms_db["hospital_storesintentdepartmentapproval"]
+hospital_CardPaymentList = hms_db["hospital_CardPaymentList"]
 
 import re
 
@@ -794,7 +795,9 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
     sold = sum(_safe_float(s.get("sold_quantity")) for s in matched_stocks)
     transferred = sum(_safe_float(s.get("transferred_out_quantity")) for s in matched_stocks)
     grn_return = sum(_safe_float(s.get("grn_return_quantity")) for s in matched_stocks)
-    available_stock = total_stock - sold - transferred - grn_return
+    blocked = sum(_safe_float(s.get("blocked_quantity")) for s in matched_stocks)
+    sales_return = sum(_safe_float(s.get("sales_return_quantity")) for s in matched_stocks)
+    available_stock = max(0.0, total_stock - sold - transferred - grn_return - blocked + sales_return)
 
     if latest_stock:
         if not item_name and latest_stock.get("item_name"):

@@ -38,6 +38,61 @@ def get_hms_db():
     return _mongo_client, _mongo_client[db_name]
 
 
+def resolve_canonical_patient(hms_db, uhid_raw):
+    """
+    Resolves any UHID format (exact, partial digits e.g. '5678', unpadded, case-insensitive)
+    against the hospital_patient collection.
+    Returns: (patient_doc, canonical_uhid) or (None, None)
+    """
+    if not uhid_raw or hms_db is None:
+        return None, None
+    clean = str(uhid_raw).strip()
+    if not clean:
+        return None, None
+
+    # 1. Exact match
+    p = hms_db["hospital_patient"].find_one({"uhid": clean})
+    if p:
+        return p, str(p.get("uhid")).strip()
+
+    # 2. Case-insensitive exact match
+    p = hms_db["hospital_patient"].find_one({
+        "uhid": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}
+    })
+    if p:
+        return p, str(p.get("uhid")).strip()
+
+    # 3. Numeric only (e.g. '5678' -> matches '.../005678', '.../05678', '.../5678')
+    if clean.isdigit():
+        num_int = int(clean)
+        p6 = str(num_int).zfill(6)
+        p5 = str(num_int).zfill(5)
+        for pattern in [f"/{p6}$", f"/{p5}$", f"/{clean}$"]:
+            p = hms_db["hospital_patient"].find_one({
+                "uhid": {"$regex": pattern, "$options": "i"}
+            })
+            if p:
+                return p, str(p.get("uhid")).strip()
+
+    # 4. Contains slash (e.g. 'S026/5678' -> matches 'S026/005678')
+    if "/" in clean:
+        parts = clean.split("/", 1)
+        prefix, num_part = parts[0].strip(), parts[1].strip()
+        if num_part.isdigit():
+            num_int = int(num_part)
+            p6 = str(num_int).zfill(6)
+            p5 = str(num_int).zfill(5)
+            pattern = f"^{re.escape(prefix)}/({re.escape(p6)}|{re.escape(p5)}|{re.escape(num_part)})$"
+            p = hms_db["hospital_patient"].find_one({
+                "uhid": {"$regex": pattern, "$options": "i"}
+            })
+            if p:
+                return p, str(p.get("uhid")).strip()
+
+    return None, None
+
+
+
 def ensure_inventory_indexes(hms_db=None):
     """
     Creates background indexes on all Inventory collections to guarantee

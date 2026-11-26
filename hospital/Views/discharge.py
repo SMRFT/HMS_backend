@@ -221,7 +221,7 @@ def _parse_discharge_dt(val):
 # ─────────────────────────────────────────────────────────────────────────────
 # High Performance MongoDB Pool & Indexing
 # ─────────────────────────────────────────────────────────────────────────────
-from .mongo_utils import get_hms_db
+from .mongo_utils import get_hms_db, resolve_canonical_patient
 
 _discharge_indexes_ensured = False
 
@@ -473,6 +473,10 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             discharge_id = obj.discharge_id
             items = _resolve_items_doctor_names(_parse_items(obj.items))
             update_dict = {"items": items}
+            if getattr(obj, "uhid", None): update_dict["uhid"] = str(obj.uhid).strip()
+            if getattr(obj, "ip_number", None):
+                update_dict["ip_number"] = str(obj.ip_number).strip()
+                update_dict["ipNumber"] = str(obj.ip_number).strip()
             if getattr(obj, "created_by", None): update_dict["created_by"] = str(obj.created_by)
             if getattr(obj, "created_date", None): update_dict["created_date"] = obj.created_date
             if getattr(obj, "bill_date", None):
@@ -497,14 +501,22 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "cancelled_reason", None): update_dict["cancelled_reason"] = str(obj.cancelled_reason)
             if getattr(obj, "edit_history", None) is not None: update_dict["edit_history"] = obj.edit_history
             
-            # Resolve Customer Type strictly from Admission
+            # Resolve Customer Type and Admission details strictly from Admission
             adm_rec = None
-            if getattr(obj, "ip_number", None):
+            obj_ip = str(getattr(obj, "ip_number", "") or "").strip()
+            if obj_ip:
                 try:
-                    adm_rec = db["hospital_admission"].find_one({"ipNumber": str(obj.ip_number).strip()})
+                    adm_rec = db["hospital_admission"].find_one({
+                        "$or": [
+                            {"ipNumber": obj_ip},
+                            {"ip_number": obj_ip},
+                            {"mr_number": obj_ip},
+                            {"legacy_ip": obj_ip},
+                        ]
+                    })
                 except Exception:
                     adm_rec = None
-            if not adm_rec and getattr(obj, "uhid", None):
+            elif getattr(obj, "uhid", None):
                 try:
                     adm_rec = db["hospital_admission"].find_one(
                         {"uhid": str(obj.uhid).strip(), "is_cancelled": {"$ne": True}},
@@ -515,6 +527,27 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
 
             if adm_rec:
                 eff_cust = str(adm_rec.get("customer_type") or adm_rec.get("customerType") or adm_rec.get("patient_type") or "").strip() or "GENERAL"
+                # Store admission info directly on bill to freeze historical details
+                adm_dt_val = adm_rec.get("admissionDateTime")
+                if adm_dt_val:
+                    update_dict["admissionDateTime"] = adm_dt_val
+                    adm_ist_d = _to_ist_dt(adm_dt_val)
+                    update_dict["admission_date"] = adm_ist_d.strftime("%d-%m-%Y %I:%M %p") if adm_ist_d else str(adm_dt_val)
+                # If discharge_date is missing on bill, resolve from admission dischargeDateTime or room details
+                if not update_dict.get("discharge_date"):
+                    adm_dd = adm_rec.get("dischargeDateTime") or adm_rec.get("discharge_date")
+                    if not adm_dd:
+                        rd = parse_json_field(adm_rec.get("room_details", []))
+                        if isinstance(rd, list):
+                            for r in reversed(rd):
+                                if isinstance(r, dict) and r.get("endDateTime"):
+                                    adm_dd = r.get("endDateTime")
+                                    break
+                    if adm_dd:
+                        dd_p = _parse_dt(adm_dd) if isinstance(adm_dd, str) else adm_dd
+                        if dd_p:
+                            update_dict["discharge_date"] = dd_p
+                            update_dict["dischargeDateTime"] = dd_p
             else:
                 eff_cust = str(getattr(obj, "customer_type", None) or "GENERAL").strip()
 
@@ -634,11 +667,13 @@ def _resolve_doctor_and_department(doc_id):
             doc_name = (profile.get("employeeName") or f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip() or "").strip()
             dept_code = profile.get("department") or ""
             dept_name = _resolve_department_name(dept_code) if dept_code else ""
+            if not dept_name or dept_name.upper().startswith("DEPT"):
+                dept_name = "General"
             _doctor_dept_cache[doc_str] = (doc_name, dept_name)
             return doc_name, dept_name
     except Exception:
         pass
-    res = (_resolve_employee_name(doc_id), "")
+    res = (_resolve_employee_name(doc_id), "General")
     _doctor_dept_cache[doc_str] = res
     return res
 
@@ -1046,16 +1081,29 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
 
     # Pre-resolve admission if ip_number exists
     adm = (adm_map.get(ip_number) if adm_map else None) if ip_number else None
-    if not adm and ip_number and adm_map is None:
+    if not adm and ip_number:
         try:
             _, db = get_hms_db()
             adm = db["hospital_admission"].find_one({
-                "$or": [{"ipNumber": ip_number}, {"ip_number": ip_number}]
+                "$or": [
+                    {"ipNumber": ip_number},
+                    {"ip_number": ip_number},
+                    {"mr_number": ip_number},
+                    {"legacy_ip": ip_number},
+                ]
             })
         except Exception:
             adm = None
 
     adm_str, current_room = _extract_adm_room_and_date(adm)
+    # If bill document itself has stored frozen admission_date, respect it
+    doc_adm_date = doc.get("admission_date") or doc.get("admissionDateTime")
+    if doc_adm_date:
+        if isinstance(doc_adm_date, _datetime):
+            adm_ist = _to_ist_dt(doc_adm_date)
+            adm_str = adm_ist.strftime("%d-%m-%Y %I:%M %p") if adm_ist else doc_adm_date.strftime("%d-%m-%Y %I:%M %p")
+        elif isinstance(doc_adm_date, str) and doc_adm_date.strip():
+            adm_str = doc_adm_date.strip()
 
     # Customer type and insurance MUST strictly originate from the admission collection (adm), NEVER from registration
     adm_cust_raw = (adm.get("customer_type") or adm.get("customerType") or adm.get("patient_type") or "").strip() if adm else ""
@@ -1091,9 +1139,17 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
     disch_dt = (
         doc.get("discharge_date") or
         doc.get("dischargeDateTime") or
-        (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None) or
-        doc.get("bill_date")
+        (adm.get("dischargeDateTime") or adm.get("discharge_date") if adm else None)
     )
+    if not disch_dt and adm:
+        rd = parse_json_field(adm.get("room_details", []))
+        if isinstance(rd, list):
+            for r in reversed(rd):
+                if isinstance(r, dict) and r.get("endDateTime"):
+                    disch_dt = r.get("endDateTime")
+                    break
+    if not disch_dt:
+        disch_dt = doc.get("bill_date")
     disch_str = ""
     if isinstance(disch_dt, _datetime):
         ist_d = _to_ist_dt(disch_dt)
@@ -1129,6 +1185,13 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 if not dept_name and adm:
                     dept_name = _resolve_department_name(adm.get("department") or adm.get("admittingDepartment") or "")
 
+            if dept_name and (dept_name.upper().startswith("DEPT") or not any(c.isspace() for c in dept_name)):
+                resolved_dn = _resolve_department_name(dept_name)
+                if resolved_dn:
+                    dept_name = resolved_dn
+            if not dept_name or dept_name.upper().startswith("DEPT"):
+                dept_name = "General"
+
             guardian_val = p.get("guardian_name") or p.get("spouse_name") or p.get("father_name") or p.get("emergency_contact") or ""
             guardian_type_val = _normalize_guardian_type(p.get("guardian_type"), pt_dict=p)
 
@@ -1163,9 +1226,17 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
                 "doctor":         doc_name or p.get("doctorName") or doc_id,
                 "doctor_id":      doc_id,
                 "department":     dept_name,
+                "uhid":           uhid,
+                "ip_number":      ip_number,
+                "ipNumber":       ip_number,
                 "admission_date": adm_str,
+                "admissionDateTime": (adm.get("admissionDateTime").isoformat() if adm and hasattr(adm.get("admissionDateTime"), "isoformat") else str(adm.get("admissionDateTime") or "")) if adm else "",
+                "doa":            adm_str,
                 "discharge_date": disch_str,
+                "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
+                "dod":            disch_str,
                 "room_no":        current_room,
+                "roomNo":         current_room,
                 "company":        eff_company if bill_is_ins else "",
                 "company_code":   str(adm.get("company_code") or raw_comp) if (adm and bill_is_ins) else "",
                 "customer_type":  bill_cust_type,
@@ -1273,10 +1344,15 @@ def _format_raw_bill_doc(doc, patient_map=None, adm_map=None, ins_map=None, emp_
         "outlet_code":       doc.get("outlet_code"),
         "hospital_code":     doc.get("hospital_code"),
         "shiftno":           doc.get("shiftno", "") or "",
+        "admission_date":    adm_str,
+        "admissionDateTime": (adm.get("admissionDateTime").isoformat() if adm and hasattr(adm.get("admissionDateTime"), "isoformat") else str(adm.get("admissionDateTime") or "")) if adm else "",
         "discharge_date":    disch_str,
         "dischargeDateTime": (disch_dt.isoformat() if hasattr(disch_dt, "isoformat") else str(disch_dt or "")) if disch_dt else "",
+        "room_no":           current_room,
+        "ipNumber":          ip_number,
         "patient_name":      patient_details.get("patient_name") or "",
         "doctor":            doc.get("doctor") or patient_details.get("doctor") or "",
+        "department":        patient_details.get("department") or "",
         "patient_details":   patient_details,
     }
 
@@ -1293,7 +1369,14 @@ def _obj_to_dict(obj):
     try:
         _, db = get_hms_db()
         p = db["hospital_patient"].find_one({"uhid": uhid}) if uhid else None
-        adm = db["hospital_admission"].find_one({"ipNumber": ip_number}) if ip_number else None
+        adm = db["hospital_admission"].find_one({
+            "$or": [
+                {"ipNumber": ip_number},
+                {"ip_number": ip_number},
+                {"mr_number": ip_number},
+                {"legacy_ip": ip_number},
+            ]
+        }) if ip_number else None
     except Exception:
         p = None
         adm = None
@@ -1384,7 +1467,7 @@ def _apply_fields(obj, data, existing=None, request=None):
         raw_items = existing.items
     items = _resolve_items_doctor_names(_parse_items(raw_items))
 
-    obj.uhid             = s("uhid")
+    obj.uhid             = data.get("_canonical_uhid") or s("uhid")
     obj.ip_number        = s("ip_number")
     obj.items            = items
 
@@ -1780,8 +1863,9 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
             adm.save()
 
             # Sync to MongoDB hospital_admission ensuring all 3 remain native BSON arrays
+            ip_str = str(adm.ipNumber)
             db["hospital_admission"].update_one(
-                {"ipNumber": str(adm.ipNumber)},
+                {"$or": [{"ipNumber": ip_str}, {"ip_number": ip_str}, {"mr_number": ip_str}, {"legacy_ip": ip_str}]},
                 {"$set": {
                     "is_discharged":       True,
                     "is_admitted":         False,
@@ -1796,9 +1880,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
             )
 
         # ── 2. Update Pharmacy Billing ───────────────────────────────────────
-        # Criteria: outlet_code: "OLET001", ip_no / inpatient_number, payment_mode: "Credit", billing_status: "Billed", is_ward_request: True
-        # ── 2. Update Pharmacy Billing ────────────────────────────────────────
-        # Update billing_status: Pending / Billed --> Completed
+        # Criteria: strictly bound to IP number so other admissions of the same patient are never affected
         pharm_ip_filter = []
         if ip_number:
             pharm_ip_filter.extend([
@@ -1807,7 +1889,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                 {"ip_number": str(ip_number)},
                 {"ip_no": str(ip_number)},
             ])
-        if uhid:
+        elif uhid:
             pharm_ip_filter.append({"uhid": str(uhid)})
 
         pharm_match = {
@@ -1863,8 +1945,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
             pass
 
         # ── 3. Update Invest Billing ─────────────────────────────────────────
-        # Criteria: ipNumber/uhid, paymentMethod: "Credit", paymentStatus: "Pending" or "Billed"
-        # Update: paymentStatus -> "Completed"
+        # Criteria: strictly bound to IP number so other admissions of the same patient are never affected
         invest_ip_filter = []
         if ip_number:
             invest_ip_filter.extend([
@@ -1872,7 +1953,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                 {"inpatient_number": str(ip_number)},
                 {"ip_number": str(ip_number)},
             ])
-        if uhid:
+        elif uhid:
             invest_ip_filter.append({"uhid": str(uhid)})
 
         invest_match = {
@@ -1900,8 +1981,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
         )
 
         # ── 4. Update Implant Request ─────────────────────────────────────────
-        # Criteria: inpatient_number/uhid, status: "Pending", is_active: True
-        # Update: status -> "Completed"
+        # Criteria: strictly bound to IP number so other admissions of the same patient are never affected
         implant_ip_filter = []
         if ip_number:
             implant_ip_filter.extend([
@@ -1909,7 +1989,7 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                 {"ipNumber": str(ip_number)},
                 {"ip_number": str(ip_number)},
             ])
-        if uhid:
+        elif uhid:
             implant_ip_filter.append({"uhid": str(uhid)})
 
         implant_match = {
@@ -2291,7 +2371,7 @@ def search_discharge_patient(request):
     client, db = get_hms_db()
 
     uhid      = request.GET.get("uhid",     "").strip()
-    ip_number = request.GET.get("ipNumber", "").strip()
+    ip_number = (request.GET.get("ipNumber", "") or request.GET.get("ip_number", "")).strip()
 
     if not uhid and not ip_number:
         return Response(
@@ -2300,40 +2380,70 @@ def search_discharge_patient(request):
         )
 
     for_print = request.GET.get("for_print") in ["true", "1", "True"]
+    allow_discharged = request.GET.get("allow_discharged") in ["true", "1", "True"] or for_print
     patient_doc   = None
     admission_doc = None
 
     try:
-        if uhid:
-            patient_doc = db["hospital_patient"].find_one({"uhid": uhid})
-            if not patient_doc:
-                return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+        # Strictly prioritize ip_number lookup: admission episode is uniquely identified by IP number,
+        # ensuring that re-admitted patients under the same UHID resolve their specific admission date & room.
+        if ip_number:
+            admission_doc = db["hospital_admission"].find_one({
+                "$or": [
+                    {"ipNumber": ip_number},
+                    {"ip_number": ip_number},
+                    {"mr_number": ip_number},
+                    {"legacy_ip": ip_number},
+                ]
+            })
+            if not allow_discharged and (not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled")):
+                return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
+            elif allow_discharged and (not admission_doc or admission_doc.get("is_cancelled")):
+                return Response({"error": "Admission record not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            admission_doc = db["hospital_admission"].find_one(
-                {"uhid": uhid, "is_admitted": True, "is_cancelled": {"$ne": True}},
-                sort=[("admissionDateTime", -1)]
-            )
-            if not admission_doc:
+            p_uhid = admission_doc.get("uhid") if admission_doc else uhid
+            patient_doc, canonical_uhid = resolve_canonical_patient(db, p_uhid)
+            if not patient_doc and uhid:
+                patient_doc, canonical_uhid = resolve_canonical_patient(db, uhid)
+            if not patient_doc or not canonical_uhid:
+                return Response({"error": "Patient not found in Patient Master"}, status=status.HTTP_404_NOT_FOUND)
+            if admission_doc and admission_doc.get("uhid") != canonical_uhid:
+                try:
+                    db["hospital_admission"].update_one(
+                        {"_id": admission_doc["_id"]},
+                        {"$set": {"uhid": canonical_uhid}}
+                    )
+                    admission_doc["uhid"] = canonical_uhid
+                except Exception:
+                    pass
+
+        elif uhid:
+            patient_doc, canonical_uhid = resolve_canonical_patient(db, uhid)
+            if not patient_doc or not canonical_uhid:
+                return Response({"error": "Patient not found in Patient Master"}, status=status.HTTP_404_NOT_FOUND)
+
+            uhid = canonical_uhid
+
+            if not allow_discharged:
                 admission_doc = db["hospital_admission"].find_one(
-                    {"uhid": uhid},
+                    {"uhid": uhid, "is_admitted": True, "is_cancelled": {"$ne": True}},
                     sort=[("admissionDateTime", -1)]
                 )
-            if not for_print and (not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled")):
-                return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
-            elif for_print and (not admission_doc or admission_doc.get("is_cancelled")):
-                return Response({"error": "Admission record not found"}, status=status.HTTP_404_NOT_FOUND)
+            else:
+                admission_doc = db["hospital_admission"].find_one(
+                    {"uhid": uhid, "is_cancelled": {"$ne": True}},
+                    sort=[("admissionDateTime", -1)]
+                )
+                if not admission_doc:
+                    admission_doc = db["hospital_admission"].find_one(
+                        {"uhid": uhid},
+                        sort=[("admissionDateTime", -1)]
+                    )
 
-        else:
-            admission_doc = db["hospital_admission"].find_one({"ipNumber": ip_number})
-            if not for_print and (not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled")):
+            if not allow_discharged and (not admission_doc or not admission_doc.get("is_admitted") or admission_doc.get("is_cancelled")):
                 return Response({"error": "Not Admitted"}, status=status.HTTP_404_NOT_FOUND)
-            elif for_print and (not admission_doc or admission_doc.get("is_cancelled")):
+            elif allow_discharged and (not admission_doc or admission_doc.get("is_cancelled")):
                 return Response({"error": "Admission record not found"}, status=status.HTTP_404_NOT_FOUND)
-
-            p_uhid = admission_doc.get("uhid")
-            patient_doc = db["hospital_patient"].find_one({"uhid": p_uhid}) if p_uhid else None
-            if not patient_doc:
-                return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
 
     except Exception as e:
         return Response(
@@ -2342,7 +2452,7 @@ def search_discharge_patient(request):
         )
 
     ward_status = str(admission_doc.get("ward_status") or "").strip()
-    if not for_print:
+    if not allow_discharged:
         # Verify patient discharge state: if already discharged, disallow billing again
         adm_status = str(admission_doc.get("status") or "").strip()
         is_discharged = bool(admission_doc.get("is_discharged", False))
@@ -2433,15 +2543,51 @@ def search_discharge_patient(request):
         doc_name = _resolve_employee_name(doc_id) if doc_id else ""
     if not dept_name:
         dept_name = _resolve_department_name(admission_doc.get("department") or admission_doc.get("admittingDepartment") or "")
+    if dept_name and (dept_name.upper().startswith("DEPT") or not any(c.isspace() for c in dept_name)):
+        resolved_dn = _resolve_department_name(dept_name)
+        if resolved_dn:
+            dept_name = resolved_dn
+    if not dept_name or dept_name.upper().startswith("DEPT"):
+        dept_name = "General"
 
     disch_dt = admission_doc.get("dischargeDateTime") or admission_doc.get("discharge_date")
     disch_str = ""
     if isinstance(disch_dt, _datetime):
-        disch_str = disch_dt.strftime("%d-%m-%Y")
+        ist_disch = _to_ist_dt(disch_dt)
+        disch_str = ist_disch.strftime("%d-%m-%Y") if ist_disch else disch_dt.strftime("%d-%m-%Y")
     elif isinstance(disch_dt, _date):
         disch_str = disch_dt.strftime("%d-%m-%Y")
     elif isinstance(disch_dt, str) and disch_dt:
-        disch_str = disch_dt[:10]
+        parsed_dd = _parse_dt(disch_dt)
+        disch_str = parsed_dd.strftime("%d-%m-%Y") if parsed_dd else disch_dt[:10]
+
+    # If discharge date is missing on admission, check room endDateTime or discharge billing
+    if not disch_str:
+        if room_details and isinstance(room_details, list):
+            for r in reversed(room_details):
+                if isinstance(r, dict) and r.get("endDateTime"):
+                    e_val = r.get("endDateTime")
+                    e_p = _parse_dt(e_val) if isinstance(e_val, str) else e_val
+                    if e_p:
+                        e_ist = _to_ist_dt(e_p)
+                        disch_str = e_ist.strftime("%d-%m-%Y") if e_ist else e_p.strftime("%d-%m-%Y")
+                        break
+        search_ip = str(admission_doc.get("ipNumber") or admission_doc.get("ip_number") or ip_number or "").strip()
+        if not disch_str and search_ip:
+            try:
+                b_match = db["hospital_dischargebilling"].find_one({
+                    "$or": [{"ip_number": search_ip}, {"ipNumber": search_ip}, {"mr_number": search_ip}, {"legacy_ip": search_ip}],
+                    "is_cancelled": {"$ne": True}
+                })
+                if b_match:
+                    b_dt = b_match.get("discharge_date") or b_match.get("dischargeDateTime") or b_match.get("bill_date")
+                    if b_dt:
+                        b_p = _parse_dt(b_dt) if isinstance(b_dt, str) else b_dt
+                        if b_p:
+                            b_ist = _to_ist_dt(b_p)
+                            disch_str = b_ist.strftime("%d-%m-%Y") if b_ist else b_p.strftime("%d-%m-%Y")
+            except Exception:
+                pass
 
     guardian_val = patient_doc.get("guardian_name") or patient_doc.get("spouse_name") or patient_doc.get("father_name") or patient_doc.get("emergency_contact") or ""
     guardian_type_val = _normalize_guardian_type(patient_doc.get("guardian_type"), pt_dict=patient_doc)
@@ -2523,8 +2669,8 @@ def search_discharge_patient(request):
         patient_info["referral_number"] = ""
         patient_info["member_number"]   = ""
 
-    effective_ip   = ip_number or admission_doc.get("ipNumber")
-    effective_uhid = patient_doc.get("uhid") or uhid
+    effective_ip   = str((admission_doc.get("ipNumber") if admission_doc else "") or ip_number or "").strip()
+    effective_uhid = str((patient_doc.get("uhid") if patient_doc else "") or uhid or "").strip()
 
     if for_print:
         # Fast path for print preview / modal: only fetch pharmacy medicines!
@@ -2643,11 +2789,26 @@ def search_discharge_patient(request):
                     "end_dt": now_dt,
                 })
 
-            # Batch pre-fetch all room documents in ONE query!
+            # Batch pre-fetch all room documents with normalized fallback!
             room_numbers_set = list({s["room_no"] for s in room_stays if s.get("room_no")})
-            room_docs_cursor = list(db["hospital_room"].find({"room_number": {"$in": room_numbers_set}})) if room_numbers_set else []
-            room_doc_map = {str(rd.get("room_number")).strip(): rd for rd in room_docs_cursor if rd.get("room_number")}
-            room_doc_lower_map = {k.lower(): v for k, v in room_doc_map.items()}
+            all_active_rooms = list(db["hospital_room"].find({"is_active": True}))
+            room_doc_map = {}
+            room_doc_clean_map = {}
+            room_doc_digit_map = {}
+            for rd in all_active_rooms:
+                rn_str = str(rd.get("room_number") or "").strip()
+                if not rn_str:
+                    continue
+                room_doc_map[rn_str] = rd
+                ck = re.sub(r'[\s\-_]+', '', rn_str).upper()
+                room_doc_clean_map[ck] = rd
+                ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', rn_str, flags=re.IGNORECASE).strip()
+                if ps:
+                    room_doc_clean_map[re.sub(r'[\s\-_]+', '', ps).upper()] = rd
+                m_d = re.search(r'(\d{2,4})', ck)
+                d_str = m_d.group(1) if m_d else re.sub(r'\D+', '', ck)
+                if d_str and d_str not in room_doc_digit_map:
+                    room_doc_digit_map[d_str] = rd
 
             for idx, stay in enumerate(room_stays):
                 r_no = stay["room_no"]
@@ -2666,7 +2827,10 @@ def search_discharge_patient(request):
                 if stay_days <= 0:
                     continue
 
-                room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_lower_map.get(str(r_no).strip().lower())
+                r_clean = re.sub(r'[\s\-_]+', '', str(r_no or '')).upper()
+                m_rd = re.search(r'(\d{2,4})', r_clean)
+                r_digit = m_rd.group(1) if m_rd else re.sub(r'\D+', '', r_clean)
+                room_doc = room_doc_map.get(str(r_no).strip()) or room_doc_clean_map.get(r_clean) or (room_doc_digit_map.get(r_digit) if r_digit else None)
 
                 if room_doc:
                     room_cat = room_doc.get("room_category", "")
@@ -4076,14 +4240,19 @@ def discharge_billing_list_create(request):
         patient_map = {str(p.get("uhid")).strip(): p for p in patient_docs if p.get("uhid")}
 
         adm_docs = list(db["hospital_admission"].find({
-            "$or": [{"ipNumber": {"$in": ip_numbers}}, {"ip_number": {"$in": ip_numbers}}]
+            "$or": [
+                {"ipNumber": {"$in": ip_numbers}},
+                {"ip_number": {"$in": ip_numbers}},
+                {"mr_number": {"$in": ip_numbers}},
+                {"legacy_ip": {"$in": ip_numbers}},
+            ]
         })) if ip_numbers else []
         adm_map = {}
         for a in adm_docs:
-            if a.get("ipNumber"):
-                adm_map[str(a.get("ipNumber")).strip()] = a
-            if a.get("ip_number"):
-                adm_map[str(a.get("ip_number")).strip()] = a
+            for k in ("ipNumber", "ip_number", "mr_number", "legacy_ip"):
+                val = str(a.get(k) or "").strip()
+                if val:
+                    adm_map[val] = a
 
         # Single batch fetch for ALL insurance member details (Claim and ID card numbers)
         ins_members = list(db["hospital_insurancemember"].find(
@@ -4154,11 +4323,21 @@ def discharge_billing_list_create(request):
                 {"employeeId": {"$in": all_emp_query}},
                 {"employeeId": 1, "employeeName": 1, "firstName": 1, "lastName": 1, "designation": 1, "department": 1}
             ))
+            g_dept_docs = list(g_db["backend_diagnostics_Departments"].find({}, {"department_code": 1, "department_name": 1, "description": 1}))
+            g_dept_map = {}
+            for gd in g_dept_docs:
+                c = str(gd.get("department_code") or "").strip()
+                n = (gd.get("department_name") or gd.get("description") or "").strip()
+                if c and n:
+                    g_dept_map[c] = n
+                    g_dept_map[c.upper()] = n
+
             for p in profiles:
                 eid = str(p.get("employeeId") or "").strip()
                 ename = (p.get("employeeName") or f"{p.get('firstName', '')} {p.get('lastName', '')}").strip()
                 edesig = (p.get("designation") or "").strip()
-                edept = (p.get("department") or "").strip()
+                edept_code = (p.get("department") or "").strip()
+                edept = g_dept_map.get(edept_code) or g_dept_map.get(edept_code.upper()) or _resolve_department_name(edept_code) or edept_code
                 if eid:
                     emp_map[eid] = ename
                     emp_map[f"DR.{eid}"] = ename
@@ -4179,7 +4358,7 @@ def discharge_billing_list_create(request):
     # Flow 1: status="Billed"    → bill_no generated, estimate_number=None
     # Flow 2: status="Estimate"  → estimate_number generated, bill_no=None
     if request.method == "POST":
-        data           = request.data
+        data           = dict(request.data)
         billing_status = data.get("status", "Estimate")
 
         if billing_status not in ("Estimate", "Billed"):
@@ -4187,6 +4366,25 @@ def discharge_billing_list_create(request):
                 {"error": "status must be 'Estimate' or 'Billed'"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        req_uhid = str(data.get("uhid") or "").strip()
+        req_ip   = str(data.get("ip_number") or data.get("ipNumber") or "").strip()
+
+        # Strictly validate patient exists in Patient Master & resolve canonical UHID
+        patient_doc, canonical_uhid = resolve_canonical_patient(db, req_uhid)
+        if not patient_doc and req_ip:
+            adm_doc = db["hospital_admission"].find_one({"$or": [{"ipNumber": req_ip}, {"ip_number": req_ip}]})
+            if adm_doc and adm_doc.get("uhid"):
+                patient_doc, canonical_uhid = resolve_canonical_patient(db, adm_doc.get("uhid"))
+
+        if not patient_doc or not canonical_uhid:
+            return Response(
+                {"error": f"Invalid UHID '{req_uhid}'. Patient not found in Patient Master. Cannot proceed with discharge bill without a registered patient."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        data["uhid"] = canonical_uhid
+        data["_canonical_uhid"] = canonical_uhid
 
         if billing_status == "Billed":
             ip_num = data.get("ip_number") or data.get("ipNumber")
@@ -4355,6 +4553,15 @@ def convert_estimate_to_bill(request, pk):
             {"error": "Already Discharged", "message": "Discharge bill already exists for this admission"},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    _, db = get_hms_db()
+    p_doc, c_uhid = resolve_canonical_patient(db, estimate.uhid)
+    if not p_doc or not c_uhid:
+        return Response(
+            {"error": f"Invalid UHID '{estimate.uhid}'. Patient not found in Patient Master. Cannot convert estimate to bill."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    estimate.uhid = c_uhid
 
     _normalise_decimals(estimate)
 

@@ -763,17 +763,52 @@ def _enrich_grn_items(data_list):
         return data_list
 
     emp_ids = set()
+    vendor_ids = set()
+    missing_item_ids = set()
+
     for r in data_list:
         for k in ("created_by", "entered_by", "verified_by", "lastmodified_by", "edited_by", "received_by"):
             val = r.get(k)
             if val and any(c.isdigit() for c in str(val)):
                 emp_ids.add(str(val).strip())
 
+        # Collect vendor_ids if vendor_name is missing or numeric
+        v_name = r.get("vendor_name")
+        if not v_name or str(v_name).strip().isdigit() or str(v_name).strip().startswith("Vendor #"):
+            vid = r.get("vendor_id") or r.get("vendor")
+            if vid is not None:
+                vendor_ids.add(str(vid).strip())
+                if str(vid).strip().isdigit():
+                    vendor_ids.add(int(str(vid).strip()))
+
+        # Parse items if stored as JSON string
+        if isinstance(r.get("items"), str):
+            try:
+                r["items"] = json.loads(r["items"])
+            except Exception:
+                pass
+
+        # Check for missing item names
+        items = r.get("items")
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict):
+                    nm = it.get("name") or it.get("item_name") or it.get("medicine_name") or it.get("product_name")
+                    if not nm and it.get("item_id"):
+                        missing_item_ids.add(str(it.get("item_id")).strip())
+                        if str(it.get("item_id")).strip().isdigit():
+                            missing_item_ids.add(int(str(it.get("item_id")).strip()))
+
     emp_name_map = {}
-    if emp_ids:
-        try:
-            client, _ = get_hms_db()
-            global_db = client["Global"]
+    vendor_name_map = {}
+    item_name_map = {}
+
+    try:
+        client, hms_db = get_hms_db()
+        global_db = client["Global"]
+
+        # 1. Resolve employee names
+        if emp_ids:
             id_query = []
             for eid in emp_ids:
                 id_query.append({"employeeId": eid})
@@ -800,8 +835,68 @@ def _enrich_grn_items(data_list):
                         emp_name_map[str(p.get("employeeId")).strip()] = name
                     if p.get("userId"):
                         emp_name_map[str(p.get("userId")).strip()] = name
-        except Exception as e:
-            logger.error(f"Error enriching employee names: {e}")
+
+        # 2. Resolve vendor names from hospital_vendor
+        if vendor_ids:
+            v_list = list(vendor_ids)
+            v_cursor = hms_db["hospital_vendor"].find(
+                {"$or": [
+                    {"vendor_id": {"$in": v_list}},
+                    {"id": {"$in": v_list}},
+                ]},
+                {"vendor_id": 1, "id": 1, "name": 1, "vendor_name": 1}
+            )
+            for v in v_cursor:
+                v_name = v.get("name") or v.get("vendor_name")
+                if v_name:
+                    for k in ("vendor_id", "id"):
+                        if v.get(k) is not None:
+                            val_str = str(v.get(k)).strip()
+                            vendor_name_map[val_str] = v_name
+                            if val_str.isdigit():
+                                vendor_name_map[int(val_str)] = v_name
+
+            # Fallback to hospital_generalstorevendor
+            missing_vids = [vid for vid in vendor_ids if vid not in vendor_name_map and str(vid) not in vendor_name_map]
+            if missing_vids:
+                gv_cursor = hms_db["hospital_generalstorevendor"].find(
+                    {"$or": [
+                        {"vendor_id": {"$in": missing_vids}},
+                        {"id": {"$in": missing_vids}},
+                    ]},
+                    {"vendor_id": 1, "id": 1, "name": 1, "vendor_name": 1}
+                )
+                for gv in gv_cursor:
+                    gv_name = gv.get("name") or gv.get("vendor_name")
+                    if gv_name:
+                        for k in ("vendor_id", "id"):
+                            if gv.get(k) is not None:
+                                val_str = str(gv.get(k)).strip()
+                                vendor_name_map[val_str] = gv_name
+                                if val_str.isdigit():
+                                    vendor_name_map[int(val_str)] = gv_name
+
+        # 3. Resolve item names from hospital_pharmacyitem
+        if missing_item_ids:
+            it_list = list(missing_item_ids)
+            it_cursor = hms_db["hospital_pharmacyitem"].find(
+                {"$or": [
+                    {"item_id": {"$in": it_list}},
+                    {"id": {"$in": it_list}},
+                ]},
+                {"item_id": 1, "id": 1, "item_name": 1, "name": 1, "medicine_name": 1}
+            )
+            for itm in it_cursor:
+                nm = itm.get("item_name") or itm.get("name") or itm.get("medicine_name")
+                if nm:
+                    for k in ("item_id", "id"):
+                        if itm.get(k) is not None:
+                            val_str = str(itm.get(k)).strip()
+                            item_name_map[val_str] = nm
+                            if val_str.isdigit():
+                                item_name_map[int(val_str)] = nm
+    except Exception as e:
+        logger.error(f"Error enriching GRN items / vendors / employees: {e}")
 
     def _get_emp_name(val):
         if not val:
@@ -815,6 +910,32 @@ def _enrich_grn_items(data_list):
                 r["items"] = json.loads(r["items"])
             except Exception:
                 pass
+
+        # Vendor name enrichment
+        vid = r.get("vendor_id") or r.get("vendor")
+        curr_vname = r.get("vendor_name")
+        if (not curr_vname or str(curr_vname).strip().isdigit() or str(curr_vname).strip().startswith("Vendor #")) and vid is not None:
+            resolved_vendor = vendor_name_map.get(str(vid).strip()) or vendor_name_map.get(vid)
+            if resolved_vendor:
+                r["vendor_name"] = resolved_vendor
+
+        # Item names enrichment
+        items = r.get("items")
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict):
+                    nm = (
+                        it.get("name")
+                        or it.get("item_name")
+                        or it.get("medicine_name")
+                        or it.get("product_name")
+                    )
+                    if not nm and it.get("item_id"):
+                        nm = item_name_map.get(str(it.get("item_id")).strip()) or item_name_map.get(it.get("item_id"))
+                    if nm:
+                        it["name"] = nm
+                        it["item_name"] = nm
+                        it["medicine_name"] = nm
 
         c_by = r.get("entered_by") or r.get("created_by") or ""
         r["entered_by"] = _get_emp_name(c_by)
@@ -1003,37 +1124,77 @@ def grn_view(request, pk=None):
             search = str(request.GET.get("search", "") or request.GET.get("q", "")).strip()
             if search:
                 reg = {"$regex": re.escape(search), "$options": "i"}
-                filter_q.setdefault("$and", []).append({
-                    "$or": [
-                        {"draft_number": reg},
-                        {"grn_number": reg},
-                        {"invoice_no": reg},
-                        {"vendor_name": reg},
-                        {"purchase_category": reg},
-                        {"status": reg}
-                    ]
-                })
+                search_or = [
+                    {"draft_number": reg},
+                    {"grn_number": reg},
+                    {"invoice_no": reg},
+                    {"vendor_name": reg},
+                    {"purchase_category": reg},
+                    {"status": reg},
+                    {"items": reg},
+                    {"items.name": reg},
+                    {"items.item_name": reg},
+                    {"items.batch": reg},
+                    {"items.batch_number": reg},
+                ]
+                if search.isdigit():
+                    search_or.append({"vendor_id": int(search)})
+                    search_or.append({"vendor_id": search})
+                    search_or.append({"items.item_id": int(search)})
+                    search_or.append({"items.item_id": search})
+
+                # Also search vendor name in hospital_vendor to match vendor_id
+                try:
+                    client, hms_db = get_hms_db()
+                    matched_vendors = list(hms_db["hospital_vendor"].find(
+                        {"name": reg},
+                        {"vendor_id": 1}
+                    ).limit(50))
+                    matched_vids = []
+                    for mv in matched_vendors:
+                        mvid = mv.get("vendor_id")
+                        if mvid is not None:
+                            matched_vids.append(mvid)
+                            if str(mvid).isdigit():
+                                matched_vids.append(int(str(mvid)))
+                                matched_vids.append(str(mvid))
+                    if matched_vids:
+                        search_or.append({"vendor_id": {"$in": matched_vids}})
+                except Exception as ve:
+                    logger.warning("Vendor search lookup error: %s", ve)
+
+                filter_q.setdefault("$and", []).append({"$or": search_or})
 
             status_f = str(request.GET.get("status", "")).strip()
             if status_f and status_f.upper() != "ALL":
                 status_lower = status_f.lower()
-                if status_lower == "pending":
+                if status_lower in ("pending", "draft"):
                     filter_q.setdefault("$and", []).append({
                         "$or": [
-                            {"status": {"$regex": r"^pending$", "$options": "i"}},
                             {"status": {"$regex": r"^draft$", "$options": "i"}},
+                            {"status": {"$regex": r"^pending$", "$options": "i"}},
                             {"status": {"$in": [None, ""]}}
                         ]
                     })
-                elif status_lower == "verified":
+                elif status_lower in ("verified", "approved"):
                     filter_q.setdefault("$and", []).append({
                         "$or": [
                             {"status": {"$regex": r"^verified$", "$options": "i"}},
                             {"status": {"$regex": r"^approved$", "$options": "i"}}
                         ]
                     })
+                elif status_lower == "received":
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": r"^received$", "$options": "i"}}
+                        ]
+                    })
                 else:
-                    filter_q["status"] = {"$regex": f"^{re.escape(status_f)}$", "$options": "i"}
+                    filter_q.setdefault("$and", []).append({
+                        "$or": [
+                            {"status": {"$regex": f"^{re.escape(status_f)}$", "$options": "i"}}
+                        ]
+                    })
 
             vendor_f = str(request.GET.get("vendor", "") or request.GET.get("vendor_id", "")).strip()
             if vendor_f and vendor_f.upper() != "ALL":
@@ -1049,31 +1210,93 @@ def grn_view(request, pk=None):
                     vendor_or.append({"vendor_id": vendor_f})
                 filter_q.setdefault("$and", []).append({"$or": vendor_or})
 
+            # Outlet / Purchase Category filtering
+            # Note: Only filter by outlet if explicitly requested in query params (e.g. from GRNReceive)
+            # General views (GRNAnalysis, GRNGeneration) do not pass outlet_code, displaying all GRNs
+            outlet_req = str(request.GET.get("outlet_code", "")).strip()
             cat_f = str(request.GET.get("purchase_category", "") or request.GET.get("type", "")).strip()
-            if cat_f:
+
+            if not cat_f and outlet_req and outlet_req.upper() not in ("ALL", "OLET003", "MAIN BLOCK"):
+                if outlet_req.upper() in ("OLET001", "IP", "IP PHARMACY"):
+                    cat_f = "IP PHARMACY"
+                elif outlet_req.upper() in ("OLET002", "OP", "OP PHARMACY"):
+                    cat_f = "OP PHARMACY"
+                elif outlet_req.upper() in ("OLET006", "DRUG", "DRUG PURCHASE"):
+                    cat_f = "DRUG PURCHASE"
+                else:
+                    cat_f = outlet_req
+
+            if cat_f and cat_f.upper() != "ALL":
                 cat_upper = cat_f.upper()
-                if cat_upper == "IP":
+                if "IP" in cat_upper or cat_upper == "OLET001":
                     cat_or = [
-                        {"purchase_category": {"$regex": r"^IP\b|_IP$", "$options": "i"}},
+                        {"purchase_category": {"$regex": r"^IP\b|_IP$|IP PHARMACY", "$options": "i"}},
+                        {"outlet_code": "OLET001"},
                         {"grn_number": {"$regex": r"^IP/", "$options": "i"}},
                     ]
-                elif cat_upper == "OP":
+                elif "OP" in cat_upper or cat_upper == "OLET002":
                     cat_or = [
-                        {"purchase_category": {"$regex": r"^OP\b|^MEDICINE_PURCHASE$", "$options": "i"}},
+                        {"purchase_category": {"$regex": r"^OP\b|^MEDICINE_PURCHASE$|OP PHARMACY", "$options": "i"}},
+                        {"outlet_code": "OLET002"},
                         {"grn_number": {"$regex": r"^OP/", "$options": "i"}},
+                    ]
+                elif "DRUG" in cat_upper or cat_upper == "OLET006":
+                    cat_or = [
+                        {"purchase_category": {"$regex": r"DRUG", "$options": "i"}},
+                        {"outlet_code": "OLET006"},
+                        {"grn_number": {"$regex": r"^DP/", "$options": "i"}},
                     ]
                 else:
                     cat_or = [
                         {"purchase_category": {"$regex": f"^{re.escape(cat_f)}$", "$options": "i"}},
+                        {"outlet_code": cat_f},
                     ]
                 filter_q.setdefault("$and", []).append({"$or": cat_or})
 
-            filter_q = apply_date_filter(filter_q, request, "created_date")
+            # Date Range Filtering (matches either created_date or date)
+            from_date = str(request.GET.get("from_date", "") or request.GET.get("fromDate", "") or "").strip()
+            to_date = str(request.GET.get("to_date", "") or request.GET.get("toDate", "") or "").strip()
+            single_date = str(request.GET.get("date", "")).strip()
+
+            from_val = from_date or single_date
+            to_val = to_date or single_date
+
+            if from_val or to_val:
+                dt_start = None
+                dt_end = None
+                try:
+                    if from_val:
+                        dt_start = datetime.strptime(from_val[:10], "%Y-%m-%d")
+                except Exception:
+                    pass
+                try:
+                    if to_val:
+                        dt_end = datetime.strptime(to_val[:10], "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999)
+                except Exception:
+                    pass
+
+                date_conds = []
+                if dt_start and dt_end:
+                    date_conds.append({"created_date": {"$gte": dt_start, "$lte": dt_end}})
+                    date_conds.append({"date": {"$gte": dt_start, "$lte": dt_end}})
+                elif dt_start:
+                    date_conds.append({"created_date": {"$gte": dt_start}})
+                    date_conds.append({"date": {"$gte": dt_start}})
+                elif dt_end:
+                    date_conds.append({"created_date": {"$lte": dt_end}})
+                    date_conds.append({"date": {"$lte": dt_end}})
+
+                if from_val and to_val:
+                    date_conds.append({"created_date": {"$gte": from_val[:10], "$lte": to_val[:10] + " 23:59:59.999999"}})
+                    date_conds.append({"date": {"$gte": from_val[:10], "$lte": to_val[:10] + " 23:59:59.999999"}})
+
+                if date_conds:
+                    filter_q.setdefault("$and", []).append({"$or": date_conds})
 
             return Response(paginate_mongo_query(
                 "hospital_grn",
                 filter_q,
-                sort=[("created_date", DESCENDING)],
+                sort=[("created_date", DESCENDING), ("date", DESCENDING), ("_id", DESCENDING)],
                 request=request,
                 enrich_fn=_enrich_grn_items
             ))
@@ -2137,6 +2360,7 @@ def pharmacy_item_purchase_history(request):
                 "grn_number": 1,
                 "date": 1,
                 "vendor_id": 1,
+                "vendor_name": 1,
                 "invoice_no": 1,
                 "invoice_date": 1,
                 "po_number": 1,
@@ -2179,8 +2403,8 @@ def pharmacy_item_purchase_history(request):
 
         for g in grns:
             vid = g.get("vendor_id")
-            vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
-            if vid:
+            vname = g.get("vendor_name") or vendor_map.get(vid) or vendor_map.get(str(vid)) or str(vid or "—")
+            if vid and vname and vname != "—":
                 suppliers_set[str(vid)] = vname
 
             p_date_raw = g.get("date")
@@ -2245,6 +2469,23 @@ def pharmacy_item_purchase_history(request):
                     free_val = str(itm.get("free") if itm.get("free") is not None else "0")
                     p_cst_val = str(itm.get("p_cst") or itm.get("purchase_cst") or itm.get("cgst_percent") or itm.get("CGST_Percentage") or "0")
                     p_tps_val = str(itm.get("p_tps") or itm.get("purchase_tax_rate") or itm.get("purchase_tps") or itm.get("sgst_percent") or itm.get("SGST_Percentage") or "0")
+                    try:
+                        cgst_f = float(p_cst_val)
+                    except (ValueError, TypeError):
+                        cgst_f = 0.0
+                    try:
+                        sgst_f = float(p_tps_val)
+                    except (ValueError, TypeError):
+                        sgst_f = 0.0
+                    tot_tax = cgst_f + sgst_f
+                    tax_disp = f"{int(tot_tax) if tot_tax.is_integer() else tot_tax:.1f}%" if tot_tax > 0 else "0%"
+
+                    type_val = g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE"
+                    if not type_val or type_val.lower() == "grn":
+                        if grn_no.upper().startswith("OP/"):
+                            type_val = "OP PHARMACY"
+                        elif grn_no.upper().startswith("IP/"):
+                            type_val = "IP PHARMACY"
 
                     all_records.append({
                         "ref": grn_no,
@@ -2259,12 +2500,14 @@ def pharmacy_item_purchase_history(request):
                         "mrp": mrp_fmt,
                         "inv_date": inv_date_str,
                         "order_number": g.get("po_number") or g.get("order_number") or "",
-                        "type": g.get("purchase_category") or g.get("grn_type") or "MEDICINE PURCHASE (IP)",
+                        "type": type_val,
                         "expiry": exp or "—",
                         "packing": str(itm.get("packing") or itm.get("pack_size") or "1"),
                         "free": free_val,
                         "p_cst": p_cst_val,
                         "p_tps": p_tps_val,
+                        "tax_percent": tax_disp,
+                        "total_tax": tax_disp,
                         "p_cost": p_cost_fmt,
                         "cst": cst_fmt,
                         "tps": tps_fmt,
@@ -2296,11 +2539,38 @@ def pharmacy_item_purchase_history(request):
             if (stk_grn, stk_batch) not in seen_grn_batches and (stk_grn != "—" or stk_batch != "—"):
                 seen_grn_batches.add((stk_grn, stk_batch))
                 vid = stk.get("vendor_id") or stk.get("supplier_id")
-                vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or stk.get("vendor_name") or stk.get("supplier_name") or stk.get("supplier") or str(vid or "—")
-                if vid:
+                vname = vendor_map.get(vid) or vendor_map.get(str(vid)) or stk.get("vendor_name") or stk.get("supplier_name") or stk.get("supplier")
+
+                # Resolve vendor & GRN reference from hospital_grn if missing (common in hospital_pharmacystock)
+                grn_match = None
+                if not vname or vname == "—" or not vid:
+                    if stk_batch and stk_batch != "—":
+                        grn_match = db["hospital_grn"].find_one(
+                            {"items": {"$regex": f'"batch":\\s*"{re.escape(str(stk_batch))}"'}},
+                            {"vendor_id": 1, "vendor_name": 1, "grn_number": 1, "date": 1, "purchase_category": 1, "grn_type": 1, "_id": 0}
+                        )
+                    if not grn_match and stk_grn and stk_grn != "—":
+                        m = re.search(r'(\d{4})/0*(\d+)', str(stk_grn))
+                        if m:
+                            yr, seq = m.groups()
+                            grn_match = db["hospital_grn"].find_one(
+                                {"grn_number": {"$regex": f'/{yr}/0*{seq}$'}},
+                                {"vendor_id": 1, "vendor_name": 1, "grn_number": 1, "date": 1, "purchase_category": 1, "grn_type": 1, "_id": 0}
+                            )
+                    if grn_match:
+                        vid = vid or grn_match.get("vendor_id")
+                        vname = grn_match.get("vendor_name") or vendor_map.get(vid) or vendor_map.get(str(vid)) or vname
+                        if grn_match.get("grn_number"):
+                            stk_grn = grn_match.get("grn_number")
+
+                vname = vname or str(vid or "—")
+                if vid and vname and vname != "—":
                     suppliers_set[str(vid)] = vname
 
                 c_date = stk.get("created_date") or stk.get("entry_date") or stk.get("date")
+                if (not c_date or c_date == "—") and grn_match and grn_match.get("date"):
+                    c_date = grn_match.get("date")
+
                 p_date_str = "—"
                 p_date_sort = ""
                 if c_date:
@@ -2336,6 +2606,28 @@ def pharmacy_item_purchase_history(request):
                 selling_fmt = _safe_fmt(selling_val, fallback="") if selling_val else ""
                 margin_fmt = _safe_fmt(margin_val, fallback="") if margin_val else ""
 
+                p_cst_val = str(stk.get("CGST_Percentage") or stk.get("cgst_percent") or "0")
+                p_tps_val = str(stk.get("SGST_Percentage") or stk.get("sgst_percent") or "0")
+                try:
+                    cgst_f = float(p_cst_val)
+                except (ValueError, TypeError):
+                    cgst_f = 0.0
+                try:
+                    sgst_f = float(p_tps_val)
+                except (ValueError, TypeError):
+                    sgst_f = 0.0
+                tot_tax = cgst_f + sgst_f
+                tax_disp = f"{int(tot_tax) if tot_tax.is_integer() else tot_tax:.1f}%" if tot_tax > 0 else "0%"
+
+                type_val = stk.get("purchase_category") or stk.get("stock_type") or (grn_match.get("purchase_category") if grn_match else None) or (grn_match.get("grn_type") if grn_match else None)
+                if not type_val or str(type_val).lower() == "grn":
+                    if stk_grn.upper().startswith("OP/"):
+                        type_val = "OP PHARMACY"
+                    elif stk_grn.upper().startswith("IP/"):
+                        type_val = "IP PHARMACY"
+                    else:
+                        type_val = "MEDICINE PURCHASE"
+
                 all_records.append({
                     "ref": stk_grn,
                     "p_date": p_date_str,
@@ -2349,12 +2641,14 @@ def pharmacy_item_purchase_history(request):
                     "mrp": mrp_fmt,
                     "inv_date": str(stk.get("invoice_date") or stk.get("inv_date") or ""),
                     "order_number": str(stk.get("po_number") or stk.get("order_number") or ""),
-                    "type": stk.get("purchase_category") or stk.get("stock_type") or "MEDICINE PURCHASE (IP)",
+                    "type": type_val,
                     "expiry": exp_str,
                     "packing": str(stk.get("packing") or stk.get("pack_size") or "1"),
                     "free": str(stk.get("free") or stk.get("free_quantity") or "0"),
-                    "p_cst": str(stk.get("CGST_Percentage") or stk.get("cgst_percent") or "0"),
-                    "p_tps": str(stk.get("SGST_Percentage") or stk.get("sgst_percent") or "0"),
+                    "p_cst": p_cst_val,
+                    "p_tps": p_tps_val,
+                    "tax_percent": tax_disp,
+                    "total_tax": tax_disp,
                     "p_cost": p_cost_fmt,
                     "cst": cst_fmt,
                     "tps": tps_fmt,

@@ -23,6 +23,7 @@ from pyauth.auth import HasRoleAndDataPermission
 from ..models import Admission, Room, Patient, InsuranceProvider, RoomBooking, IpAdvance_Refund
 from ..serializers import AdmissionSerializer
 from .discharge import _resolve_employee_name
+from .mongo_utils import resolve_canonical_patient
 import traceback
 import json
 import ast
@@ -81,7 +82,33 @@ def _resolve_doctor_name(val, doc_map=None):
     cleaned_id = re.sub(r'^(dr[.\s]*)+', '', v_str, flags=re.IGNORECASE).strip()
     if cleaned_id in doc_map:
         return doc_map[cleaned_id]
-    # 3. For old data, doctor name is already stored directly as text (e.g. 'DR.SANGEETHA M.D')
+    if cleaned_id.upper() in doc_map:
+        return doc_map[cleaned_id.upper()]
+
+    # 3. Direct lookup in Global database if not found in cached doc_map
+    is_id = cleaned_id.isdigit() or (bool(re.match(r'^[A-Za-z]{1,4}\d+$', cleaned_id)) and len(cleaned_id) <= 8)
+    if is_id:
+        try:
+            client, _ = _get_hms_db()
+            g_db = client["Global"]
+            prof = g_db["backend_diagnostics_profile"].find_one({
+                "$or": [
+                    {"employeeId": cleaned_id},
+                    {"employeeId": cleaned_id.upper()},
+                    {"employeeId": {"$regex": f"^{re.escape(cleaned_id)}$", "$options": "i"}},
+                    {"employeeId": int(cleaned_id) if cleaned_id.isdigit() else -1}
+                ]
+            })
+            if prof and prof.get("employeeName"):
+                ename = str(prof.get("employeeName")).strip()
+                if doc_map is not None:
+                    doc_map[v_str] = ename
+                    doc_map[cleaned_id] = ename
+                return ename
+        except Exception:
+            pass
+
+    # 4. For old data, doctor name is already stored directly as text (e.g. 'DR.SANGEETHA M.D')
     return v_str
 
 
@@ -703,11 +730,19 @@ def _enrich_admissions_batch(adm_list, hospital_code=None):
         # ── 1. Doctor Name Resolution (Match ID from profile, or keep existing name for old data) ──
         raw_admitting = str(adm_data.get("admittingDoctor") or "").strip()
         admitting_name = str(adm_data.get("admittingDoctorName") or "").strip()
-        resolved_admitting = admitting_name or _resolve_doctor_name(raw_admitting, doc_map)
+        is_adm_id = admitting_name.isdigit() or bool(re.match(r'^[A-Za-z]{1,4}\d+$', re.sub(r'^(dr[.\s]*)+', '', admitting_name, flags=re.IGNORECASE).strip()))
+        if is_adm_id or not admitting_name:
+            resolved_admitting = _resolve_doctor_name(admitting_name or raw_admitting, doc_map)
+        else:
+            resolved_admitting = admitting_name
 
         raw_consulting = str(adm_data.get("consultingDoctor") or "").strip()
         consulting_name = str(adm_data.get("consultingDoctorName") or "").strip()
-        resolved_consulting = consulting_name or _resolve_doctor_name(raw_consulting, doc_map)
+        is_con_id = consulting_name.isdigit() or bool(re.match(r'^[A-Za-z]{1,4}\d+$', re.sub(r'^(dr[.\s]*)+', '', consulting_name, flags=re.IGNORECASE).strip()))
+        if is_con_id or not consulting_name:
+            resolved_consulting = _resolve_doctor_name(consulting_name or raw_consulting, doc_map)
+        else:
+            resolved_consulting = consulting_name
 
         adm_data["admittingDoctor"]     = resolved_admitting
         adm_data["admittingDoctorName"] = resolved_admitting
@@ -834,6 +869,68 @@ def get_next_ip_number(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROOM NUMBER NORMALIZATION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _clean_room_str(s):
+    return re.sub(r'[\s\-_]+', '', str(s or '')).upper()
+
+def _extract_digits_str(s):
+    m = re.search(r'(\d{2,4})', str(s or ''))
+    return m.group(1) if m else re.sub(r'\D+', '', str(s or ''))
+
+def _build_room_resolver(rooms_list):
+    exact_map = {}
+    clean_map = {}
+    digit_map = {}
+    aliases = {
+        "DAYCAR": "DAYCARE",
+        "DAYCARE": "DAYCARE",
+        "DLS": "DIALYSIS",
+        "DIALYSIS": "DIALYSIS",
+        "DYLS132": "DYLS-132",
+        "CHEMO": "CHEMO",
+        "MICU": "MICU",
+        "NICU": "NICU",
+        "SICU": "SICU",
+        "POW": "POW",
+    }
+    for r in rooms_list:
+        rn = str(r.get("room_number") or "").strip()
+        if not rn:
+            continue
+        exact_map[rn] = rn
+        ck = _clean_room_str(rn)
+        clean_map[ck] = rn
+        
+        # Prefix stripped (e.g. 'TS-507' -> '507', 'SR-509' -> '509')
+        ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', rn, flags=re.IGNORECASE).strip()
+        if ps:
+            clean_map[_clean_room_str(ps)] = rn
+            
+        d = _extract_digits_str(rn)
+        if d and d not in digit_map:
+            digit_map[d] = rn
+
+    def resolver(val):
+        if not val:
+            return ""
+        s = str(val).strip()
+        if s in exact_map:
+            return exact_map[s]
+        ck = _clean_room_str(s)
+        if ck in clean_map:
+            return clean_map[ck]
+        if ck in aliases and aliases[ck] in clean_map:
+            return clean_map[aliases[ck]]
+        d = _extract_digits_str(s)
+        if d and d in digit_map:
+            return digit_map[d]
+        return s
+
+    return resolver
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET /admission-room-search/
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(["GET"])
@@ -918,26 +1015,31 @@ def search_rooms(request):
             except Exception:
                 pass
 
-            # Fetch active bookings
-            booking_map = {}
-            try:
-                for booking in hms_db["hospital_roombooking"].find({"is_active": True}):
-                    rno = str(booking.get("room_number") or "").strip()
-                    bno = str(booking.get("bed_number") or "").strip()
-                    if rno and bno:
-                        b_dt = booking.get("booking_date")
-                        booking_map[(rno, bno)] = {
-                            "ip_number": str(booking.get("ipNumber") or ""),
-                            "booking_date": _to_ist_iso(b_dt) or "",
-                        }
-            except Exception:
-                pass
-
             # Fetch rooms
             room_query = {}
             if hospital_code and hospital_code != "system":
                 room_query["hospital_code"] = hospital_code
             all_rooms = list(hms_db["hospital_room"].find(room_query))
+            room_resolver = _build_room_resolver(all_rooms)
+
+            # Fetch active bookings
+            booking_map = {}
+            try:
+                for booking in hms_db["hospital_roombooking"].find({"is_active": True}):
+                    raw_rno = str(booking.get("room_number") or "").strip()
+                    bno     = str(booking.get("bed_number") or "").strip()
+                    if raw_rno and bno:
+                        can_rno = room_resolver(raw_rno)
+                        b_dt    = booking.get("booking_date")
+                        b_val   = {
+                            "ip_number": str(booking.get("ipNumber") or ""),
+                            "booking_date": _to_ist_iso(b_dt) or "",
+                        }
+                        booking_map[(can_rno, bno)] = b_val
+                        booking_map[(_clean_room_str(can_rno), bno.upper())] = b_val
+                        booking_map[(_clean_room_str(raw_rno), bno.upper())] = b_val
+            except Exception:
+                pass
         finally:
             if client:
                 client.close()
@@ -987,10 +1089,11 @@ def search_rooms(request):
                 except Exception:
                     active_shift = active_shifts[-1]
             for shift in shifts:
-                room_no = str(shift.get("newRoomNo", "")).strip()
-                bed_no  = str(shift.get("newBedNo",  "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(shift.get("newRoomNo", "") or shift.get("roomNo", "")).strip()
+                bed_no   = str(shift.get("newBedNo",  "") or shift.get("bedNo", "")).strip()
+                if not raw_room or not bed_no:
                     continue
+                canonical_room = room_resolver(raw_room)
                 s_active  = bool(shift.get("is_roomActive",  False))
                 s_cleaned = bool(shift.get("is_roomCleaned", False))
                 if active_shift and shift == active_shift:
@@ -998,16 +1101,22 @@ def search_rooms(request):
                 elif s_cleaned:
                     status = "Available"; patient_data = {}
                 else:
-                    status = "Available - Not Cleaned"; patient_data = patient_info
-                key = (room_no, bed_no)
-                existing = admission_map.get(key)
-                if existing is None or status == "Occupied" or existing.get("status") != "Occupied":
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": s_active, "is_roomCleaned": s_cleaned, "source": "roomShitingDetails"}
+                    status = "Not Cleaned"; patient_data = patient_info
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None or status == "Occupied" or existing.get("status") != "Occupied":
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": s_active, "is_roomCleaned": s_cleaned, "source": "roomShitingDetails"}
             for entry in details:
-                room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo",  "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(entry.get("roomNo", "")).strip()
+                bed_no   = str(entry.get("bedNo",  "")).strip()
+                if not raw_room or not bed_no:
                     continue
+                canonical_room = room_resolver(raw_room)
                 e_active  = bool(entry.get("is_roomActive",  False))
                 e_cleaned = bool(entry.get("is_roomCleaned", False))
                 if e_active:
@@ -1015,13 +1124,18 @@ def search_rooms(request):
                 elif e_cleaned:
                     status = "Available"; patient_data = {}
                 else:
-                    status = "Available - Not Cleaned"; patient_data = patient_info
-                key = (room_no, bed_no)
-                existing = admission_map.get(key)
-                if existing is None:
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
-                elif existing.get("status") != "Occupied" and status == "Occupied":
-                    admission_map[key] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
+                    status = "Not Cleaned"; patient_data = patient_info
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None:
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
+                    elif existing.get("status") != "Occupied" and status == "Occupied":
+                        admission_map[k] = {"status": status, "patient": patient_data, "ip_number": ip_number, "is_roomActive": e_active, "is_roomCleaned": e_cleaned, "source": "room_details"}
 
         req_block           = str(request.GET.get("block", "") or "").strip()
         req_category        = str(request.GET.get("room_category", "") or request.GET.get("category", "") or "").strip()
@@ -1056,16 +1170,17 @@ def search_rooms(request):
                 if not isinstance(bed, dict): continue
                 bed_number = str(bed.get("bed_number", "")).strip()
                 if not bed_number: continue
-                key = (room_no, bed_number)
+                key     = (room_no, bed_number)
+                alt_key = (_clean_room_str(room_no), bed_number.upper())
                 bed_is_blocked = str(bed.get("bed_status", "")).strip().lower() == "blocked"
                 if room_is_blocked or bed_is_blocked:
                     beds_data.append({"bed_number": bed_number, "status": "Maintenance", "patient": {}, "ip_number": "", "booking": None, "is_roomActive": False, "is_roomCleaned": True})
                     continue
-                info = admission_map.get(key)
+                info = admission_map.get(key) or admission_map.get(alt_key)
                 if info:
                     beds_data.append({"bed_number": bed_number, "status": info.get("status", "Available"), "patient": info.get("patient", {}), "ip_number": info.get("ip_number", ""), "booking": None, "is_roomActive": info.get("is_roomActive", False), "is_roomCleaned": info.get("is_roomCleaned", False)})
                     continue
-                booking_info = booking_map.get(key)
+                booking_info = booking_map.get(key) or booking_map.get(alt_key)
                 if booking_info:
                     beds_data.append({"bed_number": bed_number, "status": "Reserved", "patient": {}, "ip_number": booking_info.get("ip_number", ""), "booking": booking_info, "is_roomActive": False, "is_roomCleaned": True})
                     continue
@@ -1104,10 +1219,7 @@ def op_patient_detail_by_uhid(request, uhid):
 
         client, hms_db = _get_hms_db()
         try:
-            patient = hms_db["hospital_patient"].find_one(query)
-            if not patient:
-                # Try without branch/hospital filter as fallback
-                patient = hms_db["hospital_patient"].find_one({"uhid": str(uhid)})
+            patient, canonical_uhid = resolve_canonical_patient(hms_db, uhid)
             if not patient:
                 return Response({"error": "Patient not found"}, status=404)
 
@@ -1128,7 +1240,7 @@ def op_patient_detail_by_uhid(request, uhid):
 
             data = {
                 "id": str(patient.get("_id") or patient.get("pk") or patient.get("id") or ""),
-                "uhid": patient.get("uhid"),
+                "uhid": canonical_uhid or patient.get("uhid"),
                 "salutation": patient.get("salutation") or "",
                 "firstName": patient.get("firstName") or "",
                 "middleName": patient.get("middleName") or "",
@@ -1468,14 +1580,25 @@ def admission_view(request):
     elif request.method == 'POST':
         try:
             data = {k: request.data.get(k) for k in request.data}
-            uhid = str(data.get('uhid', '')).strip()
-            clean_uhid = str(uhid).strip()
-            if not clean_uhid:
-                return JsonResponse({"error": "UHID is required"}, status=400)
+            uhid_raw = str(data.get('uhid', '')).strip()
+            if not uhid_raw:
+                return JsonResponse({"error": "UHID is required", "success": False}, status=400)
 
             client, hms_db = _get_hms_db()
             try:
-                # ── Fast check for existing active admission with index ──
+                # ── 1. Strictly validate patient against Patient Master & resolve canonical UHID ──
+                patient_obj, canonical_uhid = resolve_canonical_patient(hms_db, uhid_raw)
+                if not patient_obj or not canonical_uhid:
+                    return JsonResponse({
+                        "error": f"Invalid UHID '{uhid_raw}'. Patient not found in Patient Master. Please register the patient before admitting.",
+                        "success": False
+                    }, status=400)
+
+                clean_uhid = canonical_uhid
+                uhid = canonical_uhid
+                data['uhid'] = canonical_uhid
+
+                # ── 2. Fast check for existing active admission with canonical index ──
                 # A patient identified by UHID cannot be physically admitted more than once across the hospital!
                 # Do NOT restrict by outlet_code or branch_code so multi-outlet active admissions are caught.
                 active_adm_q = {
@@ -1520,14 +1643,6 @@ def admission_view(request):
                         "roomNo": r_no,
                         "bedNo":  b_no,
                     }, status=400)
-
-                # ── Patient info lookup ──
-                patient_obj = hms_db["hospital_patient"].find_one({
-                    "hospital_code": hospital_code,
-                    "uhid": uhid
-                })
-                if not patient_obj:
-                    patient_obj = hms_db["hospital_patient"].find_one({"uhid": uhid})
             finally:
                 if client:
                     client.close()
@@ -1688,10 +1803,17 @@ def admission_view(request):
                 "is_discharged": False,
                 "is_admitted": True,
             })
+            resolved_adm_doc = _resolve_doctor_name(adm.admittingDoctor)
+            resolved_con_doc = _resolve_doctor_name(adm.consultingDoctor)
             d = {
                 "id": str(adm.pk), "ipNumber": adm.ipNumber, "uhid": adm.uhid,
                 "admissionDateTime": _to_ist_iso(adm.admissionDateTime),
-                "admittingDoctor": adm.admittingDoctor or "", "consultingDoctor": adm.consultingDoctor or "",
+                "admittingDoctor": resolved_adm_doc,
+                "admittingDoctorName": resolved_adm_doc,
+                "admittingDoctorId": str(adm.admittingDoctor or ""),
+                "consultingDoctor": resolved_con_doc,
+                "consultingDoctorName": resolved_con_doc,
+                "consultingDoctorId": str(adm.consultingDoctor or ""),
                 "packageNo": adm.packageName or "", "reasonForAdmission": adm.reasonForAdmission or "",
                 "customer_type": customer_type, "customerType": customer_type,
                 "company_code": company_code,

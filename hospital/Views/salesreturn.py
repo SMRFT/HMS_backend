@@ -1009,20 +1009,29 @@ def OP_salesreturn_billdetails(request):
                 "message": "medicine_particulars must be an array"
             }, status=status.HTTP_400_BAD_REQUEST)
  
-        if not bill_no or not uhid or not medicine_particulars:
+        if not bill_no or not medicine_particulars:
             return Response({
                 "status":  "error",
-                "message": "bill_no, uhid and medicine_particulars are required"
+                "message": "bill_no and medicine_particulars are required"
             }, status=status.HTTP_400_BAD_REQUEST)
- 
+
         # =========================
         # ✅ AUTH
         # =========================
-        hospital_code = data.get("auth-hospital-code")
-        branch_code   = data.get("auth-branch-code")
-        outlet_code   = data.get("auth-outlet-code")
-        employee_id   = data.get("auth-user-id")
- 
+        hospital_code = data.get("auth-hospital-code") or data.get("hospital_code")
+        branch_code   = data.get("auth-branch-code") or data.get("branch_code")
+        outlet_code   = data.get("auth-outlet-code") or data.get("outlet_code")
+        employee_id   = data.get("auth-user-id") or data.get("created_by") or data.get("pharmacist_id")
+
+        if orig_b:
+            if not hospital_code:
+                hospital_code = orig_b.get("hospital_code") or "SH001"
+            if not branch_code:
+                branch_code = orig_b.get("branch_code") or "SHB001"
+            if not outlet_code:
+                outlet_code = orig_b.get("outlet_code")
+            if not employee_id:
+                employee_id = orig_b.get("lastmodified_by") or orig_b.get("billed_id") or "60129"
         # =========================
         # ✅ VALIDATE & CLEAN ITEMS
         # =========================
@@ -1100,14 +1109,24 @@ def OP_salesreturn_billdetails(request):
             billed_qty     = float(item.get("billed_qty", 0))
             return_qty_val = int(return_qty) if return_qty.is_integer() else return_qty
 
-            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number ───
-            stock_filter = {
-                "item_id":      {"$in": [item_id, str(item_id)]},
-                "batch_number": {"$in": [batch_number, str(item.get("batch_number", ""))]},
-                "outlet_code":  outlet_code
-            }
+            # ─── 1. STOCK: update sales_return_quantity by outlet_code, item_id, batch_number (or stock_id) ───
+            existing_stock = None
+            stock_id_val = item.get("stock_id") or item.get("id")
+            if stock_id_val:
+                try:
+                    s_id_int = int(stock_id_val)
+                    existing_stock = stock_col.find_one({"$or": [{"stock_id": s_id_int}, {"id": s_id_int}], "outlet_code": outlet_code})
+                except Exception:
+                    pass
 
-            existing_stock = stock_col.find_one(stock_filter)
+            if not existing_stock:
+                stock_filter = {
+                    "item_id":      {"$in": [item_id, str(item_id)]},
+                    "batch_number": {"$in": [batch_number, str(item.get("batch_number", "")).strip()]},
+                    "outlet_code":  outlet_code
+                }
+                existing_stock = stock_col.find_one(stock_filter)
+
             if not existing_stock:
                 # Fallback to direct equality match
                 existing_stock = stock_col.find_one({
@@ -1302,6 +1321,67 @@ def OP_salesreturn_billdetails(request):
                 patient_name = p_dict.get("name", "")
         except Exception:
             pass
+        if not patient_name and orig_b:
+            patient_name = orig_b.get("patient_name", "")
+
+        if not patient_name:
+            try:
+                b_doc = bill_col.find_one({"bill_no": bill_no}, {"patient_name": 1, "patientname": 1})
+                if b_doc:
+                    patient_name = b_doc.get("patient_name") or b_doc.get("patientname") or ""
+            except Exception:
+                pass
+
+        # Sync document into MongoDB hospital_salesreturn collection for Cash Counter
+        try:
+            tax_amt = 0.0
+            for it in cleaned_particulars:
+                try:
+                    c_amt = float(it.get("CGST_Amt") or it.get("cgst_amt") or 0)
+                    s_amt = float(it.get("SGST_Amt") or it.get("sgst_amt") or 0)
+                    tax_amt += (c_amt + s_amt)
+                except Exception:
+                    pass
+
+            b_info = bill_col.find_one({"bill_no": bill_no}, {"patient_name": 1, "patientname": 1, "doctor_id": 1, "doctor_name": 1, "inpatient_number": 1}) or {}
+            ret_patient_name = patient_name or b_info.get("patient_name") or b_info.get("patientname") or ""
+
+            salesreturn_doc = {
+                "sales_return_number": return_bill_no,
+                "return_no": return_bill_no,
+                "return_bill_no": return_bill_no,
+                "bill_no": bill_no,
+                "uhid": uhid or None,
+                "inpatient_number": b_info.get("inpatient_number") or "",
+                "patient_name": ret_patient_name,
+                "outlet_code": outlet_code,
+                "hospital_code": hospital_code,
+                "branch_code": branch_code,
+                "total_amount": float(return_amount or 0),
+                "return_amount": float(return_amount or 0),
+                "refund_amount": float(return_amount or 0),
+                "tax_amount": round(tax_amt, 2),
+                "payment_type": payment_type,
+                "status": "Pending",
+                "returned_items": cleaned_particulars,
+                "medicine_particulars": cleaned_particulars,
+                "created_by": employee_id,
+                "created_date": datetime.utcnow(),
+                "return_bill_date": datetime.utcnow(),
+                "return_date": datetime.utcnow(),
+                "bill_type": bill_type,
+                "doctor_id": b_info.get("doctor_id"),
+                "doctor_name": b_info.get("doctor_name"),
+            }
+
+            from .dbcollection import salesreturn_collection
+            salesreturn_collection.update_one(
+                {"return_bill_no": return_bill_no},
+                {"$set": salesreturn_doc},
+                upsert=True
+            )
+        except Exception as err:
+            logger.error(f"Error syncing to hospital_salesreturn: {err}")
 
         user_name = get_employee_name_by_id(str(employee_id).strip()) if employee_id else ""
         if not user_name or user_name == "Unknown":
@@ -1698,7 +1778,7 @@ def get_return_bills(request):
                 # ---------------------------------------------------
 
                 doc["collection_name"] = collection_name
-                doc["patient_name"] = patient_name
+                doc["patient_name"] = patient_name or doc.get("patient_name") or doc.get("patientname") or ""
                 doc["counter_id"] = counter_id
                 doc["counter_name"] = counter_name
                 doc["bill_type_name"] = bill_type_name
@@ -1724,121 +1804,133 @@ def get_return_bills(request):
 
         # ---------------------------------------------------
         # FETCH SALES RETURN
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         salesreturn_docs = list(
             salesreturn_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$return_bill_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$return_bill_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         refund_docs = list(
             refund_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refund_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refund_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH IP ADVANCE REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         ipadvance_docs = list(
             ipadvance_refund_collection.find(
                 {
-                    "status": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refund_date",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"status": "Pending"},
+                        {
+                            "status": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refund_date"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )
 
         # ---------------------------------------------------
         # FETCH INVEST REFUND
-        # ONLY CURRENT DATE
+        # ALL PENDING + CURRENT DATE PAID
         # ---------------------------------------------------
 
         investrefund_docs = list(
             investrefund_collection.find(
                 {
-                    "paymentStatus": {
-                        "$in": ["Pending", "Paid"]
-                    },
                     "hospital_code": hospital_code,
                     "branch_code": branch_code,
                     "outlet_code": outlet_code,
                     "is_approved": {"$in": [True, "true", "True"]},
-                    "$expr": {
-                        "$eq": [
-                            {
-                                "$dateToString": {
-                                    "format": "%Y-%m-%d",
-                                    "date": "$refundBillDate",
-                                    "timezone": "Asia/Kolkata"
-                                }
-                            },
-                            current_date.strftime("%Y-%m-%d")
-                        ]
-                    }
+                    "$or": [
+                        {"paymentStatus": "Pending"},
+                        {
+                            "paymentStatus": "Paid",
+                            "$expr": {
+                                "$eq": [
+                                    {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d",
+                                            "date": {"$ifNull": ["$paid_date", "$refundBillDate"]},
+                                            "timezone": "Asia/Kolkata"
+                                        }
+                                    },
+                                    current_date.strftime("%Y-%m-%d")
+                                ]
+                            }
+                        }
+                    ]
                 }
             )
         )

@@ -452,6 +452,7 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
                 {"billing_status": {"$nin": ["Cancelled", "deleted"]}},
+                {"payment_mode": {"$nin": ["Cash", "cash", "CASH"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
@@ -506,6 +507,11 @@ def patient_wise_pharmacy_ip_bill_api(request):
             b_type = b.get('bill_type')
             is_ins = b.get('is_insurance') or str(b.get('customer_type') or '').upper() == 'INSURANCE'
             
+            # Explicitly exclude if payment_mode is Cash
+            p_mode_raw = str(b.get('payment_mode') or b.get('payment_method') or (b.get('payment_details', {}).get('method') if isinstance(b.get('payment_details'), dict) else '') or '').strip().lower()
+            if p_mode_raw == 'cash':
+                continue
+
             is_qual = (
                 (b_ip and (b_ip == target_ip or b_ip in all_ips)) or
                 b_no in wr_dispatch_map or 
@@ -2893,6 +2899,7 @@ def medicine_abstract_api(request):
                 {"$or": bill_query_or},
                 {"bill_no": {"$nin": [None, ""]}},
                 {"billing_status": {"$nin": ["Cancelled", "deleted"]}},
+                {"payment_mode": {"$nin": ["Cash", "cash", "CASH"]}},
                 {
                     "$or": [
                         {"is_ward_request": {"$ne": True}},
@@ -2943,6 +2950,11 @@ def medicine_abstract_api(request):
                 b_pmode = str(b.get('payment_mode') or '').upper()
                 b_ip = str(b.get('inpatient_number') or '').strip()
                 is_ins = b.get('is_insurance') or str(b.get('customer_type') or '').upper() == 'INSURANCE'
+
+                # Explicitly exclude if payment_mode is Cash
+                p_mode_raw = str(b.get('payment_mode') or b.get('payment_method') or (b.get('payment_details', {}).get('method') if isinstance(b.get('payment_details'), dict) else '') or '').strip().lower()
+                if p_mode_raw == 'cash':
+                    continue
 
                 # Must be IP credit, linked to patient's admission / ward requests, or tagged with inpatient_number
                 is_ip_bill = (

@@ -33,7 +33,7 @@ from .dbcollection import (
     hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name,
     get_room_details, hospital_room
 )
-from ..counter_service import get_next_pharmacy_bill_no, get_next_sequence_value
+from ..counter_service import get_next_pharmacy_bill_no, get_next_pharmacy_bill_id, get_next_sequence_value
 
 # MongoDB Configuration
 from dotenv import load_dotenv
@@ -182,7 +182,7 @@ def get_pharmacy_stock(request):
                     "is_blocked": False
                 },
                 {"item_id": 1, "item_name": 1, "_id": 0}
-            ).sort("item_name", 1).limit(100))
+            ).sort("item_name", 1).limit(1000))
 
             # Fallback if no starting-letter matches: match word boundary
             if not search_items:
@@ -195,7 +195,7 @@ def get_pharmacy_stock(request):
                         "is_blocked": False
                     },
                     {"item_id": 1, "item_name": 1, "_id": 0}
-                ).sort("item_name", 1).limit(60))
+                ).sort("item_name", 1).limit(1000))
 
             # Fallback: substring match anywhere
             if not search_items:
@@ -208,7 +208,7 @@ def get_pharmacy_stock(request):
                         "is_blocked": False
                     },
                     {"item_id": 1, "item_name": 1, "_id": 0}
-                ).sort("item_name", 1).limit(60))
+                ).sort("item_name", 1).limit(1000))
 
             matching_ids = [it["item_id"] for it in search_items if "item_id" in it]
             if not matching_ids:
@@ -281,7 +281,7 @@ def get_pharmacy_stock(request):
                                                 "$subtract": [
                                                     {
                                                         "$subtract": [
-                                                            "$total_stock",
+                                                            {"$ifNull": ["$total_stock", 0]},
                                                             {"$ifNull": ["$sold_quantity", 0]}
                                                         ]
                                                     },
@@ -843,18 +843,29 @@ def adjust_blocked_stock(old_meds, new_meds, hospital_code, branch_code, outlet_
         if diff == 0:
             continue
 
-        stock_collection.update_one(
-            {
-                "hospital_code": hospital_code,
-                "branch_code": branch_code,
-                "outlet_code": outlet_code,
-                "item_id": item_id_val,
-                "batch_number": str(batch_number)
-            },
-            {
-                "$inc": {"blocked_quantity": diff}
-            }
+        stock_filter = {
+            "outlet_code": str(outlet_code or "").strip(),
+            "item_id": item_id_val,
+            "batch_number": str(batch_number).strip()
+        }
+        if hospital_code:
+            stock_filter["hospital_code"] = str(hospital_code).strip()
+        if branch_code:
+            stock_filter["branch_code"] = str(branch_code).strip()
+
+        res = stock_collection.update_one(
+            stock_filter,
+            {"$inc": {"blocked_quantity": diff}}
         )
+        if res.matched_count == 0:
+            stock_collection.update_one(
+                {
+                    "outlet_code": str(outlet_code or "").strip(),
+                    "item_id": item_id_val,
+                    "batch_number": str(batch_number).strip()
+                },
+                {"$inc": {"blocked_quantity": diff}}
+            )
 
 
 # ----------------------------------------------------------
@@ -1008,10 +1019,15 @@ def save_pharmacy_bill(request):
     employee_id = data.get("auth-user-id")
 
     # ✅ AUTH CODES
-    hospital_code = data.get("auth-hospital-code")
-    branch_code   = data.get("auth-branch-code")
-    outlet_code   = resolve_request_outlet(request, data)
-
+    hospital_code = (
+        data.get("auth-hospital-code")
+        
+    )
+    branch_code   = (
+        data.get("auth-branch-code")
+        
+    )
+    outlet_code   = resolve_request_outlet(request, data) 
     # --------------------------------------------------
     # STATUS NORMALIZATION
     # --------------------------------------------------
@@ -1075,10 +1091,7 @@ def save_pharmacy_bill(request):
     # ✅ Save patient_name ONLY when billing WITHOUT UHID
     raw_pname = (
         data.get("patient_name")
-        or data.get("patientname")
-        or data.get("patientName")
-        or data.get("customer_name")
-        or ""
+        
     )
     if isinstance(raw_pname, str):
         raw_pname = raw_pname.strip()
@@ -1296,7 +1309,7 @@ def save_pharmacy_bill(request):
     # ======================================================
     if request.method == "POST":
 
-        next_Bill_id = get_next_sequence_value("pharmacy_billing_bill_id", db_instance=mongo_db)
+        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
 
         record_doc = {
             "Bill_id":              next_Bill_id,
@@ -1356,7 +1369,21 @@ def save_pharmacy_bill(request):
                 "is_active":    True,
             })
 
-            bill_collection.insert_one(record_doc)
+            # Verify if Bill_id is already present. If present, create new Bill_id!
+            while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+
+            while True:
+                try:
+                    bill_collection.insert_one(record_doc)
+                    break
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "11000" in str(e):
+                        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                        record_doc["Bill_id"] = next_Bill_id
+                    else:
+                        raise
 
             adjust_blocked_stock(
                 [],
@@ -1394,7 +1421,21 @@ def save_pharmacy_bill(request):
                 "is_active":    True,
             })
 
-            bill_collection.insert_one(record_doc)
+            # Verify if Bill_id is already present. If present, create new Bill_id!
+            while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+
+            while True:
+                try:
+                    bill_collection.insert_one(record_doc)
+                    break
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "11000" in str(e):
+                        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                        record_doc["Bill_id"] = next_Bill_id
+                    else:
+                        raise
 
             adjust_blocked_stock(
                 [],
@@ -1646,7 +1687,7 @@ def save_oppharmacy_estimate(request):
     data["billing_status"] = "Estimate"
 
     # Calculate next Bill_id atomically
-    next_Bill_id = get_next_sequence_value("pharmacy_billing_bill_id", db_instance=mongo_db)
+    next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
 
     medicines = sanitize_medicines(data.get("medicine_particulars", []))
 
@@ -1687,7 +1728,21 @@ def save_oppharmacy_estimate(request):
     if not data.get("uhid") and raw_pname:
         record_doc["patient_name"] = raw_pname
 
-    result = bill_collection.insert_one(record_doc)
+    # Verify if Bill_id is already present. If present, create new Bill_id!
+    while bill_collection.find_one({"Bill_id": int(record_doc["Bill_id"])}, {"_id": 1}) is not None:
+        next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+        record_doc["Bill_id"] = next_Bill_id
+
+    while True:
+        try:
+            result = bill_collection.insert_one(record_doc)
+            break
+        except Exception as e:
+            if "duplicate" in str(e).lower() or "11000" in str(e):
+                next_Bill_id = get_next_pharmacy_bill_id(db_instance=mongo_db)
+                record_doc["Bill_id"] = next_Bill_id
+            else:
+                raise
 
     if result.inserted_id:
         return Response(
@@ -2747,32 +2802,55 @@ def collect_oppharmacy_payment(request):
             bill_payment_mode = "Cash"
 
         # =====================================================
-        # UPDATE STOCK
+        # UPDATE STOCK: Add sold_quantity, release/minus blocked_quantity
         # =====================================================
-
-        is_from_estimate = bool(bill.get("estimate_no"))
         for med in bill.get("medicine_particulars", []):
-            qty = float(med.get("qty", 0) or 0)
+            if med.get("is_deleted") or med.get("deleted_is"):
+                continue
+            qty = float(med.get("qty", 0) or med.get("quantity", 0) or 0)
+            if qty <= 0:
+                continue
             item_id = med.get("item_id")
             try:
                 item_id = int(item_id)
             except (ValueError, TypeError):
                 pass
 
-            inc_payload = {"sold_quantity": qty}
-            if is_from_estimate:
-                inc_payload["blocked_quantity"] = -qty
+            bn_str = str(med.get("batch_number", "") or med.get("batch", "")).strip()
 
-            stock_collection.update_one(
-                {
-                    "hospital_code": hospital_code,
-                    "branch_code": branch_code,
+            stock_filter = {
+                "outlet_code": resolved_outlet,
+                "item_id": item_id,
+                "batch_number": bn_str
+            }
+            if hospital_code:
+                stock_filter["hospital_code"] = hospital_code
+            if branch_code:
+                stock_filter["branch_code"] = branch_code
+
+            stock = stock_collection.find_one(stock_filter)
+            if not stock:
+                stock = stock_collection.find_one({
                     "outlet_code": resolved_outlet,
-                    "item_id": item_id,
-                    "batch_number": str(med.get("batch_number", "")).strip()
-                },
-                {"$inc": inc_payload}
-            )
+                    "item_id": {"$in": [item_id, str(item_id)]},
+                    "batch_number": bn_str
+                })
+
+            if stock:
+                curr_blocked = float(stock.get("blocked_quantity", 0) or 0)
+                release_qty = min(qty, curr_blocked) if curr_blocked > 0 else 0.0
+                inc_payload = {"sold_quantity": qty}
+                if release_qty > 0:
+                    inc_payload["blocked_quantity"] = -release_qty
+                stock_collection.update_one(
+                    {"_id": stock["_id"]},
+                    {"$inc": inc_payload}
+                )
+            else:
+                stock_collection.update_one(
+                    stock_filter,
+                    {"$inc": {"sold_quantity": qty, "blocked_quantity": -qty}}
+                )
 
         # =====================================================
         # UPDATE BILL
@@ -4965,14 +5043,36 @@ def finalize_bill(request):
         set_payload["billed_id"]            = employee_id
         set_payload["lastmodified_date"]    = now_ts
         set_payload["lastmodified_by"]      = employee_id
-        cumulative_bill_total = sum(
+        items_to_sum = final_particulars if is_ward else sanitized_meds
+        cumulative_bill_total = round(sum(
             float(it.get("total") or it.get("calculated_price") or 0)
-            for it in (final_particulars if is_ward else sanitized_meds)
+            for it in items_to_sum
             if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+
+        tot_item_disc = round(sum(
+            float(it.get("discount_amount") or it.get("discount") or 0)
+            for it in items_to_sum
+            if not it.get("is_deleted") and not it.get("deleted_is")
+        ), 2)
+        overall_disc = float(
+            frontend_overall_discount_amount
+            or data.get("overall_discount_amount")
+            or bill.get("overall_discount_amount")
+            or 0.0
         )
-        if is_ward and cumulative_bill_total > 0:
-            set_payload["total_amount"]         = round(cumulative_bill_total, 2)
-            set_payload["net_amount"]           = round(cumulative_bill_total, 2)
+        total_disc = round(tot_item_disc + overall_disc, 2)
+        if total_disc == 0:
+            total_disc = float(data.get("discount_amount") or bill.get("discount_amount") or 0.0)
+
+        if cumulative_bill_total > 0:
+            computed_net = max(0.0, cumulative_bill_total - total_disc)
+            rounded_net = float(round(computed_net))
+            set_payload["total_amount"]         = cumulative_bill_total
+            set_payload["total_item_discount"]  = tot_item_disc
+            set_payload["discount_amount"]      = total_disc
+            set_payload["net_amount"]           = rounded_net
+            set_payload["round_off"]            = round(rounded_net - computed_net, 2)
         else:
             set_payload["total_amount"]         = total_amount_to_use
             set_payload["net_amount"]           = float(frontend_net_amount if frontend_net_amount is not None else total_amount_to_use)
@@ -5707,10 +5807,13 @@ def pharmacy_view_bills(request):
                 p["uhid"] for p in patient_collection.find(
                     {"$or": [
                         {"firstName": {"$regex": sv, "$options": "i"}},
-                        {"lastName": {"$regex": sv, "$options": "i"}}
+                        {"lastName": {"$regex": sv, "$options": "i"}},
+                        {"patient_name": {"$regex": sv, "$options": "i"}},
+                        {"name": {"$regex": sv, "$options": "i"}},
                     ]},
                     {"uhid": 1, "_id": 0}
-                ).limit(300)
+                ).limit(10000)
+                if p.get("uhid")
             ]
             or_conds = [
                 {"patient_name": {"$regex": sv, "$options": "i"}},
@@ -6268,7 +6371,7 @@ def pharmacy_expiry_report(request):
                                                 "$subtract": [
                                                     {
                                                         "$subtract": [
-                                                            "$total_stock",
+                                                            {"$ifNull": ["$total_stock", 0]},
                                                             {"$ifNull": ["$sold_quantity", 0]}
                                                         ]
                                                     },

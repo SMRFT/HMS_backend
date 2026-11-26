@@ -1398,7 +1398,11 @@ def invest_billing_create(request):
                     {"error": "editRemarks is required when editing a bill."},
                     status=drf_status.HTTP_400_BAD_REQUEST
                 )
-            # ── Build history snapshot with only old values of changed fields ─────
+            # ── Check payment method: Cash requires approval, Credit does not ──
+            pm = str(data.get("paymentMethod") or existing_record.get("paymentMethod") or "").strip().lower()
+            is_cash = (pm == "cash")
+
+            # ── Build history snapshot with old & new values of changed fields ─────
             fields_to_ignore = {"_id", "history", "investBillNo", "lastmodified_by",
                                 "lastmodified_date", "editRemarks", "created_by",
                                 "created_date", "branch_code", "outlet_code", "hospital_code"}
@@ -1409,22 +1413,32 @@ def invest_billing_create(request):
                     continue
                 old_value = existing_record.get(key)
                 if old_value != new_value:
-                    changed_fields[key] = old_value   # ← only old value
+                    changed_fields[key] = {
+                        "old": old_value,
+                        "new": new_value
+                    }
 
             history_edit = {
+                "action": "edit",
                 "modified_date": timezone.now(),
                 "modified_by": current_user,
                 "editRemarks": edit_remarks,
                 "changes": changed_fields,
-                "is_approved": False,
+                "is_approved": not is_cash,
+                "paymentMethod": data.get("paymentMethod") or existing_record.get("paymentMethod") or "",
             }
 
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
-            data["is_approved"] = False
-            data["approved_by"] = None
-            data["approved_date"] = None
             data["editRemarks"] = edit_remarks
+            if is_cash:
+                data["is_approved"] = False
+                data["approved_by"] = None
+                data["approved_date"] = None
+            else:
+                data["is_approved"] = True
+                data["approved_by"] = current_user
+                data["approved_date"] = timezone.now()
             data.pop("investBillNo", None)
 
             invest_collection.update_one(
@@ -1538,7 +1552,13 @@ def billing_report_view(request):
         diagnostics_profile_coll = global_db['backend_diagnostics_profile']  # ← new
 
         # ── Base Query ─────────────────────────────────────────
-        query = {"is_active": True}
+        query = {}
+        is_active_param = request.GET.get('is_active')
+        if is_active_param is not None:
+            if str(is_active_param).lower() in ['true', '1']:
+                query["is_active"] = True
+            elif str(is_active_param).lower() in ['false', '0']:
+                query["is_active"] = False
 
         if hospital_code:
             query["hospital_code"] = hospital_code
@@ -1803,6 +1823,7 @@ def billing_report_view(request):
             # ── Exclude already-refunded items ─────────────────
             bill_no          = doc.get("investBillNo", "")
             already_refunded = refunded_test_ids.get(bill_no, set())
+            doc["original_items"] = items
 
             if already_refunded:
                 filtered_items = []
@@ -1816,21 +1837,46 @@ def billing_report_view(request):
                     if tid_norm not in already_refunded:
                         filtered_items.append(it)
                 doc["item"] = filtered_items
+
+                # Recalculate total, discount, and finalPrice for remaining items
+                new_total = sum(float(it.get("price", 0) or 0) * int(it.get("quantity", 1) or 1) for it in filtered_items)
+                orig_total = float(doc.get("total", 0) or 0)
+                orig_disc = float(doc.get("discount", 0) or 0)
+                disc_pct = float(doc.get("discountPercent", 0) or 0)
+
+                doc["original_total"] = orig_total
+                doc["original_finalPrice"] = float(doc.get("finalPrice", 0) or 0)
+                doc["total"] = new_total
+
+                if disc_pct > 0:
+                    new_disc = round((new_total * disc_pct) / 100.0, 2)
+                elif orig_total > 0 and orig_disc > 0:
+                    new_disc = round((new_total / orig_total) * orig_disc, 2)
+                else:
+                    new_disc = 0.0
+
+                doc["discount"] = new_disc
+                doc["finalPrice"] = max(0.0, round(new_total - new_disc, 2))
             else:
                 doc["item"] = items
 
-            # Skip the bill entirely if all items have been refunded AND all refunds approved
-            if not doc["item"]:
-                bill_no_check = doc.get("investBillNo", "")
-                bill_refunds_check = refund_details.get(bill_no_check, [])
-                has_pending_refund = any(not r.get("is_approved", False) for r in bill_refunds_check)
-                if not has_pending_refund:
-                    continue  # all refunds approved — hide the bill
-                # else: keep visible with empty items — pending refund approval
-            # ← NEW: attach refund details to the bill
-            bill_no = doc.get("investBillNo", "")
-            doc["refunds"] = refund_details.get(bill_no, [])
+            # Check if deleted
             doc["is_delete_requested"] = bool(doc.get("is_delete_requested", False))
+            is_deleted = (doc.get("is_active") is False) or (bool(doc.get("is_delete_requested")) and bool(doc.get("is_approved")))
+            if is_deleted:
+                doc["is_deleted"] = True
+                doc["paymentStatus"] = "Deleted"
+                doc["is_delete_requested"] = False
+
+            # Check if all items refunded (Sales Returned)
+            bill_refunds_check = refund_details.get(bill_no, [])
+            if not doc["item"] and (items or bill_refunds_check):
+                doc["is_fully_refunded"] = True
+                if not is_deleted:
+                    doc["paymentStatus"] = "Sales Returned"
+
+            # ← NEW: attach refund details to the bill
+            doc["refunds"] = bill_refunds_check
 
             # Approved By Name
             app_val = str(doc.get("approved_by")or "").strip()
@@ -1883,22 +1929,75 @@ def delete_bill_view(request):
         db = client['HMS']
         now = timezone.now()
 
-        # Invest bill: only REQUEST the delete. is_active stays True until approval.
+        # Cash requires approval in Dept BUD Report; Credit is directly deleted with audit.
+        # Neither stores is_approved: True by default.
+        existing_bill = db['hospital_investbilling'].find_one(
+            {"$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}], "is_active": True}
+        )
+        if not existing_bill:
+            existing_bill = db['hospital_estimatebilling'].find_one(
+                {"EstBillNo": investBillNo, "is_active": True}
+            )
+
+        pm = str((existing_bill.get('paymentMethod') if existing_bill else None) or request.data.get('paymentMethod', '')).strip().lower()
+        is_cash = (pm == 'cash')
+
+        if is_cash:
+            # Cash bill: requires approval in Dept BUD Report
+            update_data = {
+                "is_delete_requested": True,
+                "deletedBy":           employeeId,
+                "deletedAt":           now,
+                "deleteRemarks":       delete_remarks,
+                "is_approved":         False,
+                "approved_by":         None,
+                "approved_date":       None,
+            }
+        else:
+            # Credit bill: directly store is_approved: True and is_active: False
+            update_data = {
+                "is_active":           False,
+                "is_delete_requested": True,
+                "deletedBy":           employeeId,
+                "deletedAt":           now,
+                "deleteRemarks":       delete_remarks,
+                "is_approved":         True,
+                "approved_by":         employeeId,
+                "approved_date":       now,
+            }
+
+        delete_history_entry = {
+            "action": "delete",
+            "modified_date": now,
+            "modified_by": employeeId,
+            "editRemarks": delete_remarks,
+            "deleteRemarks": delete_remarks,
+            "is_approved": not is_cash,
+            "approved_by": employeeId if not is_cash else None,
+            "approved_date": now if not is_cash else None,
+            "paymentMethod": (existing_bill.get("paymentMethod") if existing_bill else "") or request.data.get('paymentMethod', '') or "",
+            "changes": {
+                "Status": {
+                    "old": "Active",
+                    "new": "Deleted" if not is_cash else "Delete Requested",
+                },
+                "Delete Reason": {
+                    "old": "—",
+                    "new": delete_remarks,
+                },
+            }
+        }
+
         result = db['hospital_investbilling'].update_one(
             {
                 "$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}],
                 "is_active": True,
                 "is_delete_requested": {"$ne": True},
             },
-            {"$set": {
-                "is_delete_requested": True,
-                "deletedBy":     employeeId,
-                "deletedAt":     now,
-                "deleteRemarks": delete_remarks,
-                "is_approved":   False,
-                "approved_by":   None,
-                "approved_date": None,
-            }}
+            {
+                "$set": update_data,
+                "$push": {"history": delete_history_entry}
+            }
         )
 
         if result.matched_count == 0:
@@ -1942,34 +2041,41 @@ def request_bill_edit_view(request):
         collection = db['hospital_investbilling']
 
         now = timezone.now()
+        existing_bill = collection.find_one(
+            {"$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}], "is_active": True}
+        )
+        if not existing_bill:
+            existing_bill = db['hospital_estimatebilling'].find_one(
+                {"EstBillNo": investBillNo, "is_active": True}
+            )
+
+        pm = str((existing_bill.get('paymentMethod') if existing_bill else None) or request.data.get('paymentMethod', '')).strip().lower()
+        is_cash = (pm == 'cash')
+
+        update_fields = {
+            "editRemarks":       edit_remarks,
+            "lastmodified_by":   employeeId,
+            "lastmodified_date": now,
+        }
+        if is_cash:
+            update_fields["is_approved"]   = False
+            update_fields["approved_by"]   = None
+            update_fields["approved_date"] = None
+        else:
+            update_fields["is_approved"]   = True
+            update_fields["approved_by"]   = employeeId
+            update_fields["approved_date"] = now
+
         result = collection.update_one(
             {"$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}], "is_active": True},
-            {
-                "$set": {
-                    "is_approved":       False,
-                    "editRemarks":       edit_remarks,
-                    "lastmodified_by":   employeeId,
-                    "lastmodified_date": now,
-                    "approved_by":       None,
-                    "approved_date":     None,
-                }
-            }
+            {"$set": update_fields}
         )
 
         if result.matched_count == 0:
             est_col = db['hospital_estimatebilling']
             est_col.update_one(
                 {"EstBillNo": investBillNo, "is_active": True},
-                {
-                    "$set": {
-                        "is_approved":       False,
-                        "editRemarks":       edit_remarks,
-                        "lastmodified_by":   employeeId,
-                        "lastmodified_date": now,
-                        "approved_by":       None,
-                        "approved_date":     None,
-                    }
-                }
+                {"$set": update_fields}
             )
 
         client.close()
@@ -2161,10 +2267,32 @@ def dept_budr_view(request):
             except Exception as pe:
                 print("Patient lookup error:", pe)
 
+        # ── Enrich refunds with paymentMethod from invest_collection if missing ──
+        if report_type == 'refund':
+            missing_pm_nos = [doc.get("investBillNo") for doc in data if not doc.get("paymentMethod") and doc.get("investBillNo")]
+            if missing_pm_nos:
+                try:
+                    inv_pm_docs = list(invest_collection.find(
+                        {"$or": [{"investBillNo": {"$in": missing_pm_nos}}, {"EstBillNo": {"$in": missing_pm_nos}}]},
+                        {"investBillNo": 1, "EstBillNo": 1, "paymentMethod": 1}
+                    ))
+                    inv_pm_map = {}
+                    for idoc in inv_pm_docs:
+                        if idoc.get("investBillNo"):
+                            inv_pm_map[idoc["investBillNo"]] = idoc.get("paymentMethod", "")
+                        if idoc.get("EstBillNo"):
+                            inv_pm_map[idoc["EstBillNo"]] = idoc.get("paymentMethod", "")
+                    for doc in data:
+                        if not doc.get("paymentMethod"):
+                            doc["paymentMethod"] = inv_pm_map.get(doc.get("investBillNo"), "")
+                except Exception as pme:
+                    print("Payment method enrichment error:", pme)
+
         # ── Process data ───────────────────────────
         result = []
 
         for doc in data:
+            doc["paymentMethod"] = doc.get("paymentMethod") or "—"
             # Bill type
             bill_type = doc.get("bill_type")
             if bill_type:
@@ -2219,6 +2347,36 @@ def dept_budr_view(request):
                 for h in doc["history"]:
                     mid = str(h.get("modified_by", "")).strip()
                     h["modified_by_name"] = employee_cache.get(mid, mid)
+
+            # Ensure deleted bills always have a deletion event in history
+            if report_type == 'deleted':
+                hist = list(doc.get("history") or [])
+                has_del_entry = any(h.get("action") == "delete" or "deleteRemarks" in h for h in hist)
+                if not has_del_entry:
+                    del_actor = str(doc.get("deletedBy") or "").strip()
+                    del_actor_name = employee_cache.get(del_actor, del_actor)
+                    synthetic_del_entry = {
+                        "action": "delete",
+                        "modified_date": doc.get("deletedAt") or doc.get("lastmodified_date"),
+                        "modified_by": del_actor,
+                        "modified_by_name": del_actor_name,
+                        "editRemarks": doc.get("deleteRemarks") or "",
+                        "deleteRemarks": doc.get("deleteRemarks") or "",
+                        "is_approved": bool(doc.get("is_approved", False)),
+                        "paymentMethod": doc.get("paymentMethod") or "",
+                        "changes": {
+                            "Status": {
+                                "old": "Active",
+                                "new": "Deleted" if doc.get("is_active") is False else "Delete Requested",
+                            },
+                            "Delete Reason": {
+                                "old": "—",
+                                "new": doc.get("deleteRemarks") or "—",
+                            },
+                        }
+                    }
+                    hist.append(synthetic_del_entry)
+                doc["history"] = hist
 
             # Ensure latest editRemarks is populated on doc
             if not doc.get("editRemarks") and isinstance(doc.get("history"), list) and doc["history"]:
@@ -2306,12 +2464,24 @@ def dept_budr_approve_view(request):
             res = collection.update_one(
                 q,
                 {"$set": {
-                    "is_active":     False,      # <-- only here
+                    "is_active":     False,      # <-- only here when approved!
                     "is_approved":   True,
                     "approved_by":   user_id,
                     "approved_date": now,
                 }}
             )
+            # Update history entry to reflect approval
+            try:
+                collection.update_one(
+                    {**q, "history.action": "delete"},
+                    {"$set": {
+                        "history.$.is_approved": True,
+                        "history.$.approved_by": user_id,
+                        "history.$.approved_date": now,
+                    }}
+                )
+            except Exception as he:
+                print("History approve error:", he)
         elif action_type in ('edit', 'edited'):
             collection = db['hospital_investbilling']
             q = {}

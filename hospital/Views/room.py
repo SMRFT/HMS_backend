@@ -101,6 +101,64 @@ def _save_admission(adm, room_details, shifting_details, advance_payments):
         print(f"[_save_admission] Mongo sync failed for {adm.ipNumber}: {ex}")
 
 
+def _clean_room_str(s):
+    return re.sub(r'[\s\-_]+', '', str(s or '')).upper()
+
+def _extract_digits_str(s):
+    m = re.search(r'(\d{2,4})', str(s or ''))
+    return m.group(1) if m else re.sub(r'\D+', '', str(s or ''))
+
+def _build_room_resolver(rooms_list):
+    exact_map = {}
+    clean_map = {}
+    digit_map = {}
+    aliases = {
+        "DAYCAR": "DAYCARE",
+        "DAYCARE": "DAYCARE",
+        "DLS": "DIALYSIS",
+        "DIALYSIS": "DIALYSIS",
+        "DYLS132": "DYLS-132",
+        "CHEMO": "CHEMO",
+        "MICU": "MICU",
+        "NICU": "NICU",
+        "SICU": "SICU",
+        "POW": "POW",
+    }
+    for r in rooms_list:
+        rn = str(r.get("room_number") or "").strip()
+        if not rn:
+            continue
+        exact_map[rn] = rn
+        ck = _clean_room_str(rn)
+        clean_map[ck] = rn
+        
+        # Prefix stripped (e.g. 'TS-507' -> '507', 'SR-509' -> '509')
+        ps = re.sub(r'^(TS|SR|RM|ROOM|BED|W|WD|SUT|MICU|SICU|NICU|3S|QS|KS|PS)[\s\-_]*', '', rn, flags=re.IGNORECASE).strip()
+        if ps:
+            clean_map[_clean_room_str(ps)] = rn
+            
+        d = _extract_digits_str(rn)
+        if d and d not in digit_map:
+            digit_map[d] = rn
+
+    def resolver(val):
+        if not val:
+            return ""
+        s = str(val).strip()
+        if s in exact_map:
+            return exact_map[s]
+        ck = _clean_room_str(s)
+        if ck in clean_map:
+            return clean_map[ck]
+        if ck in aliases and aliases[ck] in clean_map:
+            return clean_map[aliases[ck]]
+        d = _extract_digits_str(s)
+        if d and d in digit_map:
+            return digit_map[d]
+        return s
+
+    return resolver
+
 def _save_room(room, services=None, beds=None, room_kits=None):
     """
     Save Room model instance and force native BSON arrays in MongoDB for
@@ -1261,6 +1319,24 @@ def room_enquiry_view(request):
                 }
 
         # ═══════════════════════════════════════════════
+        # STEP 3B — ROOMS & RESOLVER (INDEXED QUERY)
+        # ═══════════════════════════════════════════════
+        room_query = {"is_active": True}
+        if hospital_code and hospital_code != "system":
+            room_query["hospital_code"] = hospital_code
+        if branch_code and branch_code != "system":
+            room_query["branch_code"] = branch_code
+
+        rooms_list = list(hms_db["hospital_room"].find(room_query).sort([("floor", 1), ("room_number", 1)]))
+        if not rooms_list and branch_code and branch_code != "system":
+            fallback_query = {"is_active": True}
+            if hospital_code and hospital_code != "system":
+                fallback_query["hospital_code"] = hospital_code
+            rooms_list = list(hms_db["hospital_room"].find(fallback_query).sort([("floor", 1), ("room_number", 1)]))
+
+        room_resolver = _build_room_resolver(rooms_list)
+
+        # ═══════════════════════════════════════════════
         # STEP 4 — BUILD ADMISSION MAP FOR ROOMS/BEDS
         # ═══════════════════════════════════════════════
         admission_map = {}
@@ -1299,60 +1375,92 @@ def room_enquiry_view(request):
             shifts  = [s for s in shifts if isinstance(s, dict)]
             details = [d for d in details if isinstance(d, dict)]
 
+            active_shifts = [s for s in shifts if bool(s.get("is_roomActive", False))]
+            active_shift  = None
+            if active_shifts:
+                try:
+                    active_shift = max(active_shifts, key=lambda s: int(str(s.get("shifting_id", "0")).replace("SH", "")))
+                except Exception:
+                    active_shift = active_shifts[-1]
+
             # ── Process roomShiftingDetails entries ───────────────────
             for shift in shifts:
-                room_no = str(shift.get("newRoomNo", "") or shift.get("roomNo", "")).strip()
-                bed_no  = str(shift.get("newBedNo", "") or shift.get("bedNo", "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(shift.get("newRoomNo", "") or shift.get("roomNo", "")).strip()
+                bed_no   = str(shift.get("newBedNo", "") or shift.get("bedNo", "")).strip()
+                if not raw_room or not bed_no:
                     continue
 
+                canonical_room = room_resolver(raw_room)
                 is_room_active = bool(shift.get("is_roomActive", False))
                 is_cleaned     = bool(shift.get("is_roomCleaned", False))
 
-                if is_room_active and not is_cleaned:
+                if active_shift and shift == active_shift:
                     status       = "Occupied"
                     patient_data = patient_info
-                elif not is_room_active and not is_cleaned:
-                    status       = "Not Cleaned"
-                    patient_data = patient_info
-                else:
+                elif is_cleaned:
                     status       = "Available"
                     patient_data = {}
+                else:
+                    status       = "Not Cleaned"
+                    patient_data = patient_info
 
-                admission_map[(room_no, bed_no)] = {
-                    "status":        status,
-                    "patient":       patient_data,
-                    "ip_number":     ip_number,
-                    "is_roomCleaned": is_cleaned,
-                }
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None or status == "Occupied" or existing.get("status") != "Occupied":
+                        admission_map[k] = {
+                            "status":        status,
+                            "patient":       patient_data,
+                            "ip_number":     ip_number,
+                            "is_roomCleaned": is_cleaned,
+                        }
 
             # ── Process room_details entries ─────────────────────────
             for entry in details:
-                room_no = str(entry.get("roomNo", "")).strip()
-                bed_no  = str(entry.get("bedNo", "")).strip()
-                if not room_no or not bed_no:
+                raw_room = str(entry.get("roomNo", "")).strip()
+                bed_no   = str(entry.get("bedNo", "")).strip()
+                if not raw_room or not bed_no:
                     continue
 
+                canonical_room = room_resolver(raw_room)
                 is_room_active = bool(entry.get("is_roomActive", False))
                 is_cleaned     = bool(entry.get("is_roomCleaned", False))
 
-                if is_room_active and not is_cleaned:
+                if is_room_active:
                     status       = "Occupied"
                     patient_data = patient_info
-                elif not is_room_active and not is_cleaned:
-                    status       = "Not Cleaned"
-                    patient_data = patient_info
-                else:
+                elif is_cleaned:
                     status       = "Available"
                     patient_data = {}
+                else:
+                    status       = "Not Cleaned"
+                    patient_data = patient_info
 
-                if (room_no, bed_no) not in admission_map:
-                    admission_map[(room_no, bed_no)] = {
-                        "status":        status,
-                        "patient":       patient_data,
-                        "ip_number":     ip_number,
-                        "is_roomCleaned": is_cleaned,
-                    }
+                keys_to_set = [
+                    (canonical_room, bed_no),
+                    (_clean_room_str(canonical_room), bed_no.upper()),
+                    (_clean_room_str(raw_room), bed_no.upper()),
+                ]
+                for k in keys_to_set:
+                    existing = admission_map.get(k)
+                    if existing is None:
+                        admission_map[k] = {
+                            "status":        status,
+                            "patient":       patient_data,
+                            "ip_number":     ip_number,
+                            "is_roomCleaned": is_cleaned,
+                        }
+                    elif existing.get("status") != "Occupied" and status == "Occupied":
+                        admission_map[k] = {
+                            "status":        status,
+                            "patient":       patient_data,
+                            "ip_number":     ip_number,
+                            "is_roomCleaned": is_cleaned,
+                        }
 
         # ═══════════════════════════════════════════════
         # STEP 5 — BOOKING MAP (INDEXED QUERY)
@@ -1365,29 +1473,21 @@ def room_enquiry_view(request):
             booking_query["branch_code"] = branch_code
 
         for booking in hms_db["hospital_roombooking"].find(booking_query):
-            room_number = str(booking.get("room_number") or "")
-            bed_number  = str(booking.get("bed_number") or "")
-            if room_number and bed_number:
-                booking_map[(room_number, bed_number)] = {
+            raw_room   = str(booking.get("room_number") or "").strip()
+            bed_number = str(booking.get("bed_number") or "").strip()
+            if raw_room and bed_number:
+                canonical_room = room_resolver(raw_room)
+                b_info = {
                     "ip_number": str(booking.get("ip_number") or ""),
                     "uhid":      str(booking.get("uhid") or ""),
                 }
+                booking_map[(canonical_room, bed_number)] = b_info
+                booking_map[(_clean_room_str(canonical_room), bed_number.upper())] = b_info
+                booking_map[(_clean_room_str(raw_room), bed_number.upper())] = b_info
 
         # ═══════════════════════════════════════════════
-        # STEP 6 — ROOMS & BEDS (INDEXED QUERY)
+        # STEP 6 — ROOMS & BEDS (POPULATE FLOORS)
         # ═══════════════════════════════════════════════
-        room_query = {"is_active": True}
-        if hospital_code and hospital_code != "system":
-            room_query["hospital_code"] = hospital_code
-        if branch_code and branch_code != "system":
-            room_query["branch_code"] = branch_code
-
-        rooms_list = list(hms_db["hospital_room"].find(room_query).sort([("floor", 1), ("room_number", 1)]))
-        if not rooms_list and branch_code and branch_code != "system":
-            fallback_query = {"is_active": True}
-            if hospital_code and hospital_code != "system":
-                fallback_query["hospital_code"] = hospital_code
-            rooms_list = list(hms_db["hospital_room"].find(fallback_query).sort([("floor", 1), ("room_number", 1)]))
 
         for room_doc in rooms_list:
             floor = room_doc.get("floor", 0) or 0
@@ -1401,7 +1501,9 @@ def room_enquiry_view(request):
                 if not isinstance(bed, dict):
                     continue
                 bed_number = str(bed.get("bed_number", "")).strip()
-                key        = (str(room_doc.get("room_number", "")), bed_number)
+                r_num_str  = str(room_doc.get("room_number", "")).strip()
+                key        = (r_num_str, bed_number)
+                alt_key    = (_clean_room_str(r_num_str), bed_number.upper())
 
                 # 1. Maintenance / blocked
                 if bool(bed.get("blocked", False)) or str(bed.get("bed_status", "")).lower() == "blocked":
@@ -1415,8 +1517,8 @@ def room_enquiry_view(request):
                     continue
 
                 # 2. Admission-driven status (Occupied / Not Cleaned / Available)
-                if key in admission_map:
-                    info = admission_map[key]
+                info = admission_map.get(key) or admission_map.get(alt_key)
+                if info:
                     beds_data.append({
                         "bed_number":     bed_number,
                         "status":         info["status"],
@@ -1428,12 +1530,13 @@ def room_enquiry_view(request):
                     continue
 
                 # 3. Reserved via RoomBooking
-                if key in booking_map:
+                b_info = booking_map.get(key) or booking_map.get(alt_key)
+                if b_info:
                     beds_data.append({
                         "bed_number": bed_number,
                         "status":     "Reserved",
                         "patient":    {},
-                        "booking":    booking_map[key],
+                        "booking":    b_info,
                         "ip_number":  "",
                     })
                     continue
@@ -1861,6 +1964,7 @@ def get_active_admission(request):
         # ── Active room (prioritize active room shifting over initial room_details) ─
         shiftings   = _safe_list(admission.get("roomShitingDetails"))
         has_shifted = any(isinstance(s, dict) for s in shiftings)
+        shift_count = len([s for s in shiftings if isinstance(s, dict)])
         room_details = _safe_list(admission.get("room_details"))
         active_room  = {}
         for s in reversed(shiftings):
@@ -2059,6 +2163,7 @@ def get_active_admission(request):
                 "bedNo":            active_room.get("bedNo", ""),
                 "room_details":     _normalize_ist_timestamps(room_details),
                 "has_shifted":      has_shifted,
+                "shift_count":      shift_count,
                 # ── Financial summary ──────────────────────────────────────
                 "total_advance":        total_advance,
                 "advance_count":        len(advances_summary),
@@ -2286,55 +2391,84 @@ def room_shifting_view(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # ── Guard: only one active shift allowed ──────────────────────────
+            # ── Multiple Shifting Support: resolve current active room ────────
             existing_shiftings = _safe_list(admission.roomShitingDetails)
-            active_shiftings   = [s for s in existing_shiftings if isinstance(s, dict)]
+            room_details       = _safe_list(admission.room_details)
 
-            if active_shiftings:
-                return Response(
-                    {
-                        "success": False,
-                        "error": "Room already shifted. Use Edit for the existing shifting record.",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            # ── Old room ──────────────────────────────────────────────────────
-            room_details = _safe_list(admission.room_details)
-            old_room_no  = old_bed_no = ""
-            for r in reversed(room_details):
-                if isinstance(r, dict) and r.get("is_roomActive"):
-                    old_room_no = str(r.get("roomNo", ""))
-                    old_bed_no  = str(r.get("bedNo",  ""))
+            old_room_no = old_bed_no = ""
+            # Prioritize active room from previous shiftings
+            for s in reversed(existing_shiftings):
+                if isinstance(s, dict) and s.get("is_roomActive"):
+                    old_room_no = str(s.get("newRoomNo", ""))
+                    old_bed_no  = str(s.get("newBedNo", ""))
                     break
+
+            if not old_room_no:
+                for r in reversed(room_details):
+                    if isinstance(r, dict) and r.get("is_roomActive"):
+                        old_room_no = str(r.get("roomNo", ""))
+                        old_bed_no  = str(r.get("bedNo", ""))
+                        break
+
             if not old_room_no and room_details:
                 last = room_details[-1]
                 if isinstance(last, dict):
                     old_room_no = str(last.get("roomNo", ""))
-                    old_bed_no  = str(last.get("bedNo",  ""))
+                    old_bed_no  = str(last.get("bedNo", ""))
 
-            # ── Deactivate current room in room_details & set endDateTime ─────
+            # Prevent shifting to the identical room and bed
+            if old_room_no and old_room_no == new_room and old_bed_no == new_bed:
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Patient is already in Room {new_room} / Bed {new_bed}.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             now_iso = _now_ist_iso()
+
+            # ── Deactivate previous active room in room_details & append new active room ──
             updated_room_details = []
+            max_entry_id = 0
             for room in room_details:
                 if not isinstance(room, dict):
                     continue
                 obj = dict(room)
+                try:
+                    eid = int(obj.get("room_entry_id") or 0)
+                    if eid > max_entry_id:
+                        max_entry_id = eid
+                except (ValueError, TypeError):
+                    pass
                 if obj.get("is_roomActive"):
                     obj["is_roomActive"] = False
                     obj["endDateTime"]   = now_iso
                 updated_room_details.append(obj)
 
+            updated_room_details.append({
+                "room_entry_id":  max_entry_id + 1,
+                "roomNo":         new_room,
+                "bedNo":          new_bed,
+                "is_roomActive":  True,
+                "is_roomCleaned": False,
+                "startDateTime":  now_iso,
+                "endDateTime":    None,
+            })
             admission.room_details = updated_room_details
 
-            # ── Build new shifting entry ──────────────────────────────────────
-            new_shifting_id = generate_shifting_id(existing_shiftings)
-
+            # ── Deactivate previous active shift in roomShitingDetails & append new shift ──
             cleaned_shiftings = []
             for shift in existing_shiftings:
-                if isinstance(shift, dict):
-                    cleaned_shiftings.append(dict(shift))
+                if not isinstance(shift, dict):
+                    continue
+                obj = dict(shift)
+                if obj.get("is_roomActive"):
+                    obj["is_roomActive"] = False
+                    obj["endDateTime"]   = now_iso
+                cleaned_shiftings.append(obj)
 
+            new_shifting_id = generate_shifting_id(existing_shiftings)
             cleaned_shiftings.append({
                 "shifting_id":      new_shifting_id,
                 "bill_number":      new_shifting_id,
