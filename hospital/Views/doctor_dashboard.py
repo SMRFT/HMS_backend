@@ -172,7 +172,7 @@ def doctor_dashboard_stats(request):
                 bucket["op_revenue"] += float(row.get("op_revenue") or 0.0)
 
         # 3. Aggregate IP Admissions (hospital_admission)
-        ip_match = {"is_admitted": True}
+        ip_match = {"is_cancelled": {"$ne": True}}
         if start_utc and end_utc:
             ip_match["admissionDateTime"] = {"$gte": start_utc, "$lte": end_utc}
 
@@ -190,28 +190,41 @@ def doctor_dashboard_stats(request):
             if bucket:
                 bucket["ip_count"] += int(row.get("ip_count") or 0)
 
-        # 4. Aggregate Discharges (hospital_admission)
-        dis_match = {"is_discharged": True}
+        # 4. Aggregate Discharges (hospital_dischargebilling Billed/Paid, deduplicated per IP)
+        dis_bill_match = {"status": {"$in": ["Billed", "Paid"]}, "is_cancelled": {"$ne": True}}
         if start_utc and end_utc:
-            dis_match["$or"] = [
-                {"dischargeDateTime": {"$gte": start_utc, "$lte": end_utc}},
-                {"dischargeDateTime": None, "lastmodified_date": {"$gte": start_utc, "$lte": end_utc}},
-                {"dischargeDateTime": {"$exists": False}, "lastmodified_date": {"$gte": start_utc, "$lte": end_utc}}
+            s_str = start_ist.strftime("%Y-%m-%d")
+            e_str = end_ist.strftime("%Y-%m-%d")
+            dis_bill_match["$or"] = [
+                {"bill_date": {"$gte": start_utc, "$lte": end_utc}},
+                {"bill_date": {"$gte": s_str, "$lte": f"{e_str}\uffff"}}
             ]
 
-        dis_pipeline = [
-            {"$match": dis_match},
-            {
-                "$group": {
-                    "_id": {"$ifNull": ["$consultingDoctor", "$admittingDoctor"]},
-                    "discharge_count": {"$sum": 1}
-                }
-            }
-        ]
-        for row in mongo_db["hospital_admission"].aggregate(dis_pipeline):
-            bucket = get_bucket(row.get("_id"))
-            if bucket:
-                bucket["discharge_count"] += int(row.get("discharge_count") or 0)
+        dis_bill_by_ip = {}
+        for dbill in mongo_db["hospital_dischargebilling"].find(
+            dis_bill_match,
+            {"ip_number": 1, "ipNumber": 1, "doctor": 1, "_id": 0}
+        ):
+            ip_val = str(dbill.get("ip_number") or dbill.get("ipNumber") or "").strip()
+            if ip_val and ip_val.upper() not in dis_bill_by_ip:
+                dis_bill_by_ip[ip_val.upper()] = (ip_val, dbill.get("doctor"))
+
+        if dis_bill_by_ip:
+            raw_ips = [v[0] for v in dis_bill_by_ip.values()]
+            adm_doc_map = {}
+            for adm in mongo_db["hospital_admission"].find(
+                {"ipNumber": {"$in": raw_ips}, "is_cancelled": {"$ne": True}},
+                {"ipNumber": 1, "consultingDoctor": 1, "admittingDoctor": 1, "_id": 0}
+            ):
+                adm_ip = str(adm.get("ipNumber") or "").strip().upper()
+                if adm_ip:
+                    adm_doc_map[adm_ip] = adm.get("consultingDoctor") or adm.get("admittingDoctor")
+
+            for ip_upper, (_, fallback_doc) in dis_bill_by_ip.items():
+                doc_ref = adm_doc_map.get(ip_upper) or fallback_doc
+                bucket = get_bucket(doc_ref)
+                if bucket:
+                    bucket["discharge_count"] += 1
 
         # 5. Aggregate Investigations & Investigation Revenue (hospital_investbilling)
         inv_match = {"is_active": True}
