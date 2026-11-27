@@ -3858,20 +3858,40 @@ def pharmacy_medicinechart(request):
 
             items = bill_items_map.get(str(bill.get("_id"))) or bill_items_map.get(b_id, [])
             mapped_items = []
-            is_completed_bill = str(bill.get("billing_status", "")).strip().lower() in ["billed", "paid", "completed"]
+
+            # Check if this bill has any pending or save-later items
+            has_pending_items = False
+            for itm in items:
+                if isinstance(itm, dict):
+                    i_orig = float(itm.get("qty") or itm.get("quantity") or 0)
+                    i_disp = float(itm.get("dispatched_qty", 0) or 0)
+                    i_sl = bool(itm.get("save_later") or itm.get("is_save_later"))
+                    if (i_orig - i_disp > 0) or i_sl:
+                        has_pending_items = True
+                        break
+
+            is_completed_bill = (not has_pending_items) and str(bill.get("billing_status", "")).strip().lower() in ["billed", "paid", "completed"]
+            if has_pending_items:
+                bill["billing_status"] = "Processing"
+                bill["is_dispatched"] = False
 
             for item in items:
-                if not isinstance(item, dict) or item.get("is_deleted") or item.get("deleted_is"):
+                if not isinstance(item, dict):
                     continue
 
                 # 1. Total requested quantity & already dispatched quantity
                 orig_qty = float(item.get("qty") or item.get("quantity") or 0)
                 disp_qty = float(item.get("dispatched_qty", 0) or 0)
                 pending_qty = max(0.0, orig_qty - disp_qty)
+                is_sl = bool(item.get("save_later") or item.get("is_save_later"))
+
+                # Only truly deleted items without pending quantity or save_later are excluded
+                if (item.get("is_deleted") or item.get("deleted_is")) and not is_sl and pending_qty <= 0:
+                    continue
 
                 # 2. For active pending/processing bills, fully dispatched items should NOT be displayed again
                 if not is_completed_bill:
-                    if orig_qty > 0 and pending_qty <= 0:
+                    if orig_qty > 0 and pending_qty <= 0 and not is_sl:
                         continue
 
                 stock_info = resolve_medicine_stock_details(item, items_stock_data)
@@ -4753,17 +4773,32 @@ def finalize_bill(request):
                 if not isinstance(orig_m, dict):
                     continue
                 m_iid = orig_m.get("item_id")
-                # Check if item is deleted either in orig or in frontend payload
-                is_del = (
-                    orig_m.get("deleted_is") is True or
-                    orig_m.get("is_deleted") is True or
-                    any((str(dm.get("item_id")) == str(m_iid) and (dm.get("deleted_is") or dm.get("is_deleted"))) for dm in medicines_to_use)
-                )
-                if is_del:
-                    continue  # Deleted items do NOT count towards pending dispatch!
-
                 orig_req_qty = float(orig_m.get("requested_qty") or orig_m.get("qty") or orig_m.get("quantity") or 0)
                 prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
+
+                # Check if item is marked save_later
+                sm_match = next((dm for dm in medicines_to_use if str(dm.get("item_id")) == str(m_iid)), None)
+                is_sm_sl = bool(
+                    (sm_match and (sm_match.get("save_later") or sm_match.get("is_save_later"))) or
+                    orig_m.get("save_later") or
+                    orig_m.get("is_save_later")
+                )
+
+                # Check if item is deleted either in orig or in frontend payload
+                is_del = (
+                    not is_sm_sl and (
+                        orig_m.get("deleted_is") is True or
+                        orig_m.get("is_deleted") is True or
+                        any((str(dm.get("item_id")) == str(m_iid) and (dm.get("deleted_is") or dm.get("is_deleted")) and not (dm.get("save_later") or dm.get("is_save_later"))) for dm in medicines_to_use)
+                    )
+                )
+
+                # If the item still has undispached requested quantity (out of stock / pending), it is NOT deleted!
+                if orig_req_qty > prev_disp and is_sm_sl:
+                    is_del = False
+
+                if is_del:
+                    continue  # Only genuinely cancelled/deleted items do NOT count towards pending dispatch!
 
                 # Actual quantity entered and billed right now
                 billed_qty = float(
@@ -4777,7 +4812,7 @@ def finalize_bill(request):
                 new_disp = min(orig_req_qty, prev_disp + billed_qty) if orig_req_qty > 0 else (prev_disp + billed_qty)
                 pending_qty = max(0.0, orig_req_qty - new_disp)
 
-                if pending_qty > 0:
+                if pending_qty > 0 or is_sm_sl:
                     all_items_fully_dispatched = False
 
                 u_item = dict(orig_m)
@@ -5083,13 +5118,17 @@ def finalize_bill(request):
         elif data.get("billing_mode"):
             set_payload["billing_mode"] = data.get("billing_mode")
 
-        raw_final_pm = data.get("payment_mode") or data.get("paymentMode")
-        if is_insurance_patient:
+        raw_final_pm = str(data.get("payment_mode") or data.get("paymentMode") or "").strip().lower()
+        if raw_final_pm == "cash":
+            set_payload["payment_mode"] = "Cash"
+        elif raw_final_pm == "credit":
+            set_payload["payment_mode"] = "Credit"
+        elif is_insurance_patient:
             set_payload["payment_mode"] = "Credit"
             set_payload["is_insurance"] = True
             set_payload["customer_type"] = "Insurance"
-        elif raw_final_pm:
-            set_payload["payment_mode"] = "Credit" if str(raw_final_pm).strip().lower() == "credit" else "Cash"
+        else:
+            set_payload["payment_mode"] = "Cash"
 
         # Resolve patient name and age
         resolved_p_name = (
@@ -5139,25 +5178,6 @@ def finalize_bill(request):
                 except Exception:
                     pass
 
-                # Check if item was deleted in frontend or marked deleted
-                is_del = (
-                    orig_m.get("deleted_is") is True or
-                    orig_m.get("is_deleted") is True or
-                    any((str(dm.get("item_id")) == str(m_iid) and (dm.get("deleted_is") or dm.get("is_deleted"))) for dm in sanitized_meds)
-                )
-
-                if is_del:
-                    item_entry = dict(orig_m)
-                    item_entry["deleted_is"] = True
-                    item_entry["is_deleted"] = True
-                    item_entry.pop("requested_qty", None)
-                    item_entry.pop("pending_qty", None)
-                    item_entry.pop("last_billed_qty", None)
-                    eh = item_entry.pop("edit_history", None) or []
-                    item_entry["edit_history"] = eh
-                    final_particulars.append(item_entry)
-                    continue
-
                 orig_req_qty = float(orig_m.get("requested_qty") or orig_m.get("qty") or orig_m.get("quantity") or 0)
                 prev_disp = float(orig_m.get("dispatched_qty", 0) or 0)
 
@@ -5174,6 +5194,33 @@ def finalize_bill(request):
                         or billed_sm.get("billed_qty") == 0
                         or (float(billed_sm.get("total") or 0) == 0 and float(billed_sm.get("calculated_price") or 0) == 0 and float(billed_sm.get("mrp") or 0) == 0)
                     )
+                is_sm_sl = is_sm_sl or bool(orig_m.get("save_later") or orig_m.get("is_save_later"))
+
+                # Check if item was deleted in frontend or marked deleted
+                is_del = (
+                    not is_sm_sl and (
+                        orig_m.get("deleted_is") is True or
+                        orig_m.get("is_deleted") is True or
+                        any((str(dm.get("item_id")) == str(m_iid) and (dm.get("deleted_is") or dm.get("is_deleted")) and not (dm.get("save_later") or dm.get("is_save_later"))) for dm in sanitized_meds)
+                    )
+                )
+
+                # Never delete an item that has remaining requested quantity
+                if orig_req_qty > prev_disp and is_sm_sl:
+                    is_del = False
+
+                if is_del:
+                    item_entry = dict(orig_m)
+                    item_entry["deleted_is"] = True
+                    item_entry["is_deleted"] = True
+                    item_entry.pop("requested_qty", None)
+                    item_entry.pop("pending_qty", None)
+                    item_entry.pop("last_billed_qty", None)
+                    eh = item_entry.pop("edit_history", None) or []
+                    item_entry["edit_history"] = eh
+                    final_particulars.append(item_entry)
+                    continue
+
                 if billed_sm and not is_sm_sl:
                     billed_qty = float(billed_sm.get("billed_qty") if billed_sm.get("billed_qty") is not None else billed_sm.get("qty", 0))
                 else:
@@ -5187,6 +5234,8 @@ def finalize_bill(request):
                     item_entry = dict(billed_sm)
                     item_entry["qty"] = orig_req_qty if orig_req_qty > 0 else (prev_disp + billed_qty)
                     item_entry["dispatched_qty"] = new_disp
+                    item_entry["deleted_is"] = False
+                    item_entry["is_deleted"] = False
                     unit_mrp = float(item_entry.get("mrp") or item_entry.get("price") or 0)
                     if unit_mrp > 0 and new_disp > 0:
                         calc_p = round(unit_mrp * new_disp, 2)
@@ -5209,6 +5258,10 @@ def finalize_bill(request):
                     item_entry = dict(orig_m)
                     item_entry["qty"] = orig_req_qty
                     item_entry["dispatched_qty"] = prev_disp
+                    item_entry["deleted_is"] = False
+                    item_entry["is_deleted"] = False
+                    item_entry["save_later"] = True
+                    item_entry["is_save_later"] = True
 
                 # Ensure unwanted intermediate fields are not stored
                 item_entry.pop("item_name", None)

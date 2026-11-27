@@ -5845,16 +5845,26 @@ def OPPharmacy_pending_bills(request):
 
         # ✅ DYNAMIC AUTH CODES (Tenant & Branch Context - No Hardcoding)
         hospital_code = (
-            data.get("auth-hospital-code")
-            
+            request.headers.get("Hospital-Code")
+            or request.headers.get("auth-hospital-code")
+            or request.GET.get("hospital_code")
+            or data.get("auth-hospital-code")
+            or ""
         )
         branch_code = (
-            data.get("auth-branch-code")
-            
+            request.headers.get("Branch-Code")
+            or request.headers.get("auth-branch-code")
+            or request.GET.get("branch_code")
+            or data.get("auth-branch-code")
+            or ""
         )
         outlet_code = (
-            data.get("auth-outlet-code")
-            
+            request.headers.get("Outlet-Code")
+            or request.headers.get("auth-outlet-code")
+            or request.GET.get("outlet_code")
+            or request.GET.get("outlet")
+            or data.get("auth-outlet-code")
+            or ""
         )
 
         from .dbcollection import (
@@ -6096,8 +6106,10 @@ def OPPharmacy_pending_bills(request):
         req_outlet = (
             request.GET.get("outlet_code")
             or request.GET.get("outlet")
-            or matched_outlet
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("auth-outlet-code")
             or outlet_code
+            or matched_outlet
             or ""
         )
         if isinstance(req_outlet, (list, tuple)):
@@ -6134,23 +6146,25 @@ def OPPharmacy_pending_bills(request):
         if search_conditions:
             status_and_conditions.append({"$or": search_conditions})
 
+        allowed_pending_statuses = ["Billed", "billed", "Processing", "processing", "Partially Billed", "partially billed"]
+
         if from_dt and to_dt:
-            mongo_filter["billing_status"] = {"$in": ["Billed", "Paid"]}
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses + ["Paid", "paid"]}
             date_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 date_ors.append({fld: {"$gte": from_dt, "$lte": to_dt}})
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "pending":
-            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid billed)
-            mongo_filter["billing_status"] = "Billed"
+            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid billed/processing)
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses}
             mongo_filter["bill_no"] = {"$nin": [None, ""]}
             date_ors = []
             for fld in ["bill_date", "created_date"]:
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "unpaid":
-            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid billed bills)
-            mongo_filter["billing_status"] = "Billed"
+            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid billed/processing bills)
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses}
             mongo_filter["bill_no"] = {"$nin": [None, ""]}
             status_and_conditions.append({"$or": [
                 {"bill_date": {"$lt": today_start_local}},
@@ -6161,23 +6175,23 @@ def OPPharmacy_pending_bills(request):
             ]})
         elif req_status in ["received", "paid"]:
             # 🎯 Received Bills: Current date paid cash bills
-            mongo_filter["billing_status"] = "Paid"
+            mongo_filter["billing_status"] = {"$in": ["Paid", "paid"]}
             date_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif not search_query:
-            # 🎯 Default: All unpaid billed cash bills + Paid cash bills from current date
+            # 🎯 Default: All unpaid billed/processing cash bills + Paid cash bills from current date
             today_paid_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 today_paid_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": [
                 {
-                    "billing_status": "Billed",
+                    "billing_status": {"$in": allowed_pending_statuses},
                     "bill_no": {"$nin": [None, ""]}
                 },
                 {
-                    "billing_status": "Paid",
+                    "billing_status": {"$in": ["Paid", "paid"]},
                     "$or": today_paid_ors
                 }
             ]})
@@ -6332,8 +6346,8 @@ def OPPharmacy_pending_bills(request):
                     serialized[amt_key] = convert_decimal(serialized.get(amt_key, 0))
 
             b_status = str(bill.get("billing_status") or "").strip()
-            is_unpaid_status = (b_status == "Billed" and bool(bill.get("bill_no")))
-            is_paid_status = (b_status == "Paid")
+            is_unpaid_status = (b_status.lower() in ["billed", "processing", "partially billed"] and bool(bill.get("bill_no")))
+            is_paid_status = (b_status.lower() in ["paid", "completed"])
 
             if is_paid_status:
                 raw_bdate = bill.get("paid_date") or bill.get("paid_datetime") or bill.get("lastmodified_date") or bill.get("bill_date") or bill.get("created_date")
@@ -6425,7 +6439,7 @@ def OPPharmacy_pending_bills(request):
                 it_dict["item_name"] = it_dict.get("item_name") or item_map.get(iid_val, "")
 
                 # Normalize all item numeric fields using convert_decimal
-                for f_num in ["price", "mrp", "calculated_price", "product_value", "taxable_value", "total", "discount_amount", "discount_value", "discount", "CGST_Percentage", "SGST_Percentage", "CGST_Amt", "SGST_Amt"]:
+                for f_num in ["price", "mrp", "calculated_price", "product_value", "taxable_value", "total", "discount_amount", "discount_value", "discount", "CGST_Percentage", "SGST_Percentage", "CGST_Amt", "SGST_Amt", "qty", "quantity", "dispatched_qty", "billed_qty"]:
                     if f_num in it_dict:
                         it_dict[f_num] = convert_decimal(it_dict.get(f_num, 0))
 
