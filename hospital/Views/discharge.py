@@ -1747,6 +1747,27 @@ def _apply_fields(obj, data, existing=None, request=None):
             curr_history = getattr(existing, "edit_history", []) or []
             if not isinstance(curr_history, list):
                 curr_history = []
+def _to_native_list(val):
+    if val is None:
+        return []
+    if isinstance(val, list):
+        parsed = val
+    elif isinstance(val, dict):
+        parsed = [val]
+    elif isinstance(val, str):
+        s_val = val.strip()
+        if not s_val or s_val in ("null", "None", "[]", "{}"):
+            return []
+        try:
+            res = _json.loads(s_val)
+            parsed = res if isinstance(res, list) else [res] if isinstance(res, dict) else []
+        except Exception:
+            return []
+    else:
+        parsed = []
+    return _json.loads(_json.dumps(parsed, default=str))
+
+
 def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None):
     """
     Called upon final discharge billing generation (status='Billed') or conversion from Estimate.
@@ -2156,15 +2177,6 @@ def _finalize_discharge(ip_number, user_id=None, uhid=None, discharge_date=None)
                             except Exception as ex:
                                 logger.error(f"Error incrementing hospital_itemmaster approved_quantity for {item_id}: {ex}")
 
-                            try:
-                                from hospital.Views.Stores.models import ItemMaster
-                                it_obj = ItemMaster.objects.filter(item_id=str(item_id).strip()).first()
-                                if it_obj:
-                                    it_obj.approved_quantity = int(it_obj.approved_quantity or 0) + qty_int
-                                    it_obj.save()
-                            except Exception:
-                                pass
-
                 # 3. Update is_billed: false -> true in hospital_cathlabintent
                 matched_ids = [d["_id"] for d in matching_intents if "_id" in d]
                 if matched_ids:
@@ -2198,19 +2210,445 @@ def _mark_admission_discharged(ip_number, user_id=None, uhid=None, discharge_dat
     _finalize_discharge(ip_number, user_id=user_id, uhid=uhid, discharge_date=discharge_date)
 
 
-def _revert_admission_discharge(ip_number):
-    if not ip_number:
+def _revert_finalize_discharge(ip_number, user_id=None, uhid=None, billing=None):
+    """
+    Called upon discharge billing cancellation.
+    Reverts all changes made during _finalize_discharge:
+
+    1. Admission (hospital_admission & Admission model):
+       - is_admitted = True, is_Admitted = True
+       - is_discharged = False, is_Discharged = False
+       - status = "Admitted", ward_status = "Sent for billing"
+       - dischargeDateTime = None, discharge_date = None
+       - In room_details array:
+         For the last element: is_roomActive = True, is_roomCleaned = False, endDateTime = None
+       - In roomShitingDetails array:
+         For the last element: is_roomActive = True, is_roomCleaned = False, endDateTime = None
+
+    2. Pharmacy Billing (hospital_pharmacybilling & pharmacy_billing):
+       - billing_status: "Completed" -> "Billed"
+
+    3. Invest Billing (hospital_investbilling):
+       - paymentStatus: "Completed" -> "Pending"
+       - payment_status: "Completed" -> "Pending"
+
+    4. Cathlab Intent (hospital_cathlabintent) & Item Master (hospital_itemmaster & ItemMaster model):
+       - is_billed: True -> False
+       - Decrements approved_quantity by the approved/billed quantity in hospital_itemmaster
+
+    5. Implant Request (hospital_implant_request):
+       - status: "Completed" -> "Pending"
+
+    6. Consultation Billing (hospital_billing & Billing model):
+       - payment_status: "Completed" -> "Pending"
+    """
+    if not ip_number and not uhid and not billing:
         return
+
+    if billing:
+        if not ip_number:
+            ip_number = getattr(billing, "ip_number", None) or getattr(billing, "inpatient_number", None)
+        if not uhid:
+            uhid = getattr(billing, "uhid", None)
+
+    now_dt = timezone.now()
+    user_str = str(user_id).strip() if user_id else "System"
+
     try:
-        adm = Admission.objects.filter(ipNumber=ip_number).first()
+        client, db = get_hms_db()
+
+        # Build IP number variants (both with and without slashes)
+        ip_variants = []
+        if ip_number:
+            raw_ip = str(ip_number).strip()
+            clean_ip = raw_ip.replace("/", "")
+            ip_variants.extend([raw_ip, clean_ip])
+
+        # ── 1. Revert Admission & Room Details ────────────────────────────────
+        adm = None
+        for iv in ip_variants:
+            adm = Admission.objects.filter(ipNumber=iv).first()
+            if adm:
+                break
+        if not adm and uhid:
+            adm = Admission.objects.filter(uhid=str(uhid).strip()).order_by("-admission_id").first()
+
+        adm_doc = None
+        for iv in ip_variants:
+            adm_doc = db["hospital_admission"].find_one({
+                "$or": [{"ipNumber": iv}, {"ip_number": iv}, {"mr_number": iv}, {"legacy_ip": iv}]
+            })
+            if adm_doc:
+                break
+        if not adm_doc and uhid:
+            adm_doc = db["hospital_admission"].find_one(
+                {"uhid": str(uhid).strip()},
+                sort=[("created_date", -1)]
+            )
+
+        # Read room_details
+        room_details = []
+        if adm and adm.room_details:
+            room_details = parse_json_field(adm.room_details)
+        if (not room_details or not isinstance(room_details, list)) and adm_doc:
+            room_details = adm_doc.get("room_details") or []
+        if isinstance(room_details, str):
+            room_details = parse_json_field(room_details)
+
+        updated_room_details = []
+        raw_rd_list = room_details if isinstance(room_details, list) else []
+        for idx, r in enumerate(raw_rd_list):
+            if isinstance(r, dict):
+                r_copy = dict(r)
+                if idx == len(raw_rd_list) - 1:
+                    r_copy["is_roomActive"] = True
+                    r_copy["is_roomCleaned"] = False
+                    r_copy["endDateTime"] = None
+                else:
+                    r_copy["is_roomActive"] = False
+                r_copy.pop("end_time", None)
+                r_copy.pop("endTime", None)
+                updated_room_details.append(r_copy)
+            elif r:
+                updated_room_details.append(r)
+
+        # Read roomShitingDetails
+        shifts = []
+        if adm and adm.roomShitingDetails:
+            shifts = parse_json_field(adm.roomShitingDetails)
+        if (not shifts or not isinstance(shifts, list)) and adm_doc:
+            shifts = adm_doc.get("roomShitingDetails") or []
+        if isinstance(shifts, str):
+            shifts = parse_json_field(shifts)
+
+        updated_shifts = []
+        raw_shifts_list = shifts if isinstance(shifts, list) else []
+        for idx, s in enumerate(raw_shifts_list):
+            if isinstance(s, dict):
+                s_copy = dict(s)
+                if idx == len(raw_shifts_list) - 1:
+                    s_copy["is_roomActive"] = True
+                    s_copy["is_roomCleaned"] = False
+                    s_copy["endDateTime"] = None
+                else:
+                    s_copy["is_roomActive"] = False
+                s_copy.pop("end_time", None)
+                s_copy.pop("endTime", None)
+                updated_shifts.append(s_copy)
+            elif s:
+                updated_shifts.append(s)
+
+        rd_array = _to_native_list(updated_room_details)
+        sd_array = _to_native_list(updated_shifts)
+
         if adm:
-            adm.ward_status = "Sent for billing"
-            adm.status = "Admitted"
             adm.is_discharged = False
             adm.is_admitted = True
-            adm.save()
+            adm.dischargeDateTime = None
+            if hasattr(adm, "discharge_date"):
+                adm.discharge_date = None
+            adm.ward_status = "Sent for billing"
+            adm.status = "Admitted"
+            adm.room_details = rd_array
+            adm.roomShitingDetails = sd_array
+            adm.lastmodified_by = user_str
+            adm.lastmodified_date = now_dt
+            try:
+                adm.save()
+            except Exception as e:
+                logger.error(f"Error saving SQL Admission on revert: {e}")
+
+        # Update in MongoDB hospital_admission
+        adm_query = []
+        for iv in ip_variants:
+            adm_query.extend([{"ipNumber": iv}, {"ip_number": iv}, {"mr_number": iv}, {"legacy_ip": iv}])
+        if uhid:
+            adm_query.append({"uhid": str(uhid).strip()})
+
+        if adm_query:
+            db["hospital_admission"].update_many(
+                {"$or": adm_query},
+                {"$set": {
+                    "is_discharged": False,
+                    "is_Discharged": False,
+                    "is_admitted": True,
+                    "is_Admitted": True,
+                    "ward_status": "Sent for billing",
+                    "status": "Admitted",
+                    "dischargeDateTime": None,
+                    "discharge_date": None,
+                    "room_details": rd_array,
+                    "roomShitingDetails": sd_array,
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+
+        # ── 2. Revert Pharmacy Billing (hospital_pharmacybilling) ───────────
+        pharm_ip_filter = []
+        for iv in ip_variants:
+            pharm_ip_filter.extend([
+                {"inpatient_number": iv},
+                {"ipNumber": iv},
+                {"ip_number": iv},
+                {"ip_no": iv},
+            ])
+        if uhid:
+            pharm_ip_filter.append({"uhid": str(uhid).strip()})
+
+        if pharm_ip_filter:
+            pharm_match = {
+                "$and": [
+                    {"$or": pharm_ip_filter},
+                    {"billing_status": {"$in": ["Completed", "completed", "COMPLETED"]}},
+                ]
+            }
+            db["hospital_pharmacybilling"].update_many(
+                pharm_match,
+                {"$set": {
+                    "billing_status": "Billed",
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+            try:
+                pharm_host = os.getenv("PHARMACY_DB_HOST")
+                if not pharm_host or pharm_host == os.getenv("GLOBAL_DB_HOST"):
+                    pharm_db = client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
+                else:
+                    pharm_client = MongoClient(pharm_host)
+                    pharm_db = pharm_client[os.getenv("PHARMACY_DB_NAME", "pharmacy")]
+                pharm_db["pharmacy_billing"].update_many(
+                    pharm_match,
+                    {"$set": {
+                        "billing_status": "Billed",
+                        "lastmodified_by": user_str,
+                        "lastmodified_date": now_dt,
+                    }}
+                )
+            except Exception:
+                pass
+
+        # ── 3. Revert Invest Billing (hospital_investbilling) ────────────────
+        invest_ip_filter = []
+        for iv in ip_variants:
+            invest_ip_filter.extend([
+                {"ipNumber": iv},
+                {"inpatient_number": iv},
+                {"ip_number": iv},
+            ])
+        if uhid:
+            invest_ip_filter.append({"uhid": str(uhid).strip()})
+
+        if invest_ip_filter:
+            invest_match = {
+                "$and": [
+                    {"$or": invest_ip_filter},
+                    {
+                        "$or": [
+                            {"paymentStatus": {"$in": ["Completed", "completed", "COMPLETED"]}},
+                            {"payment_status": {"$in": ["Completed", "completed", "COMPLETED"]}},
+                        ]
+                    }
+                ]
+            }
+            db["hospital_investbilling"].update_many(
+                invest_match,
+                {"$set": {
+                    "paymentStatus": "Pending",
+                    "payment_status": "Pending",
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+
+        # ── 4. Revert Cathlab Intent & Item Master ───────────────────────────
+        cathlab_ip_filter = []
+        for iv in ip_variants:
+            cathlab_ip_filter.extend([
+                {"ipnumber": iv},
+                {"ipnumber": {"$regex": f"^{re.escape(iv)}$", "$options": "i"}},
+                {"ip_number": iv},
+                {"ipNumber": iv},
+            ])
+
+        matching_intents = []
+        if cathlab_ip_filter:
+            try:
+                matching_intents = list(db["hospital_cathlabintent"].find({
+                    "$and": [
+                        {"$or": cathlab_ip_filter},
+                        {"is_billed": True},
+                    ]
+                }))
+            except Exception:
+                pass
+
+        # Also collect from billing.items if specific cathlab items were referenced
+        if billing:
+            for itm in getattr(billing, "items", []) or []:
+                if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                    obj_id_str = itm.get("bill_object_id")
+                    if obj_id_str:
+                        try:
+                            extra_doc = db["hospital_cathlabintent"].find_one({"_id": ObjectId(obj_id_str)})
+                            if extra_doc and not any(str(d.get("_id")) == str(extra_doc.get("_id")) for d in matching_intents):
+                                matching_intents.append(extra_doc)
+                        except Exception:
+                            pass
+
+        # Revert approved_quantity on item master for each matched intent
+        for intent_doc in matching_intents:
+            raw_items = intent_doc.get("items") or []
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = _json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            for itm in (raw_items if isinstance(raw_items, list) else []):
+                if not isinstance(itm, dict):
+                    continue
+                item_id = itm.get("item_id")
+                qty = int(_to_float(itm.get("approved_quantity") or itm.get("quantity") or 0))
+                if item_id and qty > 0:
+                    try:
+                        db["hospital_itemmaster"].update_one(
+                            {"item_id": str(item_id).strip()},
+                            {"$inc": {"approved_quantity": -qty}}
+                        )
+                        db["hospital_itemmaster"].update_one(
+                            {"item_id": str(item_id).strip(), "approved_quantity": {"$lt": 0}},
+                            {"$set": {"approved_quantity": 0}}
+                        )
+                    except Exception as ex:
+                        logger.error(f"Error decrementing hospital_itemmaster approved_quantity for {item_id}: {ex}")
+
+        # Also check items in billing directly in case intent document wasn't matched above
+        if billing:
+            for itm in getattr(billing, "items", []) or []:
+                if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
+                    c_item_id = itm.get("test_id") or itm.get("item_id")
+                    c_qty = int(_to_float(itm.get("quantity") or 0))
+                    obj_id_str = itm.get("bill_object_id")
+                    if obj_id_str and not any(str(d.get("_id")) == str(obj_id_str) for d in matching_intents):
+                        if c_item_id and c_qty > 0:
+                            try:
+                                db["hospital_itemmaster"].update_one(
+                                    {"item_id": str(c_item_id).strip()},
+                                    {"$inc": {"approved_quantity": -c_qty}}
+                                )
+                                db["hospital_itemmaster"].update_one(
+                                    {"item_id": str(c_item_id).strip(), "approved_quantity": {"$lt": 0}},
+                                    {"$set": {"approved_quantity": 0}}
+                                )
+                            except Exception:
+                                pass
+
+        # Mark matched cathlab intents is_billed -> False
+        matched_intent_ids = [d["_id"] for d in matching_intents if "_id" in d]
+        if matched_intent_ids:
+            db["hospital_cathlabintent"].update_many(
+                {"_id": {"$in": matched_intent_ids}},
+                {"$set": {
+                    "is_billed": False,
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+        elif cathlab_ip_filter:
+            db["hospital_cathlabintent"].update_many(
+                {
+                    "$and": [
+                        {"$or": cathlab_ip_filter},
+                        {"is_billed": True},
+                    ]
+                },
+                {"$set": {
+                    "is_billed": False,
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+
+        # ── 5. Revert Implant Request (hospital_implant_request) ─────────────
+        implant_ip_filter = []
+        for iv in ip_variants:
+            implant_ip_filter.extend([
+                {"inpatient_number": iv},
+                {"ipNumber": iv},
+                {"ip_number": iv},
+            ])
+        if uhid:
+            implant_ip_filter.append({"uhid": str(uhid).strip()})
+
+        if implant_ip_filter:
+            db["hospital_implant_request"].update_many(
+                {
+                    "$and": [
+                        {"$or": implant_ip_filter},
+                        {"status": {"$in": ["Completed", "completed", "COMPLETED"]}},
+                    ]
+                },
+                {"$set": {
+                    "status": "Pending",
+                    "lastmodified_by": user_str,
+                    "lastmodified_date": now_dt,
+                }}
+            )
+
+        # ── 6. Revert Consultation Billing (hospital_billing & Billing model) ─
+        if billing:
+            for itm in getattr(billing, "items", []) or []:
+                if isinstance(itm, dict):
+                    if itm.get("source") == "hospital_billing" or itm.get("itemName") == "Consultation OPD":
+                        b_no = itm.get("invest_bill_no")
+                        if b_no:
+                            db["hospital_billing"].update_one(
+                                {"bill_number": str(b_no), "payment_status": {"$in": ["Completed", "completed", "COMPLETED"]}},
+                                {"$set": {
+                                    "payment_status": "Pending",
+                                    "lastmodified_by": user_str,
+                                    "lastmodified_date": now_dt,
+                                }}
+                            )
+                            try:
+                                Billing.objects.filter(
+                                    bill_number=str(b_no),
+                                    payment_status__iexact="completed"
+                                ).update(
+                                    payment_status="Pending",
+                                    lastmodified_by=user_str,
+                                    lastmodified_date=now_dt
+                                )
+                            except Exception:
+                                pass
+
+        # Also sync hospital_dischargebilling status: "Cancelled", is_cancelled: True in MongoDB
+        if billing:
+            d_id = getattr(billing, "discharge_id", None) or getattr(billing, "id", None)
+            if d_id:
+                try:
+                    db["hospital_dischargebilling"].update_one(
+                        {"$or": [{"discharge_id": int(d_id) if str(d_id).isdigit() else d_id}, {"discharge_id": str(d_id)}, {"_id": d_id}]},
+                        {"$set": {
+                            "status": "Cancelled",
+                            "is_cancelled": True,
+                            "cancelled_by": user_str,
+                            "cancelled_date": now_dt,
+                            "cancelled_reason": getattr(billing, "cancelled_reason", "") or "",
+                            "lastmodified_by": user_str,
+                            "lastmodified_date": now_dt,
+                        }}
+                    )
+                except Exception:
+                    pass
+
     except Exception as e:
-        print(f"Failed to revert admission status for {ip_number}: {e}")
+        logger.error(f"Error in _revert_finalize_discharge for IP {ip_number}: {e}", exc_info=True)
+
+
+def _revert_admission_discharge(ip_number):
+    _revert_finalize_discharge(ip_number)
 
 
 def _build_pharmacy_medicines(pharm_docs, db):
@@ -4503,6 +4941,13 @@ def discharge_billing_detail(request, pk):
                     uhid=billing.uhid,
                     discharge_date=getattr(billing, "discharge_date", None) or billing.bill_date
                 )
+            elif billing.status == "Cancelled":
+                _revert_finalize_discharge(
+                    ip_number=billing.ip_number,
+                    user_id=billing.lastmodified_by,
+                    uhid=billing.uhid,
+                    billing=billing
+                )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -4513,8 +4958,16 @@ def discharge_billing_detail(request, pk):
 
     # ── DELETE (soft) ─────────────────────────────────────────────────────────
     if request.method == "DELETE":
+        was_billed = billing.status == "Billed"
         billing.is_active = False
         billing.save(update_fields=["is_active"])
+        if was_billed:
+            _revert_finalize_discharge(
+                ip_number=billing.ip_number,
+                user_id=getattr(request, "user_id", None) or "System",
+                uhid=billing.uhid,
+                billing=billing
+            )
         return Response({"message": "Record deleted"})
 
 
@@ -4636,38 +5089,13 @@ def cancel_discharge_billing(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
-        # Revert cathlab intent is_billed and approved_quantity if bill items had cathlab intent
-        for itm in billing.items or []:
-            if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
-                obj_id_str = itm.get("bill_object_id")
-                if obj_id_str:
-                    try:
-                        _, c_db = get_hms_db()
-                        c_db["hospital_cathlabintent"].update_one(
-                            {"_id": ObjectId(obj_id_str)},
-                            {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
-                        )
-                        c_item_id = itm.get("test_id") or itm.get("item_id")
-                        c_qty = int(_to_float(itm.get("quantity") or 0))
-                        if c_item_id and c_qty > 0:
-                            c_db["hospital_itemmaster"].update_one(
-                                {"item_id": str(c_item_id).strip()},
-                                {"$inc": {"approved_quantity": -c_qty}}
-                            )
-                            c_db["hospital_itemmaster"].update_one(
-                                {"item_id": str(c_item_id).strip(), "approved_quantity": {"$lt": 0}},
-                                {"$set": {"approved_quantity": 0}}
-                            )
-                            try:
-                                from hospital.Views.Stores.models import ItemMaster
-                                it_obj = ItemMaster.objects.filter(item_id=str(c_item_id).strip()).first()
-                                if it_obj:
-                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - c_qty)
-                                    it_obj.save()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+        # Revert all discharge processes across admission, pharmacy, invest, cathlab, implant, itemmaster
+        _revert_finalize_discharge(
+            ip_number=billing.ip_number,
+            user_id=user_id,
+            uhid=billing.uhid,
+            billing=billing
+        )
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -4723,38 +5151,6 @@ def convert_bill_to_insurance(request, pk):
     try:
         billing.save()
         _sync_mongo_items_array(billing)
-        # Revert cathlab intent is_billed and approved_quantity if bill items had cathlab intent
-        for itm in billing.items or []:
-            if isinstance(itm, dict) and itm.get("source") == "hospital_cathlabintent":
-                obj_id_str = itm.get("bill_object_id")
-                if obj_id_str:
-                    try:
-                        _, c_db = get_hms_db()
-                        c_db["hospital_cathlabintent"].update_one(
-                            {"_id": ObjectId(obj_id_str)},
-                            {"$set": {"is_billed": False, "lastmodified_by": str(user_id).strip(), "lastmodified_date": timezone.now()}}
-                        )
-                        c_item_id = itm.get("test_id") or itm.get("item_id")
-                        c_qty = int(_to_float(itm.get("quantity") or 0))
-                        if c_item_id and c_qty > 0:
-                            c_db["hospital_itemmaster"].update_one(
-                                {"item_id": str(c_item_id).strip()},
-                                {"$inc": {"approved_quantity": -c_qty}}
-                            )
-                            c_db["hospital_itemmaster"].update_one(
-                                {"item_id": str(c_item_id).strip(), "approved_quantity": {"$lt": 0}},
-                                {"$set": {"approved_quantity": 0}}
-                            )
-                            try:
-                                from hospital.Views.Stores.models import ItemMaster
-                                it_obj = ItemMaster.objects.filter(item_id=str(c_item_id).strip()).first()
-                                if it_obj:
-                                    it_obj.approved_quantity = max(0, int(it_obj.approved_quantity or 0) - c_qty)
-                                    it_obj.save()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
