@@ -740,7 +740,12 @@ def doctor_revenue_report_api(request):
             }))
 
         def _fetch_invest():
-            q = {"investBillDate": {"$gte": f_dt_utc, "$lte": t_dt_utc}, "is_active": {"$ne": False}}
+            q = {
+                "investBillDate": {"$gte": f_dt_utc, "$lte": t_dt_utc},
+                "is_active": {"$ne": False},
+                "paymentMethod": {"$regex": "^cash$", "$options": "i"},
+                "paymentStatus": {"$regex": "^paid$", "$options": "i"},
+            }
             if outlet_code.lower() != "all":
                 q["outlet_code"] = outlet_code
             return list(db["hospital_investbilling"].find(q, {
@@ -748,7 +753,7 @@ def doctor_revenue_report_api(request):
                 "investBillDate": 1, "created_date": 1, "uhid": 1, "ipNumber": 1,
                 "patient_name": 1, "patientname": 1, "bill_type": 1, "billTypeNo": 1,
                 "doctor": 1, "referredBy": 1, "finalPrice": 1, "total": 1,
-                "paymentMethod": 1, "payment_mode": 1, "payment_details": 1,
+                "paymentMethod": 1, "paymentStatus": 1, "payment_mode": 1, "payment_details": 1,
                 "company_name": 1, "is_cancelled": 1, "item": 1, "outlet_code": 1
             }))
 
@@ -859,6 +864,8 @@ def doctor_revenue_report_api(request):
             if not b_no:
                 continue
             amt = clean_num(b.get("total_fees") or b.get("net_amount") or (clean_num(b.get("consulting_fee")) + clean_num(b.get("registration_fee"))))
+            if amt <= 0:
+                continue
             bt_id = str(b.get("bill_type") or "").strip()
             bt_no = str(b.get("billTypeNo") or "").strip()
             cat_name = billtype_no_map.get(bt_no) or billtype_id_map.get(bt_id) or "CONSULTATION / BILLING"
