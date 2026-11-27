@@ -509,6 +509,45 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )       
  
+def resolve_doctor_id_backend(doc_val, global_db):
+    if not doc_val or str(doc_val).strip().upper() in ["", "SELF", "NONE", "NULL"]:
+        return str(doc_val or "").strip()
+    doc_str = str(doc_val).strip()
+    profile_col = global_db['backend_diagnostics_profile']
+
+    # 1. Direct match by employeeId
+    if profile_col.find_one({"employeeId": doc_str}):
+        return doc_str
+
+    # 2. Strip parentheses e.g. "DR.KATHIRVEL KUMARAN (SURGICAL ONCOLOGIST)"
+    cleaned = re.sub(r'\s*\([^)]*\)', '', doc_str).strip()
+
+    # 3. Exact match by employeeName (case-insensitive)
+    doc = profile_col.find_one({"employeeName": {"$regex": f"^{re.escape(cleaned)}$", "$options": "i"}})
+    if doc and doc.get("employeeId"):
+        return str(doc["employeeId"])
+
+    # 4. Strip "Dr." prefix
+    norm = re.sub(r'^(dr\.?|dr\b)\s*', '', cleaned, flags=re.I).strip()
+    if norm:
+        doc = profile_col.find_one({"employeeName": {"$regex": f"^{re.escape(norm)}$", "$options": "i"}})
+        if doc and doc.get("employeeId"):
+            return str(doc["employeeId"])
+        doc = profile_col.find_one({"employeeName": {"$regex": re.escape(norm), "$options": "i"}})
+        if doc and doc.get("employeeId"):
+            return str(doc["employeeId"])
+
+        # 5. Token match
+        words = [w for w in re.split(r'[\s,.-]+', norm) if len(w) > 2]
+        if words:
+            for p in profile_col.find({}, {"employeeId": 1, "employeeName": 1}):
+                p_name = (p.get("employeeName") or "").lower()
+                if all(w.lower() in p_name for w in words):
+                    return str(p["employeeId"])
+
+    return doc_str
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
@@ -524,11 +563,86 @@ def estimate_billing_create(request):
         request_data = {k: v for k, v in request.data.items()
                         if not k.startswith('auth-') and k not in ['wardName', 'fromEstBillNo', 'status']}
 
+        request_data['EstBillNo'] = formatted_bill_no
+        request_data['EstBillDate'] = timezone.now()
+        request_data['created_by'] = current_user
+        request_data['branch_code'] = branch_code
+        request_data['hospital_code'] = hospital_code
+        request_data['outlet_code'] = outlet_code
+
+        # Normalize and clean items list
+        raw_items = request_data.get('item', [])
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+                if isinstance(raw_items, str):
+                    raw_items = json.loads(raw_items)
+            except (json.JSONDecodeError, TypeError):
+                raw_items = []
+        if not isinstance(raw_items, list):
+            raw_items = []
+
+        cleaned_items = []
+        for it in raw_items:
+            if not isinstance(it, dict):
+                continue
+            for r_key in ["rate", "nabh_rate", "non_nabh_rate", "no_nabh_rate"]:
+                it.pop(r_key, None)
+
+            it_name = str(it.get("itemName") or "").strip().upper()
+            it_btn = str(it.get("billTypeNo") or "").strip().upper()
+            is_syg = (it_btn == "SYG01" or it_name == "SYRINGE")
+
+            if is_syg:
+                it["billTypeNo"] = "SYG01"
+                it["status"] = "Printed"
+                it.pop("test_id", None)
+                if not it.get("item_id"):
+                    it["item_id"] = 1
+            else:
+                if it.get("status") == "Printed" or not it.get("status"):
+                    it["status"] = "Result Pending"
+            cleaned_items.append(it)
+
+        request_data['item'] = cleaned_items
+
+        # Resolve doctor ID
+        doc_input = request_data.get('doctor', '')
+        resolved_doc_id = doc_input
+        m_client = None
+        try:
+            m_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            global_db = m_client['Global']
+            resolved_doc_id = resolve_doctor_id_backend(doc_input, global_db)
+        except Exception as err:
+            print("Error resolving doctor in backend:", err)
+        finally:
+            if m_client:
+                m_client.close()
+        request_data['doctor'] = resolved_doc_id
+
         serializer = EstimateBillingSerializer(data=request_data)
         if serializer.is_valid():
             serializer.save()
+
+            # Ensure item is stored as a native BSON array and doctor as doctor ID in MongoDB
+            try:
+                mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                mongo_db = mongo_client['HMS']
+                mongo_db['hospital_estimatebilling'].update_one(
+                    {"EstBillNo": formatted_bill_no},
+                    {"$set": {
+                        "item": cleaned_items,
+                        "doctor": resolved_doc_id
+                    }}
+                )
+                mongo_client.close()
+            except Exception as e:
+                print("Error updating estimate billing in Mongo:", e)
+
             return Response({'message': 'Form data saved successfully!', 'EstBillNo': formatted_bill_no}, status=201)
 
+        print("EstimateBillingSerializer validation errors:", serializer.errors)
         return Response(serializer.errors, status=400)
 
 def serialize_val(val):
@@ -1291,6 +1405,18 @@ def invest_billing_create(request):
 
         data = {k: v for k, v in request.data.items()
                 if not k.startswith('auth-')}
+
+        # ── Resolve doctor ID if name passed ───────────────────
+        if data.get("doctor"):
+            g_client = None
+            try:
+                g_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                data["doctor"] = resolve_doctor_id_backend(data["doctor"], g_client['Global'])
+            except Exception as err:
+                print("Error resolving doctor in invest_billing_create:", err)
+            finally:
+                if g_client:
+                    g_client.close()
 
         # ── Normalize item field ───────────────────────────────
         def normalize_item(item):
@@ -2582,6 +2708,18 @@ def invest_refund_create(request):
 
         data = {k: v for k, v in request.data.items()
                 if not k.startswith('auth-')}
+
+        # ── Resolve doctor ID if name passed ───────────────────
+        if data.get("doctor"):
+            g_client = None
+            try:
+                g_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                data["doctor"] = resolve_doctor_id_backend(data["doctor"], g_client['Global'])
+            except Exception as err:
+                print("Error resolving doctor in invest_billing_create:", err)
+            finally:
+                if g_client:
+                    g_client.close()
 
         # ── Validate required fields ────────────────────────────────────────
         required = ['investBillNo', 'uhid', 'bill_type', 'item', 'refund_finalPrice']
