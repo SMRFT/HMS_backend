@@ -18,6 +18,7 @@ from .cluster2_digital_dept import (
     date_wise_collection_summary_api,
     department_wise_collection_api,
     bill_type_wise_collection_api,
+    doctor_revenue_report_api,
 )
 from .cluster3_ip_advances import (
     advance_registration_api,
@@ -34,6 +35,7 @@ from .cluster4_audit_sundry import (
     accounts_audit_report_api,
     bill_wise_detailed_api,
     miscellaneous_payment_api,
+    all_consolidated_bill_report_api,
 )
 from .cluster5_gst_taxation import (
     sales_tax_register_api,
@@ -64,6 +66,7 @@ urlpatterns = [
     path('date-wise-collection-summary/', date_wise_collection_summary_api, name='master_date_wise_collection_summary'),
     path('department-wise-collection/', department_wise_collection_api, name='master_department_wise_collection'),
     path('bill-type-wise-collection/', bill_type_wise_collection_api, name='master_bill_type_wise_collection'),
+    path('doctor-revenue-report/', doctor_revenue_report_api, name='master_doctor_revenue_report'),
 
     # Cluster 3: IP Admissions, Advances & Billing
     path('advance-registration/', advance_registration_api, name='master_advance_registration'),
@@ -80,6 +83,7 @@ urlpatterns = [
     path('accounts-audit/', accounts_audit_report_api, name='master_accounts_audit'),
     path('bill-wise-detailed/', bill_wise_detailed_api, name='master_bill_wise_detailed'),
     path('miscellaneous-payment/', miscellaneous_payment_api, name='master_miscellaneous_payment'),
+    path('all-consolidated-bill-report/', all_consolidated_bill_report_api, name='master_all_consolidated_bill_report'),
 
     # Cluster 5: GST Taxation & Invoicing
     path('sales-tax-register/', sales_tax_register_api, name='master_sales_tax_register'),

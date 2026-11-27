@@ -94,6 +94,36 @@ def serialize_doc(doc):
             else:
                 pages.append(drug_date_card)
 
+    elif str(group_name).strip().lower() in ['master accounts', 'master accounts reports'] or str(group_id).strip() == '7':
+        if not any(p.get('route') == '/MasterDoctorRevenueReport' for p in pages):
+            doc_rev_card = {
+                'page_id': 736,
+                'name': 'Doctor Revenue Report',
+                'description': 'Date-wise detailed bills analysis grouped by Doctor and Bill Type with purchase value deduction and payment mode/company.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorRevenueReport',
+                'permissions': {'Doctor Revenue Report': 'HMS-MACC-DOC-REV-RPT'}
+            }
+            bt_idx = next((i for i, p in enumerate(pages) if p.get('route') == '/MasterBillTypeWiseReport'), -1)
+            if bt_idx != -1:
+                pages.insert(bt_idx + 1, doc_rev_card)
+            else:
+                pages.append(doc_rev_card)
+        if not any(p.get('route') == '/MasterAllConsolidatedBillReport' for p in pages):
+            cons_card = {
+                'page_id': 737,
+                'name': 'All Consolidated Bill Report',
+                'description': 'Unified register of all bills across Paid, Pending, Cancel, Return, and Refund statuses.',
+                'icon': 'FileSpreadsheet',
+                'route': '/MasterAllConsolidatedBillReport',
+                'permissions': {'All Consolidated Bill Report': 'HMS-MACC-ALL-BILLS-RPT'}
+            }
+            bw_idx = next((i for i, p in enumerate(pages) if p.get('route') == '/MasterBillWiseReport'), -1)
+            if bw_idx != -1:
+                pages.insert(bw_idx + 1, cons_card)
+            else:
+                pages.append(cons_card)
+
     d['pages'] = pages
 
     # Normalize dates
@@ -572,10 +602,25 @@ def my_report_permissions_view(request):
             "reports": {}
         }, status=status.HTTP_200_OK)
 
+    report_perms = dict(doc.get('report_permissions') or {})
+    reports_obj = dict(doc.get('reports') or {})
+
+    # Auto-grant newly added Doctor Revenue Report to users who already have Master Accounts access
+    has_master_access = any(
+        bool(v) and ('/Master' in str(k) or 'Master' in str(k))
+        for k, v in report_perms.items()
+    )
+    if has_master_access and '/MasterDoctorRevenueReport' not in report_perms:
+        report_perms['/MasterDoctorRevenueReport'] = True
+        report_perms['Doctor Revenue Report'] = True
+    if has_master_access and '/MasterAllConsolidatedBillReport' not in report_perms:
+        report_perms['/MasterAllConsolidatedBillReport'] = True
+        report_perms['All Consolidated Bill Report'] = True
+
     return Response({
         "success": True,
         "has_custom_config": True,
         "employeeid": emp_str,
-        "report_permissions": doc.get('report_permissions') or {},
-        "reports": doc.get('reports') or {}
+        "report_permissions": report_perms,
+        "reports": reports_obj
     }, status=status.HTTP_200_OK)
