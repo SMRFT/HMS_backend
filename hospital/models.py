@@ -2272,7 +2272,9 @@ class DialysisDischargeSummary(AuditModel):
                         "id_no": self.id_no or self.icd,
                         "blood_investigations": self._parse_json_field(self.blood_investigations),
                         "hd_sessions": self._parse_json_field(self.hd_sessions),
+                        "hdsessions": self._parse_json_field(self.hd_sessions),
                         "complications_during_hd": self._parse_json_field(self.complications_during_hd),
+                        "complications": self._parse_json_field(self.complications_during_hd),
                         "advice_on_discharge": self._parse_json_field(self.advice_on_discharge),
                         "date_of_first_dialysis": (
                             self.date_of_first_dialysis.isoformat()
