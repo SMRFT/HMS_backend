@@ -2740,6 +2740,7 @@ def _build_pharmacy_medicines(pharm_docs, db):
         bill_no = str(doc.get("bill_no") or last_disp_bno or doc.get("Bill_id") or "")
         meds = doc.get("medicine_particulars", [])
         calc_tot = 0.0
+        doc_med_items = []
         if isinstance(meds, list):
             for med in meds:
                 if isinstance(med, dict):
@@ -2769,7 +2770,7 @@ def _build_pharmacy_medicines(pharm_docs, db):
                     )
                     iname = str(resolved_name).strip()
                     batch = str(med.get("batch_number") or "").strip()
-                    pharmacy_medicines.append({
+                    doc_med_items.append({
                         "item_id": iid,
                         "itemName": iname,
                         "name": iname,
@@ -2787,8 +2788,18 @@ def _build_pharmacy_medicines(pharm_docs, db):
                     })
         if tot_amt == 0:
             tot_amt = calc_tot
+        elif doc_med_items and abs(tot_amt - calc_tot) > 0.001:
+            diff = round(tot_amt - calc_tot, 2)
+            last_item = doc_med_items[-1]
+            last_item["amount"] = round(last_item["amount"] + diff, 2)
+            if last_item.get("quantity", 1) == 1:
+                last_item["rate"] = last_item["amount"]
+                last_item["price"] = last_item["amount"]
+
+        pharmacy_medicines.extend(doc_med_items)
         total_pharm_amt += tot_amt
 
+    total_pharm_amt = round(total_pharm_amt, 2)
     return pharmacy_medicines, total_pharm_amt
 
 
@@ -3119,12 +3130,24 @@ def search_discharge_patient(request):
         pharm_ip_filter = []
         if effective_ip:
             clean_ip = str(effective_ip).strip()
-            pharm_ip_filter.extend([
-                {"inpatient_number": clean_ip},
-                {"ipNumber": clean_ip},
-                {"ip_number": clean_ip},
-                {"ip_no": clean_ip},
-            ])
+            ip_variants = [clean_ip]
+            if "/" in clean_ip:
+                ip_variants.append(clean_ip.replace("/", ""))
+            else:
+                m_ip = re.match(r"^([A-Za-z]+\d{2})(\d+)$", clean_ip)
+                if m_ip:
+                    ip_variants.append(f"{m_ip.group(1)}/{m_ip.group(2)}")
+            for v in ip_variants:
+                pharm_ip_filter.extend([
+                    {"inpatient_number": v},
+                    {"ipNumber": v},
+                    {"ip_number": v},
+                    {"ip_no": v},
+                    {"inpatient_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ipNumber": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_no": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                ])
         elif effective_uhid:
             clean_uhid = str(effective_uhid).strip()
             pharm_ip_filter.append({"uhid": clean_uhid})
@@ -3136,8 +3159,8 @@ def search_discharge_patient(request):
                     {"is_deleted": {"$ne": True}},
                     {
                         "$or": [
-                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
-                            {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
+                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
                         ]
                     },
                     {
@@ -3145,6 +3168,8 @@ def search_discharge_patient(request):
                             {"payment_mode": {"$in": ["Credit", "credit"]}},
                             {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
                             {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
+                            {"is_ward_request": True},
                         ]
                     }
                 ]
@@ -3661,30 +3686,40 @@ def search_discharge_patient(request):
                 })
 
         # ── 4. hospital_pharmacybilling ────────────────────────────────────────
-        # For discharge billing, medicines are taken strictly based on IP number,
-        # and ONLY bills where billing_status is "Billed" and payment_mode is "Credit"
+        # For discharge billing, medicines are taken strictly based on IP number.
+        # Include all credit/ward/IP pharmacy bills for this IP admission episode.
         pharm_q = None
         if effective_ip:
             clean_ip = str(effective_ip).strip()
-            allowed_statuses = ["Billed", "billed"]
-            if for_print:
-                allowed_statuses.extend(["Completed", "completed"])
+            ip_variants = [clean_ip]
+            if "/" in clean_ip:
+                ip_variants.append(clean_ip.replace("/", ""))
+            else:
+                m_ip = re.match(r"^([A-Za-z]+\d{2})(\d+)$", clean_ip)
+                if m_ip:
+                    ip_variants.append(f"{m_ip.group(1)}/{m_ip.group(2)}")
+
+            pharm_or_ip = []
+            for v in ip_variants:
+                pharm_or_ip.extend([
+                    {"inpatient_number": v},
+                    {"ipNumber": v},
+                    {"ip_number": v},
+                    {"ip_no": v},
+                    {"inpatient_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ipNumber": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_no": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                ])
 
             pharm_q = {
                 "$and": [
-                    {
-                        "$or": [
-                            {"inpatient_number": clean_ip},
-                            {"ipNumber": clean_ip},
-                            {"ip_number": clean_ip},
-                            {"ip_no": clean_ip},
-                        ]
-                    },
+                    {"$or": pharm_or_ip},
                     {"is_deleted": {"$ne": True}},
                     {
                         "$or": [
-                            {"billing_status": {"$in": allowed_statuses}},
-                            {"billing_status": {"$regex": "^(billed" + ("|completed" if for_print else "") + ")$", "$options": "i"}},
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
+                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
                         ]
                     },
                     {
@@ -3692,6 +3727,8 @@ def search_discharge_patient(request):
                             {"payment_mode": {"$in": ["Credit", "credit"]}},
                             {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
                             {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
+                            {"is_ward_request": True},
                         ]
                     }
                 ]
@@ -4098,7 +4135,7 @@ def get_discharge_bill_medicines(request):
 
         if b_doc:
             if not ip_number:
-                ip_number = str(b_doc.get("ip_number") or "")
+                ip_number = str(b_doc.get("ip_number") or b_doc.get("ipNumber") or "")
             if not uhid:
                 uhid = str(b_doc.get("uhid") or "")
 
@@ -4115,76 +4152,119 @@ def get_discharge_bill_medicines(request):
             # If the discharge bill explicitly has 0 medicine charges and no medicine line items, do not pull random OP pharmacy bills!
             if med_amt == 0 and not has_med_item:
                 if client: client.close()
-                return JsonResponse({"success": True, "pharmacy_medicines": []})
-
-            meds = b_doc.get("pharmacy_medicines")
-            if isinstance(meds, list) and len(meds) > 0:
-                # Check if medicines have valid names (not just fallback "Medicine <id>")
-                has_generic_only = all(
-                    re.match(r"^Medicine\s+\d+$", str(m.get("itemName") or m.get("name") or m.get("item_name") or ""), re.I)
-                    for m in meds if isinstance(m, dict)
-                )
-                if not has_generic_only:
-                    if client: client.close()
-                    return JsonResponse({"success": True, "pharmacy_medicines": meds})
+                return JsonResponse({"success": True, "pharmacy_medicines": [], "medicines_amount": 0.0})
 
         # 2. Query hospital_pharmacybilling
-        # Inpatient discharge bills MUST only match pharmacy bills for this IP admission.
-        # Never match loose UHID if ip_number is provided, as UHID would pull unrelated OP counter pharmacy sales!
+        # Inpatient discharge bills MUST match pharmacy bills for this IP admission.
         or_clauses = []
         if ip_number:
             clean_ip = str(ip_number).strip()
-            or_clauses.extend([
-                {"inpatient_number": clean_ip},
-                {"ipNumber": clean_ip},
-                {"ip_number": clean_ip},
-            ])
+            ip_variants = [clean_ip]
+            if "/" in clean_ip:
+                ip_variants.append(clean_ip.replace("/", ""))
+            else:
+                m_ip = re.match(r"^([A-Za-z]+\d{2})(\d+)$", clean_ip)
+                if m_ip:
+                    ip_variants.append(f"{m_ip.group(1)}/{m_ip.group(2)}")
+            for v in ip_variants:
+                or_clauses.extend([
+                    {"inpatient_number": v},
+                    {"ipNumber": v},
+                    {"ip_number": v},
+                    {"ip_no": v},
+                    {"inpatient_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ipNumber": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_number": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                    {"ip_no": {"$regex": f"^{re.escape(v)}$", "$options": "i"}},
+                ])
         elif uhid:
             clean_uhid = str(uhid).strip()
             or_clauses.append({"uhid": clean_uhid})
 
-        if not or_clauses:
-            if client: client.close()
-            return JsonResponse({"success": True, "pharmacy_medicines": []})
+        pharmacy_medicines = []
+        total_pharm_amt = 0.0
 
-        pharm_q = {
-            "$and": [
-                {"$or": or_clauses},
-                {"is_deleted": {"$ne": True}},
-                {
-                    "$or": [
-                        {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
-                        {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
-                    ]
-                },
-                {
-                    "$or": [
-                        {"payment_mode": {"$in": ["Credit", "credit"]}},
-                        {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
-                        {"billing_mode": {"$regex": "credit", "$options": "i"}},
-                    ]
-                }
-            ]
-        }
-        pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
-            "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
-            "medicine_particulars": 1, "bill_no": 1, "Bill_id": 1, "dispatch_history": 1
-        }))
+        if or_clauses:
+            pharm_q = {
+                "$and": [
+                    {"$or": or_clauses},
+                    {"is_deleted": {"$ne": True}},
+                    {
+                        "$or": [
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
+                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
+                        ]
+                    },
+                    {
+                        "$or": [
+                            {"payment_mode": {"$in": ["Credit", "credit"]}},
+                            {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
+                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
+                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
+                            {"is_ward_request": True},
+                        ]
+                    }
+                ]
+            }
+            pharm_docs = list(db["hospital_pharmacybilling"].find(pharm_q, {
+                "netAmount": 1, "net_amount": 1, "totalAmount": 1, "total_amount": 1,
+                "medicine_particulars": 1, "pending_returns": 1, "bill_no": 1, "Bill_id": 1, "dispatch_history": 1
+            }))
 
-        pharmacy_medicines, _ = _build_pharmacy_medicines(pharm_docs, db)
+            if pharm_docs:
+                pharmacy_medicines, total_pharm_amt = _build_pharmacy_medicines(pharm_docs, db)
 
-        # Cache on discharge bill if found
+        # Fallback to cached meds on discharge bill if live query found nothing
+        if not pharmacy_medicines and b_doc:
+            meds = b_doc.get("pharmacy_medicines")
+            if isinstance(meds, list) and len(meds) > 0:
+                pharmacy_medicines = meds
+                total_pharm_amt = _to_float(b_doc.get("medicines_amount") or sum(float(m.get("amount") or 0) for m in meds))
+
+        # Sync cache on discharge bill if found and live pharmacy bills were retrieved
         if b_doc and pharmacy_medicines:
             try:
+                update_fields = {
+                    "pharmacy_medicines": pharmacy_medicines,
+                    "medicines_amount": total_pharm_amt,
+                }
+                # Update MEDICINE CHARGES in items array
+                curr_items = b_doc.get("items") or []
+                item_changed = False
+                for it in curr_items:
+                    if isinstance(it, dict) and (
+                        str(it.get("itemName") or it.get("name") or "").upper().strip() == "MEDICINE CHARGES" or
+                        it.get("billTypeNo") == "PHARM01" or it.get("bill_type") == 13
+                    ):
+                        if abs(float(it.get("amount") or 0) - total_pharm_amt) > 0.001:
+                            it["amount"] = total_pharm_amt
+                            it["rate"] = total_pharm_amt
+                            it["price"] = total_pharm_amt
+                            item_changed = True
+                if item_changed:
+                    update_fields["items"] = curr_items
+                    new_tot = sum(float(x.get("amount") or 0) for x in curr_items)
+                    disc = float(b_doc.get("discount_amount") or 0)
+                    adv = float(b_doc.get("advance_amount") or 0)
+                    ret = float(b_doc.get("sales_return") or 0)
+                    update_fields["total_amount"] = new_tot
+                    update_fields["net_amount"] = round(new_tot - disc - adv - ret, 2)
+
                 db["hospital_dischargebilling"].update_one(
                     {"_id": b_doc["_id"]},
-                    {"$set": {"pharmacy_medicines": pharmacy_medicines}}
+                    {"$set": update_fields}
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error syncing discharge bill pharmacy medicines: {e}")
 
         if client: client.close()
-        return JsonResponse({"success": True, "pharmacy_medicines": pharmacy_medicines})
+        return JsonResponse({
+            "success": True,
+            "pharmacy_medicines": pharmacy_medicines,
+            "medicines_amount": total_pharm_amt,
+            "total_pharm_amt": total_pharm_amt,
+            "total_amount": total_pharm_amt,
+        })
     except Exception as e:
         traceback.print_exc()
         if client: client.close()
