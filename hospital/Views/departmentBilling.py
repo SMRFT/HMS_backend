@@ -534,7 +534,7 @@ def estimate_billing_create(request):
                 formatted_bill_no = f"{next_number:06d}"
 
             request_data = {k: v for k, v in request.data.items()
-                            if not k.startswith('auth-')}
+                            if not k.startswith('auth-') and k not in ['wardName', 'fromEstBillNo', 'status']}
 
             request_data['EstBillNo'] = formatted_bill_no
             request_data['EstBillDate'] = timezone.now()   # ← server time
@@ -1079,89 +1079,109 @@ def get_investigation_items(request):
                 }
             ))
 
+            btn_upper = str(bill_type_no).upper().strip()
+
             # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
-            hms_db = client['HMS']
-            nabh_collection = hms_db['hospital_lab_nabh_rate']
-            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1}))
+            # ONLY for LAB02 and LAB03. For LAB01 and others, do NOT check with NABH collection.
+            nabh_map = {}
+            if btn_upper in ["LAB02", "LAB03"]:
+                hms_db = client['HMS']
+                nabh_collection = hms_db['hospital_lab_nabh_rate']
+                nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1}))
+
+                # Build lookup dictionary: each individual test_id -> nabh_record
+                # test_id in hospital_lab_nabh_rate can be a single int OR a list of ints
+                # (multiple tests sharing the same nabh_code/rate).
+                for n_rec in nabh_records:
+                    tid_field = n_rec.get('test_id')
+                    if tid_field is None:
+                        continue
+                    # Normalise to list so single-int and array are handled the same way
+                    tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
+                    for tid in tid_list:
+                        if tid is not None:
+                            t_str = str(tid).strip()
+                            nabh_map[t_str] = n_rec
+                            try:
+                                nabh_map[str(int(t_str))] = n_rec
+                            except Exception:
+                                pass
 
             client.close()
 
-            # Build lookup dictionary: each individual test_id -> nabh_record
-            # test_id in hospital_lab_nabh_rate can be a single int OR a list of ints
-            # (multiple tests sharing the same nabh_code/rate).
-            nabh_map = {}
-            for n_rec in nabh_records:
-                tid_field = n_rec.get('test_id')
-                if tid_field is None:
-                    continue
-                # Normalise to list so single-int and array are handled the same way
-                tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
-                for tid in tid_list:
-                    if tid is not None:
-                        t_str = str(tid).strip()
-                        nabh_map[t_str] = n_rec
-                        try:
-                            nabh_map[str(int(t_str))] = n_rec
-                        except Exception:
-                            pass
+            def is_valid_rate(val):
+                if val is None:
+                    return False
+                val_str = str(val).strip()
+                if not val_str or val_str.lower() in ['none', 'null', 'nan']:
+                    return False
+                try:
+                    return float(val_str) > 0
+                except (ValueError, TypeError):
+                    return False
 
-            btn_upper = str(bill_type_no).upper().strip()
             formatted_items = []
             for test in tests:
                 t_id = test.get('test_id', '')
                 t_id_str = str(t_id).strip() if t_id is not None else ''
 
-                # Lookup NABH record (supporting both string and integer keys)
-                nabh_info = nabh_map.get(t_id_str)
-                if not nabh_info and t_id_str:
-                    try:
-                        nabh_info = nabh_map.get(str(int(t_id_str)))
-                    except Exception:
-                        nabh_info = None
-
-                nabh_code = str(nabh_info.get('nabh_code', '')).strip() if nabh_info else ""
-                nabh_rate = nabh_info.get('nabh_rate') if nabh_info else None
-                non_nabh_rate = nabh_info.get('non_nabh_rate') if nabh_info else None
-
                 if btn_upper == "LAB01":
-                    # LAB01: No nabh_code, price from SH_Rate
+                    # LAB01: No NABH collection check, no nabh_code, price from SH_Rate.
+                    # Exclude tests where SH_Rate is null or 0.
+                    sh_rate = test.get('SH_Rate')
+                    if not is_valid_rate(sh_rate):
+                        continue
                     nabh_code = ""
-                    price = test.get('SH_Rate', '0')
+                    price = str(sh_rate).strip()
 
                 elif btn_upper == "LAB02":
                     # LAB02: NABH rate & NABH code
+                    nabh_info = nabh_map.get(t_id_str)
+                    if not nabh_info and t_id_str:
+                        try:
+                            nabh_info = nabh_map.get(str(int(t_id_str)))
+                        except Exception:
+                            nabh_info = None
                     if not nabh_info:
                         continue
-                    if nabh_rate is not None and str(nabh_rate).strip() != "" and str(nabh_rate).strip().lower() != "none":
-                        price = str(nabh_rate).strip()
-                    else:
-                        price = "0"
+                    nabh_rate = nabh_info.get('nabh_rate')
+                    if not is_valid_rate(nabh_rate):
+                        continue
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    price = str(nabh_rate).strip()
 
                 elif btn_upper == "LAB03":
                     # LAB03: Non-NABH rate & NABH code
+                    nabh_info = nabh_map.get(t_id_str)
+                    if not nabh_info and t_id_str:
+                        try:
+                            nabh_info = nabh_map.get(str(int(t_id_str)))
+                        except Exception:
+                            nabh_info = None
                     if not nabh_info:
                         continue
-                    if non_nabh_rate is not None and str(non_nabh_rate).strip() != "" and str(non_nabh_rate).strip().lower() != "none":
-                        price = str(non_nabh_rate).strip()
-                    else:
-                        price = "0"
+                    non_nabh_rate = nabh_info.get('non_nabh_rate')
+                    if not is_valid_rate(non_nabh_rate):
+                        continue
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    price = str(non_nabh_rate).strip()
 
                 else:
-                    # Fallback for any other LAB category
-                    price = test.get('SH_Rate', '0')
+                    # Fallback for any other LAB category using SH_Rate
+                    sh_rate = test.get('SH_Rate')
+                    if not is_valid_rate(sh_rate):
+                        continue
+                    nabh_code = ""
+                    price = str(sh_rate).strip()
 
-                if price is None or str(price).strip().lower() == 'none' or str(price).strip() == '':
-                    price = "0"
+                if not is_valid_rate(price):
+                    continue
 
                 formatted_items.append({
                     "itemName": test.get('test_name', ''),
                     "price": str(price),
-                    "rate": str(price),
                     "test_id": t_id,
                     "nabh_code": nabh_code,
-                    "nabh_rate": nabh_rate,
-                    "non_nabh_rate": non_nabh_rate,
-                    "no_nabh_rate": non_nabh_rate,
                     "shortcut": (test.get('shortcut') or "").strip(),
                 })
 
@@ -1312,7 +1332,30 @@ def invest_billing_create(request):
             return []
 
         if "item" in data:
-            data["item"] = normalize_item(data["item"])
+            raw_items = normalize_item(data["item"])
+            cleaned_items = []
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                # Remove rate, nabh_rate, non_nabh_rate, no_nabh_rate
+                for r_key in ["rate", "nabh_rate", "non_nabh_rate", "no_nabh_rate"]:
+                    it.pop(r_key, None)
+                
+                it_name = str(it.get("itemName") or "").strip().upper()
+                it_btn = str(it.get("billTypeNo") or "").strip().upper()
+                is_syg = (it_btn == "SYG01" or it_name == "SYRINGE")
+                
+                if is_syg:
+                    it["billTypeNo"] = "SYG01"
+                    it["status"] = "Printed"
+                    it.pop("test_id", None)
+                    if not it.get("item_id"):
+                        it["item_id"] = 1
+                else:
+                    if it.get("status") == "Printed" or not it.get("status"):
+                        it["status"] = "Result Pending"
+                cleaned_items.append(it)
+            data["item"] = cleaned_items
 
         # ── Server-side validation for Age and Age Type ──
         age_val = str(data.get("age", "")).strip()
@@ -1345,10 +1388,13 @@ def invest_billing_create(request):
 
         data.pop("EstBillDate", None)
 
-        # Retain reference to original EstBillNo
+        # Retain reference to original EstBillNo (EstBillNo is enough, do not store fromEstBillNo)
         if est_bill_no:
-            data["fromEstBillNo"] = est_bill_no
             data["EstBillNo"] = est_bill_no
+
+        data.pop("fromEstBillNo", None)
+        data.pop("status", None)
+        data.pop("wardName", None)
 
         if est_doc:
             if est_doc.get("is_ward_request") or data.get("is_ward_request"):
@@ -1356,12 +1402,8 @@ def invest_billing_create(request):
                 data["ward_request_type"] = est_doc.get("ward_request_type") or data.get("ward_request_type") or "LAB"
             if not data.get("roomNo") and est_doc.get("roomNo"):
                 data["roomNo"] = est_doc.get("roomNo")
-            if not data.get("wardName") and est_doc.get("wardName"):
-                data["wardName"] = est_doc.get("wardName")
             if not data.get("ipNumber") and est_doc.get("ipNumber"):
                 data["ipNumber"] = est_doc.get("ipNumber")
-            if not data.get("status") and est_doc.get("status"):
-                data["status"] = est_doc.get("status")
 
         bill_type = data.get("bill_type")
         if not bill_type:
@@ -1431,15 +1473,11 @@ def invest_billing_create(request):
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
             data["editRemarks"] = edit_remarks
-            if is_cash:
-                data["is_approved"] = False
-                data["approved_by"] = None
-                data["approved_date"] = None
-            else:
-                data["is_approved"] = True
-                data["approved_by"] = current_user
-                data["approved_date"] = timezone.now()
+            data["is_approved"] = True
+            data["approved_by"] = current_user
+            data["approved_date"] = timezone.now()
             data.pop("investBillNo", None)
+            data.pop("investBillDate", None)
 
             invest_collection.update_one(
                 {"_id": existing_record["_id"]},
@@ -1590,10 +1628,22 @@ def billing_report_view(request):
         # ── Bill type filter ───────────────────────────────────
         bill_type_param = request.GET.get('billType')
         if bill_type_param:
-            try:
-                query["bill_type"] = int(bill_type_param)
-            except:
-                query["bill_type"] = bill_type_param
+            bts = [b.strip() for b in str(bill_type_param).split(",") if b.strip()]
+            if len(bts) == 1:
+                try:
+                    int_val = int(bts[0])
+                    query["bill_type"] = {"$in": [int_val, str(int_val)]}
+                except (ValueError, TypeError):
+                    query["bill_type"] = bts[0]
+            elif len(bts) > 1:
+                val_list = []
+                for b in bts:
+                    try:
+                        int_v = int(b)
+                        val_list.extend([int_v, str(int_v)])
+                    except (ValueError, TypeError):
+                        val_list.append(b)
+                query["bill_type"] = {"$in": val_list}
 
         bill_type_no_param = request.GET.get('billTypeNo')
         if bill_type_no_param:
@@ -1950,32 +2000,16 @@ def delete_bill_view(request):
                 {"EstBillNo": investBillNo, "is_active": True}
             )
 
-        pm = str((existing_bill.get('paymentMethod') if existing_bill else None) or request.data.get('paymentMethod', '')).strip().lower()
-        is_cash = (pm == 'cash')
-
-        if is_cash:
-            # Cash bill: requires approval in Dept BUD Report
-            update_data = {
-                "is_delete_requested": True,
-                "deletedBy":           employeeId,
-                "deletedAt":           now,
-                "deleteRemarks":       delete_remarks,
-                "is_approved":         False,
-                "approved_by":         None,
-                "approved_date":       None,
-            }
-        else:
-            # Credit bill: directly store is_approved: True and is_active: False
-            update_data = {
-                "is_active":           False,
-                "is_delete_requested": True,
-                "deletedBy":           employeeId,
-                "deletedAt":           now,
-                "deleteRemarks":       delete_remarks,
-                "is_approved":         True,
-                "approved_by":         employeeId,
-                "approved_date":       now,
-            }
+        update_data = {
+            "is_active":           False,
+            "paymentStatus":       "Deleted",
+            "deletedBy":           employeeId,
+            "deletedAt":           now,
+            "deleteRemarks":       delete_remarks,
+            "is_approved":         True,
+            "approved_by":         employeeId,
+            "approved_date":       now,
+        }
 
         delete_history_entry = {
             "action": "delete",
@@ -1983,14 +2017,14 @@ def delete_bill_view(request):
             "modified_by": employeeId,
             "editRemarks": delete_remarks,
             "deleteRemarks": delete_remarks,
-            "is_approved": not is_cash,
-            "approved_by": employeeId if not is_cash else None,
-            "approved_date": now if not is_cash else None,
+            "is_approved": True,
+            "approved_by": employeeId,
+            "approved_date": now,
             "paymentMethod": (existing_bill.get("paymentMethod") if existing_bill else "") or request.data.get('paymentMethod', '') or "",
             "changes": {
                 "Status": {
                     "old": "Active",
-                    "new": "Deleted" if not is_cash else "Delete Requested",
+                    "new": "Deleted",
                 },
                 "Delete Reason": {
                     "old": "—",
@@ -2003,7 +2037,6 @@ def delete_bill_view(request):
             {
                 "$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}],
                 "is_active": True,
-                "is_delete_requested": {"$ne": True},
             },
             {
                 "$set": update_data,
@@ -2012,7 +2045,6 @@ def delete_bill_view(request):
         )
 
         if result.matched_count == 0:
-            # Estimate bills have no approval flow in the audit report -> keep old behaviour
             result = db['hospital_estimatebilling'].update_one(
                 {"EstBillNo": investBillNo, "is_active": True},
                 {"$set": {
@@ -2024,9 +2056,9 @@ def delete_bill_view(request):
             )
 
         if result.matched_count == 0:
-            return JsonResponse({'error': 'Bill not found or delete already requested'}, status=404)
+            return JsonResponse({'error': 'Bill not found or already deleted'}, status=404)
 
-        return JsonResponse({'message': 'Delete request submitted for approval'}, status=200)
+        return JsonResponse({'message': 'Bill deleted successfully'}, status=200)
 
     except Exception as e:
         return JsonResponse({'error': 'Failed to delete bill', 'details': str(e)}, status=500)
