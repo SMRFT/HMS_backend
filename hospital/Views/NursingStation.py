@@ -64,31 +64,8 @@ diagnostics_db = client["Diagnostics"]
 
 room_collection = mongo_db["hospital_room"]
 
-from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid, get_employee_name_by_id, get_doctor_name_by_id
-from ..counter_service import get_next_est_bill_no, get_next_medicine_ward_request_no
-from ..ward_request_guard import (
-    acquire_ward_request_guard,
-    canonical_item_signature,
-    complete_ward_request_guard,
-    fail_ward_request_guard,
-)
-
-
-def _resolve_doctor_employee_id(raw_doctor):
-    """Resolves a doctor name or employeeId using the module-level profile_collection."""
-    doctor_id = str(raw_doctor or "").strip()
-    if not doctor_id or doctor_id.isdigit():
-        return doctor_id
-    try:
-        doc_profile = profile_collection.find_one(
-            {"$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]},
-            {"employeeId": 1},
-        )
-        if doc_profile and doc_profile.get("employeeId"):
-            return str(doc_profile.get("employeeId")).strip()
-    except Exception as e:
-        print("Doctor lookup error:", e)
-    return doctor_id
+from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid, get_employee_name_by_id, get_doctor_name_by_id, _safe_float
+from bson.decimal128 import Decimal128
 
 # --- Helper: Timezone conversion to IST (Asia/Kolkata) ---
 def format_dt_to_ist(dt_raw):
@@ -4487,13 +4464,13 @@ def get_pending_ward_returns(request):
 
                 matched_med = existing_meds_map.get((i_id, b_no)) or {}
 
-                price = float(matched_med.get("price") or itm.get("price") or 0.0)
+                mrp = _safe_float(matched_med.get("mrp") or itm.get("mrp") or matched_med.get("price") or itm.get("price"))
 
-                mrp = float(matched_med.get("mrp") or itm.get("mrp") or price)
+                price = _safe_float(matched_med.get("price") or itm.get("price")) or mrp
 
-                qty = float(itm.get("return_qty") or itm.get("qty") or 0.0)
+                qty = _safe_float(itm.get("return_qty") or itm.get("qty") or 0.0)
 
-                tax = float(matched_med.get("tax") or (float(matched_med.get("CGST_Percentage", 0)) + float(matched_med.get("SGST_Percentage", 0))))
+                tax = _safe_float(matched_med.get("tax") or (_safe_float(matched_med.get("CGST_Percentage", 0)) + _safe_float(matched_med.get("SGST_Percentage", 0))))
 
                 item_name = itm.get("item_name") or matched_med.get("item_name") or f"Item #{i_id}"
 
@@ -4565,7 +4542,7 @@ def get_pending_ward_returns(request):
 
                 "return_amount": round(total_return_amount, 2),
 
-                "original_bill_amount": float(doc.get("net_amount") or doc.get("total_amount") or 0.0)
+                "original_bill_amount": _safe_float(doc.get("net_amount") or doc.get("total_amount") or 0.0)
 
             })
 
@@ -4742,7 +4719,7 @@ def approve_ward_return(request):
 
         branch_code = (bill_doc.get("branch_code") if bill_doc else None) or getattr(bill, "branch_code", None)
 
-        original_bill_total = float((bill_doc.get("net_amount") if bill_doc else None) or (bill_doc.get("total_amount") if bill_doc else None) or getattr(bill, "net_amount", 0.0) or getattr(bill, "total_amount", 0.0) or 0.0)
+        original_bill_total = _safe_float((bill_doc.get("net_amount") if bill_doc else None) or (bill_doc.get("total_amount") if bill_doc else None) or getattr(bill, "net_amount", 0.0) or getattr(bill, "total_amount", 0.0) or 0.0)
 
         ward_return_particulars = []
 
@@ -4754,7 +4731,7 @@ def approve_ward_return(request):
 
             batch_val = str(incoming.get("batch_number", "")).strip()
 
-            return_qty = float(incoming.get("return_qty", 0))
+            return_qty = _safe_float(incoming.get("return_qty", 0))
 
             if return_qty <= 0:
 
@@ -4786,21 +4763,21 @@ def approve_ward_return(request):
 
                     item_name = current.get("item_name") or ""
 
-                item_price = float(current.get("price") or 0.0)
+                item_mrp = _safe_float(current.get("mrp") or current.get("price") or 0.0)
 
-                item_mrp = float(current.get("mrp") or item_price)
+                item_price = _safe_float(current.get("price")) or item_mrp
 
                 expiry_date = current.get("expiry_date") or expiry_date
 
-                cgst_pct = float(current.get("CGST_Percentage") or 2.5)
+                cgst_pct = _safe_float(current.get("CGST_Percentage") or 2.5)
 
-                sgst_pct = float(current.get("SGST_Percentage") or 2.5)
+                sgst_pct = _safe_float(current.get("SGST_Percentage") or 2.5)
 
-                old_qty = float(current.get("quantity", current.get("qty", 0)))
+                old_qty = _safe_float(current.get("quantity", current.get("qty", 0)))
 
                 history_returns = [
 
-                    float(h.get("return_qty", 0))
+                    _safe_float(h.get("return_qty", 0))
 
                     for h in current.get("edit_history", [])
 
@@ -4918,19 +4895,19 @@ def approve_ward_return(request):
 
             if stock_doc:
 
-                if not item_price:
-
-                    item_price = float(stock_doc.get("Selling_Price") or stock_doc.get("mrp") or 0.0)
-
                 if not item_mrp:
 
-                    item_mrp = float(stock_doc.get("mrp") or item_price)
+                    item_mrp = _safe_float(stock_doc.get("mrp") or stock_doc.get("Selling_Price") or 0.0)
+
+                if not item_price:
+
+                    item_price = _safe_float(stock_doc.get("Selling_Price") or stock_doc.get("mrp") or item_mrp)
 
                 if not item_name:
 
                     item_name = stock_doc.get("item_name") or ""
 
-                current_blocked = float(stock_doc.get("blocked_quantity", 0) or 0)
+                current_blocked = _safe_float(stock_doc.get("blocked_quantity", 0) or 0)
 
                 new_blocked = max(0.0, current_blocked - return_qty)
 
@@ -4976,25 +4953,25 @@ def approve_ward_return(request):
 
                 "expiry_date": expiry_date,
 
-                "billed_qty": float(billed_qty),
+                "billed_qty": _safe_float(billed_qty),
 
-                "return_qty": float(return_qty),
+                "return_qty": _safe_float(return_qty),
 
-                "price": float(item_price),
+                "price": _safe_float(item_price),
 
-                "mrp": float(item_mrp),
+                "mrp": _safe_float(item_mrp),
 
-                "CGST_Percentage": float(cgst_pct),
+                "CGST_Percentage": _safe_float(cgst_pct),
 
-                "SGST_Percentage": float(sgst_pct),
+                "SGST_Percentage": _safe_float(sgst_pct),
 
-                "CGST_Amt": float(cgst_amt),
+                "CGST_Amt": _safe_float(cgst_amt),
 
-                "SGST_Amt": float(sgst_amt),
+                "SGST_Amt": _safe_float(sgst_amt),
 
-                "return_amount": float(item_return_amount),
+                "return_amount": _safe_float(item_return_amount),
 
-                "amount": float(item_return_amount),
+                "amount": _safe_float(item_return_amount),
 
                 "reason": incoming.get("reason", "Ward Return"),
 
@@ -5258,9 +5235,9 @@ def get_ward_return_details(request):
 
                     meds = []
 
-            calc_return_amt = sum(float(m.get("return_amount") or (float(m.get("return_qty", 0)) * float(m.get("price", 0)))) for m in meds if isinstance(m, dict))
+            calc_return_amt = sum(_safe_float(m.get("return_amount") or (_safe_float(m.get("return_qty", 0)) * _safe_float(m.get("price", 0)))) for m in meds if isinstance(m, dict))
 
-            saved_return_amt = float(r.get("return_amount") or 0.0)
+            saved_return_amt = _safe_float(r.get("return_amount") or 0.0)
 
             return_amt = saved_return_amt if saved_return_amt > 0 else round(calc_return_amt, 2)
 
@@ -5272,11 +5249,11 @@ def get_ward_return_details(request):
 
                 orig_bill = PharmacyBilling.objects.filter(bill_no=orig_bill_no).first()
 
-            orig_amt = float(r.get("original_bill_amount") or (orig_bill.total_amount if orig_bill else 0.0) or (orig_bill.net_amount if orig_bill else 0.0) or 0.0)
+            orig_amt = _safe_float(r.get("original_bill_amount") or (orig_bill.total_amount if orig_bill else 0.0) or (orig_bill.net_amount if orig_bill else 0.0) or 0.0)
 
-            if orig_bill and orig_amt <= return_amt and float(orig_bill.net_amount or 0) > 0:
+            if orig_bill and orig_amt <= return_amt and _safe_float(orig_bill.net_amount or 0) > 0:
 
-                orig_amt = float(orig_bill.net_amount or 0) + return_amt
+                orig_amt = _safe_float(orig_bill.net_amount or 0) + return_amt
 
             bal_amt = max(0.0, orig_amt - return_amt)
 
