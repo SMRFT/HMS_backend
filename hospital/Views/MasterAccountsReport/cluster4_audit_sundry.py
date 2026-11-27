@@ -737,3 +737,491 @@ def miscellaneous_payment_api(request):
             client.close()
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def all_consolidated_bill_report_api(request):
+    """
+    All Consolidated Bill Report API.
+    Unified register across all billing modules (Consultation/Billing, Investigation,
+    Discharge, Pharmacy, Sales Return, Refunds) classified by status:
+    Paid, Pending, Cancel, Return, Refund.
+    """
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from datetime import datetime, timedelta
+        from .core_ledger_engine import get_db, parse_date, clean_num, to_ist, AccountsLedgerEngine
+
+        data = request.data if request.method == "POST" else request.query_params
+        from_str = data.get("from_date") or data.get("start_date")
+        to_str = data.get("to_date") or data.get("end_date")
+        outlet_code = str(data.get("outlet_code") or data.get("outlet") or "all").strip()
+        status_filter = str(data.get("bill_status") or data.get("status") or "all").strip().lower()
+        module_filter = str(data.get("module") or data.get("category") or "all").strip().lower()
+        search_q = str(data.get("search") or "").strip().lower()
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        f_dt = parse_date(from_str or today_str) or parse_date(today_str)
+        t_dt = parse_date(to_str or today_str, is_end=True) or parse_date(today_str, is_end=True)
+        f_dt_utc = f_dt - timedelta(hours=5, minutes=30)
+        t_dt_utc = t_dt - timedelta(hours=5, minutes=30)
+
+        _, db, _ = get_db()
+
+        def _fetch_billtypes():
+            by_no, by_id = {}, {}
+            for bt in db["hospital_billtype"].find({}, {"billTypeNo": 1, "bill_name": 1, "bill_type": 1}):
+                nm = str(bt.get("bill_name") or "").strip()
+                if not nm:
+                    continue
+                if bt.get("billTypeNo"):
+                    by_no[str(bt["billTypeNo"]).strip()] = nm
+                if bt.get("bill_type") is not None:
+                    by_id[str(bt["bill_type"]).strip()] = nm
+            return by_no, by_id
+
+        def _outlet_q(q):
+            if outlet_code.lower() != "all":
+                q["outlet_code"] = outlet_code
+            return q
+
+        def _fetch_billing():
+            q = _outlet_q({"billed_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}})
+            return list(db["hospital_billing"].find(q, {
+                "bill_number": 1, "bill_no": 1, "billed_date": 1, "created_date": 1,
+                "uhid": 1, "patient_name": 1, "patientname": 1, "bill_type": 1,
+                "total_fees": 1, "net_amount": 1, "discount_amount": 1, "discount": 1,
+                "payment_method": 1, "payment_mode": 1, "payment_status": 1,
+                "is_cancelled": 1, "is_active": 1, "cancelled_reason": 1, "outlet_code": 1
+            }))
+
+        def _fetch_invest():
+            q = _outlet_q({"investBillDate": {"$gte": f_dt_utc, "$lte": t_dt_utc}})
+            return list(db["hospital_investbilling"].find(q, {
+                "investBillNo": 1, "bill_no": 1, "investBillDate": 1, "created_date": 1,
+                "uhid": 1, "ipNumber": 1, "patient_name": 1, "patientname": 1,
+                "billTypeNo": 1, "bill_type": 1, "finalPrice": 1, "total": 1, "discount": 1,
+                "paymentMethod": 1, "payment_mode": 1, "paymentStatus": 1,
+                "is_cancelled": 1, "is_active": 1, "cancelled_reason": 1, "outlet_code": 1
+            }))
+
+        def _fetch_discharge():
+            q = _outlet_q({
+                "bill_date": {"$gte": f_dt_utc, "$lte": t_dt_utc},
+                "status": {"$ne": "Estimate"}
+            })
+            return list(db["hospital_dischargebilling"].find(q, {
+                "bill_no": 1, "bill_number": 1, "insurance_bill_number": 1,
+                "bill_date": 1, "discharge_date": 1, "uhid": 1, "ipNumber": 1, "ip_number": 1,
+                "patient_name": 1, "patientname": 1, "total_amount": 1, "net_amount": 1,
+                "discount_amount": 1, "payment_method": 1, "payment_mode": 1,
+                "company_name": 1, "is_insurance_bill": 1, "status": 1,
+                "is_cancelled": 1, "cancelled_reason": 1, "outlet_code": 1
+            }))
+
+        def _fetch_pharmacy():
+            q = _outlet_q({
+                "bill_date": {"$gte": f_dt_utc, "$lte": t_dt_utc},
+                "billing_mode": {"$ne": "ESTIMATE"},
+                "billing_status": {"$ne": "Estimate"}
+            })
+            return list(db["hospital_pharmacybilling"].find(q, {
+                "bill_no": 1, "bill_date": 1, "uhid": 1, "inpatient_number": 1,
+                "patientname": 1, "patient_name": 1, "total_amount": 1, "net_amount": 1,
+                "overall_discount_amount": 1, "discount_amount": 1,
+                "payment_mode": 1, "billing_mode": 1, "billing_status": 1,
+                "is_deleted": 1, "delete_reason": 1, "outlet_code": 1
+            }))
+
+        def _fetch_sales_returns():
+            q = _outlet_q({"$or": [
+                {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                {"return_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+            ]})
+            return list(db["hospital_salesreturn"].find(q, {
+                "return_bill_no": 1, "sales_return_number": 1, "return_no": 1, "bill_no": 1,
+                "created_date": 1, "return_date": 1, "uhid": 1, "patient_name": 1, "patientName": 1,
+                "return_amount": 1, "total_amount": 1, "net_amount": 1, "amount": 1,
+                "PaymentType": 1, "payment_mode": 1, "reason": 1, "outlet_code": 1
+            }))
+
+        def _fetch_refunds():
+            res_list = []
+            for col_name, label in (
+                ("hospital_refund", "Consultation / OP Refund"),
+                ("hospital_investrefund", "Investigation Refund"),
+                ("hospital_ipadvance_refund", "IP Advance Refund"),
+            ):
+                q = _outlet_q({"$or": [
+                    {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                    {"refund_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                ]})
+                for doc in db[col_name].find(q):
+                    doc["_refund_source"] = label
+                    res_list.append(doc)
+            return res_list
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            f_bt = executor.submit(_fetch_billtypes)
+            f_b = executor.submit(_fetch_billing)
+            f_i = executor.submit(_fetch_invest)
+            f_d = executor.submit(_fetch_discharge)
+            f_p = executor.submit(_fetch_pharmacy)
+            f_sr = executor.submit(_fetch_sales_returns)
+            f_rf = executor.submit(_fetch_refunds)
+
+            bt_no_map, bt_id_map = f_bt.result()
+            b_docs = f_b.result()
+            i_docs = f_i.result()
+            d_docs = f_d.result()
+            p_docs = f_p.result()
+            sr_docs = f_sr.result()
+            rf_docs = f_rf.result()
+
+        all_uhids = list({
+            str(doc.get("uhid") or "").strip()
+            for grp in (b_docs, i_docs, d_docs, p_docs, sr_docs, rf_docs)
+            for doc in grp if doc.get("uhid")
+        })
+        p_map = {}
+        if all_uhids:
+            for p in db["hospital_patient"].find(
+                {"uhid": {"$in": all_uhids}},
+                {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1, "patientname": 1}
+            ):
+                uk = str(p.get("uhid") or "").strip()
+                nm = str(p.get("patient_name") or p.get("patientname") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()).strip()
+                if uk and nm:
+                    p_map[uk] = nm
+
+        def _fmt_dt(raw):
+            dt = to_ist(raw)
+            if isinstance(dt, datetime):
+                return dt.strftime("%d/%m/%Y %I:%M %p"), dt.strftime("%Y-%m-%d %H:%M:%S")
+            return str(raw or ""), str(raw or "")
+
+        rows = []
+
+        # 1. Billing / Consultation
+        for b in b_docs:
+            bno = str(b.get("bill_number") or b.get("bill_no") or "").strip()
+            if not bno:
+                continue
+            is_cancel = bool(b.get("is_cancelled") or b.get("is_active") is False)
+            p_stat = str(b.get("payment_status") or "").strip().lower()
+            p_meth = str(b.get("payment_method") or b.get("payment_mode") or "Cash").strip()
+            if is_cancel:
+                bill_status = "Cancel"
+            elif p_stat == "pending" or (p_meth.lower() == "credit" and p_stat != "paid"):
+                bill_status = "Credit Pending" if "credit" in p_meth.lower() else "Cash Pending"
+            else:
+                bill_status = "Paid"
+
+            net = clean_num(b.get("total_fees") or b.get("net_amount"))
+            disc = clean_num(b.get("discount_amount") or b.get("discount"))
+            gross = round(net + disc, 2)
+            uhid = str(b.get("uhid") or "").strip()
+            pname = str(b.get("patient_name") or b.get("patientname") or p_map.get(uhid) or "Patient").strip()
+            dt_disp, dt_sort = _fmt_dt(b.get("billed_date") or b.get("created_date"))
+            cat = bt_id_map.get(str(b.get("bill_type") or "").strip()) or "Consultation / Registration"
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Billing",
+                "category": cat,
+                "uhid": uhid or "—",
+                "ip_number": "—",
+                "patient_name": pname,
+                "payment_mode": p_meth,
+                "gross_amount": gross,
+                "discount_amount": round(disc, 2),
+                "net_amount": round(net, 2),
+                "status": bill_status,
+                "remarks": str(b.get("cancelled_reason") or "").strip(),
+                "outlet_code": b.get("outlet_code") or "",
+            })
+
+        # 2. Investigation Billing
+        for inv in i_docs:
+            bno = str(inv.get("investBillNo") or inv.get("bill_no") or "").strip()
+            if not bno:
+                continue
+            is_cancel = bool(inv.get("is_cancelled") or inv.get("is_active") is False)
+            p_stat = str(inv.get("paymentStatus") or "").strip().lower()
+            p_meth = str(inv.get("paymentMethod") or inv.get("payment_mode") or "Cash").strip()
+            if is_cancel:
+                bill_status = "Cancel"
+            elif p_stat == "pending" or (p_meth.lower() == "credit" and p_stat != "paid"):
+                bill_status = "Credit Pending" if "credit" in p_meth.lower() else "Cash Pending"
+            else:
+                bill_status = "Paid"
+
+            net = clean_num(inv.get("finalPrice") or inv.get("total"))
+            disc = clean_num(inv.get("discount"))
+            gross = round(net + disc, 2)
+            uhid = str(inv.get("uhid") or "").strip()
+            pname = str(inv.get("patient_name") or inv.get("patientname") or p_map.get(uhid) or "Patient").strip()
+            dt_disp, dt_sort = _fmt_dt(inv.get("investBillDate") or inv.get("created_date"))
+            cat = bt_no_map.get(str(inv.get("billTypeNo") or "").strip()) or bt_id_map.get(str(inv.get("bill_type") or "").strip()) or "Investigation"
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Investigation",
+                "category": cat,
+                "uhid": uhid or "—",
+                "ip_number": str(inv.get("ipNumber") or "—").strip() or "—",
+                "patient_name": pname,
+                "payment_mode": p_meth,
+                "gross_amount": gross,
+                "discount_amount": round(disc, 2),
+                "net_amount": round(net, 2),
+                "status": bill_status,
+                "remarks": str(inv.get("cancelled_reason") or "").strip(),
+                "outlet_code": inv.get("outlet_code") or "",
+            })
+
+        # 3. Discharge Billing
+        for dis in d_docs:
+            bno = str(dis.get("bill_no") or dis.get("bill_number") or "").strip()
+            if not bno:
+                continue
+            st_l = str(dis.get("status") or "").strip().lower()
+            is_cancel = bool(dis.get("is_cancelled") or st_l == "cancelled")
+            p_meth = str(dis.get("payment_method") or dis.get("payment_mode") or "Cash").strip()
+            is_ins = bool(dis.get("is_insurance_bill") or p_meth.lower() == "credit")
+            if is_cancel:
+                bill_status = "Cancel"
+            elif st_l == "paid":
+                bill_status = "Paid"
+            elif is_ins or st_l == "pending":
+                bill_status = "Credit Pending" if "credit" in p_meth.lower() else "Cash Pending"
+            else:
+                bill_status = "Paid"
+
+            tot = clean_num(dis.get("total_amount"))
+            net = clean_num(dis.get("net_amount"))
+            disc = clean_num(dis.get("discount_amount"))
+            gross = tot if tot > 0 else round(net + disc, 2)
+            uhid = str(dis.get("uhid") or "").strip()
+            pname = str(dis.get("patient_name") or dis.get("patientname") or p_map.get(uhid) or "Patient").strip()
+            dt_disp, dt_sort = _fmt_dt(dis.get("bill_date") or dis.get("discharge_date"))
+            comp = str(dis.get("company_name") or "").strip()
+            pm_disp = f"{p_meth} ({comp})" if comp else p_meth
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Discharge",
+                "category": "DISCHARGE",
+                "uhid": uhid or "—",
+                "ip_number": str(dis.get("ipNumber") or dis.get("ip_number") or "—").strip() or "—",
+                "patient_name": pname,
+                "payment_mode": pm_disp,
+                "gross_amount": round(gross, 2),
+                "discount_amount": round(disc, 2),
+                "net_amount": round(net if net > 0 else gross, 2),
+                "status": bill_status,
+                "remarks": str(dis.get("cancelled_reason") or dis.get("insurance_bill_number") or "").strip(),
+                "outlet_code": dis.get("outlet_code") or "",
+            })
+
+        # 4. Pharmacy Billing
+        for pb in p_docs:
+            bno = str(pb.get("bill_no") or "").strip()
+            if not bno:
+                continue
+            b_stat = str(pb.get("billing_status") or "").strip().lower()
+            is_cancel = bool(pb.get("is_deleted") or b_stat in ("cancelled", "deleted"))
+            p_meth = str(pb.get("payment_mode") or pb.get("billing_mode") or "Cash").strip()
+            if is_cancel:
+                bill_status = "Cancel"
+            elif b_stat == "pending" or (str(pb.get("billing_mode") or "").upper() == "IP CREDIT" and b_stat != "paid"):
+                is_cred = "credit" in p_meth.lower() or str(pb.get("billing_mode") or "").upper() == "IP CREDIT"
+                bill_status = "Credit Pending" if is_cred else "Cash Pending"
+            else:
+                bill_status = "Paid"
+
+            net = clean_num(pb.get("net_amount") or pb.get("total_amount"))
+            disc = clean_num(pb.get("overall_discount_amount") or pb.get("discount_amount"))
+            gross = round(net + disc, 2)
+            uhid = str(pb.get("uhid") or "").strip()
+            pname = str(pb.get("patientname") or pb.get("patient_name") or p_map.get(uhid) or "Pharmacy Patient").strip()
+            dt_disp, dt_sort = _fmt_dt(pb.get("bill_date"))
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Pharmacy",
+                "category": f"PHARMACY ({pb.get('billing_mode') or 'DIRECT'})",
+                "uhid": uhid or "—",
+                "ip_number": str(pb.get("inpatient_number") or "—").strip() or "—",
+                "patient_name": pname,
+                "payment_mode": p_meth,
+                "gross_amount": gross,
+                "discount_amount": round(disc, 2),
+                "net_amount": round(net, 2),
+                "status": bill_status,
+                "remarks": str(pb.get("delete_reason") or "").strip(),
+                "outlet_code": pb.get("outlet_code") or "",
+            })
+
+        # 5. Sales Returns
+        for sr in sr_docs:
+            bno = str(sr.get("return_bill_no") or sr.get("sales_return_number") or sr.get("return_no") or sr.get("bill_no") or "").strip()
+            if not bno:
+                continue
+            amt = abs(clean_num(sr.get("return_amount") or sr.get("total_amount") or sr.get("net_amount") or sr.get("amount")))
+            uhid = str(sr.get("uhid") or "").strip()
+            pname = str(sr.get("patient_name") or sr.get("patientName") or p_map.get(uhid) or "Sales Return").strip()
+            dt_disp, dt_sort = _fmt_dt(sr.get("created_date") or sr.get("return_date"))
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Sales Return",
+                "category": "SALES RETURN",
+                "uhid": uhid or "—",
+                "ip_number": "—",
+                "patient_name": pname,
+                "payment_mode": str(sr.get("PaymentType") or sr.get("payment_mode") or "Cash").strip(),
+                "gross_amount": round(amt, 2),
+                "discount_amount": 0.0,
+                "net_amount": round(amt, 2),
+                "status": "Return",
+                "remarks": f"Orig Bill: {sr.get('bill_no') or '-'} {sr.get('reason') or ''}".strip(),
+                "outlet_code": sr.get("outlet_code") or "",
+            })
+
+        # 6. Refunds
+        for rf in rf_docs:
+            bno = str(rf.get("refund_no") or rf.get("bill_no") or rf.get("bill_number") or rf.get("investBillNo") or "").strip() or "-"
+            amt = abs(clean_num(rf.get("refund_amount") or rf.get("amount") or rf.get("total_amount")))
+            uhid = str(rf.get("uhid") or "").strip()
+            pname = str(rf.get("patient_name") or rf.get("patientname") or p_map.get(uhid) or "Refund Patient").strip()
+            dt_disp, dt_sort = _fmt_dt(rf.get("created_date") or rf.get("refund_date"))
+            rows.append({
+                "bill_no": bno,
+                "date": dt_disp,
+                "_sort": dt_sort,
+                "module": "Refund",
+                "category": str(rf.get("_refund_source") or "REFUND").upper(),
+                "uhid": uhid or "—",
+                "ip_number": str(rf.get("ipNumber") or rf.get("ip_number") or "—").strip() or "—",
+                "patient_name": pname,
+                "payment_mode": str(rf.get("payment_mode") or rf.get("payment_method") or "Cash").strip(),
+                "gross_amount": round(amt, 2),
+                "discount_amount": 0.0,
+                "net_amount": round(amt, 2),
+                "status": "Refund",
+                "remarks": str(rf.get("reason") or rf.get("remarks") or "").strip(),
+                "outlet_code": rf.get("outlet_code") or "",
+            })
+
+        # Compute global summary before status/module filters
+        status_summary = {
+            s: {"count": 0, "amount": 0.0}
+            for s in ("Paid", "Cash Pending", "Credit Pending", "Cancel", "Return", "Refund")
+        }
+        credit_bills_amt = 0.0
+        credit_paid_amt = 0.0
+        actual_billed_amt = 0.0
+
+        for r in rows:
+            st = r["status"]
+            net_v = clean_num(r.get("net_amount"))
+            gross_v = clean_num(r.get("gross_amount"))
+            pm_l = str(r.get("payment_mode") or "").lower()
+            if st in status_summary:
+                status_summary[st]["count"] += 1
+                status_summary[st]["amount"] = round(status_summary[st]["amount"] + net_v, 2)
+
+            if st == "Paid":
+                actual_billed_amt += net_v
+                if "credit" in pm_l:
+                    credit_paid_amt += net_v
+                    credit_bills_amt += gross_v
+            elif st == "Credit Pending":
+                actual_billed_amt += net_v
+                credit_bills_amt += gross_v
+            elif st == "Cash Pending":
+                actual_billed_amt += net_v
+
+        # Reconcile Cash, Bank, Sales Return/Refund, Expense, and Net Cash strictly with 3-Tier Ledger Engine
+        ledger_res = AccountsLedgerEngine.get_ledger_data(
+            from_str=from_str or today_str,
+            to_str=to_str or today_str,
+            outlet_code=outlet_code,
+        )
+        l_bills = ledger_res.get("bills", [])
+        l_gross_cash = 0.0
+        l_bank = 0.0
+        l_credit_coll = 0.0
+        l_sales_ret = 0.0
+        l_expenses = 0.0
+        for lb in l_bills:
+            l_cat = str(lb.get("category") or "").lower()
+            is_sr = bool(lb.get("is_sales_return") or "return" in l_cat or "refund" in l_cat or clean_num(lb.get("sales_return")) > 0)
+            is_exp = bool(lb.get("is_expense") or "expense" in l_cat or "payment" in l_cat)
+            l_amt = abs(clean_num(lb.get("amount") or lb.get("gross") or lb.get("net_amount")))
+            if is_sr:
+                l_sales_ret += abs(clean_num(lb.get("sales_return_amount") or lb.get("refund_amount") or l_amt))
+            elif is_exp:
+                l_expenses += abs(clean_num(lb.get("expense_amount") or l_amt))
+            else:
+                l_gross_cash += clean_num(lb.get("cash"))
+                l_bank += clean_num(lb.get("bank"))
+                l_credit_coll += clean_num(lb.get("credit"))
+
+        l_net_cash = round(l_gross_cash - l_sales_ret - l_expenses, 2)
+        credit_pending_amt = round(status_summary["Credit Pending"]["amount"], 2)
+        financial_summary = {
+            "gross_cash": round(l_gross_cash, 2),
+            "bank": round(l_bank, 2),
+            "sales_return_refund": round(l_sales_ret, 2),
+            "expenses_paid": round(l_expenses, 2),
+            "net_cash": l_net_cash,
+            "counter_credit": round(l_credit_coll, 2),
+            "credit_amount": round(l_credit_coll, 2),
+            "credit_bills_amount": round(credit_bills_amt, 2),
+            "actual_billed_amount": round(actual_billed_amt, 2),
+            "cash_pending_amount": round(status_summary["Cash Pending"]["amount"], 2),
+            "credit_pending_amount": credit_pending_amt,
+            "cancel_amount": round(status_summary["Cancel"]["amount"], 2),
+        }
+
+        # Apply filters
+        filtered = []
+        for r in rows:
+            if status_filter != "all" and r["status"].lower() != status_filter:
+                continue
+            if module_filter != "all" and r["module"].lower() != module_filter and r["category"].lower() != module_filter:
+                continue
+            if search_q:
+                hay = f"{r['bill_no']} {r['uhid']} {r['ip_number']} {r['patient_name']} {r['category']} {r['payment_mode']} {r['status']}".lower()
+                if search_q not in hay:
+                    continue
+            filtered.append(r)
+
+        filtered.sort(key=lambda x: (x["_sort"], x["bill_no"]), reverse=True)
+        for idx, r in enumerate(filtered, start=1):
+            r["sl_no"] = idx
+            r.pop("_sort", None)
+
+        return Response({
+            "success": True,
+            "report_title": "All Consolidated Bill Report",
+            "date_range": {"from_date": str(f_dt)[:10], "to_date": str(t_dt)[:10]},
+            "summary": {
+                "total_count": len(rows),
+                "filtered_count": len(filtered),
+                "filtered_amount": round(sum(r["net_amount"] for r in filtered), 2),
+                "by_status": status_summary,
+                "financial_summary": financial_summary,
+            },
+            "data": filtered,
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

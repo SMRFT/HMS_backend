@@ -642,10 +642,19 @@ class AccountsLedgerEngine:
                 ))
 
             def fetch_expenses():
-                rp_q = {"$or": [
-                    {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
-                    {"voucher_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}}
-                ]}
+                rp_q = {
+                    "$and": [
+                        {"$or": [
+                            {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
+                            {"created_date": {"$exists": False}, "voucher_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}}
+                        ]},
+                        {"$or": [
+                            {"receipt_type": {"$regex": "^payment$", "$options": "i"}},
+                            {"receipt_type": {"$exists": False}},
+                            {"receipt_type": None}
+                        ]}
+                    ]
+                }
                 return list(db["hospital_receiptandpayment"].find(rp_q).sort("created_date", 1))
 
             def fetch_shifts():
@@ -794,7 +803,10 @@ class AccountsLedgerEngine:
                 if cat.lower() == "discharge" and b_no == "2627008327":
                     continue
                     
-                dedup_key = (cat, b_no, r.get("shift_no"), str(r.get("collected_amount")))
+                if "return" in cat.lower() or "refund" in cat.lower():
+                    dedup_key = (cat, b_no, r.get("shift_no"), str(r.get("return_bill_no") or r.get("_id")), str(r.get("Returned_amount") or r.get("collected_amount")))
+                else:
+                    dedup_key = (cat, b_no, r.get("shift_no"), str(r.get("collected_amount")))
                 if b_no and dedup_key in seen_keys:
                     continue
                 seen_keys.add(dedup_key)
@@ -1387,144 +1399,24 @@ class AccountsLedgerEngine:
 
             # 5. Fetch Counter Expense Vouchers (Payment receipts)
             expense_vouchers = []
-            total_counter_expenses = 0.0
-            
-            for ep in expense_docs:
-                e_amt = clean_num(ep.get("amount") or 0.0)
-                total_counter_expenses += e_amt
-                ep_dt = ep.get("created_date")
-                ep_dt_str = format_dt(ep_dt + timedelta(hours=5, minutes=30)) if isinstance(ep_dt, datetime) else str(ep_dt or "")
-                cid = str(ep.get("created_by") or "").strip()
-                
-                desc_raw = ep.get("description") or ""
-                pt_n = ""
-                rm_n = ""
-                ds_t = ""
-                if isinstance(desc_raw, str) and desc_raw.strip().startswith("{") and desc_raw.strip().endswith("}"):
-                    try:
-                        import json
-                        pj = json.loads(desc_raw)
-                        pt_n = str(pj.get("patient_name") or "").strip()
-                        rm_n = str(pj.get("room_no") or "").strip()
-                        ds_t = str(pj.get("description") or "").strip()
-                    except Exception:
-                        ds_t = desc_raw
-                elif isinstance(desc_raw, dict):
-                    pt_n = str(desc_raw.get("patient_name") or "").strip()
-                    rm_n = str(desc_raw.get("room_no") or "").strip()
-                    ds_t = str(desc_raw.get("description") or "").strip()
-                else:
-                    ds_t = str(desc_raw or "")
-                    
-                final_desc = (pt_n + (f" (Room {rm_n})" if rm_n else "")) if pt_n else (ds_t or "Counter Expense Payment")
-                
-                expense_vouchers.append({
-                    "voucher_no": ep.get("voucher_no") or "—",
-                    "date": ep_dt_str,
-                    "amount": e_amt,
-                    "account_head": str(ep.get("account_head") or "Counter Expense"),
-                    "description": final_desc,
-                    "shift_no": ep.get("shiftno") or "",
-                    "cashier_id": cid,
-                    "cashier_name": cashier_map.get(cid, cid.upper() or "STAFF")
-                })
-
-            # 6. Shift-Wise Handover Reconciliation & Comprehensive Return Resolution
-            # shifts_in_db was already fetched concurrently in thread pool
-
-            # Ingest Sales Returns directly from hospital_salesreturn to guarantee no return is omitted
-            known_sr_shift_nos = [str(s.get("shiftno") or "").strip() for s in shifts_in_db if s.get("shiftno")]
-            sr_query_clauses = [
-                {"created_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
-                {"return_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
-                {"paid_date": {"$gte": f_dt_utc, "$lte": t_dt_utc}},
-            ]
-            if known_sr_shift_nos:
-                sr_query_clauses.extend([
-                    {"shiftno": {"$in": known_sr_shift_nos}},
-                    {"shift_no": {"$in": known_sr_shift_nos}}
-                ])
-            sr_find_q = {"$or": sr_query_clauses}
-            if outlet_code and str(outlet_code).lower() != "all":
-                sr_find_q["outlet_code"] = outlet_code
-            sr_docs = list(db["hospital_salesreturn"].find(sr_find_q))
-
-            seen_sr_keys = set()
+            # 5. Tier 1 -> Tier 2: Build Expense Vouchers & Shift-Wise Reconciliation Strictly from Tier 1 (enriched_bills)
+            expense_vouchers = []
             for b in enriched_bills:
-                if b.get("is_sales_return") or b.get("is_refund") or str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"]:
-                    if b.get("bill_no"):
-                        b_str = str(b["bill_no"]).strip()
-                        seen_sr_keys.add(b_str)
-                        seen_sr_keys.add(b_str.replace("/", ""))
-                    if b.get("return_bill_no"):
-                        r_str = str(b["return_bill_no"]).strip()
-                        seen_sr_keys.add(r_str)
-                        seen_sr_keys.add(r_str.replace("/", ""))
+                if b.get("is_expense"):
+                    part = (b.get("particulars") or [{}])[0] if isinstance(b.get("particulars"), list) and b.get("particulars") else {}
+                    expense_vouchers.append({
+                        "voucher_no": b.get("bill_no") or "—",
+                        "date": b.get("date") or "",
+                        "amount": clean_num(b.get("expense_amount") or abs(clean_num(b.get("cash")))),
+                        "account_head": str(part.get("account_head") or "Counter Expense"),
+                        "description": b.get("patient_name") or part.get("itemName") or "Counter Expense Payment",
+                        "shift_no": b.get("shift_no") or "",
+                        "cashier_id": b.get("cashier_id") or "",
+                        "cashier_name": b.get("cashier_name") or "STAFF",
+                    })
+            total_counter_expenses = round(sum(v["amount"] for v in expense_vouchers), 2)
 
-            for sr in sr_docs:
-                sr_ret_no = str(sr.get("return_bill_no") or sr.get("sales_return_number") or sr.get("return_no") or "").strip()
-                sr_orig_no = str(sr.get("bill_no") or "").strip()
-                if (sr_ret_no and (sr_ret_no in seen_sr_keys or sr_ret_no.replace("/", "") in seen_sr_keys)) or \
-                   (sr_orig_no and (sr_orig_no in seen_sr_keys or sr_orig_no.replace("/", "") in seen_sr_keys)):
-                    continue
-                if sr_ret_no:
-                    seen_sr_keys.add(sr_ret_no)
-                    seen_sr_keys.add(sr_ret_no.replace("/", ""))
-                if sr_orig_no:
-                    seen_sr_keys.add(sr_orig_no)
-                    seen_sr_keys.add(sr_orig_no.replace("/", ""))
-
-                # Match to appropriate shift
-                r_shift = str(sr.get("shiftno") or sr.get("shift_no") or "").strip()
-                rc_dt = sr.get("created_date") or sr.get("return_date")
-                r_outlet = str(sr.get("outlet_code") or "").strip()
-                rc_dt_safe = _to_naive_dt(rc_dt)
-                if not r_shift and rc_dt_safe:
-                    for sh in shifts_in_db:
-                        sh_outlet = str(sh.get("SelectedOutlet") or sh.get("outlet_code") or "").strip()
-                        if not r_outlet or sh_outlet == r_outlet:
-                            sh_start = _to_naive_dt(sh.get("StartingTime"))
-                            sh_end = _to_naive_dt(sh.get("closingTime")) or (sh_start + timedelta(hours=14) if sh_start else None)
-                            if sh_start and sh_end and (sh_start <= rc_dt_safe <= sh_end):
-                                r_shift = str(sh.get("shiftno") or "").strip()
-                                break
-
-                r_amt = clean_num(sr.get("return_amount") or sr.get("total_amount") or sr.get("net_amount") or sr.get("amount"))
-                pm = str(sr.get("PaymentType") or sr.get("payment_mode") or "Cash").strip()
-                c_val, cr_val, b_val = split_payment_modes(r_amt, pm)
-
-                sr_dt_str = format_dt(rc_dt + timedelta(hours=5, minutes=30)) if isinstance(rc_dt, datetime) else str(rc_dt or "")
-                sr_cid = str(sr.get("pharmacist_id") or sr.get("CashierID") or sr.get("created_by") or "")
-                sr_cname = cashier_map.get(sr_cid, sr_cid.upper() or "PHARMACY")
-
-                enriched_bills.append({
-                    "bill_no": sr_ret_no or sr_orig_no or "RET",
-                    "date": sr_dt_str,
-                    "category": "Sales Return",
-                    "uhid": str(sr.get("uhid") or ""),
-                    "ip_number": "",
-                    "patient_name": patient_map.get(str(sr.get("uhid") or "").strip()) or str(sr.get("patient_name") or sr.get("patientName") or "Sales Return - Pharmacy").strip(),
-                    "gross": -r_amt,
-                    "cash": -c_val,
-                    "card": -b_val,
-                    "bank": -b_val,
-                    "credit": -cr_val,
-                    "net_amount": -r_amt,
-                    "amount": r_amt,
-                    "return_amount": r_amt,
-                    "sales_return": r_amt,
-                    "sales_return_amount": r_amt,
-                    "refund_amount": r_amt,
-                    "shift_no": r_shift,
-                    "cashier_id": sr_cid,
-                    "cashier_name": sr_cname,
-                    "payment_mode": pm,
-                    "outlet_code": r_outlet or "OLET002",
-                    "particulars": sr.get("medicine_particulars") or [],
-                    "is_sales_return": True,
-                    "is_refund": True
-                })
-
+            # 6. Tier 2: Shift-Wise Handover Reconciliation (Strictly Aggregated from Tier 1 enriched_bills)
             shift_reconciliation = []
             for s in shifts_in_db:
                 s_no = str(s.get("shiftno") or "").strip()
@@ -1539,24 +1431,30 @@ class AccountsLedgerEngine:
                     s_dt_str = ""
                 
                 s_no_clean = s_no.replace("/", "")
-                s_cash_gross = sum(b["cash"] for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean) and b["cash"] > 0)
-                s_card_amt = sum(b["bank"] for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean))
-                s_credit_amt = sum(b["credit"] for b in enriched_bills if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean))
-                s_expenses = sum(v["amount"] for v in expense_vouchers if (str(v.get("shift_no") or "").strip() == s_no or str(v.get("shift_no") or "").replace("/", "").strip() == s_no_clean))
-
-                s_returns_bills = sum(
-                    clean_num(b.get("refund_amount") or b.get("return_amount") or b.get("sales_return_amount") or b.get("sales_return"))
-                    for b in enriched_bills
+                shift_bills = [
+                    b for b in enriched_bills
                     if (str(b.get("shift_no") or "").strip() == s_no or str(b.get("shift_no") or "").replace("/", "").strip() == s_no_clean)
-                    and (b.get("is_sales_return") or b.get("is_refund") or str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"])
+                ]
+                s_cash_gross = sum(b["cash"] for b in shift_bills if b["cash"] > 0)
+                s_card_amt = sum(b["bank"] for b in shift_bills)
+                s_credit_amt = sum(b["credit"] for b in shift_bills)
+                s_expenses = sum(
+                    clean_num(b.get("expense_amount") or abs(clean_num(b.get("cash"))))
+                    for b in shift_bills if b.get("is_expense")
                 )
+                s_returns = round(sum(
+                    abs(clean_num(b.get("cash")))
+                    for b in shift_bills
+                    if not b.get("is_expense") and (
+                        b.get("is_sales_return") or b.get("is_refund") or
+                        str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"]
+                    )
+                ), 2)
 
-                s_stored_ret = abs(clean_num(s.get("SalesReturnAmount")))
-                s_returns = round(max(s_returns_bills, s_stored_ret), 2)
                 s_net_handover = round(s_cash_gross - s_expenses - s_returns, 2)
-                
                 recorded_cash = clean_num(s.get("collected_Amount"))
                 recorded_credit = clean_num(s.get("CreditAmount"))
+                recorded_closing = clean_num(s.get("ClosingBalance"))
                 s_tot = s_cash_gross + s_card_amt + s_credit_amt
                 r_tot = recorded_cash + recorded_credit
                 
@@ -1571,24 +1469,39 @@ class AccountsLedgerEngine:
                     "shift_status": s.get("ShiftStatus") or "closed",
                     "gross_cash": round(s_cash_gross, 2),
                     "expenses_paid": round(s_expenses, 2),
-                    "sales_return": round(s_returns, 2),
-                    "retAmt": round(s_returns, 2),
+                    "sales_return": s_returns,
+                    "retAmt": s_returns,
                     "net_handover_cash": s_net_handover,
                     "recorded_shift_cash": recorded_cash,
+                    "recorded_closing_balance": recorded_closing,
+                    "variance": round(s_net_handover - recorded_closing, 2),
                     "card_collection": round(s_card_amt, 2),
                     "credit_collection": round(s_credit_amt, 2),
                     "recorded_credit": recorded_credit,
                     "opening_balance": clean_num(s.get("OpeningBalance")),
                     "closing_balance": s_net_handover,
-                    "is_tallied": (abs(s_net_handover - recorded_cash) < 1.0) or (abs(s_cash_gross - recorded_cash) < 1.0) or (abs(s_tot - r_tot) < 1.0)
+                    "is_tallied": (
+                        abs(s_net_handover - recorded_closing) < 1.0
+                        or abs((s_cash_gross - s_expenses) - recorded_cash) < 1.0
+                        or abs(s_net_handover - recorded_cash) < 1.0
+                        or abs(s_cash_gross - recorded_cash) < 1.0
+                        or abs(s_tot - r_tot) < 1.0
+                    )
                 })
 
-            # 7. Financial Grand Totals
+            # 7. Financial Grand Totals (Tier 1 Single Source of Truth)
             total_gross_cash = round(sum(b["cash"] for b in enriched_bills if b["cash"] > 0), 2)
             total_bank_card = round(sum(b["bank"] for b in enriched_bills), 2)
             total_credit_scheme = round(sum(b["credit"] for b in enriched_bills), 2)
             total_gross_revenue = round(total_gross_cash + total_bank_card + total_credit_scheme, 2)
-            total_sales_returns = round(sum(s["sales_return"] for s in shift_reconciliation), 2)
+            total_sales_returns = round(sum(
+                abs(clean_num(b.get("cash")))
+                for b in enriched_bills
+                if not b.get("is_expense") and (
+                    b.get("is_sales_return") or b.get("is_refund") or
+                    str(b.get("category") or "").upper() in ["SALES RETURN", "REFUND", "DISCHARGE REFUND", "INVESTIGATION REFUND", "OP REFUND", "IP ADVANCE REFUND"]
+                )
+            ), 2)
             net_cash_handover = round(total_gross_cash - total_counter_expenses - total_sales_returns, 2)
 
             res = {
