@@ -3322,7 +3322,7 @@ def update_mainblock_pendingbills(request):
         hospital_code = _clean_str(data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE"), "SH001")
         branch_code   = _clean_str(data.get("auth-branch-code") or request.META.get("HTTP_AUTH_BRANCH_CODE") or request.headers.get("Branch-Code"), "SHB001")
         outlet_code   = _clean_str(data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE") or request.headers.get("Outlet-Code"), "")
-        employee_id   = _clean_str(data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID") or extract_aud_employee_id(request), "")
+        employee_id   = _clean_str(data.get("auth-user-id"))
 
         CashierID = employee_id or "admin"
 
@@ -3404,7 +3404,20 @@ def update_mainblock_pendingbills(request):
         )
         target_category = str(data.get("type") or data.get("bill_category") or data.get("category") or "").strip().lower()
 
-        if paid_amount_raw == 0:
+        # Resolve target_category to discharge if indicated by bill_type or bill record
+        if target_category != "discharge":
+            req_bt = data.get("bill_type")
+            if str(req_bt).strip() in ["2", "discharge"] or str(data.get("bill_type_name") or "").strip().lower() == "discharge":
+                target_category = "discharge"
+            elif bill_no:
+                d_check = discharge_col.find_one({"$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]})
+                if d_check:
+                    target_category = "discharge"
+
+        is_discharge = (target_category == "discharge")
+
+        # Allow 0 amount collection for discharge bills (e.g. fully covered by advance/insurance)
+        if paid_amount_raw == 0 and not is_discharge:
             return Response(
                 {
                     "status": "error",
@@ -3412,7 +3425,7 @@ def update_mainblock_pendingbills(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if paid_amount_raw < 0 and target_category != "discharge":
+        if paid_amount_raw < 0 and not is_discharge:
             return Response(
                 {
                     "status": "error",
