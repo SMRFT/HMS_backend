@@ -7651,22 +7651,17 @@ def PharmacyBillanalysis(request):
             p_mode = str(b.get("payment_mode") or "").strip().lower()
             b_mode = str(b.get("billing_mode") or "").strip().upper()
 
-            if p_mode == "credit" or b_mode in ["WARD REQUEST", "IP CREDIT", "CREDIT"]:
+            if p_mode == "credit":
                 derived_status = "Credit Bills"
-            elif p_mode in ["cash", "card", "upi", "online", "multiple payment"] or b_mode == "DIRECT" or b.get("payment_details"):
+            elif p_mode in ["cash", "card", "upi", "online", "multiple payment"] or b.get("payment_details"):
                 derived_status = "Cash Bills"
+            elif b_mode in ["WARD REQUEST", "IP CREDIT", "CREDIT"]:
+                derived_status = "Credit Bills"
             else:
-                if p_mode:
-                    derived_status = f"{p_mode.title()} Bills"
-                elif b.get("inpatient_number") or "IP" in bt_name.upper():
-                    derived_status = "Credit Bills"
-                else:
-                    derived_status = "Cash Bills"
+                derived_status = "Cash Bills"
 
-            # A bill is a Cash Bill if payment_mode is Cash (or direct payment) and not cancelled
-            is_cash_bill = not is_cancelled and (
-                derived_status == "Cash Bills" or (p_mode != "credit" and b_mode not in ["WARD REQUEST", "IP CREDIT", "CREDIT"])
-            )
+            # A bill is a Cash Bill if payment_mode is not credit and not cancelled
+            is_cash_bill = not is_cancelled and p_mode != "credit"
 
             # Status filter
             if status_filter != "all":
