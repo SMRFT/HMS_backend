@@ -65,6 +65,30 @@ diagnostics_db = client["Diagnostics"]
 room_collection = mongo_db["hospital_room"]
 
 from .dbcollection import get_patient_name_by_uhid, get_patient_details_by_uhid, get_employee_name_by_id, get_doctor_name_by_id
+from ..counter_service import get_next_est_bill_no, get_next_medicine_ward_request_no
+from ..ward_request_guard import (
+    acquire_ward_request_guard,
+    canonical_item_signature,
+    complete_ward_request_guard,
+    fail_ward_request_guard,
+)
+
+
+def _resolve_doctor_employee_id(raw_doctor):
+    """Resolves a doctor name or employeeId using the module-level profile_collection."""
+    doctor_id = str(raw_doctor or "").strip()
+    if not doctor_id or doctor_id.isdigit():
+        return doctor_id
+    try:
+        doc_profile = profile_collection.find_one(
+            {"$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]},
+            {"employeeId": 1},
+        )
+        if doc_profile and doc_profile.get("employeeId"):
+            return str(doc_profile.get("employeeId")).strip()
+    except Exception as e:
+        print("Doctor lookup error:", e)
+    return doctor_id
 
 # --- Helper: Timezone conversion to IST (Asia/Kolkata) ---
 def format_dt_to_ist(dt_raw):
@@ -1278,9 +1302,9 @@ def get_lab_ward_requests(request):
 @permission_classes([HasRoleAndDataPermission])
 
 def save_lab_ward_request(request):
+    lock_key = None
     try:
         import json
-        from pymongo import ReturnDocument
         data = request.data
 
         current_user = data.get("auth-user-id", "system")
@@ -1293,6 +1317,8 @@ def save_lab_ward_request(request):
 
         uhid = str(data.get("uhid") or "").strip()
         ip_number = str(data.get("ipNumber") or data.get("ip_number") or "").strip()
+        client_request_id = data.get("client_request_id") or ""
+        force_duplicate = bool(data.get("force_duplicate", False))
 
         # Lookup Admission & Patient
         adm_doc = None
@@ -1309,21 +1335,8 @@ def save_lab_ward_request(request):
         if uhid:
             pt_doc = mongo_db["hospital_patient"].find_one({"uhid": uhid})
 
-        # Resolve Doctor ID (employeeId)
-        raw_doctor = data.get("doctor") or ""
-        doctor_id = str(raw_doctor).strip()
-        if doctor_id:
-            try:
-                from pymongo import MongoClient
-                import os
-                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
-                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
-                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
-                })
-                if doc_profile and doc_profile.get("employeeId"):
-                    doctor_id = str(doc_profile.get("employeeId")).strip()
-            except Exception as e:
-                print("Doctor lookup error in save_lab_ward_request:", e)
+        # Resolve Doctor ID (employeeId) using shared connection
+        doctor_id = _resolve_doctor_employee_id(data.get("doctor") or "")
 
         # Resolve Room No
         raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
@@ -1379,16 +1392,61 @@ def save_lab_ward_request(request):
         if not isinstance(raw_tests, list):
             raw_tests = []
 
-        # Auto-enrich NABH code
-        nabh_records = list(mongo_db["hospital_lab_nabh_rate"].find({}, {"_id": 0, "test_id": 1, "nabh_code": 1}))
+        # Idempotency & Duplicate Prevention Guard (before allocating EstBillNo)
+        item_signature = canonical_item_signature(raw_tests)
+        proceed, early_resp, lock_key = acquire_ward_request_guard(
+            mongo_db,
+            req_type="LAB",
+            client_request_id=client_request_id,
+            uhid=uhid,
+            ip_number=ip_number,
+            bill_type_no=bill_type_no,
+            signature=item_signature,
+            force_duplicate=force_duplicate,
+            auto_suppress_seconds=60,
+            check_same_day_warning=True,
+            collection_specs=[{
+                "collection": "hospital_estimatebilling",
+                "items_field": "item",
+                "date_field": "created_date",
+                "bill_fields": ("EstBillNo",),
+                "extra_query": {"is_ward_request": True, "ward_request_type": "LAB"},
+                "build_suppressed_payload": lambda cand, bill_val, bill_id: {
+                    "success": True,
+                    "message": f"Lab Ward Request already recorded (Est #{bill_val})",
+                    "data": {
+                        "id": bill_id,
+                        "EstBillNo": bill_val,
+                        "investBillNo": bill_val,
+                    },
+                },
+            }],
+        )
+        if not proceed:
+            return early_resp
+
+        # Auto-enrich NABH code (filtered only to requested test_ids instead of full scan)
         nabh_map = {}
-        for r in nabh_records:
-            t_fld = r.get("test_id")
-            if t_fld is not None:
-                t_list = t_fld if isinstance(t_fld, list) else [t_fld]
-                for tid in t_list:
-                    if tid is not None and str(tid).strip():
-                        nabh_map[str(tid).strip()] = str(r.get("nabh_code", "")).strip()
+        req_test_ids = []
+        for t in raw_tests:
+            if isinstance(t, dict) and t.get("test_id") not in (None, ""):
+                s_id = str(t.get("test_id")).strip()
+                if s_id:
+                    req_test_ids.append(s_id)
+                    if s_id.isdigit():
+                        req_test_ids.append(int(s_id))
+        if req_test_ids:
+            nabh_records = mongo_db["hospital_lab_nabh_rate"].find(
+                {"test_id": {"$in": req_test_ids}},
+                {"_id": 0, "test_id": 1, "nabh_code": 1},
+            )
+            for r in nabh_records:
+                t_fld = r.get("test_id")
+                if t_fld is not None:
+                    t_list = t_fld if isinstance(t_fld, list) else [t_fld]
+                    for tid in t_list:
+                        if tid is not None and str(tid).strip():
+                            nabh_map[str(tid).strip()] = str(r.get("nabh_code", "")).strip()
 
         enriched_tests = []
         total_price = 0
@@ -1434,35 +1492,8 @@ def save_lab_ward_request(request):
             last_name = adm_doc.get("lastName") or ""
             gender = adm_doc.get("gender") or ""
 
-        # Sequential EstBillNo Generation (aligned with EstimateBilling)
-        from hospital.models import EstimateBilling
-        from django.db import transaction
-
-        with transaction.atomic():
-            last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
-            if last_bill and last_bill.EstBillNo:
-                try:
-                    last_number = int(last_bill.EstBillNo)
-                except (ValueError, TypeError):
-                    last_number = 0
-                next_number = last_number + 1
-            else:
-                highest_mongo = mongo_db["hospital_estimatebilling"].find_one(
-                    {"EstBillNo": {"$regex": "^[0-9]+$"}},
-                    sort=[("EstBillNo", -1)]
-                )
-                if highest_mongo and highest_mongo.get("EstBillNo"):
-                    try:
-                        next_number = int(highest_mongo["EstBillNo"]) + 1
-                    except (ValueError, TypeError):
-                        next_number = 1
-                else:
-                    next_number = 1
-
-            est_bill_no = f"{next_number:06d}"
-            while EstimateBilling.objects.filter(EstBillNo=est_bill_no).exists() or mongo_db["hospital_estimatebilling"].find_one({"EstBillNo": est_bill_no}):
-                next_number += 1
-                est_bill_no = f"{next_number:06d}"
+        # Atomic sequential EstBillNo via MongoDB counters (race-condition free)
+        est_bill_no = get_next_est_bill_no(db_instance=mongo_db)
 
         ist = pytz.timezone("Asia/Kolkata")
         now_ist = datetime.now(ist)
@@ -1503,13 +1534,12 @@ def save_lab_ward_request(request):
             "created_date": now_ist,
             "lastmodified_by": None,
             "lastmodified_date": now_ist,
-            "is_active": True
         }
 
         collection = mongo_db["hospital_estimatebilling"]
         result = collection.insert_one(request_doc)
 
-        return Response({
+        response_payload = {
             "success": True,
             "message": "Lab Ward Request saved successfully to Estimate Billing",
             "data": {
@@ -1517,8 +1547,11 @@ def save_lab_ward_request(request):
                 "EstBillNo": est_bill_no,
                 "investBillNo": est_bill_no
             }
-        })
+        }
+        complete_ward_request_guard(mongo_db, lock_key, response_payload)
+        return Response(response_payload)
     except Exception as e:
+        fail_ward_request_guard(mongo_db, lock_key)
         print("Error saving lab ward request:", e)
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
@@ -2486,7 +2519,7 @@ def update_medicine_ward_request(request):
 @permission_classes([HasRoleAndDataPermission])
 
 def save_medicine_ward_request(request):
-
+    lock_key = None
     try:
 
         data = request.data
@@ -2507,21 +2540,13 @@ def save_medicine_ward_request(request):
 
         total_amount = round(float(data.get("total_amount") or 0), 2)
 
-        
+        client_request_id = data.get("client_request_id") or ""
+        force_duplicate = bool(data.get("force_duplicate", False))
 
         # --- Doctor & Patient Settings ---
-
-        doctor_id = str(data.get("doctor_id") or data.get("doctorId") or data.get("doctor") or "").strip()
-        if doctor_id and not doctor_id.isdigit():
-            try:
-                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
-                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
-                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
-                })
-                if doc_profile and doc_profile.get("employeeId"):
-                    doctor_id = str(doc_profile.get("employeeId")).strip()
-            except Exception as e:
-                print("Doctor lookup error in save_medicine_ward_request:", e)
+        doctor_id = _resolve_doctor_employee_id(
+            data.get("doctor_id") or data.get("doctorId") or data.get("doctor") or ""
+        )
 
         # Resolve Room No
         raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
@@ -2596,34 +2621,42 @@ def save_medicine_ward_request(request):
         elif bt_val == 42 or "OP" in bt_name:
             is_ip = False
 
-        # --- Idempotency & Duplicate Prevention Guard ---
-        # If an identical pending ward request was created for this patient within the last 10 seconds,
-        # return the existing record to prevent accidental multi-click duplicates.
-        recent_cutoff = timezone.now() - timedelta(seconds=10)
-        recent_existing = mongo_db["hospital_pharmacybilling"].find_one({
-            "uhid": data.get("uhid"),
-            "is_ward_request": True,
-            "billing_status": "Pending",
-            "is_deleted": {"$ne": True},
-            "ward_request_date": {"$gte": recent_cutoff}
-        }, sort=[("ward_request_date", -1)])
-
-        if recent_existing:
-            existing_meds = recent_existing.get("medicine_particulars") or []
-            existing_ids = sorted([str(m.get("item_id")) for m in existing_meds if isinstance(m, dict) and m.get("item_id")])
-            new_ids = sorted([str(m.get("item_id")) for m in cleaned_particulars if m.get("item_id")])
-            if existing_ids == new_ids and len(existing_ids) > 0:
-                print(f"Duplicate ward request detected within 10s for UHID {data.get('uhid')}. Returning existing: {recent_existing.get('request_no') or recent_existing.get('bill_no')}")
-                return Response({
+        # --- Idempotency & Duplicate Prevention Guard (atomic client_request_id + 15s window) ---
+        med_signature = canonical_item_signature(
+            cleaned_particulars, id_keys=("item_id",), name_key="", qty_keys=("qty", "quantity")
+        )
+        proceed, early_resp, lock_key = acquire_ward_request_guard(
+            mongo_db,
+            req_type="MEDICINE",
+            client_request_id=client_request_id,
+            uhid=str(data.get("uhid") or "").strip(),
+            ip_number=raw_ip,
+            signature=med_signature,
+            force_duplicate=force_duplicate,
+            auto_suppress_seconds=15,
+            check_same_day_warning=False,
+            collection_specs=[{
+                "collection": "hospital_pharmacybilling",
+                "items_field": "medicine_particulars",
+                "date_field": "ward_request_date",
+                "ip_field": "inpatient_number",
+                "pk_field": "Bill_id",
+                "bill_fields": ("request_no", "bill_no"),
+                "id_keys": ("item_id",),
+                "qty_keys": ("qty", "quantity"),
+                "extra_query": {"is_ward_request": True, "billing_status": "Pending"},
+                "build_suppressed_payload": lambda cand, bill_val, bill_id: {
                     "success": True,
                     "message": "Medicine ward request already received",
-                    "id": recent_existing.get("Bill_id"),
-                    "request_no": recent_existing.get("request_no") or recent_existing.get("bill_no"),
-                    "bill_no": recent_existing.get("bill_no") if not str(recent_existing.get("bill_no", "")).startswith("MR") else None,
-                    "duplicate_suppressed": True
-                })
+                    "id": cand.get("Bill_id"),
+                    "request_no": cand.get("request_no") or cand.get("bill_no"),
+                    "bill_no": cand.get("bill_no") if not str(cand.get("bill_no", "")).startswith("MR") else None,
+                },
+            }],
+        )
+        if not proceed:
+            return early_resp
 
-        from ..counter_service import get_next_medicine_ward_request_no
         req_no = get_next_medicine_ward_request_no(is_ip=is_ip)
 
         # Create Bill via Django Model (Handles auto-increment and defaults)
@@ -2665,18 +2698,20 @@ def save_medicine_ward_request(request):
             }}
         )
 
-        return Response({
+        response_payload = {
             "success": True,
             "message": "Medicine ward request saved successfully",
             "id": bill.Bill_id,
             "request_no": req_no,
             "bill_no": None,
-        })
+        }
+        complete_ward_request_guard(mongo_db, lock_key, response_payload)
+        return Response(response_payload)
 
         
 
     except Exception as e:
-
+        fail_ward_request_guard(mongo_db, lock_key)
         import traceback
 
         print(traceback.format_exc())
@@ -3166,6 +3201,7 @@ def get_radiology_ward_requests(request):
 @api_view(["POST"])
 @permission_classes([HasRoleAndDataPermission])
 def save_radiology_ward_request(request):
+    lock_key = None
     try:
         import json
         from pymongo import ReturnDocument
@@ -3181,6 +3217,8 @@ def save_radiology_ward_request(request):
 
         uhid = str(data.get("uhid") or "").strip()
         ip_number = str(data.get("ipNumber") or data.get("ip_number") or "").strip()
+        client_request_id = data.get("client_request_id") or ""
+        force_duplicate = bool(data.get("force_duplicate", False))
 
         # Lookup Admission & Patient
         adm_doc = None
@@ -3197,21 +3235,8 @@ def save_radiology_ward_request(request):
         if uhid:
             pt_doc = mongo_db["hospital_patient"].find_one({"uhid": uhid})
 
-        # Resolve Doctor ID (employeeId)
-        raw_doctor = data.get("doctor") or ""
-        doctor_id = str(raw_doctor).strip()
-        if doctor_id:
-            try:
-                from pymongo import MongoClient
-                import os
-                g_client = MongoClient(os.getenv("GLOBAL_DB_HOST", "mongodb://localhost:27017"))
-                doc_profile = g_client["Global"]["backend_diagnostics_profile"].find_one({
-                    "$or": [{"employeeName": doctor_id}, {"employeeId": doctor_id}]
-                })
-                if doc_profile and doc_profile.get("employeeId"):
-                    doctor_id = str(doc_profile.get("employeeId")).strip()
-            except Exception as e:
-                print("Doctor lookup error in save_radiology_ward_request:", e)
+        # Resolve Doctor ID (employeeId) using shared connection
+        doctor_id = _resolve_doctor_employee_id(data.get("doctor") or "")
 
         # Resolve Room No
         raw_r = str(data.get("roomNo") or data.get("room_no") or "").strip()
@@ -3267,6 +3292,58 @@ def save_radiology_ward_request(request):
         if not isinstance(raw_tests, list):
             raw_tests = []
 
+        # Idempotency & Duplicate Prevention Guard (before allocating bill numbers)
+        item_signature = canonical_item_signature(raw_tests)
+        proceed, early_resp, lock_key = acquire_ward_request_guard(
+            mongo_db,
+            req_type="RADIOLOGY",
+            client_request_id=client_request_id,
+            uhid=uhid,
+            ip_number=ip_number,
+            bill_type_no=bill_type_no,
+            signature=item_signature,
+            force_duplicate=force_duplicate,
+            auto_suppress_seconds=60,
+            check_same_day_warning=True,
+            collection_specs=[
+                {
+                    "collection": "hospital_estimatebilling",
+                    "items_field": "item",
+                    "date_field": "created_date",
+                    "bill_fields": ("EstBillNo",),
+                    "extra_query": {"is_ward_request": True, "ward_request_type": "RADIOLOGY"},
+                    "build_suppressed_payload": lambda cand, bill_val, bill_id: {
+                        "success": True,
+                        "message": f"Radiology Ward Request already recorded (Est #{bill_val})",
+                        "data": {
+                            "id": bill_id,
+                            "EstBillNo": bill_val,
+                            "investBillNo": bill_val,
+                            "billSource": "Estimate",
+                        },
+                    },
+                },
+                {
+                    "collection": "hospital_investbilling",
+                    "items_field": "item",
+                    "date_field": "created_date",
+                    "bill_fields": ("investBillNo",),
+                    "extra_query": {"is_ward_request": True, "ward_request_type": "RADIOLOGY"},
+                    "build_suppressed_payload": lambda cand, bill_val, bill_id: {
+                        "success": True,
+                        "message": f"Radiology Ward Request already recorded (Bill #{bill_val})",
+                        "data": {
+                            "id": bill_id,
+                            "investBillNo": bill_val,
+                            "billSource": "Invest Billing",
+                        },
+                    },
+                },
+            ],
+        )
+        if not proceed:
+            return early_resp
+
         enriched_tests = []
         total_price = 0
         for t in raw_tests:
@@ -3306,35 +3383,8 @@ def save_radiology_ward_request(request):
         now_ist = datetime.now(ist)
 
         if not is_insurance:
-            # PAY PATIENT -> Save to hospital_estimatebilling with sequential EstBillNo
-            from hospital.models import EstimateBilling
-            from django.db import transaction
-
-            with transaction.atomic():
-                last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
-                if last_bill and last_bill.EstBillNo:
-                    try:
-                        last_number = int(last_bill.EstBillNo)
-                    except (ValueError, TypeError):
-                        last_number = 0
-                    next_number = last_number + 1
-                else:
-                    highest_mongo = mongo_db["hospital_estimatebilling"].find_one(
-                        {"EstBillNo": {"$regex": "^[0-9]+$"}},
-                        sort=[("EstBillNo", -1)]
-                    )
-                    if highest_mongo and highest_mongo.get("EstBillNo"):
-                        try:
-                            next_number = int(highest_mongo["EstBillNo"]) + 1
-                        except (ValueError, TypeError):
-                            next_number = 1
-                    else:
-                        next_number = 1
-
-                est_bill_no = f"{next_number:06d}"
-                while EstimateBilling.objects.filter(EstBillNo=est_bill_no).exists() or mongo_db["hospital_estimatebilling"].find_one({"EstBillNo": est_bill_no}):
-                    next_number += 1
-                    est_bill_no = f"{next_number:06d}"
+            # PAY PATIENT -> Save to hospital_estimatebilling with atomic sequential EstBillNo
+            est_bill_no = get_next_est_bill_no(db_instance=mongo_db)
 
             salutation = ""
             first_name = ""
@@ -3393,7 +3443,7 @@ def save_radiology_ward_request(request):
             collection = mongo_db["hospital_estimatebilling"]
             result = collection.insert_one(request_doc)
 
-            return Response({
+            response_payload = {
                 "success": True,
                 "message": "Radiology Ward Request saved successfully to Estimate Billing",
                 "data": {
@@ -3402,7 +3452,9 @@ def save_radiology_ward_request(request):
                     "investBillNo": est_bill_no,
                     "billSource": "Estimate"
                 }
-            })
+            }
+            complete_ward_request_guard(mongo_db, lock_key, response_payload)
+            return Response(response_payload)
         else:
             # INSURANCE PATIENT -> Save to hospital_investbilling
             today = datetime.now()
@@ -3460,7 +3512,7 @@ def save_radiology_ward_request(request):
             collection = mongo_db["hospital_investbilling"]
             result = collection.insert_one(request_doc)
 
-            return Response({
+            response_payload = {
                 "success": True,
                 "message": "Radiology Ward Request saved successfully",
                 "data": {
@@ -3468,9 +3520,12 @@ def save_radiology_ward_request(request):
                     "investBillNo": invest_bill_no,
                     "billSource": "Invest Billing"
                 }
-            })
+            }
+            complete_ward_request_guard(mongo_db, lock_key, response_payload)
+            return Response(response_payload)
 
     except Exception as e:
+        fail_ward_request_guard(mongo_db, lock_key)
         print("Error saving radiology ward request:", e)
         print(traceback.format_exc())
         return Response({"success": False, "error": str(e)}, status=500)
@@ -3612,6 +3667,20 @@ def remove_individual_test_from_radiology_ward_request(request):
         return Response({"success": False, "error": str(e)}, status=500)
 
 
+def _format_rs_amount(val):
+    """Safely converts BSON Decimal128 / numeric / string totals to formatted 'Rs. X,XXX.XX'."""
+    if val is None or val == "":
+        return ""
+    try:
+        if hasattr(val, "to_decimal"):
+            num = float(val.to_decimal())
+        else:
+            num = float(str(val).strip())
+        return f"Rs. {num:,.2f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
 def get_patient_billing_clearance_data(ip_number, uhid=None):
     """
     Evaluates inpatient clearance across 6 streams:
@@ -3669,7 +3738,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("investBillDate") or d.get("created_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         status_str = d.get("status") or "Result Pending"
 
         raw_items = d.get("item", [])
@@ -3726,7 +3795,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("investBillDate") or d.get("created_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("finalPrice") if d.get("finalPrice") is not None else d.get("total")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         status_str = d.get("status") or "Result Pending"
 
         raw_items = d.get("item", [])
@@ -3823,7 +3892,7 @@ def get_patient_billing_clearance_data(ip_number, uhid=None):
         dt_raw = d.get("bill_date") or d.get("created_date") or d.get("ward_request_date")
         dt_str = format_dt_to_ist(dt_raw)
         tot = d.get("net_amount") if d.get("net_amount") is not None else d.get("total_amount")
-        tot_str = f"Rs. {float(tot):,.2f}" if tot is not None else ""
+        tot_str = _format_rs_amount(tot)
         st_str = d.get("billing_status") or "Pending"
 
         item_details = []

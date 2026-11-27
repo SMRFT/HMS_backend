@@ -109,8 +109,9 @@ def parse_date_str(d_str):
             pass
     return None
 
-def get_grn_date(g):
-    dt = g.get('invoice_date') or g.get('date') or g.get('created_date')
+def to_date_obj(dt):
+    if not dt:
+        return None
     if isinstance(dt, datetime):
         return dt.date()
     if isinstance(dt, date):
@@ -119,17 +120,28 @@ def get_grn_date(g):
         return parse_date_str(dt)
     return None
 
+def get_grn_invoice_date(g):
+    dt = g.get('invoice_date')
+    if not dt:
+        dt = g.get('date') or g.get('created_date')
+    return to_date_obj(dt)
+
+def get_grn_date(g):
+    return get_grn_invoice_date(g)
+
 def match_date_range(g, from_date, to_date):
     if not from_date and not to_date:
         return True
-    g_date = get_grn_date(g)
-    if not g_date:
-        return True
     f_dt = parse_date_str(from_date) if from_date else None
     t_dt = parse_date_str(to_date) if to_date else None
-    if f_dt and g_date < f_dt:
+
+    target_dt = get_grn_invoice_date(g)
+    if not target_dt:
+        return True
+
+    if f_dt and target_dt < f_dt:
         return False
-    if t_dt and g_date > t_dt:
+    if t_dt and target_dt > t_dt:
         return False
     return True
 
@@ -173,9 +185,17 @@ def get_drug_supplier_grn_report_data(hms_db, params):
 
         grn_no = g.get('grn_number') or g.get('draft_number') or f"GRN-{sno}"
         inv_no = g.get('invoice_no') or f"INV-2627-{sno}"
-        inv_dt = g.get('invoice_date') or g.get('date') or datetime.now().strftime("%d/%m/%Y")
-        if isinstance(inv_dt, datetime):
-            inv_dt = inv_dt.strftime("%d/%m/%Y")
+        raw_inv_dt = g.get('invoice_date') or g.get('date') or datetime.now()
+        if hasattr(raw_inv_dt, 'strftime'):
+            inv_dt_str = raw_inv_dt.strftime("%Y-%m-%d")
+        else:
+            inv_dt_str = str(raw_inv_dt or '')[:10]
+
+        raw_grn_dt = g.get('date') or g.get('created_date') or raw_inv_dt
+        if hasattr(raw_grn_dt, 'strftime'):
+            grn_dt_str = raw_grn_dt.strftime("%Y-%m-%d")
+        else:
+            grn_dt_str = str(raw_grn_dt or '')[:10]
 
         taxable = clean_num(g.get('taxable_amount') or (clean_num(g.get('net_invoice_amount') or g.get('total_amount')) * 0.95))
         cgst = clean_num(g.get('cgst') or (taxable * 0.025))
@@ -221,9 +241,9 @@ def get_drug_supplier_grn_report_data(hms_db, params):
 
         sg["grns"].append({
             "grn_number": grn_no,
-            "date": str(inv_dt)[:10],
+            "date": grn_dt_str,
             "invoice_no": inv_no,
-            "invoice_date": str(inv_dt)[:10],
+            "invoice_date": inv_dt_str,
             "taxable_amount": round(taxable, 2),
             "cgst": round(cgst, 2),
             "sgst": round(sgst, 2),
@@ -295,6 +315,9 @@ def get_drug_supplier_grn_report_data(hms_db, params):
         grand_return += ret_amt
 
     for sg in supplier_groups.values():
+        sg["grns"].sort(key=lambda x: (str(x.get('invoice_date') or x.get('date') or ''), str(x.get('date') or '')))
+        if "returns" in sg:
+            sg["returns"].sort(key=lambda x: str(x.get('date') or ''))
         sg["taxable_amount"] = round(sg["taxable_amount"], 2)
         sg["tax_amount"] = round(sg["tax_amount"], 2)
         sg["total_discount"] = round(sg["total_discount"], 2)
@@ -375,7 +398,8 @@ def get_drug_date_grn_report_data(hms_db, params):
         if vendor_filter and vendor_filter != 'all' and vid != vendor_filter:
             continue
 
-        raw_dt = g.get('date') or g.get('invoice_date') or g.get('created_date')
+        # Use invoice date for sub head instead of grn date
+        raw_dt = g.get('invoice_date') or g.get('date') or g.get('created_date')
         if hasattr(raw_dt, 'strftime'):
             d_str = raw_dt.strftime('%Y-%m-%d')
         else:
@@ -383,11 +407,15 @@ def get_drug_date_grn_report_data(hms_db, params):
         if not d_str or len(d_str) < 10:
             d_str = datetime.now().strftime("%Y-%m-%d")
 
+        raw_grn_dt = g.get('date') or g.get('created_date') or raw_dt
+        if hasattr(raw_grn_dt, 'strftime'):
+            grn_dt_str = raw_grn_dt.strftime('%Y-%m-%d')
+        else:
+            grn_dt_str = str(raw_grn_dt or '')[:10]
+
         grn_no = g.get('grn_number') or g.get('draft_number') or f"GRN-{sno}"
         inv_no = g.get('invoice_no') or f"INV-2627-{sno}"
-        inv_dt = g.get('invoice_date') or g.get('date') or d_str
-        if isinstance(inv_dt, datetime):
-            inv_dt = inv_dt.strftime("%Y-%m-%d")
+        inv_dt_str = d_str
 
         taxable = clean_num(g.get('taxable_amount') or (clean_num(g.get('net_invoice_amount') or g.get('total_amount')) * 0.95))
         cgst = clean_num(g.get('cgst') or (taxable * 0.025))
@@ -436,9 +464,9 @@ def get_drug_date_grn_report_data(hms_db, params):
 
         dg["grns"].append({
             "grn_number": grn_no,
-            "date": d_str,
+            "date": grn_dt_str,
             "invoice_no": inv_no,
-            "invoice_date": str(inv_dt)[:10],
+            "invoice_date": inv_dt_str,
             "vendor_id": vid,
             "vendor_name": v_name,
             "vendor_gstin": v_gstin,
@@ -535,11 +563,14 @@ def get_drug_date_grn_report_data(hms_db, params):
 
         dates_list.append(dg)
 
-    # Sort dates descending (newest first)
-    dates_list.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+    # Sort dates ascending (earliest date first) as requested
+    dates_list.sort(key=lambda x: str(x.get('date', '')))
+    for dg in dates_list:
+        dg["grns"].sort(key=lambda g: (str(g.get('invoice_date') or g.get('date') or ''), str(g.get('date') or '')))
+        dg["returns"].sort(key=lambda r: str(r.get('date') or ''))
 
     columns = [
-        {"key": "date", "label": "Date", "width": "120px"},
+        {"key": "date", "label": "Invoice Date", "width": "120px"},
         {"key": "day_of_week", "label": "Day", "width": "100px"},
         {"key": "total_grns", "label": "Total GRNs", "width": "100px", "align": "center"},
         {"key": "suppliers_count", "label": "Suppliers", "width": "90px", "align": "center"},

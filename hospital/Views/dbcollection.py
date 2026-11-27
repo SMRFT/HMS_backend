@@ -51,6 +51,7 @@ hospital_tumour_board_collection  = hms_db["hospital_tumourBoard"]
 hospital_tumour_template_collection = hms_db["hospital_tumourTemplate"]
 stores_intent_dept_approval_collection = hms_db["hospital_storesintentdepartmentapproval"]
 hospital_CardPaymentList = hms_db["hospital_CardPaymentList"]
+salesreturn_collection   = hms_db["hospital_salesreturn"]
 
 import re
 
