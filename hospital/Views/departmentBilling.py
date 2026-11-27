@@ -23,6 +23,7 @@ from bson.json_util import dumps
 import json
 from pymongo import MongoClient, ReturnDocument
 import re
+from ..counter_service import get_next_est_bill_no
 
 IST = py_timezone(py_timedelta(hours=5, minutes=30))
 
@@ -508,6 +509,45 @@ def ip_patient_detail_by_ipNumber(request, ipNumber):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )       
  
+def resolve_doctor_id_backend(doc_val, global_db):
+    if not doc_val or str(doc_val).strip().upper() in ["", "SELF", "NONE", "NULL"]:
+        return str(doc_val or "").strip()
+    doc_str = str(doc_val).strip()
+    profile_col = global_db['backend_diagnostics_profile']
+
+    # 1. Direct match by employeeId
+    if profile_col.find_one({"employeeId": doc_str}):
+        return doc_str
+
+    # 2. Strip parentheses e.g. "DR.KATHIRVEL KUMARAN (SURGICAL ONCOLOGIST)"
+    cleaned = re.sub(r'\s*\([^)]*\)', '', doc_str).strip()
+
+    # 3. Exact match by employeeName (case-insensitive)
+    doc = profile_col.find_one({"employeeName": {"$regex": f"^{re.escape(cleaned)}$", "$options": "i"}})
+    if doc and doc.get("employeeId"):
+        return str(doc["employeeId"])
+
+    # 4. Strip "Dr." prefix
+    norm = re.sub(r'^(dr\.?|dr\b)\s*', '', cleaned, flags=re.I).strip()
+    if norm:
+        doc = profile_col.find_one({"employeeName": {"$regex": f"^{re.escape(norm)}$", "$options": "i"}})
+        if doc and doc.get("employeeId"):
+            return str(doc["employeeId"])
+        doc = profile_col.find_one({"employeeName": {"$regex": re.escape(norm), "$options": "i"}})
+        if doc and doc.get("employeeId"):
+            return str(doc["employeeId"])
+
+        # 5. Token match
+        words = [w for w in re.split(r'[\s,.-]+', norm) if len(w) > 2]
+        if words:
+            for p in profile_col.find({}, {"employeeId": 1, "employeeName": 1}):
+                p_name = (p.get("employeeName") or "").lower()
+                if all(w.lower() in p_name for w in words):
+                    return str(p["employeeId"])
+
+    return doc_str
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([HasRoleAndDataPermission])
@@ -518,37 +558,92 @@ def estimate_billing_create(request):
         outlet_code = request.data.get('auth-outlet-code', 'system')
         hospital_code = request.data.get('auth-hospital-code', 'system')
 
-        with transaction.atomic():
-            last_bill = EstimateBilling.objects.select_for_update().order_by('-id').first()
+        formatted_bill_no = get_next_est_bill_no()
 
-            if last_bill and last_bill.EstBillNo:
-                last_number = int(last_bill.EstBillNo)
-                next_number = last_number + 1
+        request_data = {k: v for k, v in request.data.items()
+                        if not k.startswith('auth-') and k not in ['wardName', 'fromEstBillNo', 'status']}
+
+        request_data['EstBillNo'] = formatted_bill_no
+        request_data['EstBillDate'] = timezone.now()
+        request_data['created_by'] = current_user
+        request_data['branch_code'] = branch_code
+        request_data['hospital_code'] = hospital_code
+        request_data['outlet_code'] = outlet_code
+
+        # Normalize and clean items list
+        raw_items = request_data.get('item', [])
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+                if isinstance(raw_items, str):
+                    raw_items = json.loads(raw_items)
+            except (json.JSONDecodeError, TypeError):
+                raw_items = []
+        if not isinstance(raw_items, list):
+            raw_items = []
+
+        cleaned_items = []
+        for it in raw_items:
+            if not isinstance(it, dict):
+                continue
+            for r_key in ["rate", "nabh_rate", "non_nabh_rate", "no_nabh_rate"]:
+                it.pop(r_key, None)
+
+            it_name = str(it.get("itemName") or "").strip().upper()
+            it_btn = str(it.get("billTypeNo") or "").strip().upper()
+            is_syg = (it_btn == "SYG01" or it_name == "SYRINGE")
+
+            if is_syg:
+                it["billTypeNo"] = "SYG01"
+                it["status"] = "Printed"
+                it.pop("test_id", None)
+                if not it.get("item_id"):
+                    it["item_id"] = 1
             else:
-                next_number = 1
+                if it.get("status") == "Printed" or not it.get("status"):
+                    it["status"] = "Result Pending"
+            cleaned_items.append(it)
 
-            formatted_bill_no = f"{next_number:06d}"
+        request_data['item'] = cleaned_items
 
-            while EstimateBilling.objects.filter(EstBillNo=formatted_bill_no).exists():
-                next_number += 1
-                formatted_bill_no = f"{next_number:06d}"
+        # Resolve doctor ID
+        doc_input = request_data.get('doctor', '')
+        resolved_doc_id = doc_input
+        m_client = None
+        try:
+            m_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+            global_db = m_client['Global']
+            resolved_doc_id = resolve_doctor_id_backend(doc_input, global_db)
+        except Exception as err:
+            print("Error resolving doctor in backend:", err)
+        finally:
+            if m_client:
+                m_client.close()
+        request_data['doctor'] = resolved_doc_id
 
-            request_data = {k: v for k, v in request.data.items()
-                            if not k.startswith('auth-')}
+        serializer = EstimateBillingSerializer(data=request_data)
+        if serializer.is_valid():
+            serializer.save()
 
-            request_data['EstBillNo'] = formatted_bill_no
-            request_data['EstBillDate'] = timezone.now()   # ← server time
-            request_data['created_by'] = current_user      # ← from auth header
-            request_data['branch_code'] = branch_code      # ← from auth header
-            request_data['hospital_code'] = hospital_code      # ← from auth header
-            request_data['outlet_code'] = outlet_code      # ← from auth header
+            # Ensure item is stored as a native BSON array and doctor as doctor ID in MongoDB
+            try:
+                mongo_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                mongo_db = mongo_client['HMS']
+                mongo_db['hospital_estimatebilling'].update_one(
+                    {"EstBillNo": formatted_bill_no},
+                    {"$set": {
+                        "item": cleaned_items,
+                        "doctor": resolved_doc_id
+                    }}
+                )
+                mongo_client.close()
+            except Exception as e:
+                print("Error updating estimate billing in Mongo:", e)
 
-            serializer = EstimateBillingSerializer(data=request_data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({'message': 'Form data saved successfully!', 'EstBillNo': formatted_bill_no}, status=201)
+            return Response({'message': 'Form data saved successfully!', 'EstBillNo': formatted_bill_no}, status=201)
 
-            return Response(serializer.errors, status=400)
+        print("EstimateBillingSerializer validation errors:", serializer.errors)
+        return Response(serializer.errors, status=400)
 
 def serialize_val(val):
     """Make a single value JSON-safe."""
@@ -1079,89 +1174,109 @@ def get_investigation_items(request):
                 }
             ))
 
+            btn_upper = str(bill_type_no).upper().strip()
+
             # 2. Fetch NABH codes & rates from HMS database -> hospital_lab_nabh_rate
-            hms_db = client['HMS']
-            nabh_collection = hms_db['hospital_lab_nabh_rate']
-            nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1}))
+            # ONLY for LAB02 and LAB03. For LAB01 and others, do NOT check with NABH collection.
+            nabh_map = {}
+            if btn_upper in ["LAB02", "LAB03"]:
+                hms_db = client['HMS']
+                nabh_collection = hms_db['hospital_lab_nabh_rate']
+                nabh_records = list(nabh_collection.find({}, {"_id": 0, "test_id": 1, "nabh_code": 1, "nabh_rate": 1, "non_nabh_rate": 1, "test_name": 1}))
+
+                # Build lookup dictionary: each individual test_id -> nabh_record
+                # test_id in hospital_lab_nabh_rate can be a single int OR a list of ints
+                # (multiple tests sharing the same nabh_code/rate).
+                for n_rec in nabh_records:
+                    tid_field = n_rec.get('test_id')
+                    if tid_field is None:
+                        continue
+                    # Normalise to list so single-int and array are handled the same way
+                    tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
+                    for tid in tid_list:
+                        if tid is not None:
+                            t_str = str(tid).strip()
+                            nabh_map[t_str] = n_rec
+                            try:
+                                nabh_map[str(int(t_str))] = n_rec
+                            except Exception:
+                                pass
 
             client.close()
 
-            # Build lookup dictionary: each individual test_id -> nabh_record
-            # test_id in hospital_lab_nabh_rate can be a single int OR a list of ints
-            # (multiple tests sharing the same nabh_code/rate).
-            nabh_map = {}
-            for n_rec in nabh_records:
-                tid_field = n_rec.get('test_id')
-                if tid_field is None:
-                    continue
-                # Normalise to list so single-int and array are handled the same way
-                tid_list = tid_field if isinstance(tid_field, list) else [tid_field]
-                for tid in tid_list:
-                    if tid is not None:
-                        t_str = str(tid).strip()
-                        nabh_map[t_str] = n_rec
-                        try:
-                            nabh_map[str(int(t_str))] = n_rec
-                        except Exception:
-                            pass
+            def is_valid_rate(val):
+                if val is None:
+                    return False
+                val_str = str(val).strip()
+                if not val_str or val_str.lower() in ['none', 'null', 'nan']:
+                    return False
+                try:
+                    return float(val_str) > 0
+                except (ValueError, TypeError):
+                    return False
 
-            btn_upper = str(bill_type_no).upper().strip()
             formatted_items = []
             for test in tests:
                 t_id = test.get('test_id', '')
                 t_id_str = str(t_id).strip() if t_id is not None else ''
 
-                # Lookup NABH record (supporting both string and integer keys)
-                nabh_info = nabh_map.get(t_id_str)
-                if not nabh_info and t_id_str:
-                    try:
-                        nabh_info = nabh_map.get(str(int(t_id_str)))
-                    except Exception:
-                        nabh_info = None
-
-                nabh_code = str(nabh_info.get('nabh_code', '')).strip() if nabh_info else ""
-                nabh_rate = nabh_info.get('nabh_rate') if nabh_info else None
-                non_nabh_rate = nabh_info.get('non_nabh_rate') if nabh_info else None
-
                 if btn_upper == "LAB01":
-                    # LAB01: No nabh_code, price from SH_Rate
+                    # LAB01: No NABH collection check, no nabh_code, price from SH_Rate.
+                    # Exclude tests where SH_Rate is null or 0.
+                    sh_rate = test.get('SH_Rate')
+                    if not is_valid_rate(sh_rate):
+                        continue
                     nabh_code = ""
-                    price = test.get('SH_Rate', '0')
+                    price = str(sh_rate).strip()
 
                 elif btn_upper == "LAB02":
                     # LAB02: NABH rate & NABH code
+                    nabh_info = nabh_map.get(t_id_str)
+                    if not nabh_info and t_id_str:
+                        try:
+                            nabh_info = nabh_map.get(str(int(t_id_str)))
+                        except Exception:
+                            nabh_info = None
                     if not nabh_info:
                         continue
-                    if nabh_rate is not None and str(nabh_rate).strip() != "" and str(nabh_rate).strip().lower() != "none":
-                        price = str(nabh_rate).strip()
-                    else:
-                        price = "0"
+                    nabh_rate = nabh_info.get('nabh_rate')
+                    if not is_valid_rate(nabh_rate):
+                        continue
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    price = str(nabh_rate).strip()
 
                 elif btn_upper == "LAB03":
                     # LAB03: Non-NABH rate & NABH code
+                    nabh_info = nabh_map.get(t_id_str)
+                    if not nabh_info and t_id_str:
+                        try:
+                            nabh_info = nabh_map.get(str(int(t_id_str)))
+                        except Exception:
+                            nabh_info = None
                     if not nabh_info:
                         continue
-                    if non_nabh_rate is not None and str(non_nabh_rate).strip() != "" and str(non_nabh_rate).strip().lower() != "none":
-                        price = str(non_nabh_rate).strip()
-                    else:
-                        price = "0"
+                    non_nabh_rate = nabh_info.get('non_nabh_rate')
+                    if not is_valid_rate(non_nabh_rate):
+                        continue
+                    nabh_code = str(nabh_info.get('nabh_code', '')).strip()
+                    price = str(non_nabh_rate).strip()
 
                 else:
-                    # Fallback for any other LAB category
-                    price = test.get('SH_Rate', '0')
+                    # Fallback for any other LAB category using SH_Rate
+                    sh_rate = test.get('SH_Rate')
+                    if not is_valid_rate(sh_rate):
+                        continue
+                    nabh_code = ""
+                    price = str(sh_rate).strip()
 
-                if price is None or str(price).strip().lower() == 'none' or str(price).strip() == '':
-                    price = "0"
+                if not is_valid_rate(price):
+                    continue
 
                 formatted_items.append({
                     "itemName": test.get('test_name', ''),
                     "price": str(price),
-                    "rate": str(price),
                     "test_id": t_id,
                     "nabh_code": nabh_code,
-                    "nabh_rate": nabh_rate,
-                    "non_nabh_rate": non_nabh_rate,
-                    "no_nabh_rate": non_nabh_rate,
                     "shortcut": (test.get('shortcut') or "").strip(),
                 })
 
@@ -1291,6 +1406,18 @@ def invest_billing_create(request):
         data = {k: v for k, v in request.data.items()
                 if not k.startswith('auth-')}
 
+        # ── Resolve doctor ID if name passed ───────────────────
+        if data.get("doctor"):
+            g_client = None
+            try:
+                g_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                data["doctor"] = resolve_doctor_id_backend(data["doctor"], g_client['Global'])
+            except Exception as err:
+                print("Error resolving doctor in invest_billing_create:", err)
+            finally:
+                if g_client:
+                    g_client.close()
+
         # ── Normalize item field ───────────────────────────────
         def normalize_item(item):
             if isinstance(item, list):
@@ -1312,7 +1439,30 @@ def invest_billing_create(request):
             return []
 
         if "item" in data:
-            data["item"] = normalize_item(data["item"])
+            raw_items = normalize_item(data["item"])
+            cleaned_items = []
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                # Remove rate, nabh_rate, non_nabh_rate, no_nabh_rate
+                for r_key in ["rate", "nabh_rate", "non_nabh_rate", "no_nabh_rate"]:
+                    it.pop(r_key, None)
+                
+                it_name = str(it.get("itemName") or "").strip().upper()
+                it_btn = str(it.get("billTypeNo") or "").strip().upper()
+                is_syg = (it_btn == "SYG01" or it_name == "SYRINGE")
+                
+                if is_syg:
+                    it["billTypeNo"] = "SYG01"
+                    it["status"] = "Printed"
+                    it.pop("test_id", None)
+                    if not it.get("item_id"):
+                        it["item_id"] = 1
+                else:
+                    if it.get("status") == "Printed" or not it.get("status"):
+                        it["status"] = "Result Pending"
+                cleaned_items.append(it)
+            data["item"] = cleaned_items
 
         # ── Server-side validation for Age and Age Type ──
         age_val = str(data.get("age", "")).strip()
@@ -1334,7 +1484,7 @@ def invest_billing_create(request):
         est_doc = None
         if est_bill_no:
             est_doc = mongo_db['hospital_estimatebilling'].find_one({"EstBillNo": est_bill_no})
-            mongo_db['hospital_estimatebilling'].update_one(
+            mongo_db['hospital_estimatebilling'].update_many(
                 {"EstBillNo": est_bill_no, "is_active": True},
                 {"$set": {
                     "is_active": False,
@@ -1345,10 +1495,13 @@ def invest_billing_create(request):
 
         data.pop("EstBillDate", None)
 
-        # Retain reference to original EstBillNo
+        # Retain reference to original EstBillNo (EstBillNo is enough, do not store fromEstBillNo)
         if est_bill_no:
-            data["fromEstBillNo"] = est_bill_no
             data["EstBillNo"] = est_bill_no
+
+        data.pop("fromEstBillNo", None)
+        data.pop("status", None)
+        data.pop("wardName", None)
 
         if est_doc:
             if est_doc.get("is_ward_request") or data.get("is_ward_request"):
@@ -1356,12 +1509,8 @@ def invest_billing_create(request):
                 data["ward_request_type"] = est_doc.get("ward_request_type") or data.get("ward_request_type") or "LAB"
             if not data.get("roomNo") and est_doc.get("roomNo"):
                 data["roomNo"] = est_doc.get("roomNo")
-            if not data.get("wardName") and est_doc.get("wardName"):
-                data["wardName"] = est_doc.get("wardName")
             if not data.get("ipNumber") and est_doc.get("ipNumber"):
                 data["ipNumber"] = est_doc.get("ipNumber")
-            if not data.get("status") and est_doc.get("status"):
-                data["status"] = est_doc.get("status")
 
         bill_type = data.get("bill_type")
         if not bill_type:
@@ -1431,15 +1580,11 @@ def invest_billing_create(request):
             data["lastmodified_by"] = current_user
             data["lastmodified_date"] = timezone.now()
             data["editRemarks"] = edit_remarks
-            if is_cash:
-                data["is_approved"] = False
-                data["approved_by"] = None
-                data["approved_date"] = None
-            else:
-                data["is_approved"] = True
-                data["approved_by"] = current_user
-                data["approved_date"] = timezone.now()
+            data["is_approved"] = True
+            data["approved_by"] = current_user
+            data["approved_date"] = timezone.now()
             data.pop("investBillNo", None)
+            data.pop("investBillDate", None)
 
             invest_collection.update_one(
                 {"_id": existing_record["_id"]},
@@ -1590,10 +1735,22 @@ def billing_report_view(request):
         # ── Bill type filter ───────────────────────────────────
         bill_type_param = request.GET.get('billType')
         if bill_type_param:
-            try:
-                query["bill_type"] = int(bill_type_param)
-            except:
-                query["bill_type"] = bill_type_param
+            bts = [b.strip() for b in str(bill_type_param).split(",") if b.strip()]
+            if len(bts) == 1:
+                try:
+                    int_val = int(bts[0])
+                    query["bill_type"] = {"$in": [int_val, str(int_val)]}
+                except (ValueError, TypeError):
+                    query["bill_type"] = bts[0]
+            elif len(bts) > 1:
+                val_list = []
+                for b in bts:
+                    try:
+                        int_v = int(b)
+                        val_list.extend([int_v, str(int_v)])
+                    except (ValueError, TypeError):
+                        val_list.append(b)
+                query["bill_type"] = {"$in": val_list}
 
         bill_type_no_param = request.GET.get('billTypeNo')
         if bill_type_no_param:
@@ -1950,32 +2107,16 @@ def delete_bill_view(request):
                 {"EstBillNo": investBillNo, "is_active": True}
             )
 
-        pm = str((existing_bill.get('paymentMethod') if existing_bill else None) or request.data.get('paymentMethod', '')).strip().lower()
-        is_cash = (pm == 'cash')
-
-        if is_cash:
-            # Cash bill: requires approval in Dept BUD Report
-            update_data = {
-                "is_delete_requested": True,
-                "deletedBy":           employeeId,
-                "deletedAt":           now,
-                "deleteRemarks":       delete_remarks,
-                "is_approved":         False,
-                "approved_by":         None,
-                "approved_date":       None,
-            }
-        else:
-            # Credit bill: directly store is_approved: True and is_active: False
-            update_data = {
-                "is_active":           False,
-                "is_delete_requested": True,
-                "deletedBy":           employeeId,
-                "deletedAt":           now,
-                "deleteRemarks":       delete_remarks,
-                "is_approved":         True,
-                "approved_by":         employeeId,
-                "approved_date":       now,
-            }
+        update_data = {
+            "is_active":           False,
+            "paymentStatus":       "Deleted",
+            "deletedBy":           employeeId,
+            "deletedAt":           now,
+            "deleteRemarks":       delete_remarks,
+            "is_approved":         True,
+            "approved_by":         employeeId,
+            "approved_date":       now,
+        }
 
         delete_history_entry = {
             "action": "delete",
@@ -1983,14 +2124,14 @@ def delete_bill_view(request):
             "modified_by": employeeId,
             "editRemarks": delete_remarks,
             "deleteRemarks": delete_remarks,
-            "is_approved": not is_cash,
-            "approved_by": employeeId if not is_cash else None,
-            "approved_date": now if not is_cash else None,
+            "is_approved": True,
+            "approved_by": employeeId,
+            "approved_date": now,
             "paymentMethod": (existing_bill.get("paymentMethod") if existing_bill else "") or request.data.get('paymentMethod', '') or "",
             "changes": {
                 "Status": {
                     "old": "Active",
-                    "new": "Deleted" if not is_cash else "Delete Requested",
+                    "new": "Deleted",
                 },
                 "Delete Reason": {
                     "old": "—",
@@ -2003,7 +2144,6 @@ def delete_bill_view(request):
             {
                 "$or": [{"investBillNo": investBillNo}, {"EstBillNo": investBillNo}],
                 "is_active": True,
-                "is_delete_requested": {"$ne": True},
             },
             {
                 "$set": update_data,
@@ -2012,7 +2152,6 @@ def delete_bill_view(request):
         )
 
         if result.matched_count == 0:
-            # Estimate bills have no approval flow in the audit report -> keep old behaviour
             result = db['hospital_estimatebilling'].update_one(
                 {"EstBillNo": investBillNo, "is_active": True},
                 {"$set": {
@@ -2024,9 +2163,9 @@ def delete_bill_view(request):
             )
 
         if result.matched_count == 0:
-            return JsonResponse({'error': 'Bill not found or delete already requested'}, status=404)
+            return JsonResponse({'error': 'Bill not found or already deleted'}, status=404)
 
-        return JsonResponse({'message': 'Delete request submitted for approval'}, status=200)
+        return JsonResponse({'message': 'Bill deleted successfully'}, status=200)
 
     except Exception as e:
         return JsonResponse({'error': 'Failed to delete bill', 'details': str(e)}, status=500)
@@ -2569,6 +2708,18 @@ def invest_refund_create(request):
 
         data = {k: v for k, v in request.data.items()
                 if not k.startswith('auth-')}
+
+        # ── Resolve doctor ID if name passed ───────────────────
+        if data.get("doctor"):
+            g_client = None
+            try:
+                g_client = MongoClient(os.getenv('GLOBAL_DB_HOST'))
+                data["doctor"] = resolve_doctor_id_backend(data["doctor"], g_client['Global'])
+            except Exception as err:
+                print("Error resolving doctor in invest_billing_create:", err)
+            finally:
+                if g_client:
+                    g_client.close()
 
         # ── Validate required fields ────────────────────────────────────────
         required = ['investBillNo', 'uhid', 'bill_type', 'item', 'refund_finalPrice']

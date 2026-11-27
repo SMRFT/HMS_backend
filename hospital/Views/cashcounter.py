@@ -709,13 +709,7 @@ def cash_counter_shiftdetails(request):
         ]:
             setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
-        shift.closingTime = closing_time
-        shift.ShiftStatus = "inactive"
-        shift.is_active = False
-        shift.lastmodified_by = employee_id
-        shift.lastmodified_date = timezone.now()
-        shift.save()
-
+        # 1. Update MongoDB collection directly FIRST to guarantee shift is marked inactive
         try:
             m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             m_db = m_client["HMS"]
@@ -737,8 +731,19 @@ def cash_counter_shiftdetails(request):
                 }}
             )
             m_client.close()
-        except Exception:
-            pass
+        except Exception as db_err:
+            print(f"[cash_counter_shiftdetails] Direct Mongo update warning: {db_err}")
+
+        # 2. Update Django ORM instance inside try-except so ORM errors never block closure
+        try:
+            shift.closingTime = closing_time
+            shift.ShiftStatus = "inactive"
+            shift.is_active = False
+            shift.lastmodified_by = employee_id
+            shift.lastmodified_date = timezone.now()
+            shift.save()
+        except Exception as orm_err:
+            print(f"[cash_counter_shiftdetails] ORM shift save warning: {orm_err}")
 
         # ✅ Record remitted/submitted transactions in hospital_cashcountercollection
         try:
@@ -1100,7 +1105,12 @@ def calculate_shift_collection(shift_no):
             elif d.get("receipt_type") == "Payment":
                 results["payments"] += amt
                 results["total_collection"] -= amt
-                results["cash_collection"] -= amt
+                # Payments are majorly or only done by cash; only exempt from cash drawer deduction if explicitly marked non-cash
+                pm = str(d.get("payment_method") or d.get("payment_mode") or d.get("payment_type") or d.get("mode_of_payment") or "").strip().lower()
+                if pm in ["cheque", "bank", "online", "neft", "rtgs", "card", "upi"]:
+                    pass
+                else:
+                    results["cash_collection"] -= amt
 
     except Exception as e:
         print("Error calculating shift collection:", e)

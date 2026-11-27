@@ -612,16 +612,18 @@ def patient_wise_pharmacy_ip_bill_api(request):
 
                 # Apply date filters
                 if adm_day_start and b_dt and (b_ip != target_ip):
-                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    if b_check_date < adm_day_start.date():
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    adm_check_date = adm_day_start.date() if hasattr(adm_day_start, 'date') else (parse_date(str(adm_day_start)[:10]).date() if parse_date(str(adm_day_start)[:10]) else None)
+                    if b_check_date and adm_check_date and b_check_date < adm_check_date:
                         continue
 
                 if apply_dates and dt_start and b_dt:
-                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
-                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
-                    if not (s_date_only <= b_date_only <= e_date_only):
-                        continue
+                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else (parse_date(str(dt_start)[:10]).date() if parse_date(str(dt_start)[:10]) else None)
+                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else (parse_date(str(dt_end)[:10]).date() if parse_date(str(dt_end)[:10]) else None)
+                    if b_date_only and s_date_only and e_date_only:
+                        if not (s_date_only <= b_date_only <= e_date_only):
+                            continue
 
                 b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
 
@@ -641,6 +643,19 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     if allowed_ids and it_id not in allowed_ids:
                         continue
 
+                    # If dispatched_qty is explicitly specified and <= 0, item was NOT dispatched in this bill!
+                    if itm.get('dispatched_qty') is not None:
+                        qty = clean_num(itm.get('dispatched_qty'))
+                    else:
+                        qty = clean_num(itm.get('qty') or itm.get('quantity') or 0)
+
+                    if qty <= 0:
+                        continue
+
+                    # If an item was not billed (no batch and no total/price and not dispatched), skip it
+                    if not itm.get('batch_number') and not itm.get('batch') and itm.get('total') is None and itm.get('calculated_price') is None and itm.get('price') is None and itm.get('mrp') is None:
+                        continue
+
                     try:
                         it_id_int = int(it_id) if it_id is not None else None
                     except (ValueError, TypeError):
@@ -652,7 +667,6 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     stk_fallback = stock_item_fallback.get(it_id_int, {})
 
                     part_name = itm.get('item_name') or itm.get('name') or im_doc.get('item_name') or "MEDICINE"
-                    qty = clean_num(itm.get('dispatched_qty') or itm.get('qty') or 1)
 
                     raw_price = itm.get('mrp') or itm.get('price')
                     if raw_price is not None and str(raw_price).strip() != "":
@@ -736,6 +750,8 @@ def patient_wise_pharmacy_ip_bill_api(request):
                         "particulars": part_name,
                         "batch": batch,
                         "expiry": exp_str,
+                        "rate": round(price, 2) if price > 0 else (round(item_amt , 2) if qty > 0 else 0.0),
+                        "price": round(price, 2) if price > 0 else (round(item_amt , 2) if qty > 0 else 0.0),
                         "amount": item_amt,
                         "hsn": hsn,
                         "cgst_pct": cgst_pct,
@@ -758,16 +774,30 @@ def patient_wise_pharmacy_ip_bill_api(request):
                 b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
                 b_net_tot = round(b_net_tot, 2)
 
-                # Check for bill-level discount and stored net amount
-                b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
+                # Calculate actual discount
+                items_disc = round(sum(clean_num(itm.get('discount_amount') or itm.get('discount') or 0) for itm in (b.get('medicine_particulars') or b.get('items') or [])), 2)
+                overall_disc = clean_num(b.get('overall_discount_amount') or (b.get('overall_discount_value') if str(b.get('overall_discount_type')).lower() == 'amount' else 0))
                 stored_net = clean_num(b.get('net_amount'))
 
-                # Net amount reflects any discount applied; only use stored_net if consistent with item totals within round-off
-                expected_net = round(b_net_tot - b_disc, 2)
-                if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
+                # If stored_net matches the gross item total within rounding (e.g. 306.0 vs 305.70),
+                # it proves NO discount was applied to this bill regardless of any stale/dirty discount fields
+                if stored_net > 0 and abs(stored_net - b_net_tot) <= 2.0:
+                    b_disc = 0.0
+                    bill_final_net = stored_net
+                elif items_disc > 0 or overall_disc > 0:
+                    b_disc = min(b_net_tot, round(items_disc + overall_disc, 2))
+                    expected_net = round(b_net_tot - b_disc, 2)
+                    bill_final_net = stored_net if (stored_net > 0 and abs(stored_net - expected_net) <= 2.0) else expected_net
+                elif clean_num(b.get('discount_amount')) > 0 and stored_net > 0 and stored_net < (b_net_tot - 0.5):
+                    b_disc = round(b_net_tot - stored_net, 2)
                     bill_final_net = stored_net
                 else:
-                    bill_final_net = expected_net
+                    b_disc = 0.0
+                    # If allowed_ids filtered a parent ward-request doc, stored_net may be the un-split request total
+                    if allowed_ids and stored_net > (b_net_tot + 5.0):
+                        bill_final_net = b_net_tot
+                    else:
+                        bill_final_net = stored_net if stored_net > 0 else b_net_tot
 
                 tax_grand += b_taxable_tot
                 cgst_grand += b_cgst_tot
@@ -2910,6 +2940,25 @@ def medicine_abstract_api(request):
             ]
         }).sort("created_date", 1))
 
+        # Prefer standalone / child bill docs (no dispatch_history) over parent ward-request docs when bill_no is shared
+        def abs_doc_priority(doc):
+            u = str(doc.get('uhid') or '').strip()
+            ip = str(doc.get('inpatient_number') or '').strip()
+            p = str(doc.get('patient_name') or doc.get('patientname') or '').strip()
+            dh = doc.get('dispatch_history') or []
+            score = 0
+            if len(dh) == 0:
+                score += 100
+            if u in all_uhids or u in all_ips:
+                score += 10
+            if ip in all_ips or ip in all_uhids:
+                score += 10
+            if p and patient_name and patient_name.lower() in p.lower():
+                score += 5
+            return score
+
+        raw_bills.sort(key=abs_doc_priority, reverse=True)
+
         # Pre-cache stock details for items that might be missing explicit prices
         abs_item_ids = set()
         for b in raw_bills:
@@ -2984,16 +3033,18 @@ def medicine_abstract_api(request):
                             b_dt = parse_date(raw_date[:10])
 
                 if adm_day_start and b_dt and (b_ip != target_ip):
-                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    if b_check_date < adm_day_start.date():
+                    b_check_date = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    adm_check_date = adm_day_start.date() if hasattr(adm_day_start, 'date') else (parse_date(str(adm_day_start)[:10]).date() if parse_date(str(adm_day_start)[:10]) else None)
+                    if b_check_date and adm_check_date and b_check_date < adm_check_date:
                         continue
 
                 if apply_dates and dt_start and b_dt:
-                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else b_dt
-                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else dt_start
-                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else dt_end
-                    if not (s_date_only <= b_date_only <= e_date_only):
-                        continue
+                    b_date_only = b_dt.date() if hasattr(b_dt, 'date') else (parse_date(str(b_dt)[:10]).date() if parse_date(str(b_dt)[:10]) else None)
+                    s_date_only = dt_start.date() if hasattr(dt_start, 'date') else (parse_date(str(dt_start)[:10]).date() if parse_date(str(dt_start)[:10]) else None)
+                    e_date_only = dt_end.date() if hasattr(dt_end, 'date') else (parse_date(str(dt_end)[:10]).date() if parse_date(str(dt_end)[:10]) else None)
+                    if b_date_only and s_date_only and e_date_only:
+                        if not (s_date_only <= b_date_only <= e_date_only):
+                            continue
 
                 b_date_str = b_dt.strftime("%d/%m/%Y") if b_dt else ""
 
@@ -3010,6 +3061,19 @@ def medicine_abstract_api(request):
                     if allowed_ids and it_id not in allowed_ids:
                         continue
 
+                    # If dispatched_qty is explicitly specified and <= 0, item was NOT dispatched in this bill!
+                    if itm.get('dispatched_qty') is not None:
+                        qty = clean_num(itm.get('dispatched_qty'))
+                    else:
+                        qty = clean_num(itm.get('qty') or itm.get('quantity') or 0)
+
+                    if qty <= 0:
+                        continue
+
+                    # If an item was not billed (no batch and no total/price and not dispatched), skip it
+                    if not itm.get('batch_number') and not itm.get('batch') and itm.get('total') is None and itm.get('calculated_price') is None and itm.get('price') is None and itm.get('mrp') is None:
+                        continue
+
                     try:
                         it_id_int = int(it_id) if it_id is not None else None
                     except (ValueError, TypeError):
@@ -3019,7 +3083,6 @@ def medicine_abstract_api(request):
                     stk_fallback = abs_stock_fallback.get(it_id_int, {})
 
                     raw_price = itm.get('mrp') or itm.get('price')
-                    qty = clean_num(itm.get('qty') or itm.get('quantity') or 1)
                     if raw_price is not None and str(raw_price).strip() != "":
                         price = clean_num(raw_price)
                     elif stk_doc and stk_doc.get('mrp') is not None:
@@ -3082,16 +3145,30 @@ def medicine_abstract_api(request):
                 b_gst_tot = round(b_cgst_tot + b_sgst_tot, 2)
                 b_net_tot = round(b_net_tot, 2)
 
-                # Check for bill-level discount and stored net amount
-                b_disc = clean_num(b.get('overall_discount_amount') or b.get('discount_amount') or b.get('total_item_discount'))
+                # Calculate actual discount
+                items_disc = round(sum(clean_num(itm.get('discount_amount') or itm.get('discount') or 0) for itm in (b.get('medicine_particulars') or b.get('items') or [])), 2)
+                overall_disc = clean_num(b.get('overall_discount_amount') or (b.get('overall_discount_value') if str(b.get('overall_discount_type')).lower() == 'amount' else 0))
                 stored_net = clean_num(b.get('net_amount'))
 
-                # Use net_amount for Bill Amount; only take stored_net if consistent with item totals within round-off
-                expected_net = round(b_net_tot - b_disc, 2)
-                if stored_net > 0 and abs(stored_net - expected_net) <= 2.0:
+                # If stored_net matches the gross item total within rounding (e.g. 306.0 vs 305.70),
+                # it proves NO discount was applied to this bill regardless of any stale/dirty discount fields
+                if stored_net > 0 and abs(stored_net - b_net_tot) <= 2.0:
+                    b_disc = 0.0
+                    bill_final_net = stored_net
+                elif items_disc > 0 or overall_disc > 0:
+                    b_disc = min(b_net_tot, round(items_disc + overall_disc, 2))
+                    expected_net = round(b_net_tot - b_disc, 2)
+                    bill_final_net = stored_net if (stored_net > 0 and abs(stored_net - expected_net) <= 2.0) else expected_net
+                elif clean_num(b.get('discount_amount')) > 0 and stored_net > 0 and stored_net < (b_net_tot - 0.5):
+                    b_disc = round(b_net_tot - stored_net, 2)
                     bill_final_net = stored_net
                 else:
-                    bill_final_net = expected_net
+                    b_disc = 0.0
+                    # If allowed_ids filtered a parent ward-request doc, stored_net may be the un-split request total
+                    if allowed_ids and stored_net > (b_net_tot + 5.0):
+                        bill_final_net = b_net_tot
+                    else:
+                        bill_final_net = stored_net if stored_net > 0 else b_net_tot
 
                 naive_dt = b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo is not None) else (b_dt or datetime.min)
                 out_bills.append({

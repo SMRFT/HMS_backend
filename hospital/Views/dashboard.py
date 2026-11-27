@@ -57,31 +57,62 @@ def dashboard_stats(request):
         end_utc = end_ist.astimezone(pytz.UTC)
 
         # 1. KPIs for Selected Date Range
-        new_patients = mongo_db["hospital_patient"].count_documents({
-            "created_date": {"$gte": start_utc, "$lte": end_utc}
-        })
+        new_patient_docs = list(mongo_db["hospital_patient"].find(
+            {"created_date": {"$gte": start_utc, "$lte": end_utc}},
+            {"uhid": 1, "_id": 0}
+        ))
+        new_patients = len(new_patient_docs)
+        new_uhids = {str(p.get("uhid") or "").strip() for p in new_patient_docs if p.get("uhid")}
 
-        op_count = mongo_db["hospital_billing"].count_documents({
-            "billed_date": {"$gte": start_utc, "$lte": end_utc},
-            "is_active": {"$ne": False},
-            "payment_status": {"$ne": "Cancelled"}
-        })
+        op_bills = list(mongo_db["hospital_billing"].find(
+            {
+                "billed_date": {"$gte": start_utc, "$lte": end_utc},
+                "is_active": {"$ne": False},
+                "payment_status": {"$ne": "Cancelled"}
+            },
+            {"uhid": 1, "_id": 0}
+        ))
+        op_count = len(op_bills)
+        # Renewals = OP visits whose UHID was NOT registered fresh within this selected range
+        renewals = sum(1 for b in op_bills if str(b.get("uhid") or "").strip() not in new_uhids)
 
-        renewals = max(0, op_count - new_patients)
+        # Admissions: include all non-cancelled admissions (even same-day discharges)
+        adm_docs = list(mongo_db["hospital_admission"].find(
+            {
+                "admissionDateTime": {"$gte": start_utc, "$lte": end_utc},
+                "is_cancelled": {"$ne": True}
+            },
+            {"ipNumber": 1, "_id": 0}
+        ))
+        ip_count = len(adm_docs)
+        daycare_ip_count = sum(1 for a in adm_docs if str(a.get("ipNumber") or "").strip().upper().startswith("SD"))
+        normal_ip_count = ip_count - daycare_ip_count
 
-        ip_count = mongo_db["hospital_admission"].count_documents({
-            "is_admitted": True,
-            "admissionDateTime": {"$gte": start_utc, "$lte": end_utc}
-        })
+        def _count_discharges_in_window(w_start_utc, w_end_utc, w_start_str, w_end_str):
+            dis_cursor = mongo_db["hospital_dischargebilling"].find(
+                {
+                    "status": {"$in": ["Billed", "Paid"]},
+                    "is_cancelled": {"$ne": True},
+                    "$or": [
+                        {"bill_date": {"$gte": w_start_utc, "$lte": w_end_utc}},
+                        {"bill_date": {"$gte": w_start_str, "$lte": f"{w_end_str}\uffff"}}
+                    ]
+                },
+                {"ip_number": 1, "ipNumber": 1, "_id": 0}
+            )
+            seen_ips = {
+                str(d.get("ip_number") or d.get("ipNumber") or "").strip().upper()
+                for d in dis_cursor
+                if (d.get("ip_number") or d.get("ipNumber"))
+            }
+            return len(seen_ips)
 
-        discharge_count = mongo_db["hospital_admission"].count_documents({
-            "is_discharged": True,
-            "$or": [
-                {"dischargeDateTime": {"$gte": start_utc, "$lte": end_utc}},
-                {"dischargeDateTime": None, "lastmodified_date": {"$gte": start_utc, "$lte": end_utc}},
-                {"dischargeDateTime": {"$exists": False}, "lastmodified_date": {"$gte": start_utc, "$lte": end_utc}}
-            ]
-        })
+        discharge_count = _count_discharges_in_window(
+            start_utc,
+            end_utc,
+            start_ist.strftime("%Y-%m-%d"),
+            end_ist.strftime("%Y-%m-%d")
+        )
 
         # 2. Chart Data:
         # If single day selected, plot 7 days ending on end_ist; otherwise plot days in range (capped at 31 days).
@@ -101,33 +132,41 @@ def dashboard_stats(request):
             d_start = day_local.astimezone(pytz.UTC)
             d_end = day_end_local.astimezone(pytz.UTC)
 
-            c_new = mongo_db["hospital_patient"].count_documents({
-                "created_date": {"$gte": d_start, "$lte": d_end}
-            })
-            c_op = mongo_db["hospital_billing"].count_documents({
-                "billed_date": {"$gte": d_start, "$lte": d_end},
-                "is_active": {"$ne": False},
-                "payment_status": {"$ne": "Cancelled"}
-            })
+            d_new_docs = list(mongo_db["hospital_patient"].find(
+                {"created_date": {"$gte": d_start, "$lte": d_end}},
+                {"uhid": 1, "_id": 0}
+            ))
+            c_new = len(d_new_docs)
+            d_new_uhids = {str(p.get("uhid") or "").strip() for p in d_new_docs if p.get("uhid")}
+
+            d_op_bills = list(mongo_db["hospital_billing"].find(
+                {
+                    "billed_date": {"$gte": d_start, "$lte": d_end},
+                    "is_active": {"$ne": False},
+                    "payment_status": {"$ne": "Cancelled"}
+                },
+                {"uhid": 1, "_id": 0}
+            ))
+            c_op = len(d_op_bills)
+            c_renew = sum(1 for b in d_op_bills if str(b.get("uhid") or "").strip() not in d_new_uhids)
+
             c_ip = mongo_db["hospital_admission"].count_documents({
-                "is_admitted": True,
-                "admissionDateTime": {"$gte": d_start, "$lte": d_end}
+                "admissionDateTime": {"$gte": d_start, "$lte": d_end},
+                "is_cancelled": {"$ne": True}
             })
-            c_dis = mongo_db["hospital_admission"].count_documents({
-                "is_discharged": True,
-                "$or": [
-                    {"dischargeDateTime": {"$gte": d_start, "$lte": d_end}},
-                    {"dischargeDateTime": None, "lastmodified_date": {"$gte": d_start, "$lte": d_end}},
-                    {"dischargeDateTime": {"$exists": False}, "lastmodified_date": {"$gte": d_start, "$lte": d_end}}
-                ]
-            })
+            c_dis = _count_discharges_in_window(
+                d_start,
+                d_end,
+                day_local.strftime("%Y-%m-%d"),
+                day_local.strftime("%Y-%m-%d")
+            )
 
             chart_data.append({
                 "date": day_local.strftime("%d %b"),
                 "OP Visits": c_op,
                 "IP Admissions": c_ip,
                 "New Patients": c_new,
-                "Renewals": max(0, c_op - c_new),
+                "Renewals": c_renew,
                 "Discharges": c_dis
             })
 
@@ -136,6 +175,8 @@ def dashboard_stats(request):
             "from_date": start_ist.strftime("%Y-%m-%d"),
             "to_date": end_ist.strftime("%Y-%m-%d"),
             "today_ip": ip_count,
+            "today_normal_ip": normal_ip_count,
+            "today_daycare_ip": daycare_ip_count,
             "today_op": op_count,
             "today_new_patients": new_patients,
             "today_renewals": renewals,

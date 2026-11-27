@@ -14,6 +14,7 @@ Cluster 3: Inpatient Advances, Settlements & Dues APIs
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 from pyauth.auth import HasRoleAndDataPermission
 from .core_ledger_engine import AccountsLedgerEngine, clean_num, get_db, parse_date, format_dt, format_ist_time, format_ist_date, format_ist_datetime, to_ist
@@ -913,109 +914,279 @@ def debit_and_due_bills_api(request):
 def discount_bills_api(request):
     """
     Dedicated Discount Bills Register API.
-    Management waivers, concessions, and authorized discounts across all billing modules.
+    Management waivers, concessions, and authorized discounts across Discharge,
+    Billing/Registration, Investigation, and Pharmacy modules.
     """
     try:
         data = request.data if request.method == "POST" else request.query_params
         f_str = data.get("from_date") or data.get("start_date")
         t_str = data.get("to_date") or data.get("end_date")
-        f_d = parse_date(f_str) if f_str else None
-        t_d = parse_date(t_str, is_end=True) if t_str else None
+        outlet_code = str(data.get("outlet_code") or data.get("outlet") or "all").strip()
 
-        client, db, g_db = get_db()
-        try:
-            rows = []
-            
-            # 1. Search hospital_dischargebilling
-            d_docs = list(db["hospital_dischargebilling"].find())
-            for d in d_docs:
-                disc = clean_num(d.get("discount_amount"))
-                if disc > 0:
-                    raw_dt = d.get("created_date") or d.get("discharge_date")
-                    d_dt = parse_date(raw_dt)
-                    if f_d and d_dt and d_dt < f_d: continue
-                    if t_d and d_dt and d_dt > t_d: continue
-                    dt_str = format_ist_date(raw_dt)
-                    tot = clean_num(d.get("total_amount"))
-                    rows.append({
-                        "bill_no": d.get("bill_no") or d.get("bill_number"),
-                        "uhid": d.get("uhid") or "",
-                        "mr_no": d.get("uhid") or "-",
-                        "category": "DISCHARGE",
-                        "patient_name": str(d.get("patient_name") or d.get("patientname") or "").strip(),
-                        "authorized_by": d.get("authorized_by") or d.get("doctor_name") or "Management",
-                        "reason": d.get("disc_reason") or "Management Concession",
-                        "bill_amount": tot if tot > 0 else disc,
-                        "discount_amount": disc,
-                        "net_amount": round((tot if tot > 0 else disc) - disc, 2),
-                        "date": dt_str
-                    })
-                    
-            # 2. Search hospital_billing
-            b_docs = list(db["hospital_billing"].find({
-                "$or": [{"discount_amount": {"$exists": True, "$ne": 0}}, {"discount": {"$exists": True, "$ne": 0}}]
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        f_d = parse_date(f_str or today_str)
+        t_d = parse_date(t_str or today_str, is_end=True)
+        f_dt_utc = (f_d - timedelta(hours=5, minutes=30)) if f_d else None
+        t_dt_utc = (t_d - timedelta(hours=5, minutes=30)) if t_d else None
+
+        _, db, g_db = get_db()
+
+        def _date_clause(field_names):
+            if not (f_dt_utc and t_dt_utc):
+                return {}
+            rng = {"$gte": f_dt_utc, "$lte": t_dt_utc}
+            if len(field_names) == 1:
+                return {field_names[0]: rng}
+            return {"$or": [{fn: rng} for fn in field_names]}
+
+        def _fetch_billtypes():
+            bt_no_map, bt_id_map = {}, {}
+            for bt in db["hospital_billtype"].find({}, {"billTypeNo": 1, "bill_name": 1, "bill_type": 1}):
+                nm = str(bt.get("bill_name") or "").strip()
+                if not nm:
+                    continue
+                if bt.get("billTypeNo"):
+                    bt_no_map[str(bt["billTypeNo"]).strip()] = nm
+                if bt.get("bill_type") is not None:
+                    bt_id_map[str(bt["bill_type"]).strip()] = nm
+            return bt_no_map, bt_id_map
+
+        def _fetch_discharge():
+            q = {
+                "is_cancelled": {"$ne": True},
+                "status": {"$nin": ["Estimate", "Cancelled"]},
+                "discount_amount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]},
+            }
+            if outlet_code.lower() != "all":
+                q["outlet_code"] = outlet_code
+            dc = _date_clause(["bill_date", "created_date", "discharge_date"])
+            if dc:
+                q.update(dc)
+            return list(db["hospital_dischargebilling"].find(q, {
+                "bill_no": 1, "bill_number": 1, "uhid": 1, "patient_name": 1, "patientname": 1,
+                "authorized_by": 1, "doctor_name": 1, "disc_reason": 1, "total_amount": 1,
+                "net_amount": 1, "discount_amount": 1, "bill_date": 1, "created_date": 1, "discharge_date": 1
             }))
-            for b in b_docs:
-                disc = clean_num(b.get("discount_amount") or b.get("discount"))
-                if disc > 0:
-                    raw_dt = b.get("billed_date") or b.get("created_date")
-                    b_dt = parse_date(raw_dt)
-                    if f_d and b_dt and b_dt < f_d: continue
-                    if t_d and b_dt and b_dt > t_d: continue
-                    dt_str = format_ist_date(raw_dt)
-                    tot = clean_num(b.get("total_fees") or b.get("total_amount"))
-                    rows.append({
-                        "bill_no": b.get("bill_number") or b.get("bill_no"),
-                        "uhid": b.get("uhid") or "",
-                        "mr_no": b.get("uhid") or "-",
-                        "category": "REGISTRATION",
-                        "patient_name": str(b.get("patient_name") or "").strip(),
-                        "authorized_by": b.get("doctor_name") or "Management",
-                        "reason": "Authorized Concession",
-                        "bill_amount": tot if tot > 0 else disc,
-                        "discount_amount": disc,
-                        "net_amount": round((tot if tot > 0 else disc) - disc, 2),
-                        "date": dt_str
-                    })
-                    
-            # 3. Patient Name Backfill
-            missing_uhids = list(set([r["uhid"] for r in rows if r["uhid"] and not r["patient_name"]]))
-            if missing_uhids:
-                p_docs = list(db["hospital_patient"].find({"uhid": {"$in": missing_uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1}))
-                p_map = {p["uhid"]: f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() for p in p_docs}
-                reg_docs = list(db["hospital_patientregistration"].find(
-                    {"$or": [{"uhid": {"$in": missing_uhids}}, {"PatientId": {"$in": missing_uhids}}]},
-                    {"PatientId": 1, "uhid": 1, "firstName": 1, "lastName": 1}
-                ))
-                for pr in reg_docs:
-                    nm = f"{pr.get('firstName', '')} {pr.get('lastName', '')}".strip()
-                    if pr.get("uhid"): p_map[pr["uhid"]] = nm
-                    if pr.get("PatientId"): p_map[pr["PatientId"]] = nm
-                    
-                for r in rows:
-                    if not r["patient_name"] and r["uhid"] in p_map:
-                        r["patient_name"] = p_map[r["uhid"]]
-                    if not r["patient_name"]:
-                        r["patient_name"] = "Patient"
-                        
-            tot_disc = round(sum(r["discount_amount"] for r in rows), 2)
-            tot_gross = round(sum(r["bill_amount"] for r in rows), 2)
-            tot_net = round(sum(r["net_amount"] for r in rows), 2)
-            
-            return Response({
-                "success": True,
-                "report_title": "Discount Bills Register",
-                "count": len(rows),
-                "summary": {
-                    "total_discount_amount": tot_disc,
-                    "total_bill_amount": tot_gross,
-                    "total_net_amount": tot_net
-                },
+
+        def _fetch_billing():
+            q = {
+                "is_active": {"$ne": False},
+                "is_cancelled": {"$ne": True},
+                "$and": [
+                    {"$or": [
+                        {"discount_amount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]}},
+                        {"discount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]}},
+                    ]}
+                ]
+            }
+            if outlet_code.lower() != "all":
+                q["outlet_code"] = outlet_code
+            dc = _date_clause(["billed_date", "created_date"])
+            if dc:
+                q["$and"].append(dc)
+            return list(db["hospital_billing"].find(q, {
+                "bill_number": 1, "bill_no": 1, "uhid": 1, "patient_name": 1, "patientname": 1,
+                "doctor_id": 1, "doctor_name": 1, "total_fees": 1, "total_amount": 1,
+                "discount_amount": 1, "discount": 1, "billed_date": 1, "created_date": 1, "bill_type": 1
+            }))
+
+        def _fetch_invest():
+            q = {
+                "is_active": {"$ne": False},
+                "is_cancelled": {"$ne": True},
+                "discount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]},
+            }
+            if outlet_code.lower() != "all":
+                q["outlet_code"] = outlet_code
+            dc = _date_clause(["investBillDate", "created_date"])
+            if dc:
+                q.update(dc)
+            return list(db["hospital_investbilling"].find(q, {
+                "investBillNo": 1, "bill_no": 1, "uhid": 1, "patient_name": 1, "patientname": 1,
+                "doctor": 1, "discountRemarks": 1, "discount": 1, "finalPrice": 1, "total": 1,
+                "investBillDate": 1, "created_date": 1, "billTypeNo": 1, "bill_type": 1
+            }))
+
+        def _fetch_pharmacy():
+            q = {
+                "is_deleted": {"$ne": True},
+                "billing_status": {"$nin": ["Cancelled", "Estimate", "deleted"]},
+                "$and": [
+                    {"$or": [
+                        {"overall_discount_amount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]}},
+                        {"discount_amount": {"$exists": True, "$nin": [None, 0, "0", "0.00"]}},
+                    ]}
+                ]
+            }
+            if outlet_code.lower() != "all":
+                q["outlet_code"] = outlet_code
+            dc = _date_clause(["bill_date", "created_date"])
+            if dc:
+                q["$and"].append(dc)
+            return list(db["hospital_pharmacybilling"].find(q, {
+                "bill_no": 1, "uhid": 1, "patientname": 1, "patient_name": 1, "doctor_id": 1,
+                "total_amount": 1, "net_amount": 1, "overall_discount_amount": 1, "discount_amount": 1,
+                "bill_date": 1, "created_date": 1, "billing_mode": 1, "medicine_particulars": 1
+            }))
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            f_bt = executor.submit(_fetch_billtypes)
+            f_d = executor.submit(_fetch_discharge)
+            f_b = executor.submit(_fetch_billing)
+            f_i = executor.submit(_fetch_invest)
+            f_p = executor.submit(_fetch_pharmacy)
+
+            bt_no_map, bt_id_map = f_bt.result()
+            d_docs = f_d.result()
+            b_docs = f_b.result()
+            i_docs = f_i.result()
+            p_docs = f_p.result()
+
+        rows = []
+
+        # 1. Discharge Billing
+        for d in d_docs:
+            disc = clean_num(d.get("discount_amount"))
+            if disc <= 0:
+                continue
+            raw_dt = d.get("bill_date") or d.get("created_date") or d.get("discharge_date")
+            tot = clean_num(d.get("total_amount"))
+            net = clean_num(d.get("net_amount"))
+            gross = tot if tot > 0 else (net + disc)
+            rows.append({
+                "bill_no": d.get("bill_no") or d.get("bill_number") or "-",
+                "uhid": str(d.get("uhid") or "").strip(),
+                "mr_no": str(d.get("uhid") or "-").strip(),
+                "category": "DISCHARGE",
+                "patient_name": str(d.get("patient_name") or d.get("patientname") or "").strip(),
+                "authorized_by": str(d.get("authorized_by") or d.get("doctor_name") or "Management").strip(),
+                "reason": str(d.get("disc_reason") or "Management Concession").strip(),
+                "bill_amount": round(gross, 2),
+                "discount_amount": round(disc, 2),
+                "net_amount": round(max(0.0, gross - disc), 2),
+                "date": format_ist_date(raw_dt),
+                "_sort": format_ist_datetime(raw_dt),
+            })
+
+        # 2. Billing / Registration
+        for b in b_docs:
+            disc = clean_num(b.get("discount_amount") or b.get("discount"))
+            if disc <= 0:
+                continue
+            raw_dt = b.get("billed_date") or b.get("created_date")
+            tot = clean_num(b.get("total_fees") or b.get("total_amount"))
+            gross = tot + disc if tot > 0 else disc
+            cat = bt_id_map.get(str(b.get("bill_type") or "").strip()) or "REGISTRATION"
+            rows.append({
+                "bill_no": b.get("bill_number") or b.get("bill_no") or "-",
+                "uhid": str(b.get("uhid") or "").strip(),
+                "mr_no": str(b.get("uhid") or "-").strip(),
+                "category": cat.upper(),
+                "patient_name": str(b.get("patient_name") or b.get("patientname") or "").strip(),
+                "authorized_by": str(b.get("doctor_name") or b.get("doctor_id") or "Management").strip(),
+                "reason": "Authorized Concession",
+                "bill_amount": round(gross, 2),
+                "discount_amount": round(disc, 2),
+                "net_amount": round(max(0.0, gross - disc), 2),
+                "date": format_ist_date(raw_dt),
+                "_sort": format_ist_datetime(raw_dt),
+            })
+
+        # 3. Investigation Billing
+        for inv in i_docs:
+            disc = clean_num(inv.get("discount"))
+            if disc <= 0:
+                continue
+            raw_dt = inv.get("investBillDate") or inv.get("created_date")
+            final_p = clean_num(inv.get("finalPrice") or inv.get("total"))
+            gross = final_p + disc if final_p > 0 else disc
+            cat = bt_no_map.get(str(inv.get("billTypeNo") or "").strip()) or bt_id_map.get(str(inv.get("bill_type") or "").strip()) or "INVESTIGATION"
+            rows.append({
+                "bill_no": inv.get("investBillNo") or inv.get("bill_no") or "-",
+                "uhid": str(inv.get("uhid") or "").strip(),
+                "mr_no": str(inv.get("uhid") or "-").strip(),
+                "category": cat.upper(),
+                "patient_name": str(inv.get("patient_name") or inv.get("patientname") or "").strip(),
+                "authorized_by": str(inv.get("doctor") or "Management").strip(),
+                "reason": str(inv.get("discountRemarks") or "Investigation Concession").strip(),
+                "bill_amount": round(gross, 2),
+                "discount_amount": round(disc, 2),
+                "net_amount": round(max(0.0, gross - disc), 2),
+                "date": format_ist_date(raw_dt),
+                "_sort": format_ist_datetime(raw_dt),
+            })
+
+        # 4. Pharmacy Billing (overall or genuine item-level discounts)
+        for pb in p_docs:
+            ov_disc = clean_num(pb.get("overall_discount_amount"))
+            meds = pb.get("medicine_particulars") or []
+            item_disc = sum(clean_num(m.get("discount_amount")) for m in meds if isinstance(m, dict))
+            disc = ov_disc if ov_disc > 0 else item_disc
+            if disc <= 0:
+                continue
+            raw_dt = pb.get("bill_date") or pb.get("created_date")
+            net = clean_num(pb.get("net_amount") or pb.get("total_amount"))
+            gross = net + disc
+            rows.append({
+                "bill_no": pb.get("bill_no") or "-",
+                "uhid": str(pb.get("uhid") or "").strip(),
+                "mr_no": str(pb.get("uhid") or "-").strip(),
+                "category": "PHARMACY",
+                "patient_name": str(pb.get("patientname") or pb.get("patient_name") or "").strip(),
+                "authorized_by": str(pb.get("doctor_id") or "Management").strip(),
+                "reason": "Pharmacy Discount",
+                "bill_amount": round(gross, 2),
+                "discount_amount": round(disc, 2),
+                "net_amount": round(net, 2),
+                "date": format_ist_date(raw_dt),
+                "_sort": format_ist_datetime(raw_dt),
+            })
+
+        # 5. Patient Name Backfill
+        missing_uhids = list({r["uhid"] for r in rows if r["uhid"] and not r["patient_name"]})
+        if missing_uhids:
+            p_map = {}
+            for p in db["hospital_patient"].find({"uhid": {"$in": missing_uhids}}, {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1}):
+                nm = str(p.get("patient_name") or f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()).strip()
+                if p.get("uhid") and nm:
+                    p_map[p["uhid"]] = nm
+            for pr in db["hospital_patientregistration"].find(
+                {"$or": [{"uhid": {"$in": missing_uhids}}, {"PatientId": {"$in": missing_uhids}}]},
+                {"PatientId": 1, "uhid": 1, "firstName": 1, "lastName": 1}
+            ):
+                nm = f"{pr.get('firstName', '')} {pr.get('lastName', '')}".strip()
+                if nm:
+                    if pr.get("uhid"):
+                        p_map.setdefault(pr["uhid"], nm)
+                    if pr.get("PatientId"):
+                        p_map.setdefault(pr["PatientId"], nm)
+
+            for r in rows:
+                if not r["patient_name"] and r["uhid"] in p_map:
+                    r["patient_name"] = p_map[r["uhid"]]
+                if not r["patient_name"]:
+                    r["patient_name"] = "Patient"
+
+        rows.sort(key=lambda x: x.get("date") or "", reverse=True)
+        for r in rows:
+            r.pop("_sort", None)
+
+        tot_disc = round(sum(r["discount_amount"] for r in rows), 2)
+        tot_gross = round(sum(r["bill_amount"] for r in rows), 2)
+        tot_net = round(sum(r["net_amount"] for r in rows), 2)
+
+        return Response({
+            "success": True,
+            "report_title": "Discount Bills Register",
+            "count": len(rows),
+            "summary": {
                 "total_discount_amount": tot_disc,
-                "data": rows
-            }, status=status.HTTP_200_OK)
-        finally:
-            client.close()
+                "total_bill_amount": tot_gross,
+                "total_net_amount": tot_net
+            },
+            "total_discount_amount": tot_disc,
+            "data": rows
+        }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
