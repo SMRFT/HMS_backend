@@ -841,6 +841,8 @@ def resolve_medicine_stock_details(item_dict, items_stock_data):
         "SGST_Percentage": sgst_per,
         "CGST_Amt": cgst_amt,
         "SGST_Amt": sgst_amt,
+        "unit_cgst_amt": cgst_amt,
+        "unit_sgst_amt": sgst_amt,
         "is_consumable_items": is_consumable
     }
 

@@ -31,7 +31,7 @@ from .dbcollection import (
     get_employee_name_by_id, resolve_doctor_id, get_doctor_name_by_id,
     admission_collection, pharmacy_billing_collection,
     hospital_insuranceprovider, get_insurance_provider_by_patient, get_insurance_company_name,
-    get_room_details, hospital_room
+    get_room_details, hospital_room, _safe_float
 )
 from ..counter_service import get_next_pharmacy_bill_no, get_next_pharmacy_bill_id, get_next_sequence_value
 
@@ -59,6 +59,17 @@ def convert_decimals(obj):
     return obj
 
 
+def _safe_float(val):
+    if isinstance(val, Decimal128):
+        return float(val.to_decimal())
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def to_utc_iso(dt_val):
     if not dt_val:
         return ""
@@ -70,6 +81,27 @@ def to_utc_iso(dt_val):
     if s and "T" in s and not s.endswith("Z") and "+" not in s:
         return s + "Z"
     return s
+
+
+def _enrich_bill_item_names(serialized_doc):
+    """Enriches item_name on response payload only without modifying MongoDB storage."""
+    if not isinstance(serialized_doc, dict):
+        return serialized_doc
+    meds = serialized_doc.get("medicine_particulars")
+    if isinstance(meds, list):
+        for s_m in meds:
+            if isinstance(s_m, dict) and not s_m.get("item_name"):
+                iid = s_m.get("item_id")
+                if iid:
+                    itm_doc = mongo_db["hospital_pharmacyitem"].find_one({"item_id": iid})
+                    if not itm_doc and str(iid).isdigit():
+                        itm_doc = mongo_db["hospital_pharmacyitem"].find_one({"item_id": int(iid)})
+                    if itm_doc:
+                        inm = str(itm_doc.get("item_name") or "").strip()
+                        s_m["item_name"] = inm
+                        s_m["name"] = inm
+                        s_m["medicine_name"] = inm
+    return serialized_doc
 
 
 
@@ -831,9 +863,6 @@ def sanitize_medicines(medicines, outlet_code=None):
 
         clean_item = {
             "item_id": item_id_val,
-            "item_name": item_name_val,
-            "name": item_name_val,
-            "medicine_name": item_name_val,
             "batch_number": bn_val,
             "expiry_date": expiry_val,
             "hsn_code": hsn_val,
@@ -866,6 +895,15 @@ def sanitize_medicines(medicines, outlet_code=None):
                 clean_item["dispatched_qty"] = float(med.get("dispatched_qty"))
             except Exception:
                 clean_item["dispatched_qty"] = med.get("dispatched_qty")
+        if med.get("save_later"):
+            clean_item["save_later"] = True
+        if med.get("is_save_later"):
+            clean_item["is_save_later"] = True
+        if med.get("billed_qty") is not None:
+            try:
+                clean_item["billed_qty"] = float(med.get("billed_qty"))
+            except Exception:
+                clean_item["billed_qty"] = med.get("billed_qty")
         clean_item["edit_history"] = med.get("edit_history") or []
 
         clean.append(clean_item)
@@ -1052,8 +1090,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
                 "edited_by": employee_id
             })
 
-        new_item = {k: v for k, v in new.items() if k != "item_name" and k != "quantity"}
-        new_item = {k: v for k, v in new.items() if k not in ("item_name", "quantity", "price")}
+        new_item = {k: v for k, v in new.items() if k not in ("item_name", "name", "medicine_name", "quantity", "price")}
         new_item["qty"] = new_qty
         new_item["edit_history"] = history
         updated.append(new_item)
@@ -1061,7 +1098,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
     # Process additions (in new but not in old)
     for new in unmatched_new:
         new_qty = _get_qty(new)
-        new_item = {k: v for k, v in new.items() if k not in ("item_name", "quantity", "price")}
+        new_item = {k: v for k, v in new.items() if k not in ("item_name", "name", "medicine_name", "quantity", "price")}
         new_item["qty"] = new_qty
         new_item.setdefault("edit_history", [])
         new_item["edit_history"].append({
@@ -1076,7 +1113,7 @@ def build_edit_history(old_meds, new_meds, employee_id):
     # Process deletions (in old but not in new)
     for old in unmatched_old:
         old_qty = _get_qty(old)
-        old_item = {k: v for k, v in old.items() if k not in ("item_name", "quantity", "price")}
+        old_item = {k: v for k, v in old.items() if k not in ("item_name", "name", "medicine_name", "quantity", "price")}
         old_item["qty"] = old_qty
         old_item.setdefault("edit_history", [])
         old_item["is_deleted"] = True
@@ -1176,7 +1213,6 @@ def save_pharmacy_bill(request):
         # FIX 3: age stored as integer; also returned in every response
         "age":                      int(data.get("age", 0) or 0),
         "room_no":                  data.get("room_no"),
-        "taxable_value":            float(data.get("taxable_value") or tot_taxable),
         "total_taxable_value":      float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable),
         "total_cgst_amount":        float(data.get("total_cgst_amount") or tot_cgst),
         "total_sgst_amount":        float(data.get("total_sgst_amount") or tot_sgst),
@@ -1243,13 +1279,26 @@ def save_pharmacy_bill(request):
                     if om:
                         prev_disp = float(om.get("dispatched_qty", 0) or 0)
                         req_q = float(om.get("requested_qty") or om.get("qty") or om.get("quantity") or 0)
-                        curr_disp = float(um.get("dispatched_qty", 0) or 0)
-                        if curr_disp > prev_disp:
-                            um["dispatched_qty"] = curr_disp
-                        elif prev_disp > 0:
+                        is_um_sl = bool(
+                            um.get("save_later")
+                            or um.get("is_save_later")
+                            or um.get("billed_qty") == 0
+                            or (float(um.get("total") or 0) == 0 and float(um.get("calculated_price") or 0) == 0 and float(um.get("mrp") or 0) == 0)
+                        )
+                        if is_um_sl:
                             um["dispatched_qty"] = prev_disp
+                        else:
+                            curr_disp = float(um.get("dispatched_qty", 0) or 0)
+                            if curr_disp > prev_disp:
+                                um["dispatched_qty"] = curr_disp
+                            elif prev_disp > 0:
+                                um["dispatched_qty"] = prev_disp
                         if req_q > 0:
                             um["qty"] = req_q
+                if isinstance(um, dict):
+                    um.pop("item_name", None)
+                    um.pop("name", None)
+                    um.pop("medicine_name", None)
 
         qty_changed = old_meds != medicines
 
@@ -1389,7 +1438,7 @@ def save_pharmacy_bill(request):
 
         # Return bill_no + age immediately in PATCH response
         updated_doc = bill_collection.find_one({"Bill_id": int(Bill_id)})
-        serialized_saved_bill = convert_decimals(updated_doc) if updated_doc else {}
+        serialized_saved_bill = _enrich_bill_item_names(convert_decimals(updated_doc) if updated_doc else {})
         if "_id" in serialized_saved_bill:
             serialized_saved_bill["_id"] = str(serialized_saved_bill["_id"])
 
@@ -1504,7 +1553,7 @@ def save_pharmacy_bill(request):
 
             # Return bill_no + age immediately
             saved_doc = bill_collection.find_one({"Bill_id": next_Bill_id})
-            serialized_saved_bill = convert_decimals(saved_doc) if saved_doc else convert_decimals(record_doc)
+            serialized_saved_bill = _enrich_bill_item_names(convert_decimals(saved_doc) if saved_doc else convert_decimals(record_doc))
             if "_id" in serialized_saved_bill:
                 serialized_saved_bill["_id"] = str(serialized_saved_bill["_id"])
 
@@ -1829,7 +1878,6 @@ def save_oppharmacy_estimate(request):
         "bill_type": data.get("bill_type"),
         "doctor_id": resolve_doctor_id(data.get("doctor_id")),
         "room_no": data.get("room_no"),
-        "taxable_value": float(data.get("taxable_value") or tot_taxable),
         "total_taxable_value": float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable),
         "total_cgst_amount": float(data.get("total_cgst_amount") or tot_cgst),
         "total_sgst_amount": float(data.get("total_sgst_amount") or tot_sgst),
@@ -3831,14 +3879,25 @@ def pharmacy_medicinechart(request):
                 clean_orig = int(orig_qty) if orig_qty.is_integer() else orig_qty
                 clean_disp = int(disp_qty) if disp_qty.is_integer() else disp_qty
                 clean_pending = int(pending_qty) if pending_qty.is_integer() else pending_qty
+                line_qty = clean_pending if not is_completed_bill else (clean_disp or clean_orig)
+
+                # Ensure line CGST_Amt and SGST_Amt are scaled by line quantity
+                unit_c = _safe_float(stock_info.get("unit_cgst_amt") or stock_info.get("CGST_Amt") or item.get("unit_cgst_amt") or item.get("CGST_Amt"))
+                unit_s = _safe_float(stock_info.get("unit_sgst_amt") or stock_info.get("SGST_Amt") or item.get("unit_sgst_amt") or item.get("SGST_Amt"))
+                line_c = round(unit_c * line_qty, 2) if unit_c > 0 and line_qty > 0 else unit_c
+                line_s = round(unit_s * line_qty, 2) if unit_s > 0 and line_qty > 0 else unit_s
 
                 mapped_items.append({
                     **item,
                     **stock_info,
-                    "qty": clean_pending if not is_completed_bill else (clean_disp or clean_orig),
+                    "qty": line_qty,
                     "requested_qty": clean_orig,
                     "dispatched_qty": clean_disp,
                     "pending_qty": clean_pending,
+                    "unit_cgst_amt": unit_c,
+                    "unit_sgst_amt": unit_s,
+                    "CGST_Amt": line_c,
+                    "SGST_Amt": line_s,
                 })
 
             # If all items in this bill are fully dispatched, do not display the bill in pending chart
@@ -4637,10 +4696,18 @@ def finalize_bill(request):
         # Build lookup of actual items billed in this transaction
         billed_items_map = {}
         for med in medicines_to_use:
-            if not isinstance(med, dict) or med.get("is_deleted"):
+            if not isinstance(med, dict) or med.get("is_deleted") or med.get("deleted_is"):
+                continue
+            is_sl = bool(
+                med.get("save_later")
+                or med.get("is_save_later")
+                or med.get("billed_qty") == 0
+                or (float(med.get("total") or 0) == 0 and float(med.get("calculated_price") or 0) == 0 and float(med.get("mrp") or 0) == 0)
+            )
+            if is_sl:
                 continue
             m_iid = med.get("item_id")
-            m_qty = float(med.get("qty") or med.get("quantity") or 0)
+            m_qty = float(med.get("billed_qty") if med.get("billed_qty") is not None else (med.get("qty") or med.get("quantity") or 0))
             if m_iid is not None and m_qty > 0:
                 billed_items_map[str(m_iid)] = m_qty
                 try:
@@ -4992,7 +5059,14 @@ def finalize_bill(request):
         # 🛑 Rule: billing_mode should NEVER change from WARD REQUEST or OT REQUEST or DISCHARGE MEDICINE!
         existing_bm = str(bill.get("billing_mode") or data.get("billing_mode") or "").strip().upper()
         req_no = str(bill.get("request_no") or data.get("request_no") or "").strip().upper()
-        is_ward = is_ward or bill.get("is_ward_request") or data.get("is_ward_request") or existing_bm == "WARD REQUEST" or req_no.startswith("MR")
+        is_ward = bool(
+            is_ward
+            or bill.get("is_ward_request")
+            or data.get("is_ward_request")
+            or existing_bm in ["WARD REQUEST", "OT REQUEST", "DISCHARGE MEDICINE"]
+            or req_no.startswith("MR")
+            or req_no.startswith("OT")
+        )
         is_ot = existing_bm == "OT REQUEST" or req_no.startswith("OT")
         is_discharge = "DISCHARGE" in existing_bm
 
@@ -5092,12 +5166,23 @@ def finalize_bill(request):
                     or billed_map.get(str(m_iid))
                     or (billed_map.get(int(m_iid)) if str(m_iid).isdigit() else None)
                 )
-                billed_qty = float(billed_sm.get("qty", 0)) if billed_sm else 0.0
+                is_sm_sl = False
+                if billed_sm:
+                    is_sm_sl = bool(
+                        billed_sm.get("save_later")
+                        or billed_sm.get("is_save_later")
+                        or billed_sm.get("billed_qty") == 0
+                        or (float(billed_sm.get("total") or 0) == 0 and float(billed_sm.get("calculated_price") or 0) == 0 and float(billed_sm.get("mrp") or 0) == 0)
+                    )
+                if billed_sm and not is_sm_sl:
+                    billed_qty = float(billed_sm.get("billed_qty") if billed_sm.get("billed_qty") is not None else billed_sm.get("qty", 0))
+                else:
+                    billed_qty = 0.0
 
                 new_disp = min(orig_req_qty, prev_disp + billed_qty) if orig_req_qty > 0 else (prev_disp + billed_qty)
                 pending_qty = max(0.0, orig_req_qty - new_disp)
 
-                if billed_sm and billed_qty > 0:
+                if billed_sm and billed_qty > 0 and not is_sm_sl:
                     # Item was billed: copy full billing fields (pricing, batch, tax) and set quantities
                     item_entry = dict(billed_sm)
                     item_entry["qty"] = orig_req_qty if orig_req_qty > 0 else (prev_disp + billed_qty)
@@ -5120,12 +5205,15 @@ def finalize_bill(request):
                             item_entry["SGST_Amt"] = round((taxable_val * sgst_p) / 100.0, 2)
                         item_entry["total"] = calc_p
                 else:
-                    # Item was NOT billed in this transaction (e.g. out of stock): preserve original request item with updated dispatch
+                    # Item was NOT billed in this transaction (e.g. out of stock / save later): preserve original request item with updated dispatch
                     item_entry = dict(orig_m)
                     item_entry["qty"] = orig_req_qty
                     item_entry["dispatched_qty"] = prev_disp
 
                 # Ensure unwanted intermediate fields are not stored
+                item_entry.pop("item_name", None)
+                item_entry.pop("name", None)
+                item_entry.pop("medicine_name", None)
                 item_entry.pop("requested_qty", None)
                 item_entry.pop("pending_qty", None)
                 item_entry.pop("last_billed_qty", None)
@@ -5145,9 +5233,18 @@ def finalize_bill(request):
                         item_entry["deleted_is"] = True
                         item_entry["is_deleted"] = True
                     else:
-                        b_qty = float(sm.get("qty", 0))
-                        item_entry["qty"] = b_qty
+                        is_sm_sl = bool(
+                            sm.get("save_later")
+                            or sm.get("is_save_later")
+                            or sm.get("billed_qty") == 0
+                            or (float(sm.get("total") or 0) == 0 and float(sm.get("calculated_price") or 0) == 0 and float(sm.get("mrp") or 0) == 0)
+                        )
+                        b_qty = float(sm.get("billed_qty") if sm.get("billed_qty") is not None else sm.get("qty", 0)) if not is_sm_sl else 0.0
+                        item_entry["qty"] = float(sm.get("qty", 0))
                         item_entry["dispatched_qty"] = b_qty
+                    item_entry.pop("item_name", None)
+                    item_entry.pop("name", None)
+                    item_entry.pop("medicine_name", None)
                     item_entry.pop("requested_qty", None)
                     item_entry.pop("pending_qty", None)
                     item_entry.pop("last_billed_qty", None)
@@ -5164,8 +5261,17 @@ def finalize_bill(request):
                 set_payload["is_dispatched"] = True
         else:
             for sm in sanitized_meds:
-                b_qty = float(sm.get("qty", 0))
+                is_sm_sl = bool(
+                    sm.get("save_later")
+                    or sm.get("is_save_later")
+                    or sm.get("billed_qty") == 0
+                    or (float(sm.get("total") or 0) == 0 and float(sm.get("calculated_price") or 0) == 0 and float(sm.get("mrp") or 0) == 0)
+                )
+                b_qty = 0.0 if is_sm_sl else float(sm.get("billed_qty") if sm.get("billed_qty") is not None else sm.get("qty", 0))
                 sm["dispatched_qty"] = b_qty
+                sm.pop("item_name", None)
+                sm.pop("name", None)
+                sm.pop("medicine_name", None)
                 sm.pop("requested_qty", None)
                 sm.pop("pending_qty", None)
                 sm.pop("last_billed_qty", None)
@@ -5231,14 +5337,15 @@ def finalize_bill(request):
             for it in items_to_sum
             if not it.get("is_deleted") and not it.get("deleted_is")
         ), 2)
-        set_payload["taxable_value"]        = float(data.get("taxable_value") or tot_taxable)
         set_payload["total_taxable_value"]  = float(data.get("total_taxable_value") or data.get("taxable_value") or tot_taxable)
         set_payload["total_cgst_amount"]    = float(data.get("total_cgst_amount") or tot_cgst)
         set_payload["total_sgst_amount"]    = float(data.get("total_sgst_amount") or tot_sgst)
 
         # Do NOT save patient details when UHID is present (dynamically compared & displayed from patient collection by UHID).
         # Do NOT save billed_bill_no, converted_bill_no, or dispatch_history.
+        # Do NOT store root taxable_value variable on pharmacy billing documents.
         unset_payload = {
+            "taxable_value": "",
             "billed_bill_no": "",
             "converted_bill_no": "",
             "dispatch_history": ""
@@ -5294,7 +5401,7 @@ def finalize_bill(request):
         res_msg = "Prescriptions saved for later in Medicine Chart" if is_save_later_only else "Bill finalized, dispatched & stock updated"
 
         final_saved_doc = bill_collection.find_one({"_id": bill["_id"]})
-        serialized_saved_bill = convert_decimals(final_saved_doc) if final_saved_doc else {}
+        serialized_saved_bill = _enrich_bill_item_names(convert_decimals(final_saved_doc) if final_saved_doc else {})
         if "_id" in serialized_saved_bill:
             serialized_saved_bill["_id"] = str(serialized_saved_bill["_id"])
 

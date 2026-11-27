@@ -5435,6 +5435,36 @@ def create_dialysis_discharge_summary(request):
         else:
             parsed_advice = str(raw_advice or "")
 
+        raw_hd = data.get("hd_sessions") if data.get("hd_sessions") is not None else data.get("hdsessions")
+        if isinstance(raw_hd, str):
+            raw_s = raw_hd.strip()
+            if raw_s.startswith("[") and raw_s.endswith("]"):
+                try:
+                    parsed_hd = json.loads(raw_s)
+                except Exception:
+                    parsed_hd = raw_hd
+            else:
+                parsed_hd = raw_hd
+        elif isinstance(raw_hd, list):
+            parsed_hd = raw_hd
+        else:
+            parsed_hd = str(raw_hd or "")
+
+        raw_comp = data.get("complications_during_hd") if data.get("complications_during_hd") is not None else data.get("complications")
+        if isinstance(raw_comp, str):
+            raw_s = raw_comp.strip()
+            if raw_s.startswith("[") and raw_s.endswith("]"):
+                try:
+                    parsed_comp = json.loads(raw_s)
+                except Exception:
+                    parsed_comp = raw_comp
+            else:
+                parsed_comp = raw_comp
+        elif isinstance(raw_comp, list):
+            parsed_comp = raw_comp
+        else:
+            parsed_comp = str(raw_comp or "")
+
         payload = {
             "name":       data.get("name"),
             "age":        data.get("age"),
@@ -5455,18 +5485,11 @@ def create_dialysis_discharge_summary(request):
 
             "blood_investigations":
                 json.loads(data.get("blood_investigations"))
-                if isinstance(data.get("blood_investigations"), str)
+                if isinstance(data.get("blood_investigations"), str) and str(data.get("blood_investigations")).strip().startswith("[")
                 else data.get("blood_investigations", []),
 
-            "hd_sessions":
-                json.loads(data.get("hd_sessions"))
-                if isinstance(data.get("hd_sessions"), str)
-                else data.get("hd_sessions", []),
-
-            "complications_during_hd":
-                json.loads(data.get("complications_during_hd"))
-                if isinstance(data.get("complications_during_hd"), str)
-                else data.get("complications_during_hd", []),
+            "hd_sessions":            parsed_hd,
+            "complications_during_hd": parsed_comp,
 
             "condition_on_discharge": data.get("condition_on_discharge"),
 
