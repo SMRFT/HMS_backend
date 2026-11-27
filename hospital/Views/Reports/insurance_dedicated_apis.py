@@ -793,7 +793,11 @@ def patient_wise_pharmacy_ip_bill_api(request):
                     bill_final_net = stored_net
                 else:
                     b_disc = 0.0
-                    bill_final_net = stored_net if stored_net > 0 else b_net_tot
+                    # If allowed_ids filtered a parent ward-request doc, stored_net may be the un-split request total
+                    if allowed_ids and stored_net > (b_net_tot + 5.0):
+                        bill_final_net = b_net_tot
+                    else:
+                        bill_final_net = stored_net if stored_net > 0 else b_net_tot
 
                 tax_grand += b_taxable_tot
                 cgst_grand += b_cgst_tot
@@ -2936,6 +2940,25 @@ def medicine_abstract_api(request):
             ]
         }).sort("created_date", 1))
 
+        # Prefer standalone / child bill docs (no dispatch_history) over parent ward-request docs when bill_no is shared
+        def abs_doc_priority(doc):
+            u = str(doc.get('uhid') or '').strip()
+            ip = str(doc.get('inpatient_number') or '').strip()
+            p = str(doc.get('patient_name') or doc.get('patientname') or '').strip()
+            dh = doc.get('dispatch_history') or []
+            score = 0
+            if len(dh) == 0:
+                score += 100
+            if u in all_uhids or u in all_ips:
+                score += 10
+            if ip in all_ips or ip in all_uhids:
+                score += 10
+            if p and patient_name and patient_name.lower() in p.lower():
+                score += 5
+            return score
+
+        raw_bills.sort(key=abs_doc_priority, reverse=True)
+
         # Pre-cache stock details for items that might be missing explicit prices
         abs_item_ids = set()
         for b in raw_bills:
@@ -3141,7 +3164,11 @@ def medicine_abstract_api(request):
                     bill_final_net = stored_net
                 else:
                     b_disc = 0.0
-                    bill_final_net = stored_net if stored_net > 0 else b_net_tot
+                    # If allowed_ids filtered a parent ward-request doc, stored_net may be the un-split request total
+                    if allowed_ids and stored_net > (b_net_tot + 5.0):
+                        bill_final_net = b_net_tot
+                    else:
+                        bill_final_net = stored_net if stored_net > 0 else b_net_tot
 
                 naive_dt = b_dt.replace(tzinfo=None) if (b_dt and hasattr(b_dt, 'tzinfo') and b_dt.tzinfo is not None) else (b_dt or datetime.min)
                 out_bills.append({
