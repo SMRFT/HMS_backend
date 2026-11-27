@@ -832,8 +832,6 @@ def patient_wise_pharmacy_ip_bill_api(request):
             return b_out, f_items, round(tax_grand, 2), round(cgst_grand, 2), round(sgst_grand, 2), round(net_grand, 2)
 
         bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=True)
-        if not bills_output and (dt_start or dt_end or search_ip):
-            bills_output, all_flattened_items, tot_taxable_grand, tot_cgst_grand, tot_sgst_grand, tot_net_grand = build_bills(apply_dates=False)
 
         return Response({
             "success": True,
@@ -3194,8 +3192,6 @@ def medicine_abstract_api(request):
             return out_bills
 
         bills = collect_bills(apply_dates=True)
-        if not bills and (dt_start or dt_end or search_ip):
-            bills = collect_bills(apply_dates=False)
 
         total_taxable = round(sum(b['taxable_amt'] for b in bills), 2)
         total_cgst = round(sum(b['cgst'] for b in bills), 2)
