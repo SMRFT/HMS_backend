@@ -3159,17 +3159,14 @@ def search_discharge_patient(request):
                     {"is_deleted": {"$ne": True}},
                     {
                         "$or": [
-                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
-                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
+                            {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
                         ]
                     },
                     {
                         "$or": [
                             {"payment_mode": {"$in": ["Credit", "credit"]}},
                             {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
-                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
-                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
-                            {"is_ward_request": True},
                         ]
                     }
                 ]
@@ -3718,17 +3715,14 @@ def search_discharge_patient(request):
                     {"is_deleted": {"$ne": True}},
                     {
                         "$or": [
-                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
-                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
+                            {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
                         ]
                     },
                     {
                         "$or": [
                             {"payment_mode": {"$in": ["Credit", "credit"]}},
                             {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
-                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
-                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
-                            {"is_ward_request": True},
                         ]
                     }
                 ]
@@ -4191,17 +4185,14 @@ def get_discharge_bill_medicines(request):
                     {"is_deleted": {"$ne": True}},
                     {
                         "$or": [
-                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed", "Paid", "paid"]}},
-                            {"billing_status": {"$regex": "^(billed|completed|paid)$", "$options": "i"}},
+                            {"billing_status": {"$in": ["Billed", "billed", "Completed", "completed"]}},
+                            {"billing_status": {"$regex": "^(billed|completed)$", "$options": "i"}},
                         ]
                     },
                     {
                         "$or": [
                             {"payment_mode": {"$in": ["Credit", "credit"]}},
                             {"payment_mode": {"$regex": "^credit$", "$options": "i"}},
-                            {"billing_mode": {"$regex": "credit", "$options": "i"}},
-                            {"billing_mode": {"$in": ["IP CREDIT", "WARD REQUEST", "OT REQUEST"]}},
-                            {"is_ward_request": True},
                         ]
                     }
                 ]
