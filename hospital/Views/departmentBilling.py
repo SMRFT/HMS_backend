@@ -522,10 +522,7 @@ def estimate_billing_create(request):
         formatted_bill_no = get_next_est_bill_no()
 
         request_data = {k: v for k, v in request.data.items()
-                        if not k.startswith('auth-')}
-
-            request_data = {k: v for k, v in request.data.items()
-                            if not k.startswith('auth-') and k not in ['wardName', 'fromEstBillNo', 'status']}
+                        if not k.startswith('auth-') and k not in ['wardName', 'fromEstBillNo', 'status']}
 
         serializer = EstimateBillingSerializer(data=request_data)
         if serializer.is_valid():
