@@ -3756,7 +3756,13 @@ def update_mainblock_pendingbills(request):
                         "is_deleted": {"$ne": True}
                     }))
                     for pb in ip_pharm_bills:
+                        # Skip direct counter cash bills that were already paid during the patient stay
+                        pb_pm = str(pb.get("payment_mode") or pb.get("paymentMethod") or "").strip().lower()
+                        is_ward = bool(pb.get("is_ward_request"))
                         pb_bno = str(pb.get("bill_no") or "").strip()
+                        if pb_pm == "cash" and not is_ward and pb_bno not in processed_pharm_bill_nos:
+                            continue
+
                         pb_outlet = str(pb.get("outlet_code") or discharge_doc.get("outlet_code") or outlet_code or "OLET001").strip()
                         if pb_bno not in processed_pharm_bill_nos:
                             for m in (pb.get("medicine_particulars") or []):
@@ -3772,12 +3778,12 @@ def update_mainblock_pendingbills(request):
                                         "qty": q,
                                         "outlet_code": pb_outlet
                                     })
-                        # Mark pharmacy bill as Paid
+                        # Mark pharmacy bill as Completed upon discharge settlement
                         pharm_bill_col.update_one(
                             {"_id": pb["_id"]},
                             {"$set": {
                                 "payment_status": "Paid",
-                                "billing_status": "Paid",
+                                "billing_status": "Completed",
                                 "paid_date": datetime.utcnow(),
                                 "lastmodified_by": CashierID,
                                 "lastmodified_date": datetime.utcnow()
