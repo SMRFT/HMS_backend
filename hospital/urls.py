@@ -506,6 +506,7 @@ urlpatterns = [
 
     # Dedicated Specialized Insurance Reports APIs
     path('report-patient-wise-pharmacy-ip-bill/', insurance_dedicated_apis.patient_wise_pharmacy_ip_bill_api, name='report_patient_wise_pharmacy_ip_bill'),
+    path('report-patient-wise-pharmacy-ip-bill-old/', insurance_dedicated_apis.patient_wise_pharmacy_ip_bill_old_api, name='report_patient_wise_pharmacy_ip_bill_old'),
     path('report-lab-abstract/', insurance_dedicated_apis.lab_abstract_api, name='report_lab_abstract'),
     path('report-occupancy-company-wise/', insurance_dedicated_apis.occupancy_company_wise_api, name='report_occupancy_company_wise'),
     path('report-insurance-bills-status/', insurance_dedicated_apis.insurance_bills_status_api, name='report_insurance_bills_status'),
@@ -514,6 +515,7 @@ urlpatterns = [
     path('report-insurance-discharge-bill-all/', insurance_dedicated_apis.insurance_discharge_bill_all_api, name='report_insurance_discharge_bill_all'),
     path('report-prescription-details/', insurance_dedicated_apis.prescription_details_api, name='report_prescription_details'),
     path('report-medicine-abstract/', insurance_dedicated_apis.medicine_abstract_api, name='report_medicine_abstract'),
+    path('report-medicine-abstract-old/', insurance_dedicated_apis.medicine_abstract_old_api, name='report_medicine_abstract_old'),
     path('get-ip-numbers-by-uhid/', insurance_dedicated_apis.get_ip_numbers_by_uhid_api, name='get_ip_numbers_by_uhid'),
 
     path('DrugPurchaseReportsDashboard/', drug_purchase_reports.drug_purchase_reports_dashboard_view, name='drug_purchase_reports_dashboard'),

@@ -829,6 +829,22 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'page_id': 531,
                 'permissions': {'Insurance Bills Status Report': 'HMS-RPT-INSURANCE'},
                 'route': '/InsuranceBillsStatusReport'
+            },
+            {
+                'description': 'Historical itemized IP pharmacy invoices per patient (Sep–Nov 2026) from old pharmacy billing.',
+                'icon': 'Package',
+                'name': 'Patient Wise Pharmacy IP Bill Detailed (Old)',
+                'page_id': 532,
+                'permissions': {'Patient Wise Pharmacy IP Bill Detailed (Old)': 'HMS-RPT-INSURANCE'},
+                'route': '/PatientWisePharmacyIpBillOldReport'
+            },
+            {
+                'description': 'Historical pharmaceutical dispensation abstract (Sep–Nov 2026) from old pharmacy billing.',
+                'icon': 'Package',
+                'name': 'Medicine Abstract Report (Old)',
+                'page_id': 533,
+                'permissions': {'Medicine Abstract Report (Old)': 'HMS-RPT-INSURANCE'},
+                'route': '/MedicineAbstractOldReport'
             }
         ]
     },
