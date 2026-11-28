@@ -4590,6 +4590,20 @@ def get_pending_ward_returns(request):
 def approve_ward_return(request):
 
     import traceback
+    from bson import Decimal128
+    from decimal import Decimal
+
+    def _to_float(val, default=0.0):
+        if val is None or val == "":
+            return default
+        if isinstance(val, Decimal128):
+            return float(val.to_decimal())
+        if isinstance(val, Decimal):
+            return float(val)
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
 
     try:
 
@@ -4742,7 +4756,7 @@ def approve_ward_return(request):
 
         branch_code = (bill_doc.get("branch_code") if bill_doc else None) or getattr(bill, "branch_code", None)
 
-        original_bill_total = float((bill_doc.get("net_amount") if bill_doc else None) or (bill_doc.get("total_amount") if bill_doc else None) or getattr(bill, "net_amount", 0.0) or getattr(bill, "total_amount", 0.0) or 0.0)
+        original_bill_total = _to_float((bill_doc.get("net_amount") if bill_doc else None) or (bill_doc.get("total_amount") if bill_doc else None) or getattr(bill, "net_amount", 0.0) or getattr(bill, "total_amount", 0.0) or 0.0)
 
         ward_return_particulars = []
 
@@ -4754,7 +4768,7 @@ def approve_ward_return(request):
 
             batch_val = str(incoming.get("batch_number", "")).strip()
 
-            return_qty = float(incoming.get("return_qty", 0))
+            return_qty = _to_float(incoming.get("return_qty", 0))
 
             if return_qty <= 0:
 
@@ -4786,21 +4800,21 @@ def approve_ward_return(request):
 
                     item_name = current.get("item_name") or ""
 
-                item_price = float(current.get("price") or 0.0)
+                item_price = _to_float(current.get("price") or current.get("mrp") or 0.0)
 
-                item_mrp = float(current.get("mrp") or item_price)
+                item_mrp = _to_float(current.get("mrp") or item_price)
 
                 expiry_date = current.get("expiry_date") or expiry_date
 
-                cgst_pct = float(current.get("CGST_Percentage") or 2.5)
+                cgst_pct = _to_float(current.get("CGST_Percentage"), 2.5)
 
-                sgst_pct = float(current.get("SGST_Percentage") or 2.5)
+                sgst_pct = _to_float(current.get("SGST_Percentage"), 2.5)
 
-                old_qty = float(current.get("quantity", current.get("qty", 0)))
+                old_qty = _to_float(current.get("quantity", current.get("qty", 0)))
 
                 history_returns = [
 
-                    float(h.get("return_qty", 0))
+                    _to_float(h.get("return_qty", 0))
 
                     for h in current.get("edit_history", [])
 
@@ -4920,17 +4934,17 @@ def approve_ward_return(request):
 
                 if not item_price:
 
-                    item_price = float(stock_doc.get("Selling_Price") or stock_doc.get("mrp") or 0.0)
+                    item_price = _to_float(stock_doc.get("Selling_Price") or stock_doc.get("mrp") or 0.0)
 
                 if not item_mrp:
 
-                    item_mrp = float(stock_doc.get("mrp") or item_price)
+                    item_mrp = _to_float(stock_doc.get("mrp") or item_price)
 
                 if not item_name:
 
                     item_name = stock_doc.get("item_name") or ""
 
-                current_blocked = float(stock_doc.get("blocked_quantity", 0) or 0)
+                current_blocked = _to_float(stock_doc.get("blocked_quantity", 0) or 0)
 
                 new_blocked = max(0.0, current_blocked - return_qty)
 
