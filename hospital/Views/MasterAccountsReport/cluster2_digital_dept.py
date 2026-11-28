@@ -1151,3 +1151,468 @@ def doctor_revenue_report_api(request):
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def doctor_wise_ip_collection_api(request):
+    """
+    Doctor Wise IP Collection Report (matches oct-26.pdf).
+    Groups IP discharge bill items by Doctor -> Particular Head,
+    showing BILLDATE, BILLNUMBER, IPNUMBER, OPNUMBER, PATIENTNAME, Amount, and Cash bill (Y/N/M).
+    """
+    try:
+        data = request.data if request.method == "POST" else request.query_params
+        from_str = data.get("from_date") or data.get("start_date")
+        to_str = data.get("to_date") or data.get("end_date")
+        outlet_code = str(data.get("outlet_code") or data.get("outlet") or "all").strip()
+        doctor_filter = str(data.get("doctor_id") or data.get("doctor") or "all").strip()
+        head_filter = str(data.get("head") or data.get("particular") or "all").strip()
+        cash_bill_filter = str(data.get("cash_bill") or "all").strip().upper()
+        search_q = str(data.get("search") or "").strip().lower()
+        is_refresh = str(data.get("refresh") or data.get("force_refresh") or "").lower() in ("true", "1")
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        f_dt = parse_date(from_str or today_str) or parse_date(today_str)
+        t_dt = parse_date(to_str or today_str, is_end=True) or parse_date(today_str, is_end=True)
+
+        f_dt_utc = f_dt - timedelta(hours=5, minutes=30)
+        t_dt_utc = t_dt - timedelta(hours=5, minutes=30)
+
+        _, db, g_db = get_db()
+        doctor_map = _get_doctor_map(g_db, is_refresh)
+
+        q = {
+            "bill_date": {"$gte": f_dt_utc, "$lte": t_dt_utc},
+            "is_cancelled": {"$ne": True},
+            "status": {"$nin": ["Estimate", "Cancelled"]},
+        }
+        if outlet_code.lower() != "all":
+            q["outlet_code"] = outlet_code
+
+        discharge_docs = list(db["hospital_dischargebilling"].find(q, {
+            "bill_no": 1, "bill_date": 1, "discharge_date": 1, "uhid": 1,
+            "ipNumber": 1, "ip_number": 1, "patient_name": 1, "patientname": 1,
+            "payment_method": 1, "payment_mode": 1, "customer_type": 1,
+            "is_insurance_bill": 1, "items": 1, "outlet_code": 1
+        }))
+
+        ip_numbers = list({
+            str(d.get("ipNumber") or d.get("ip_number") or "").strip()
+            for d in discharge_docs if (d.get("ipNumber") or d.get("ip_number"))
+        })
+        all_uhids = list({
+            str(d.get("uhid") or "").strip()
+            for d in discharge_docs if d.get("uhid")
+        })
+
+        adm_map = {}
+        if ip_numbers:
+            for adm in db["hospital_admission"].find(
+                {"ipNumber": {"$in": ip_numbers}},
+                {"ipNumber": 1, "consultingDoctor": 1, "admittingDoctor": 1, "patient_name": 1, "patientname": 1}
+            ):
+                ip_k = str(adm.get("ipNumber") or "").strip()
+                if ip_k:
+                    adm_map[ip_k] = adm
+
+        patient_map = {}
+        if all_uhids:
+            for pat in db["hospital_patient"].find(
+                {"uhid": {"$in": all_uhids}},
+                {"uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1, "patientname": 1}
+            ):
+                u_k = str(pat.get("uhid") or "").strip()
+                if u_k:
+                    patient_map[u_k] = pat
+
+        raw_rows = []
+        for dis in discharge_docs:
+            bill_no = str(dis.get("bill_no") or "").strip()
+            if not bill_no:
+                continue
+            ip_no = str(dis.get("ipNumber") or dis.get("ip_number") or "").strip()
+            uhid = str(dis.get("uhid") or "").strip()
+            adm = adm_map.get(ip_no, {})
+            pat = patient_map.get(uhid, {})
+
+            pat_name = str(
+                pat.get("patient_name")
+                or pat.get("patientname")
+                or f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip()
+                or dis.get("patient_name")
+                or dis.get("patientname")
+                or adm.get("patient_name")
+                or adm.get("patientname")
+                or "GENERAL PATIENT"
+            ).strip().upper()
+
+            pm = str(dis.get("payment_method") or dis.get("payment_mode") or "").strip().lower()
+            if "multiple" in pm:
+                cash_bill = "M"
+            elif "credit" in pm or dis.get("is_insurance_bill") or str(dis.get("customer_type") or "").upper() == "INSURANCE":
+                cash_bill = "N"
+            else:
+                cash_bill = "Y"
+
+            dt_ist = to_ist(dis.get("bill_date") or dis.get("discharge_date"))
+            bill_date_str = dt_ist.strftime("%d/%m/%Y") if isinstance(dt_ist, datetime) else ""
+            sort_dt_str = dt_ist.strftime("%Y-%m-%d %H:%M:%S") if isinstance(dt_ist, datetime) else ""
+            adm_doc_raw = str(adm.get("consultingDoctor") or adm.get("admittingDoctor") or "").strip()
+
+            for it in (dis.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                raw_doc = str(it.get("doctor") or "").strip()
+                doc_fee = clean_num(it.get("doctor_fee"))
+                if not raw_doc or doc_fee <= 0:
+                    continue
+
+                pkg = str(it.get("package_name") or "").strip()
+                item_nm = str(it.get("itemName") or "OTHER CHARGES").strip()
+                head_name = (pkg if pkg else item_nm).upper()
+
+                doc_name = _resolve_doc_name(raw_doc, doctor_map).upper()
+
+                raw_rows.append({
+                    "doctor_name": doc_name,
+                    "head_name": head_name,
+                    "bill_date": bill_date_str,
+                    "_sort_dt": sort_dt_str,
+                    "bill_number": bill_no,
+                    "ip_number": ip_no,
+                    "op_number": uhid,
+                    "patient_name": pat_name,
+                    "amount": round(doc_fee, 2),
+                    "cash_bill": cash_bill,
+                })
+
+        doctors_options = sorted({r["doctor_name"] for r in raw_rows})
+        heads_options = sorted({r["head_name"] for r in raw_rows})
+
+        filtered_rows = []
+        for r in raw_rows:
+            if doctor_filter.lower() != "all" and r["doctor_name"].lower() != doctor_filter.lower():
+                continue
+            if head_filter.lower() != "all" and r["head_name"].lower() != head_filter.lower():
+                continue
+            if cash_bill_filter != "ALL" and r["cash_bill"] != cash_bill_filter:
+                continue
+            if search_q:
+                hay = f"{r['doctor_name']} {r['head_name']} {r['bill_number']} {r['ip_number']} {r['op_number']} {r['patient_name']}".lower()
+                if search_q not in hay:
+                    continue
+            filtered_rows.append(r)
+
+        doc_groups = {}
+        for r in filtered_rows:
+            doc_groups.setdefault(r["doctor_name"], {}).setdefault(r["head_name"], []).append(r)
+
+        doctors_list = []
+        grand_total = 0.0
+        grand_count = 0
+
+        for doc_idx, (doc_name, heads_dict) in enumerate(sorted(doc_groups.items(), key=lambda kv: kv[0]), start=1):
+            heads_list = []
+            doc_total = 0.0
+            doc_count = 0
+
+            for head_idx, (head_name, rows_in_head) in enumerate(sorted(heads_dict.items(), key=lambda kv: kv[0]), start=1):
+                rows_in_head.sort(key=lambda x: (x["_sort_dt"], x["bill_number"]))
+                formatted_rows = []
+                head_total = 0.0
+                for r_idx, row in enumerate(rows_in_head, start=1):
+                    head_total += row["amount"]
+                    formatted_rows.append({
+                        "sl_no": r_idx,
+                        "bill_date": row["bill_date"],
+                        "bill_number": row["bill_number"],
+                        "ip_number": row["ip_number"],
+                        "op_number": row["op_number"],
+                        "patient_name": row["patient_name"],
+                        "amount": round(row["amount"], 2),
+                        "cash_bill": row["cash_bill"],
+                    })
+                doc_total += head_total
+                doc_count += len(formatted_rows)
+                heads_list.append({
+                    "head_sl_no": head_idx,
+                    "head_name": head_name,
+                    "bill_count": len(formatted_rows),
+                    "total_amount": round(head_total, 2),
+                    "rows": formatted_rows,
+                })
+
+            grand_total += doc_total
+            grand_count += doc_count
+            doctors_list.append({
+                "doctor_sl_no": doc_idx,
+                "doctor_name": doc_name,
+                "bill_count": doc_count,
+                "total_amount": round(doc_total, 2),
+                "heads": heads_list,
+            })
+
+        return Response({
+            "success": True,
+            "report_title": "DOCTOR WISE IP COLLECTION",
+            "date_range": {
+                "from_date": f_dt.strftime("%Y-%m-%d"),
+                "to_date": t_dt.strftime("%Y-%m-%d"),
+                "from_display": f_dt.strftime("%d/%m/%Y"),
+                "to_display": t_dt.strftime("%d/%m/%Y"),
+            },
+            "printed_at": datetime.now().strftime("%d/%m/%Y at %H:%M:%S"),
+            "doctors": doctors_list,
+            "doctors_options": doctors_options,
+            "heads_options": heads_options,
+            "summary": {
+                "total_doctors": len(doctors_list),
+                "total_records": grand_count,
+                "grand_total": round(grand_total, 2),
+            },
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([HasRoleAndDataPermission])
+def doctor_wise_op_collection_api(request):
+    """
+    Doctor Wise OP Collection Report (DOCTOR WISE OP REGISTRATION DETAILED, matches op details.pdf).
+    Groups OP registration & consultation bills (hospital_billing bill_type=5) by Doctor,
+    showing Patient Name + Gender/Age/Address/Phone, OP NUMBER, Reg Fees, Cons Fee,
+    Patient Age, Contact No, and Company Name.
+    """
+    try:
+        data = request.data if request.method == "POST" else request.query_params
+        from_str = data.get("from_date") or data.get("start_date")
+        to_str = data.get("to_date") or data.get("end_date")
+        outlet_code = str(data.get("outlet_code") or data.get("outlet") or "all").strip()
+        doctor_filter = str(data.get("doctor_id") or data.get("doctor") or "all").strip()
+        search_q = str(data.get("search") or "").strip().lower()
+        is_refresh = str(data.get("refresh") or data.get("force_refresh") or "").lower() in ("true", "1")
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        f_dt = parse_date(from_str or today_str) or parse_date(today_str)
+        t_dt = parse_date(to_str or today_str, is_end=True) or parse_date(today_str, is_end=True)
+
+        f_dt_utc = f_dt - timedelta(hours=5, minutes=30)
+        t_dt_utc = t_dt - timedelta(hours=5, minutes=30)
+
+        _, db, g_db = get_db()
+        doctor_map = _get_doctor_map(g_db, is_refresh)
+
+        q = {
+            "billed_date": {"$gte": f_dt_utc, "$lte": t_dt_utc},
+            "bill_type": 5,
+            "is_active": {"$ne": False},
+            "is_cancelled": {"$ne": True},
+        }
+        if outlet_code.lower() != "all":
+            q["outlet_code"] = outlet_code
+
+        op_docs = list(db["hospital_billing"].find(q, {
+            "bill_number": 1, "bill_no": 1, "billed_date": 1, "created_date": 1,
+            "uhid": 1, "patient_name": 1, "patientname": 1, "gender": 1,
+            "mobile_phone": 1, "doctor_id": 1, "doctorName": 1,
+            "registration_fee": 1, "consulting_fee": 1, "total_fees": 1,
+            "payment_method": 1, "payment_mode": 1, "payment_status": 1,
+            "company_name": 1, "company_code": 1, "customer_type": 1,
+        }))
+
+        all_uhids = list({str(b.get("uhid") or "").strip() for b in op_docs if b.get("uhid")})
+        patient_map = {}
+        if all_uhids:
+            for pat in db["hospital_patient"].find(
+                {"uhid": {"$in": all_uhids}},
+                {
+                    "uhid": 1, "firstName": 1, "lastName": 1, "patient_name": 1, "patientname": 1,
+                    "gender": 1, "age": 1, "permanent_address": 1, "area": 1, "city": 1,
+                    "district": 1, "state": 1, "zipcode": 1, "mobilePhone": 1,
+                    "home_phone": 1, "emergency_contact": 1, "company_code": 1,
+                    "company_name": 1, "insurance_company": 1, "customer_type": 1,
+                }
+            ):
+                u_k = str(pat.get("uhid") or "").strip()
+                if u_k:
+                    patient_map[u_k] = pat
+
+        comp_map = {}
+        for c_db in (db, g_db):
+            if "hospital_company" in c_db.list_collection_names():
+                for c in c_db["hospital_company"].find({}, {"company_code": 1, "company_name": 1}):
+                    cc = str(c.get("company_code") or "").strip()
+                    cn = str(c.get("company_name") or "").strip()
+                    if cc and cn:
+                        comp_map[cc] = cn
+
+        raw_rows = []
+        for b in op_docs:
+            uhid = str(b.get("uhid") or "").strip()
+            bill_no = str(b.get("bill_number") or b.get("bill_no") or "").strip()
+            if not bill_no:
+                continue
+
+            pat = patient_map.get(uhid, {})
+            pat_name = str(
+                pat.get("patient_name")
+                or pat.get("patientname")
+                or f"{pat.get('firstName', '')} {pat.get('lastName', '')}".strip()
+                or b.get("patient_name")
+                or b.get("patientname")
+                or "GENERAL PATIENT"
+            ).strip().upper()
+
+            gender = str(pat.get("gender") or b.get("gender") or "").strip()
+            age_val = str(pat.get("age") or "").strip()
+            age_str = f"{age_val} YRS" if age_val and age_val.isdigit() else age_val
+
+            addr_parts = [
+                str(pat.get(k) or "").strip()
+                for k in ("permanent_address", "area", "city", "district", "state", "zipcode")
+                if str(pat.get(k) or "").strip() and str(pat.get(k) or "").strip().lower() != "none"
+            ]
+            # Deduplicate consecutive identical parts (e.g., area == city)
+            dedup_addr = []
+            for ap in addr_parts:
+                if not dedup_addr or dedup_addr[-1].lower() != ap.lower():
+                    dedup_addr.append(ap)
+            address = ", ".join(dedup_addr)
+
+            contact_no = str(
+                b.get("mobile_phone")
+                or pat.get("mobilePhone")
+                or pat.get("home_phone")
+                or pat.get("emergency_contact")
+                or ""
+            ).strip()
+            if contact_no.lower() == "none":
+                contact_no = ""
+
+            comp_code = str(b.get("company_code") or pat.get("company_code") or "").strip()
+            comp_name = str(
+                b.get("company_name")
+                or pat.get("company_name")
+                or pat.get("insurance_company")
+                or comp_map.get(comp_code)
+                or ""
+            ).strip()
+            if not comp_name or comp_name.lower() in ("none", "n", "null"):
+                pm = str(b.get("payment_method") or b.get("payment_mode") or "Cash").strip().upper()
+                comp_name = "CASH" if pm in ("CASH", "CARD", "UPI", "") else pm
+
+            reg_fee = clean_num(b.get("registration_fee"))
+            cons_fee = clean_num(b.get("consulting_fee"))
+            tot_fee = clean_num(b.get("total_fees"))
+            if reg_fee == 0 and cons_fee == 0 and tot_fee > 0:
+                cons_fee = tot_fee
+
+            doc_id = str(b.get("doctor_id") or "").strip()
+            doc_name = _resolve_doc_name(doc_id, doctor_map, b.get("doctorName") or "").upper()
+
+            dt_ist = to_ist(b.get("billed_date") or b.get("created_date"))
+            raw_rows.append({
+                "doctor_id": doc_id or "UNASSIGNED",
+                "doctor_name": doc_name,
+                "uhid": uhid,
+                "bill_number": bill_no,
+                "bill_date": dt_ist.strftime("%d/%m/%Y") if isinstance(dt_ist, datetime) else "",
+                "_sort_dt": dt_ist.strftime("%Y-%m-%d %H:%M:%S") if isinstance(dt_ist, datetime) else "",
+                "patient_name": pat_name,
+                "gender": gender,
+                "age": age_str,
+                "address": address,
+                "op_number": uhid,
+                "reg_fees": round(reg_fee, 2),
+                "cons_fee": round(cons_fee, 2),
+                "total_fee": round(reg_fee + cons_fee, 2),
+                "contact_no": contact_no,
+                "company_name": comp_name.upper(),
+            })
+
+        doctors_options = sorted(
+            {(r["doctor_id"], r["doctor_name"]) for r in raw_rows},
+            key=lambda x: x[1]
+        )
+        doctors_options = [{"id": d_id, "name": d_nm} for d_id, d_nm in doctors_options]
+
+        filtered_rows = []
+        for r in raw_rows:
+            if doctor_filter.lower() != "all" and r["doctor_id"].lower() != doctor_filter.lower() and r["doctor_name"].lower() != doctor_filter.lower():
+                continue
+            if search_q:
+                hay = f"{r['doctor_name']} {r['patient_name']} {r['op_number']} {r['contact_no']} {r['company_name']} {r['address']}".lower()
+                if search_q not in hay:
+                    continue
+            filtered_rows.append(r)
+
+        doc_groups = {}
+        for r in filtered_rows:
+            doc_groups.setdefault((r["doctor_id"], r["doctor_name"]), []).append(r)
+
+        doctors_list = []
+        grand_reg = 0.0
+        grand_cons = 0.0
+        grand_patients = 0
+
+        for doc_idx, ((d_id, d_name), rows_in_doc) in enumerate(sorted(doc_groups.items(), key=lambda kv: kv[0][1]), start=1):
+            rows_in_doc.sort(key=lambda x: (x["_sort_dt"], x["bill_number"]))
+            formatted_rows = []
+            doc_reg = 0.0
+            doc_cons = 0.0
+            for r_idx, row in enumerate(rows_in_doc, start=1):
+                doc_reg += row["reg_fees"]
+                doc_cons += row["cons_fee"]
+                formatted_rows.append({
+                    "sl_no": r_idx,
+                    "bill_number": row["bill_number"],
+                    "bill_date": row["bill_date"],
+                    "patient_name": row["patient_name"],
+                    "gender": row["gender"],
+                    "age": row["age"],
+                    "address": row["address"],
+                    "op_number": row["op_number"],
+                    "reg_fees": round(row["reg_fees"], 2),
+                    "cons_fee": round(row["cons_fee"], 2),
+                    "total_fee": round(row["total_fee"], 2),
+                    "contact_no": row["contact_no"],
+                    "company_name": row["company_name"],
+                })
+            grand_reg += doc_reg
+            grand_cons += doc_cons
+            grand_patients += len(formatted_rows)
+            doctors_list.append({
+                "doctor_sl_no": doc_idx,
+                "doctor_id": d_id,
+                "doctor_name": d_name,
+                "patient_count": len(formatted_rows),
+                "reg_fees": round(doc_reg, 2),
+                "cons_fee": round(doc_cons, 2),
+                "total_amount": round(doc_reg + doc_cons, 2),
+                "rows": formatted_rows,
+            })
+
+        return Response({
+            "success": True,
+            "report_title": "DOCTOR WISE OP REGISTRATION DETAILED",
+            "date_range": {
+                "from_date": f_dt.strftime("%Y-%m-%d"),
+                "to_date": t_dt.strftime("%Y-%m-%d"),
+                "from_display": f_dt.strftime("%d/%m/%Y"),
+                "to_display": t_dt.strftime("%d/%m/%Y"),
+            },
+            "printed_at": datetime.now().strftime("%d/%m/%Y at %H:%M:%S"),
+            "doctors": doctors_list,
+            "doctors_options": doctors_options,
+            "summary": {
+                "total_doctors": len(doctors_list),
+                "total_patients": grand_patients,
+                "total_reg_fees": round(grand_reg, 2),
+                "total_cons_fee": round(grand_cons, 2),
+                "grand_total": round(grand_reg + grand_cons, 2),
+            },
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

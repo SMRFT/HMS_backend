@@ -19,6 +19,8 @@ from .cluster2_digital_dept import (
     department_wise_collection_api,
     bill_type_wise_collection_api,
     doctor_revenue_report_api,
+    doctor_wise_ip_collection_api,
+    doctor_wise_op_collection_api,
 )
 from .cluster3_ip_advances import (
     advance_registration_api,
@@ -67,6 +69,8 @@ urlpatterns = [
     path('department-wise-collection/', department_wise_collection_api, name='master_department_wise_collection'),
     path('bill-type-wise-collection/', bill_type_wise_collection_api, name='master_bill_type_wise_collection'),
     path('doctor-revenue-report/', doctor_revenue_report_api, name='master_doctor_revenue_report'),
+    path('doctor-wise-ip-collection/', doctor_wise_ip_collection_api, name='master_doctor_wise_ip_collection'),
+    path('doctor-wise-op-collection/', doctor_wise_op_collection_api, name='master_doctor_wise_op_collection'),
 
     # Cluster 3: IP Admissions, Advances & Billing
     path('advance-registration/', advance_registration_api, name='master_advance_registration'),
