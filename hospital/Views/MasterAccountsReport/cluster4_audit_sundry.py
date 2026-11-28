@@ -684,6 +684,14 @@ def miscellaneous_payment_api(request):
                 
                 c_id = str(sr.get("CashierID") or sr.get("pharmacist_id") or sr.get("created_by") or "")
                 c_name = cashier_map.get(c_id, c_id)
+                req_id = str(sr.get("created_by") or sr.get("requested_by") or c_id or "").strip()
+                req_name = cashier_map.get(req_id, req_id) or c_name or "-"
+                app_id = str(sr.get("approved_by") or sr.get("lastmodified_by") or "").strip()
+                app_name = cashier_map.get(app_id, app_id) or "-"
+                sr_items = sr.get("return_items") or sr.get("items") or sr.get("medicines") or sr.get("medicine_particulars") or []
+                items_cnt = len(sr_items) if isinstance(sr_items, list) and len(sr_items) > 0 else 1
+                pay_mode = str(sr.get("payment_mode") or sr.get("refund_mode") or "Cash").strip()
+                sr_status = str(sr.get("refund_status") or sr.get("status") or "Paid").strip()
                 narr = f"Pharmacy Sales Return for Bill {orig_bno}" if orig_bno else "Pharmacy Sales Return"
                 
                 vouchers.append({
@@ -699,7 +707,13 @@ def miscellaneous_payment_api(request):
                     "cashier_name": c_name,
                     "narration": narr,
                     "is_sales_return": True,
-                    "original_bill_no": orig_bno
+                    "original_bill_no": orig_bno,
+                    "uhid": u_val or "-",
+                    "requested_by": req_name,
+                    "approved_by": app_name,
+                    "items_count": items_cnt,
+                    "payment_mode": pay_mode,
+                    "status": sr_status,
                 })
                 
             # Sort vouchers naturally by date and voucher_no
