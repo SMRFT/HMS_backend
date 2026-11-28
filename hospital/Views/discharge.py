@@ -341,27 +341,31 @@ def generate_insurance_bill_number(insurance_name_or_code):
         _, db = get_hms_db()
         regex_pattern = f"^{re.escape(prefix)}"
         cursor = db["hospital_dischargebilling"].find(
-            {"insurance_bill_number": {"$regex": regex_pattern}},
-            {"insurance_bill_number": 1}
+            {"$or": [
+                {"insurance_bill_number": {"$regex": regex_pattern}},
+                {"bill_no": {"$regex": regex_pattern}}
+            ]},
+            {"insurance_bill_number": 1, "bill_no": 1}
         )
         max_seq = 0
         for doc in cursor:
-            val = str(doc.get("insurance_bill_number") or "")
-            if "/" in val:
-                parts = val.split("/")
-                try:
-                    num = int(parts[-1])
-                    if num > max_seq:
-                        max_seq = num
-                except ValueError:
-                    pass
-            elif val.startswith(prefix):
-                try:
-                    num = int(val[len(prefix):])
-                    if num > max_seq:
-                        max_seq = num
-                except ValueError:
-                    pass
+            for field_key in ("insurance_bill_number", "bill_no"):
+                val = str(doc.get(field_key) or "")
+                if "/" in val:
+                    parts = val.split("/")
+                    try:
+                        num = int(parts[-1])
+                        if num > max_seq:
+                            max_seq = num
+                    except ValueError:
+                        pass
+                elif val.startswith(prefix):
+                    try:
+                        num = int(val[len(prefix):])
+                        if num > max_seq:
+                            max_seq = num
+                    except ValueError:
+                        pass
         seq = max_seq + 1
     except Exception as e:
         print(f"Error generating insurance bill number: {e}")
@@ -565,6 +569,10 @@ def _sync_mongo_items_array(obj_or_id, raw_items=None):
             if getattr(obj, "pharmacy_medicines", None) is not None:
                 update_dict["pharmacy_medicines"] = obj.pharmacy_medicines
 
+            if getattr(obj, "bill_no", None) is not None:
+                update_dict["bill_no"] = str(obj.bill_no).replace("/", "") if obj.bill_no else None
+            if getattr(obj, "estimate_number", None) is not None:
+                update_dict["estimate_number"] = str(obj.estimate_number) if obj.estimate_number else None
             db["hospital_dischargebilling"].update_one(
                 {"discharge_id": int(discharge_id)},
                 {"$set": update_dict}
@@ -1606,6 +1614,15 @@ def _apply_fields(obj, data, existing=None, request=None):
         if not ins_bill_no:
             ins_bill_no = generate_insurance_bill_number(obj.company_name or "INS")
         obj.insurance_bill_number = ins_bill_no
+
+        # For Insurance Credit bills, insurance bill number is the bill number
+        is_ins_credit = bool(
+            is_insurance and
+            str(obj.payment_method or "").strip().lower() in ["credit"]
+        )
+        if is_ins_credit and obj.insurance_bill_number:
+            if not getattr(obj, "bill_no", None) or (existing and getattr(existing, "bill_no", None) == getattr(existing, "insurance_bill_number", None)):
+                obj.bill_no = obj.insurance_bill_number
     else:
         # Non-insurance patient (GENERAL, GENERAL IP, BAJAJ EMI, SELF PACKAGE, etc.)
         obj.claim_number = ""
@@ -4931,7 +4948,18 @@ def discharge_billing_list_create(request):
             obj.estimate_number = generate_estimate_number()
             obj.bill_no         = None
         else:
-            obj.bill_no         = generate_bill_number()
+            is_ins_credit = bool(
+                (obj.customer_type == "INSURANCE" or getattr(obj, "is_insurance_bill", False)) and
+                str(obj.payment_method or "").strip().lower() in ["credit"]
+            )
+            if is_ins_credit:
+                if not getattr(obj, "insurance_bill_number", None):
+                    ins_name = getattr(obj, "company_name", None) or "INS"
+                    obj.insurance_bill_number = generate_insurance_bill_number(ins_name)
+                obj.bill_no = obj.insurance_bill_number
+            else:
+                obj.bill_no = generate_bill_number()
+                obj.insurance_bill_number = ""
             obj.estimate_number = None
 
         try:
@@ -4999,6 +5027,13 @@ def discharge_billing_detail(request, pk):
             parsed_bd = _parse_discharge_dt(raw_bd)
             if parsed_bd:
                 billing.bill_date = parsed_bd
+
+        is_ins_credit = bool(
+            (getattr(billing, "customer_type", None) == "INSURANCE" or getattr(billing, "is_insurance_bill", False)) and
+            str(billing.payment_method or "").strip().lower() in ["credit"]
+        )
+        if billing.status == "Billed" and is_ins_credit and getattr(billing, "insurance_bill_number", None):
+            billing.bill_no = billing.insurance_bill_number
 
         _normalise_decimals(billing)
 
@@ -5095,7 +5130,22 @@ def convert_estimate_to_bill(request, pk):
     estimate.lastmodified_date = timezone.now()
 
     estimate.status    = "Billed"
-    estimate.bill_no   = generate_bill_number()
+
+    if request.data.get("payment_method"):
+        estimate.payment_method = str(request.data.get("payment_method")).strip()
+
+    is_ins_credit = bool(
+        (getattr(estimate, "customer_type", None) == "INSURANCE" or getattr(estimate, "is_insurance_bill", False)) and
+        str(estimate.payment_method or "").strip().lower() in ["credit"]
+    )
+    if is_ins_credit:
+        if not getattr(estimate, "insurance_bill_number", None):
+            ins_name = getattr(estimate, "company_name", None) or "INS"
+            estimate.insurance_bill_number = generate_insurance_bill_number(ins_name)
+        estimate.bill_no = estimate.insurance_bill_number
+    else:
+        estimate.bill_no = generate_bill_number()
+        estimate.insurance_bill_number = ""
 
     raw_dd = request.data.get("discharge_date") or request.data.get("date_of_discharge") or request.data.get("dischargeDateTime") or getattr(estimate, "discharge_date", None)
     parsed_dd = _parse_discharge_dt(raw_dd) if raw_dd else None
@@ -5112,11 +5162,6 @@ def convert_estimate_to_bill(request, pk):
         estimate.bill_date = timezone.now()
 
     estimate.shiftno   = request.data.get("shiftno")
-    if request.data.get("payment_method"):
-        estimate.payment_method = str(request.data.get("payment_method")).strip()
-    if getattr(estimate, "is_insurance_bill", False) and not getattr(estimate, "insurance_bill_number", None):
-        ins_name = getattr(estimate, "company_name", None) or "INS"
-        estimate.insurance_bill_number = generate_insurance_bill_number(ins_name)
 
     try:
         estimate.save()
