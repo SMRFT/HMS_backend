@@ -109,6 +109,24 @@ def serialize_doc(doc):
                 pages.insert(bt_idx + 1, doc_rev_card)
             else:
                 pages.append(doc_rev_card)
+        if not any(p.get('route') == '/MasterDoctorWiseIPCollection' for p in pages):
+            pages.append({
+                'page_id': 738,
+                'name': 'Doctor Wise IP Collection',
+                'description': 'Doctor-wise IP discharge collection grouped by Particular Head with Bill Date, Bill/IP/OP Numbers, Amount, and Cash Bill flag.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorWiseIPCollection',
+                'permissions': {'Doctor Wise IP Collection': 'HMS-MACC-DOC-IP-COL'}
+            })
+        if not any(p.get('route') == '/MasterDoctorWiseOPCollection' for p in pages):
+            pages.append({
+                'page_id': 739,
+                'name': 'Doctor Wise OP Collection',
+                'description': 'Doctor-wise OP registration and consultation detailed report with patient demographics, Reg/Cons fees, and Company.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorWiseOPCollection',
+                'permissions': {'Doctor Wise OP Collection': 'HMS-MACC-DOC-OP-COL'}
+            })
         if not any(p.get('route') == '/MasterAllConsolidatedBillReport' for p in pages):
             cons_card = {
                 'page_id': 737,
@@ -616,6 +634,12 @@ def my_report_permissions_view(request):
     if has_master_access and '/MasterAllConsolidatedBillReport' not in report_perms:
         report_perms['/MasterAllConsolidatedBillReport'] = True
         report_perms['All Consolidated Bill Report'] = True
+    if has_master_access and '/MasterDoctorWiseIPCollection' not in report_perms:
+        report_perms['/MasterDoctorWiseIPCollection'] = True
+        report_perms['Doctor Wise IP Collection'] = True
+    if has_master_access and '/MasterDoctorWiseOPCollection' not in report_perms:
+        report_perms['/MasterDoctorWiseOPCollection'] = True
+        report_perms['Doctor Wise OP Collection'] = True
 
     return Response({
         "success": True,

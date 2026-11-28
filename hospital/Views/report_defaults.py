@@ -1073,6 +1073,22 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'permissions': {'Doctor Revenue Report': 'HMS-MACC-DOC-REV-RPT'}
             },
             {
+                'page_id': 738,
+                'name': 'Doctor Wise IP Collection',
+                'description': 'Doctor-wise IP discharge collection grouped by Particular Head with Bill Date, Bill/IP/OP Numbers, Amount, and Cash Bill flag.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorWiseIPCollection',
+                'permissions': {'Doctor Wise IP Collection': 'HMS-MACC-DOC-IP-COL'}
+            },
+            {
+                'page_id': 739,
+                'name': 'Doctor Wise OP Collection',
+                'description': 'Doctor-wise OP registration and consultation detailed report with patient demographics, Reg/Cons fees, and Company.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorWiseOPCollection',
+                'permissions': {'Doctor Wise OP Collection': 'HMS-MACC-DOC-OP-COL'}
+            },
+            {
                 'page_id': 711,
                 'name': 'Advance Registration Report',
                 'description': 'Patient running advance deposits register with payment mode decomposition and IP tracking.',

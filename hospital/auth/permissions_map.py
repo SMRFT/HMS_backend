@@ -162,7 +162,7 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^/_b_a_c_k_e_n_d/HMS/block/?(\?.*)?$': 'HMS-P-BLK',
     r'^/_b_a_c_k_e_n_d/HMS/block/[0-9]+/?(\?.*)?$': 'HMS-P-BLKD',
 
-    r'^/_b_a_c_k_e_n_d/HMS/room-category/?(\?.*)?$': 'HMS-P-RCAT',
+    r'^/_b_a_c_k_e_n_d/HMS/room-category/?(\?.*)?$': ['HMS-P-RCAT', 'HMS-P-AIN'],
     r'^/_b_a_c_k_e_n_d/HMS/room-category/[^/]+/?(\?.*)?$': 'HMS-P-RCATD',
 
     r'^/_b_a_c_k_e_n_d/HMS/room/?(\?.*)?$': 'HMS-P-RM',
