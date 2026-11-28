@@ -84,9 +84,12 @@ PAGE_MAPPING = DynamicPageMapping({
     r'^(/_b_a_c_k_e_n_d/HMS)?/InsuranceReportsDashboard/?(\?.*)?$': ['HMS-P-FOR', 'HMS-P-IB', 'HMS-P-ICD', 'HMS-P-WR', 'HMS-P-PB', 'HMS-P-SB', 'HMS-P-ROR'],
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports-dashboard/?(\?.*)?$': ['HMS-P-FOR', 'HMS-P-IB', 'HMS-P-ICD', 'HMS-P-WR', 'HMS-P-PB', 'HMS-P-SB', 'HMS-P-ROR'],
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-reports/?(\?.*)?$': ['HMS-P-FOR', 'HMS-P-IB', 'HMS-P-ICD', 'HMS-P-WR', 'HMS-P-PB', 'HMS-P-SB', 'HMS-P-ROR'],
-    r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|medicine-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': ['HMS-P-FOR', 'HMS-P-IB', 'HMS-P-ICD', 'HMS-P-WR', 'HMS-P-PB', 'HMS-P-SB', 'HMS-P-ROR'],
+    r'^(/_b_a_c_k_e_n_d/HMS)?/report-(patient-wise-pharmacy-ip-bill|lab-abstract|report-patient-wise-pharmacy-ip-bill-old|medicine-abstract|occupancy-company-wise|insurance-bills-status|insurance-branch-dues|companywise-registration|insurance-discharge-bill-all|prescription-details)/?(\?.*)?$': ['HMS-P-FOR', 'HMS-P-IB', 'HMS-P-ICD', 'HMS-P-WR', 'HMS-P-PB', 'HMS-P-SB', 'HMS-P-ROR'],
     r'^(/_b_a_c_k_e_n_d/HMS)?/get-ip-numbers-by-uhid/?(\?.*)?$': 'HMS-API-DLD',
     r'^/_b_a_c_k_e_n_d/HMS/get-sidebar-mapping/?(\?.*)?$': 'HMS-P-SB',
+    r'^/_b_a_c_k_e_n_d/HMS/report-patient-wise-pharmacy-ip-bill-old/?(\?.*)?$': 'HMS-P-FOR',
+
+    
 
     # ==================== INSURANCE CLAIMS & MEMBERS ====================
     r'^(/_b_a_c_k_e_n_d/HMS)?/insurance-claims?/?(\?.*)?$': 'HMS-P-ICD',
