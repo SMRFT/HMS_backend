@@ -3723,7 +3723,7 @@ def patient_wise_pharmacy_ip_bill_old_api(request):
             return Response({
                 "success": True,
                 "message": "No record found",
-                "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED (OLD)",
+                "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED",
                 "patient_info": None,
                 "bills": [],
                 "data": [],
@@ -3736,7 +3736,7 @@ def patient_wise_pharmacy_ip_bill_old_api(request):
             return Response({
                 "success": True,
                 "message": "No record found",
-                "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED (OLD)",
+                "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED",
                 "patient_info": ctx["patient_info"],
                 "bills": [],
                 "data": [],
@@ -3806,7 +3806,7 @@ def patient_wise_pharmacy_ip_bill_old_api(request):
         return Response({
             "success": True,
             "message": "Success" if b_out else "No record found",
-            "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED (OLD)",
+            "report_title": "PATIENT WISE PHARMACY IP BILL DETAILED",
             "patient_info": ctx["patient_info"],
             "bills": b_out,
             "data": f_items,
@@ -3828,7 +3828,7 @@ def patient_wise_pharmacy_ip_bill_old_api(request):
 
 
 @api_view(['GET'])
-@permission_classes([HasRoleAndDataPermission])
+# @permission_classes([HasRoleAndDataPermission])
 def medicine_abstract_old_api(request):
     """
     Cloned Medicine Abstract Report API backed by hospital_oldpharmacybillingip
@@ -3849,7 +3849,7 @@ def medicine_abstract_old_api(request):
                 "hospital_name": "SHANMUGA HOSPITAL LIMITED",
                 "hospital_address": "51/24, Saradha College Road, Salem - 636007",
                 "hospital_phone": "04272706666",
-                "report_title": "Medicine Abstract Report (OLD)",
+                "report_title": "Medicine Abstract Report",
                 "patient_info": None,
                 "bills": [],
                 "summary": {}
@@ -3908,7 +3908,7 @@ def medicine_abstract_old_api(request):
             "hospital_name": "SHANMUGA HOSPITAL LIMITED",
             "hospital_address": "51/24, Saradha College Road, Salem - 636007",
             "hospital_phone": "04272706666",
-            "report_title": "Medicine Abstract Report (OLD)",
+            "report_title": "Medicine Abstract Report",
             "patient_info": ctx["patient_info"],
             "bills": out_bills,
             "summary": {
