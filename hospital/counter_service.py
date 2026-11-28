@@ -160,11 +160,14 @@ def _resolve_seed_advance_refund(db, fy):
 
 
 def _resolve_seed_discharge_bill(db, fy):
-    """Finds true maximum bill_no in hospital_dischargebilling for financial year."""
+    """Finds true maximum bill_no in hospital_dischargebilling for financial year (for cash/non-insurance bills)."""
     max_seq = 0
     try:
         cursor = db["hospital_dischargebilling"].find(
-            {"bill_no": {"$regex": f"^{re.escape(fy)}"}},
+            {
+                "customer_type": {"$ne": "INSURANCE"},
+                "bill_no": {"$regex": f"^{re.escape(fy)}"}
+            },
             {"bill_no": 1}
         )
         for doc in cursor:
