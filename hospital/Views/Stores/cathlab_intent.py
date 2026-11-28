@@ -303,7 +303,24 @@ def create_cathlab_intent(request):
             parsed_date = timezone.now()
 
         ipnumber = str(request.data.get("ipnumber") or "").strip()
+        patient_name = str(request.data.get("patient_name") or "").strip()
+        uhid = str(request.data.get("uhid") or "").strip()
         department = request.data.get("department") or "DEPT027"
+
+        # Auto-resolve uhid and patient_name from Admission & Patient if not provided
+        if (not uhid or not patient_name) and ipnumber:
+            try:
+                from hospital.models import Admission, Patient
+                adm = Admission.objects.filter(ipNumber=ipnumber).first()
+                if adm:
+                    if not uhid and adm.uhid:
+                        uhid = str(adm.uhid).strip()
+                    if not patient_name and adm.uhid:
+                        pat = Patient.objects.filter(uhid=adm.uhid).first()
+                        if pat:
+                            patient_name = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
+            except Exception:
+                pass
 
         raw_items = request.data.get("items") or []
         if isinstance(raw_items, str):
@@ -332,6 +349,12 @@ def create_cathlab_intent(request):
         intent_id = generate_cathlab_intent_id()
         now_dt = timezone.now()
 
+        is_approved_val = request.data.get("is_approved")
+        if is_approved_val is None:
+            is_approved_val = True
+        else:
+            is_approved_val = bool(is_approved_val)
+
         doc = {
             "created_by": str(employee_id),
             "created_date": now_dt,
@@ -342,11 +365,13 @@ def create_cathlab_intent(request):
             "hospital_code": hospital_code,
             "intent_id": intent_id,
             "ipnumber": ipnumber,
+            "patient_name": patient_name,
+            "uhid": uhid,
             "is_active": True,
             "date": parsed_date,
             "items": clean_items,
             "department": department,
-            "is_approved": False,
+            "is_approved": is_approved_val,
             "is_billed": False,
             "is_hod_approved": True,
             "hod_status": "Approved"
@@ -393,14 +418,63 @@ def get_cathlab_intents(request):
             query["ipnumber"] = {"$regex": str(ipnumber).strip(), "$options": "i"}
 
         if search:
-            query["$or"] = [
-                {"intent_id": {"$regex": str(search).strip(), "$options": "i"}},
-                {"ipnumber": {"$regex": str(search).strip(), "$options": "i"}},
-                {"items.name": {"$regex": str(search).strip(), "$options": "i"}}
+            search_str = str(search).strip()
+            # Find matching IPs from Patient/Admission if user searched by patient name or UHID
+            matching_ips = set()
+            try:
+                from hospital.models import Admission, Patient
+                from django.db.models import Q
+                p_q = Q(firstName__icontains=search_str) | Q(lastName__icontains=search_str) | Q(uhid__icontains=search_str)
+                matched_uhids = list(Patient.objects.filter(p_q).values_list("uhid", flat=True)[:500])
+                if matched_uhids:
+                    adm_ips = list(Admission.objects.filter(uhid__in=matched_uhids).values_list("ipNumber", flat=True)[:500])
+                    matching_ips.update(adm_ips)
+            except Exception:
+                pass
+
+            or_conds = [
+                {"intent_id": {"$regex": search_str, "$options": "i"}},
+                {"ipnumber": {"$regex": search_str, "$options": "i"}},
+                {"uhid": {"$regex": search_str, "$options": "i"}},
+                {"patient_name": {"$regex": search_str, "$options": "i"}},
+                {"items.name": {"$regex": search_str, "$options": "i"}}
             ]
+            if matching_ips:
+                or_conds.append({"ipnumber": {"$in": list(matching_ips)}})
+
+            query["$or"] = or_conds
 
         col = hms_db["hospital_cathlabintent"]
         docs = list(col.find(query).sort("created_date", -1))
+
+        # Dynamic enrichment of patient_name and uhid for docs (especially legacy records)
+        ip_set = {str(d.get("ipnumber", "")).strip() for d in docs if str(d.get("ipnumber", "")).strip()}
+        ip_to_uhid = {}
+        uhid_to_name = {}
+
+        if ip_set:
+            try:
+                from hospital.models import Admission, Patient
+                admissions = Admission.objects.filter(ipNumber__in=list(ip_set)).values("ipNumber", "uhid")
+                uhid_set = set()
+                for adm in admissions:
+                    ip = adm.get("ipNumber")
+                    u = adm.get("uhid")
+                    if ip and u:
+                        ip_to_uhid[ip] = u
+                        uhid_set.add(u)
+
+                for d in docs:
+                    if d.get("uhid"):
+                        uhid_set.add(str(d.get("uhid")).strip())
+
+                if uhid_set:
+                    patients = Patient.objects.filter(uhid__in=list(uhid_set)).values("uhid", "firstName", "lastName")
+                    for p in patients:
+                        full_name = f"{p.get('firstName') or ''} {p.get('lastName') or ''}".strip()
+                        uhid_to_name[p.get("uhid")] = full_name
+            except Exception:
+                pass
 
         formatted = []
         for d in docs:
@@ -409,7 +483,27 @@ def get_cathlab_intents(request):
                 d["date"] = d["date"].isoformat()
             if isinstance(d.get("created_date"), (datetime, date)):
                 d["created_date"] = d["created_date"].isoformat()
+
+            # Ensure patient_name and uhid are populated
+            ip = str(d.get("ipnumber") or "").strip()
+            resolved_uhid = d.get("uhid") or ip_to_uhid.get(ip, "")
+            resolved_pname = d.get("patient_name") or uhid_to_name.get(resolved_uhid, "")
+
+            d["uhid"] = resolved_uhid
+            d["patient_name"] = resolved_pname
+
             formatted.append(d)
+
+        if search:
+            s_lower = str(search).strip().lower()
+            formatted = [
+                d for d in formatted
+                if s_lower in str(d.get("intent_id", "")).lower()
+                or s_lower in str(d.get("ipnumber", "")).lower()
+                or s_lower in str(d.get("uhid", "")).lower()
+                or s_lower in str(d.get("patient_name", "")).lower()
+                or any(s_lower in str(it.get("name", "")).lower() for it in d.get("items", []))
+            ]
 
         return Response(clean_mongo_value({"status": "success", "count": len(formatted), "data": formatted}), status=status.HTTP_200_OK)
     except Exception as e:
@@ -456,7 +550,29 @@ def update_cathlab_intent(request, pk=None):
             parsed_date = doc.get("date")
 
         ipnumber = str(request.data.get("ipnumber") or "").strip()
+        patient_name = str(request.data.get("patient_name") or "").strip()
+        uhid = str(request.data.get("uhid") or "").strip()
         department = request.data.get("department") or doc.get("department", "DEPT027")
+
+        # If not provided, resolve from Admission/Patient or preserve existing
+        if not patient_name or not uhid:
+            if ipnumber:
+                try:
+                    from hospital.models import Admission, Patient
+                    adm = Admission.objects.filter(ipNumber=ipnumber).first()
+                    if adm:
+                        if not uhid and adm.uhid:
+                            uhid = str(adm.uhid).strip()
+                        if not patient_name and adm.uhid:
+                            pat = Patient.objects.filter(uhid=adm.uhid).first()
+                            if pat:
+                                patient_name = f"{pat.firstName or ''} {pat.lastName or ''}".strip()
+                except Exception:
+                    pass
+            if not patient_name:
+                patient_name = doc.get("patient_name", "")
+            if not uhid:
+                uhid = doc.get("uhid", "")
 
         raw_items = request.data.get("items") or []
         if isinstance(raw_items, str):
@@ -486,6 +602,8 @@ def update_cathlab_intent(request, pk=None):
         update_fields = {
             "date": parsed_date,
             "ipnumber": ipnumber,
+            "patient_name": patient_name,
+            "uhid": uhid,
             "department": department,
             "items": clean_items,
             "lastmodified_by": str(employee_id),
@@ -498,6 +616,8 @@ def update_cathlab_intent(request, pk=None):
             cathlabIntent.objects.filter(intent_id=doc.get("intent_id")).update(
                 date=parsed_date.date() if isinstance(parsed_date, datetime) else parsed_date,
                 ipnumber=ipnumber,
+                patient_name=patient_name,
+                uhid=uhid,
                 items=clean_items,
                 lastmodified_by=str(employee_id),
                 lastmodified_date=now_dt

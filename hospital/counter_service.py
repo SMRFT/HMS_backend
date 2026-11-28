@@ -953,3 +953,80 @@ def get_next_medicine_ward_request_no(is_ip=True, prefix=None, db_instance=None)
     )
     return f"{clean_prefix}{seq:03d}"
 
+
+# 9. Estimate Billing / Ward Request EstBillNo (e.g. '000778')
+def _resolve_seed_est_bill(db):
+    """Finds the true maximum numeric EstBillNo across hospital_estimatebilling and ORM."""
+    max_num = 0
+    try:
+        cursor = db["hospital_estimatebilling"].find(
+            {"EstBillNo": {"$regex": "^[0-9]+$"}},
+            {"EstBillNo": 1}
+        )
+        for doc in cursor:
+            raw = str(doc.get("EstBillNo") or "").strip()
+            if raw.isdigit():
+                val = int(raw)
+                if val > max_num:
+                    max_num = val
+    except Exception:
+        pass
+
+    try:
+        from hospital.models import EstimateBilling
+        for raw in EstimateBilling.objects.values_list("EstBillNo", flat=True):
+            s = str(raw or "").strip()
+            if s.isdigit():
+                val = int(s)
+                if val > max_num:
+                    max_num = val
+    except Exception:
+        pass
+
+    return max_num
+
+
+def get_next_est_bill_no(db_instance=None):
+    """
+    Returns the next strictly unique, zero-padded 6-digit EstBillNo (e.g. '000778').
+    Thread-safe and collision-free via MongoDB 'counters' atomic $inc plus collision advancement.
+    """
+    should_close = False
+    if db_instance is not None:
+        db = db_instance
+    else:
+        client, db = _get_db()
+        should_close = True
+
+    try:
+        counters = db["counters"]
+        est_col = db["hospital_estimatebilling"]
+        counter_name = "estimate_billing_est_bill_no"
+
+        candidate = int(get_next_sequence_value(
+            counter_name,
+            seed_resolver=_resolve_seed_est_bill,
+            db_instance=db
+        ))
+        est_bill_no = f"{candidate:06d}"
+
+        while est_col.find_one({"EstBillNo": est_bill_no}, {"_id": 1}) is not None:
+            candidate += 1
+            est_bill_no = f"{candidate:06d}"
+            counters.update_one(
+                {"_id": counter_name},
+                {"$max": {"seq": candidate}}
+            )
+
+        counters.update_one(
+            {"_id": counter_name},
+            {"$max": {"seq": candidate}}
+        )
+        return est_bill_no
+    finally:
+        if should_close:
+            try:
+                client.close()
+            except Exception:
+                pass
+

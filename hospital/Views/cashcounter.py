@@ -709,13 +709,7 @@ def cash_counter_shiftdetails(request):
         ]:
             setattr(shift, field, safe_dec(getattr(shift, field, 0)))
 
-        shift.closingTime = closing_time
-        shift.ShiftStatus = "inactive"
-        shift.is_active = False
-        shift.lastmodified_by = employee_id
-        shift.lastmodified_date = timezone.now()
-        shift.save()
-
+        # 1. Update MongoDB collection directly FIRST to guarantee shift is marked inactive
         try:
             m_client = MongoClient(os.getenv("GLOBAL_DB_HOST"))
             m_db = m_client["HMS"]
@@ -737,8 +731,19 @@ def cash_counter_shiftdetails(request):
                 }}
             )
             m_client.close()
-        except Exception:
-            pass
+        except Exception as db_err:
+            print(f"[cash_counter_shiftdetails] Direct Mongo update warning: {db_err}")
+
+        # 2. Update Django ORM instance inside try-except so ORM errors never block closure
+        try:
+            shift.closingTime = closing_time
+            shift.ShiftStatus = "inactive"
+            shift.is_active = False
+            shift.lastmodified_by = employee_id
+            shift.lastmodified_date = timezone.now()
+            shift.save()
+        except Exception as orm_err:
+            print(f"[cash_counter_shiftdetails] ORM shift save warning: {orm_err}")
 
         # ✅ Record remitted/submitted transactions in hospital_cashcountercollection
         try:
@@ -942,7 +947,7 @@ def calculate_shift_collection(shift_no):
 
         # 1. Billing (Registration/Consultation)
         paid_bills = list(db["hospital_billing"].find(
-            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}},
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Paid", "Billing"]}, "is_active": {"$ne": False}},
             {"total_fees": 1, "payment_details": 1, "payment_method": 1, "payment_mode": 1}
         ))
         for b in paid_bills:
@@ -955,7 +960,7 @@ def calculate_shift_collection(shift_no):
         
         # Pending
         pending_bills = list(db["hospital_billing"].find(
-            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}},
+            {"shiftno": {"$in": shift_vals}, "payment_status": {"$in": ["Pending", "Cash Pending"]}, "is_active": {"$ne": False}},
             {"total_fees": 1}
         ))
         for b in pending_bills:
@@ -1100,7 +1105,12 @@ def calculate_shift_collection(shift_no):
             elif d.get("receipt_type") == "Payment":
                 results["payments"] += amt
                 results["total_collection"] -= amt
-                results["cash_collection"] -= amt
+                # Payments are majorly or only done by cash; only exempt from cash drawer deduction if explicitly marked non-cash
+                pm = str(d.get("payment_method") or d.get("payment_mode") or d.get("payment_type") or d.get("mode_of_payment") or "").strip().lower()
+                if pm in ["cheque", "bank", "online", "neft", "rtgs", "card", "upi"]:
+                    pass
+                else:
+                    results["cash_collection"] -= amt
 
     except Exception as e:
         print("Error calculating shift collection:", e)
@@ -2535,10 +2545,10 @@ def get_mainblock_pendingbills(request):
     try:
 
         data = request.data if isinstance(request.data, dict) else {}
-        employee_id = data.get("auth-user-id") or request.GET.get("auth-user-id")
-        hospital_code = data.get("auth-hospital-code") or request.GET.get("auth-hospital-code")
-        branch_code = data.get("auth-branch-code") or request.GET.get("auth-branch-code")
-        outlet_code = data.get("auth-outlet-code") or request.GET.get("auth-outlet-code")
+        employee_id = data.get("auth-user-id") 
+        hospital_code = data.get("auth-hospital-code") 
+        branch_code = data.get("auth-branch-code") 
+        outlet_code = data.get("auth-outlet-code") 
         final_data = []
 
         # =========================================================
@@ -2769,7 +2779,8 @@ def get_mainblock_pendingbills(request):
         def build_module_query(status_key, status_val, date_key):
             conds = [
                 {status_key: status_val},
-                {"is_cancelled": {"$ne": True}}
+                {"is_cancelled": {"$ne": True}},
+                {"is_active": {"$ne": False}}
             ]
             if is_received_req:
                 conds.append(received_payment_filter)
@@ -3311,7 +3322,7 @@ def update_mainblock_pendingbills(request):
         hospital_code = _clean_str(data.get("auth-hospital-code") or request.META.get("HTTP_AUTH_HOSPITAL_CODE"), "SH001")
         branch_code   = _clean_str(data.get("auth-branch-code") or request.META.get("HTTP_AUTH_BRANCH_CODE") or request.headers.get("Branch-Code"), "SHB001")
         outlet_code   = _clean_str(data.get("auth-outlet-code") or request.META.get("HTTP_AUTH_OUTLET_CODE") or request.headers.get("Outlet-Code"), "")
-        employee_id   = _clean_str(data.get("auth-user-id") or request.META.get("HTTP_AUTH_USER_ID") or extract_aud_employee_id(request), "")
+        employee_id   = _clean_str(data.get("auth-user-id"))
 
         CashierID = employee_id or "admin"
 
@@ -3393,7 +3404,20 @@ def update_mainblock_pendingbills(request):
         )
         target_category = str(data.get("type") or data.get("bill_category") or data.get("category") or "").strip().lower()
 
-        if paid_amount_raw == 0:
+        # Resolve target_category to discharge if indicated by bill_type or bill record
+        if target_category != "discharge":
+            req_bt = data.get("bill_type")
+            if str(req_bt).strip() in ["2", "discharge"] or str(data.get("bill_type_name") or "").strip().lower() == "discharge":
+                target_category = "discharge"
+            elif bill_no:
+                d_check = discharge_col.find_one({"$or": [{"bill_no": bill_no}, {"bill_number": bill_no}]})
+                if d_check:
+                    target_category = "discharge"
+
+        is_discharge = (target_category == "discharge")
+
+        # Allow 0 amount collection for discharge bills (e.g. fully covered by advance/insurance)
+        if paid_amount_raw == 0 and not is_discharge:
             return Response(
                 {
                     "status": "error",
@@ -3401,7 +3425,7 @@ def update_mainblock_pendingbills(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if paid_amount_raw < 0 and target_category != "discharge":
+        if paid_amount_raw < 0 and not is_discharge:
             return Response(
                 {
                     "status": "error",
@@ -3430,7 +3454,7 @@ def update_mainblock_pendingbills(request):
                 "billing_category": "Billing",
                 "transaction_type": "collected"
             })
-            if existing_cc or (str(billing_doc.get("payment_status", "")).lower() == "paid" and pending_amount == 0):
+            if existing_cc:
                 print(f"[CashCounterCollection] Already collected for Billing {b_no}, preventing duplicate insert.")
                 if str(billing_doc.get("payment_status", "")).lower() != "paid":
                     billing_col.update_one(
@@ -3486,8 +3510,8 @@ def update_mainblock_pendingbills(request):
                 "outlet_code": final_outlet,
                 "created_by": final_cashier,
                 "lastmodified_by": final_cashier,
-                "bill_no": bill_no,
-                "bill_number": bill_no,
+                "bill_no": b_no,
+                "bill_number": b_no,
                 "bill_type": bill_type,
                 "counter_code": _clean_str(counter_id, "CC0001"),
                 "shift_no": _clean_str(shiftno, ""),
@@ -3500,19 +3524,28 @@ def update_mainblock_pendingbills(request):
             cc_serializer = CashCounterCollectionSerializer(data=cash_counter_data)
             if cc_serializer.is_valid():
                 cc_serializer.save()
+                pat_name = billing_doc.get("patient_name") or billing_doc.get("patientname") or ""
+                if not pat_name and billing_doc.get("uhid"):
+                    try:
+                        p_doc = patient_collection.find_one({"uhid": str(billing_doc.get("uhid")).strip()})
+                        if p_doc:
+                            pat_name = p_doc.get("PatientName") or p_doc.get("name") or f"{p_doc.get('salutation', '')} {p_doc.get('firstName', '')} {p_doc.get('lastName', '')}".strip()
+                    except Exception:
+                        pass
+
                 _enrich_cash_counter_doc(
-                    hms_db, bill_no, "Billing", shiftno, payment_details,
+                    hms_db, b_no, "Billing", shiftno, payment_details,
                     amount=payment_details.get("Paid_amount", 0),
-                    patient_info={"uhid": bill_doc.get("uhid"), "patient_name": bill_doc.get("patient_name")}
+                    patient_info={"uhid": billing_doc.get("uhid"), "patient_name": pat_name}
                 )
             else:
-                print(f"[CashCounterCollection] Warning for bill {bill_no}: {cc_serializer.errors}")
+                print(f"[CashCounterCollection] Warning for bill {b_no}: {cc_serializer.errors}")
             recalculate_and_update_shift_details(shiftno)
             return Response({
                 "status": "success",
                 "type": "Billing",
                 "bill_type": bill_type,
-                "bill_no": bill_no,
+                "bill_no": b_no,
                 "new_payment_status": new_status
             }, status=status.HTTP_200_OK)
 
@@ -3677,6 +3710,138 @@ def update_mainblock_pendingbills(request):
                     }
                 }
             )
+
+            # =====================================================
+            # UPDATE PHARMACY STOCK: Release blocked_quantity, add sold_quantity
+            # =====================================================
+            if new_status == "Paid" and not discharge_doc.get("pharmacy_stock_deducted"):
+                stock_col = db["hospital_pharmacystock"]
+                pharm_bill_col = db["hospital_pharmacybilling"]
+
+                meds_to_deduct = []
+                processed_pharm_bill_nos = set()
+
+                # 1. From pharmacy_medicines array on discharge_doc
+                pm_list = discharge_doc.get("pharmacy_medicines") or []
+                if isinstance(pm_list, list):
+                    for m in pm_list:
+                        if not isinstance(m, dict):
+                            continue
+                        iid = m.get("item_id")
+                        bn = str(m.get("batch_number") or m.get("batch") or "").strip()
+                        q = float(m.get("quantity") or m.get("qty") or 0)
+                        bno = str(m.get("bill_no") or "").strip()
+                        if bno:
+                            processed_pharm_bill_nos.add(bno)
+                        o_code = str(m.get("outlet_code") or "").strip()
+                        if not o_code and bno:
+                            pb_lookup = pharm_bill_col.find_one({"bill_no": bno}, {"outlet_code": 1})
+                            if pb_lookup:
+                                o_code = str(pb_lookup.get("outlet_code") or "").strip()
+                        if not o_code:
+                            o_code = str(discharge_doc.get("outlet_code") or outlet_code or "OLET001").strip()
+                        if iid and q > 0:
+                            meds_to_deduct.append({
+                                "item_id": iid,
+                                "batch_number": bn,
+                                "qty": q,
+                                "outlet_code": o_code
+                            })
+
+                # 2. From hospital_pharmacybilling for this IP number
+                ip_num = str(discharge_doc.get("ip_number") or discharge_doc.get("inpatient_number") or "").strip()
+                if ip_num:
+                    ip_pharm_bills = list(pharm_bill_col.find({
+                        "$or": [{"inpatient_number": ip_num}, {"ip_number": ip_num}, {"inpatientNo": ip_num}],
+                        "is_deleted": {"$ne": True}
+                    }))
+                    for pb in ip_pharm_bills:
+                        pb_bno = str(pb.get("bill_no") or "").strip()
+                        pb_outlet = str(pb.get("outlet_code") or discharge_doc.get("outlet_code") or outlet_code or "OLET001").strip()
+                        if pb_bno not in processed_pharm_bill_nos:
+                            for m in (pb.get("medicine_particulars") or []):
+                                if not isinstance(m, dict) or m.get("is_deleted") or m.get("deleted_is"):
+                                    continue
+                                iid = m.get("item_id")
+                                bn = str(m.get("batch_number") or m.get("batch") or "").strip()
+                                q = float(m.get("qty") or m.get("quantity") or 0)
+                                if iid and q > 0:
+                                    meds_to_deduct.append({
+                                        "item_id": iid,
+                                        "batch_number": bn,
+                                        "qty": q,
+                                        "outlet_code": pb_outlet
+                                    })
+                        # Mark pharmacy bill as Paid
+                        pharm_bill_col.update_one(
+                            {"_id": pb["_id"]},
+                            {"$set": {
+                                "payment_status": "Paid",
+                                "billing_status": "Paid",
+                                "paid_date": datetime.utcnow(),
+                                "lastmodified_by": CashierID,
+                                "lastmodified_date": datetime.utcnow()
+                            }}
+                        )
+
+                # 3. Deduct stock in hospital_pharmacystock: release blocked_quantity, add sold_quantity
+                for m_item in meds_to_deduct:
+                    i_id = m_item["item_id"]
+                    b_num = m_item["batch_number"]
+                    qty_to_deduct = m_item["qty"]
+                    m_outlet = m_item["outlet_code"]
+
+                    if qty_to_deduct <= 0:
+                        continue
+
+                    try:
+                        norm_iid = int(i_id)
+                    except (ValueError, TypeError):
+                        norm_iid = i_id
+
+                    stk_filter = {
+                        "outlet_code": m_outlet,
+                        "item_id": norm_iid,
+                        "batch_number": b_num
+                    }
+                    if hospital_code:
+                        stk_filter["hospital_code"] = hospital_code
+                    if branch_code:
+                        stk_filter["branch_code"] = branch_code
+
+                    stock = stock_col.find_one(stk_filter)
+                    if not stock:
+                        stock = stock_col.find_one({
+                            "outlet_code": m_outlet,
+                            "item_id": {"$in": [norm_iid, str(norm_iid)]},
+                            "batch_number": b_num
+                        })
+                    if not stock:
+                        stock = stock_col.find_one({
+                            "item_id": {"$in": [norm_iid, str(norm_iid)]},
+                            "batch_number": b_num
+                        })
+
+                    if stock:
+                        curr_blocked = float(stock.get("blocked_quantity", 0) or 0)
+                        release_q = min(qty_to_deduct, curr_blocked) if curr_blocked > 0 else 0.0
+                        inc_data = {"sold_quantity": qty_to_deduct}
+                        if release_q > 0:
+                            inc_data["blocked_quantity"] = -release_q
+                        stock_col.update_one(
+                            {"_id": stock["_id"]},
+                            {"$inc": inc_data}
+                        )
+                    else:
+                        stock_col.update_one(
+                            stk_filter,
+                            {"$inc": {"sold_quantity": qty_to_deduct, "blocked_quantity": -qty_to_deduct}}
+                        )
+
+                discharge_col.update_one(
+                    {"_id": discharge_doc["_id"]},
+                    {"$set": {"pharmacy_stock_deducted": True}}
+                )
             bill_type = None
             items = discharge_doc.get("items", [])
             if items and isinstance(items, list):
@@ -4409,8 +4574,10 @@ def _save_cash_counter(
 
 def _payment_set(cashier_id, payment_details, shiftno, pending_amount, new_status):
     now_dt = datetime.utcnow()
+    doc_status = "Partial" if new_status == "Partial" else "Refund"
     return {
         "status":            "Paid",            # was "Pending" → always "Paid" after cashier processes
+        "document_status":   doc_status,        # was "Pending" → "Refund" (or "Partial")
         "payment_status":    new_status,        # "Refund" or "Partial"
         "paymentStatus":     "Paid",            # for collections using camelCase (hospital_investrefund)
         "payment_details":   payment_details,
@@ -5688,16 +5855,26 @@ def OPPharmacy_pending_bills(request):
 
         # ✅ DYNAMIC AUTH CODES (Tenant & Branch Context - No Hardcoding)
         hospital_code = (
-            data.get("auth-hospital-code")
-            
+            request.headers.get("Hospital-Code")
+            or request.headers.get("auth-hospital-code")
+            or request.GET.get("hospital_code")
+            or data.get("auth-hospital-code")
+            or ""
         )
         branch_code = (
-            data.get("auth-branch-code")
-            
+            request.headers.get("Branch-Code")
+            or request.headers.get("auth-branch-code")
+            or request.GET.get("branch_code")
+            or data.get("auth-branch-code")
+            or ""
         )
         outlet_code = (
-            data.get("auth-outlet-code")
-            
+            request.headers.get("Outlet-Code")
+            or request.headers.get("auth-outlet-code")
+            or request.GET.get("outlet_code")
+            or request.GET.get("outlet")
+            or data.get("auth-outlet-code")
+            or ""
         )
 
         from .dbcollection import (
@@ -5939,8 +6116,10 @@ def OPPharmacy_pending_bills(request):
         req_outlet = (
             request.GET.get("outlet_code")
             or request.GET.get("outlet")
-            or matched_outlet
+            or request.headers.get("Outlet-Code")
+            or request.headers.get("auth-outlet-code")
             or outlet_code
+            or matched_outlet
             or ""
         )
         if isinstance(req_outlet, (list, tuple)):
@@ -5977,23 +6156,25 @@ def OPPharmacy_pending_bills(request):
         if search_conditions:
             status_and_conditions.append({"$or": search_conditions})
 
+        allowed_pending_statuses = ["Billed", "billed", "Processing", "processing", "Partially Billed", "partially billed"]
+
         if from_dt and to_dt:
-            mongo_filter["billing_status"] = {"$in": ["Billed", "Paid"]}
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses + ["Paid", "paid"]}
             date_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 date_ors.append({fld: {"$gte": from_dt, "$lte": to_dt}})
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "pending":
-            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid billed)
-            mongo_filter["billing_status"] = "Billed"
+            # 🎯 Pending Bills: Current date alone in Indian Time (unpaid billed/processing)
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses}
             mongo_filter["bill_no"] = {"$nin": [None, ""]}
             date_ors = []
             for fld in ["bill_date", "created_date"]:
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif req_status == "unpaid":
-            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid billed bills)
-            mongo_filter["billing_status"] = "Billed"
+            # 🎯 Unpaid Bills: Prior dates before today (backlog/overdue unpaid billed/processing bills)
+            mongo_filter["billing_status"] = {"$in": allowed_pending_statuses}
             mongo_filter["bill_no"] = {"$nin": [None, ""]}
             status_and_conditions.append({"$or": [
                 {"bill_date": {"$lt": today_start_local}},
@@ -6004,23 +6185,23 @@ def OPPharmacy_pending_bills(request):
             ]})
         elif req_status in ["received", "paid"]:
             # 🎯 Received Bills: Current date paid cash bills
-            mongo_filter["billing_status"] = "Paid"
+            mongo_filter["billing_status"] = {"$in": ["Paid", "paid"]}
             date_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 date_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": date_ors})
         elif not search_query:
-            # 🎯 Default: All unpaid billed cash bills + Paid cash bills from current date
+            # 🎯 Default: All unpaid billed/processing cash bills + Paid cash bills from current date
             today_paid_ors = []
             for fld in ["paid_date", "paid_datetime", "bill_date", "created_date"]:
                 today_paid_ors.extend(make_date_conditions(fld, today_start_local, today_end_local, today_start_utc, today_end_utc, today_str))
             status_and_conditions.append({"$or": [
                 {
-                    "billing_status": "Billed",
+                    "billing_status": {"$in": allowed_pending_statuses},
                     "bill_no": {"$nin": [None, ""]}
                 },
                 {
-                    "billing_status": "Paid",
+                    "billing_status": {"$in": ["Paid", "paid"]},
                     "$or": today_paid_ors
                 }
             ]})
@@ -6175,8 +6356,8 @@ def OPPharmacy_pending_bills(request):
                     serialized[amt_key] = convert_decimal(serialized.get(amt_key, 0))
 
             b_status = str(bill.get("billing_status") or "").strip()
-            is_unpaid_status = (b_status == "Billed" and bool(bill.get("bill_no")))
-            is_paid_status = (b_status == "Paid")
+            is_unpaid_status = (b_status.lower() in ["billed", "processing", "partially billed"] and bool(bill.get("bill_no")))
+            is_paid_status = (b_status.lower() in ["paid", "completed"])
 
             if is_paid_status:
                 raw_bdate = bill.get("paid_date") or bill.get("paid_datetime") or bill.get("lastmodified_date") or bill.get("bill_date") or bill.get("created_date")
@@ -6250,12 +6431,25 @@ def OPPharmacy_pending_bills(request):
                 if not isinstance(item, dict):
                     continue
                 it_dict = dict(item)
+
+                # ✅ Exclude deleted medicines from billing and print
+                if it_dict.get("is_deleted") is True or it_dict.get("deleted_is") is True or it_dict.get("is_active") is False:
+                    continue
+                del_qty = sum(
+                    float(h.get("qty_deleted") or h.get("qty") or 0)
+                    for h in (it_dict.get("edit_history") or [])
+                    if isinstance(h, dict) and h.get("action") == "medicine_deleted"
+                )
+                orig_qty = float(it_dict.get("qty") or it_dict.get("quantity") or 0)
+                if del_qty >= orig_qty and orig_qty > 0:
+                    continue
+
                 iid_val = int(it_dict["item_id"]) if str(it_dict.get("item_id", "")).isdigit() else it_dict.get("item_id")
 
                 it_dict["item_name"] = it_dict.get("item_name") or item_map.get(iid_val, "")
 
                 # Normalize all item numeric fields using convert_decimal
-                for f_num in ["price", "mrp", "calculated_price", "product_value", "taxable_value", "total", "discount_amount", "discount_value", "discount", "CGST_Percentage", "SGST_Percentage", "CGST_Amt", "SGST_Amt"]:
+                for f_num in ["price", "mrp", "calculated_price", "product_value", "taxable_value", "total", "discount_amount", "discount_value", "discount", "CGST_Percentage", "SGST_Percentage", "CGST_Amt", "SGST_Amt", "qty", "quantity", "dispatched_qty", "billed_qty"]:
                     if f_num in it_dict:
                         it_dict[f_num] = convert_decimal(it_dict.get(f_num, 0))
 

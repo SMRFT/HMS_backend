@@ -1,5 +1,8 @@
+import logging
 from django.http import JsonResponse
 from pymongo import MongoClient
+
+logger = logging.getLogger(__name__)
 import os
 import re
 import json
@@ -672,34 +675,24 @@ def get_salesreturn_billdetails(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # =========================
-        # ✅ AUTH DETAILS
+        # ✅ AUTH CODES
         # =========================
-        hospital_code = (
-            data.get("auth-hospital-code")
-            or request.META.get("HTTP_AUTH_HOSPITAL_CODE")
-            or "SH001"
-        )
-        branch_code = (
-            data.get("auth-branch-code")
-            or request.META.get("HTTP_AUTH_BRANCH_CODE")
-            or request.META.get("HTTP_BRANCH_CODE")
-            or "SHB001"
-        )
-        outlet_code = (
-            data.get("auth-outlet-code")
-            or request.META.get("HTTP_AUTH_OUTLET_CODE")
-            or request.META.get("HTTP_OUTLET_CODE")
-        )
+        employee_id   = data.get("auth-user-id")
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
 
         # =========================
         # ✅ FETCH BILL
         # =========================
         bill_query = {
             "bill_no": str(bill_no).strip(),
-            "hospital_code": hospital_code,
-            "branch_code": branch_code,
             "billing_status": {"$in": ["Paid", "Billed"]}
         }
+        if hospital_code:
+            bill_query["hospital_code"] = hospital_code
+        if branch_code:
+            bill_query["branch_code"] = branch_code
 
         if outlet_code:
             bill = bill_collection.find_one({**bill_query, "outlet_code": outlet_code})
@@ -963,7 +956,7 @@ def get_salesreturn_billdetails(request):
 
 
 
-    from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 from django.utils import timezone
@@ -1015,26 +1008,39 @@ def OP_salesreturn_billdetails(request):
                 "message": "bill_no and medicine_particulars are required"
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # ✅ Look up original bill document from MongoDB
+        orig_b = None
+        if bill_no:
+            try:
+                from .dbcollection import pharmacy_billing_collection as temp_col
+                orig_b = temp_col.find_one({"bill_no": bill_no})
+            except Exception:
+                orig_b = None
+
         # =========================
-        # ✅ AUTH
+        # ✅ AUTH CODES
         # =========================
-        hospital_code = data.get("auth-hospital-code") or data.get("hospital_code")
-        branch_code   = data.get("auth-branch-code") or data.get("branch_code")
-        outlet_code   = data.get("auth-outlet-code") or data.get("outlet_code")
-        employee_id   = data.get("auth-user-id") or data.get("created_by") or data.get("pharmacist_id")
+        employee_id   = data.get("auth-user-id")
+        hospital_code = data.get("auth-hospital-code")
+        branch_code   = data.get("auth-branch-code")
+        outlet_code   = data.get("auth-outlet-code")
 
         if orig_b:
             if not hospital_code:
-                hospital_code = orig_b.get("hospital_code") or "SH001"
+                hospital_code = orig_b.get("hospital_code")
             if not branch_code:
-                branch_code = orig_b.get("branch_code") or "SHB001"
+                branch_code = orig_b.get("branch_code")
             if not outlet_code:
                 outlet_code = orig_b.get("outlet_code")
             if not employee_id:
-                employee_id = orig_b.get("lastmodified_by") or orig_b.get("billed_id") or "60129"
+                employee_id = orig_b.get("lastmodified_by") or orig_b.get("billed_id")
+            if not bill_type:
+                bill_type = orig_b.get("bill_type")
         # =========================
         # ✅ VALIDATE & CLEAN ITEMS
         # =========================
+        from .dbcollection import hms_db
+        pharmacy_item_col = hms_db["hospital_pharmacyitem"]
         cleaned_particulars = []
         for item in medicine_particulars:
             if not isinstance(item, dict):
@@ -1064,6 +1070,18 @@ def OP_salesreturn_billdetails(request):
                     "message": f"Return quantity exceeds billed quantity for item {item.get('item_id')}"
                 }, status=status.HTTP_400_BAD_REQUEST)
  
+            # Ensure medicine name is always resolved from master if missing or generic
+            curr_name = str(item.get("item_name") or "").strip()
+            item_id_val = item.get("item_id")
+            if not curr_name or curr_name.lower().startswith("item"):
+                try:
+                    iid_int = int(item_id_val)
+                    pi_doc = pharmacy_item_col.find_one({"item_id": {"$in": [iid_int, str(item_id_val)]}}, {"item_name": 1})
+                    if pi_doc and pi_doc.get("item_name"):
+                        item["item_name"] = pi_doc["item_name"]
+                except Exception:
+                    pass
+
             cleaned_particulars.append(item)
  
         # =========================
@@ -1071,25 +1089,7 @@ def OP_salesreturn_billdetails(request):
         # Format: {FY}{outlet_2digits}{6-digit auto-increment}
         # e.g. OLET002 -> 262702000001, OLET001 -> 262701000001
         # =========================
-        resolved_outlet = (
-            outlet_code
-            or data.get("outlet_code")
-            or (request.headers.get("Outlet-Code") if hasattr(request, "headers") else None)
-            or (request.headers.get("outlet-code") if hasattr(request, "headers") else None)
-        )
-        if not resolved_outlet and bill_no:
-            try:
-                from .dbcollection import pharmacy_billing_collection as temp_col
-                orig_b = temp_col.find_one({"bill_no": bill_no}, {"outlet_code": 1})
-                if orig_b and orig_b.get("outlet_code"):
-                    resolved_outlet = orig_b.get("outlet_code")
-            except Exception:
-                pass
-
-        if not resolved_outlet:
-            resolved_outlet = "OLET002"
-
-        outlet_code = resolved_outlet
+        resolved_outlet = outlet_code
 
         from ..counter_service import get_next_sales_return_bill_no
         return_bill_no = get_next_sales_return_bill_no(outlet_code=resolved_outlet)
@@ -1168,14 +1168,11 @@ def OP_salesreturn_billdetails(request):
             # return_bill_no being pushed twice (duplicate submission).
             duplicate_check = bill_col.find_one(
                 {
-                    "bill_no":       bill_no,
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
+                    "bill_no": bill_no,
                     "medicine_particulars": {
                         "$elemMatch": {
-                            "item_id":                     item_id,
-                            "batch_number":                batch_number,
+                            "item_id":                     {"$in": [item_id, str(item_id)]},
+                            "batch_number":                {"$in": [batch_number, str(item.get("batch_number", "")).strip()]},
                             "edit_history.return_bill_no": return_bill_no   # this exact return
                         }
                     }
@@ -1195,18 +1192,9 @@ def OP_salesreturn_billdetails(request):
             # Fetch the current bill document to read the item's existing
             # edit_history, sum all previous return_qty entries, and derive
             # the correct old_qty for THIS new history entry.
-            #
-            # Example:
-            #   original qty  = 5
-            #   1st return    → old_qty: 5,  return_qty: 2  (remaining after: 3)
-            #   2nd return    → old_qty: 3,  return_qty: 1  (remaining after: 2)
-            #   3rd return    → old_qty: 2,  return_qty: 1  (remaining after: 1)
             current_bill = bill_col.find_one(
                 {
-                    "bill_no":       bill_no,
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
+                    "bill_no": bill_no,
                 },
                 # Only project the matching medicine_particular to keep it lean
                 {"medicine_particulars": 1, "_id": 0}
@@ -1218,8 +1206,8 @@ def OP_salesreturn_billdetails(request):
  
             if current_bill:
                 for mp in current_bill.get("medicine_particulars", []):
-                    if (int(mp.get("item_id", -1)) == item_id and
-                            str(mp.get("batch_number", "")) == batch_number):
+                    if (str(mp.get("item_id", -1)) == str(item_id) and
+                            str(mp.get("batch_number", "")).strip() == str(batch_number).strip()):
                         # Original qty is stored as `quantity` or `qty` on the billing document
                         raw_mp_qty = mp.get("quantity") if mp.get("quantity") is not None else mp.get("qty", billed_qty)
                         try:
@@ -1248,10 +1236,7 @@ def OP_salesreturn_billdetails(request):
  
             bill_result = bill_col.update_one(
                 {
-                    "bill_no":       bill_no,
-                    "hospital_code": hospital_code,
-                    "branch_code":   branch_code,
-                    "outlet_code":   outlet_code,
+                    "bill_no": bill_no,
                 },
                 {
                     "$push": {
@@ -1264,8 +1249,8 @@ def OP_salesreturn_billdetails(request):
                 },
                 array_filters=[
                     {
-                        "elem.item_id":      item_id,
-                        "elem.batch_number": batch_number
+                        "elem.item_id":      {"$in": [item_id, str(item_id)]},
+                        "elem.batch_number": {"$in": [batch_number, str(item.get("batch_number", "")).strip()]}
                     }
                 ]
             )
@@ -1346,6 +1331,7 @@ def OP_salesreturn_billdetails(request):
             b_info = bill_col.find_one({"bill_no": bill_no}, {"patient_name": 1, "patientname": 1, "doctor_id": 1, "doctor_name": 1, "inpatient_number": 1}) or {}
             ret_patient_name = patient_name or b_info.get("patient_name") or b_info.get("patientname") or ""
 
+            bill_type_int = int(bill_type) if str(bill_type).isdigit() else 42
             salesreturn_doc = {
                 "sales_return_number": return_bill_no,
                 "return_no": return_bill_no,
@@ -1363,19 +1349,22 @@ def OP_salesreturn_billdetails(request):
                 "tax_amount": round(tax_amt, 2),
                 "payment_type": payment_type,
                 "status": "Pending",
+                "document_status": "Pending",
                 "returned_items": cleaned_particulars,
                 "medicine_particulars": cleaned_particulars,
                 "created_by": employee_id,
                 "created_date": datetime.utcnow(),
                 "return_bill_date": datetime.utcnow(),
                 "return_date": datetime.utcnow(),
-                "bill_type": bill_type,
+                "bill_type": bill_type_int,
+                "bill_type_name": "PHARMACY OP BILL" if bill_type_int == 42 else (b_info.get("bill_type_name") or "Sales Return"),
                 "doctor_id": b_info.get("doctor_id"),
                 "doctor_name": b_info.get("doctor_name"),
             }
 
-            from .dbcollection import salesreturn_collection
-            salesreturn_collection.update_one(
+            from .dbcollection import hms_db
+            salesreturn_col = hms_db["hospital_salesreturn"]
+            salesreturn_col.update_one(
                 {"return_bill_no": return_bill_no},
                 {"$set": salesreturn_doc},
                 upsert=True
@@ -1525,10 +1514,11 @@ def get_return_bills(request):
         print("all keys     :", list(data.keys()))
 
         # ---------------------------------------------------
-        # CURRENT DATE
+        # CURRENT DATE (Asia/Kolkata timezone to match queries)
         # ---------------------------------------------------
 
-        current_date = datetime.utcnow().date()
+        ist = pytz.timezone("Asia/Kolkata")
+        current_date = datetime.now(ist).date()
 
         # ---------------------------------------------------
         # VALIDATION
@@ -2128,7 +2118,17 @@ def get_salesreturn_print_details(request):
             except (ValueError, TypeError):
                 iid_int = iid
 
-            name = it.get("item_name") or item_name_map.get(iid_int) or f"Item #{iid}"
+            clean_name = str(it.get("item_name") or "").strip()
+            if not clean_name or clean_name.lower().startswith("item"):
+                clean_name = item_name_map.get(iid_int) or item_name_map.get(str(iid))
+                if not clean_name:
+                    try:
+                        pi_doc = db["hospital_pharmacyitem"].find_one({"item_id": {"$in": [iid_int, str(iid)]}}, {"item_name": 1})
+                        if pi_doc and pi_doc.get("item_name"):
+                            clean_name = pi_doc["item_name"]
+                    except Exception:
+                        pass
+            name = clean_name or f"Item #{iid}"
             batch = it.get("batch_number", "—")
             ret_qty = float(it.get("return_qty", 0) or 0)
             ret_amt = float(it.get("return_amount", 0) or 0)
@@ -2142,8 +2142,8 @@ def get_salesreturn_print_details(request):
                     if not exp_val or exp_val == "—":
                         exp_val = stock.get("expiry_date") or "—"
                     if not gst_val:
-                        cgst = float(stock.get("CGST_Percentage") or 0)
-                        sgst = float(stock.get("SGST_Percentage") or 0)
+                        cgst = float(str(stock.get("CGST_Percentage") or 0))
+                        sgst = float(str(stock.get("SGST_Percentage") or 0))
                         tot_gst = cgst + sgst
                         gst_val = f"{tot_gst:g}%" if tot_gst > 0 else "5%"
 

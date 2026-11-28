@@ -233,3 +233,151 @@ def process_registration_refund(request):
     except Exception as e:
         traceback.print_exc()
         return Response({"success": False, "message": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([HasRoleAndDataPermission])
+def cancel_pending_registration_visit(request):
+    """
+    Cancels an unpaid (Pending) OP registration / consultation visit before payment.
+    Sets is_active=False and payment_status='Cancelled' on the root document, and
+    stores all cancellation metadata (is_cancelled, cancel_reason, cancelled_by,
+    cancelled_by_id, cancelled_date, lastmodified_by, lastmodified_date) inside edit_history.
+    """
+    try:
+        import os
+        from pymongo import MongoClient
+
+        data = request.data
+        bill_no = str(data.get('bill_no') or data.get('bill_number') or '').strip()
+        reason = str(data.get('reason') or data.get('remarks') or '').strip()
+
+        if not bill_no:
+            return Response({"success": False, "message": "Bill number is required"}, status=400)
+        if not reason:
+            return Response({"success": False, "message": "Reason for cancellation is required"}, status=400)
+
+        employee_id = str(
+            request.headers.get('auth-user-id')
+            or data.get('auth-user-id')
+            or data.get('employee_id')
+            or getattr(request.user, 'username', None)
+            or 'system'
+        ).strip()
+
+        mongo_host = os.getenv("GLOBAL_DB_HOST")
+        if not mongo_host:
+            return Response({"success": False, "message": "Database configuration missing"}, status=500)
+
+        client = MongoClient(mongo_host, serverSelectionTimeoutMS=5000)
+        hms_db = client['HMS']
+        global_db = client['Global']
+
+        # Resolve staff display name
+        user_name = employee_id
+        if employee_id and employee_id != 'system':
+            try:
+                u_doc = global_db['backend_diagnostics_profile'].find_one(
+                    {"employeeId": employee_id},
+                    {"employeeName": 1}
+                )
+                if u_doc and u_doc.get("employeeName"):
+                    user_name = str(u_doc.get("employeeName")).strip()
+            except Exception:
+                pass
+
+        # Support variations with or without slash
+        raw_variants = [bill_no]
+        if "/" in bill_no:
+            raw_variants.append(bill_no.replace("/", ""))
+        elif len(bill_no) == 10 and bill_no[:4].isdigit():
+            raw_variants.append(f"{bill_no[:4]}/{bill_no[4:]}")
+
+        match_query = {
+            "$or": [
+                {"bill_number": {"$in": raw_variants}},
+                {"bill_no": {"$in": raw_variants}}
+            ]
+        }
+
+        bill_doc = hms_db["hospital_billing"].find_one(match_query)
+        if not bill_doc:
+            client.close()
+            return Response({"success": False, "message": f"Bill '{bill_no}' not found"}, status=404)
+
+        old_status = str(bill_doc.get("payment_status") or "Pending").strip()
+        if old_status.lower() in ("paid", "refunded"):
+            client.close()
+            return Response({
+                "success": False,
+                "message": f"Cannot cancel a {old_status} bill here. Please use the Refund workflow."
+            }, status=400)
+
+        already_cancelled = (
+            bill_doc.get("is_active") is False
+            or old_status.lower() == "cancelled"
+            or any(isinstance(h, dict) and h.get("is_cancelled") for h in (bill_doc.get("edit_history") or []))
+        )
+        if already_cancelled:
+            client.close()
+            return Response({"success": False, "message": "Visit is already cancelled"}, status=400)
+
+        now_utc = timezone.now()
+
+        history_entry = {
+            "date": now_utc,
+            "user": user_name,
+            "reason": reason,
+            "is_cancelled": True,
+            "cancel_reason": reason,
+            "cancelled_by": user_name,
+            "cancelled_by_id": employee_id,
+            "cancelled_date": now_utc,
+            "lastmodified_by": employee_id,
+            "lastmodified_date": now_utc,
+            "changes": {
+                "status": {"old": old_status, "new": "Cancelled"},
+                "is_active": {"old": bill_doc.get("is_active", True), "new": False},
+                "action": "cancel_before_payment"
+            }
+        }
+
+        hms_db["hospital_billing"].update_one(
+            {"_id": bill_doc["_id"]},
+            {
+                "$set": {
+                    "is_active": False,
+                    "payment_status": "Cancelled",
+                    "lastmodified_by": employee_id,
+                    "lastmodified_date": now_utc
+                },
+                "$push": {
+                    "edit_history": history_entry
+                }
+            }
+        )
+
+        import pytz
+        ist_str = now_utc.astimezone(pytz.timezone("Asia/Kolkata")).strftime("%d-%m-%Y %I:%M %p")
+        client.close()
+
+        return Response({
+            "success": True,
+            "message": "Pending visit cancelled successfully",
+            "bill_number": bill_doc.get("bill_number") or bill_no,
+            "history_entry": {
+                "date": ist_str,
+                "user": user_name,
+                "reason": reason,
+                "is_cancelled": True,
+                "cancel_reason": reason,
+                "cancelled_by": user_name,
+                "cancelled_by_id": employee_id,
+                "cancelled_date": ist_str,
+                "changes": history_entry["changes"]
+            }
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response({"success": False, "message": str(e)}, status=500)

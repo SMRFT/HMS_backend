@@ -118,7 +118,7 @@ def patient_master_list(request):
         if uhids:
             try:
                 pipeline = [
-                    {"$match": {"uhid": {"$in": uhids}}},
+                    {"$match": {"uhid": {"$in": uhids}, "is_active": {"$ne": False}, "payment_status": {"$ne": "Cancelled"}}},
                     {"$sort": {"billed_date": -1}},
                     {
                         "$group": {
@@ -428,23 +428,27 @@ def patient_op_visits(request, uhid):
             b_date_str = ""
             b_time_str = ""
             if b_date:
-                if hasattr(b_date, "astimezone"):
-                    try:
-                        b_date_ist = b_date.astimezone(kolkata_tz)
-                        b_date_str = b_date_ist.strftime("%d-%m-%Y")
-                        b_time_str = b_date_ist.strftime("%I:%M %p")
-                    except Exception:
-                        b_date_str = str(b_date)[:10]
-                        b_time_str = str(b_date)[11:16]
-                elif isinstance(b_date, str):
+                if isinstance(b_date, str):
                     try:
                         dt_obj = datetime.fromisoformat(b_date.replace("Z", "+00:00"))
+                        if dt_obj.tzinfo is None:
+                            dt_obj = pytz.UTC.localize(dt_obj)
                         dt_ist = dt_obj.astimezone(kolkata_tz)
                         b_date_str = dt_ist.strftime("%d-%m-%Y")
                         b_time_str = dt_ist.strftime("%I:%M %p")
                     except Exception:
                         b_date_str = b_date[:10]
                         b_time_str = b_date[11:16] if len(b_date) > 16 else ""
+                elif hasattr(b_date, "astimezone"):
+                    try:
+                        if b_date.tzinfo is None:
+                            b_date = pytz.UTC.localize(b_date)
+                        b_date_ist = b_date.astimezone(kolkata_tz)
+                        b_date_str = b_date_ist.strftime("%d-%m-%Y")
+                        b_time_str = b_date_ist.strftime("%I:%M %p")
+                    except Exception:
+                        b_date_str = str(b_date)[:10]
+                        b_time_str = str(b_date)[11:16]
 
             # Resolve Doctor Name
             raw_did = str(b.get("doctor_id") or b.get("doctorId") or "").strip()
@@ -454,6 +458,54 @@ def patient_op_visits(request, uhid):
             pay_method = str(b.get("payment_method") or b.get("paymentMethod") or "Cash").strip()
             pay_status = str(b.get("payment_status") or b.get("paymentStatus") or "Paid").strip()
 
+            # Format edit_history (IST) and detect cancellation metadata stored inside edit_history
+            def _to_ist_fmt(dt_val):
+                if not dt_val:
+                    return ""
+                if isinstance(dt_val, str):
+                    try:
+                        d_obj = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+                        if d_obj.tzinfo is None:
+                            d_obj = pytz.UTC.localize(d_obj)
+                        return d_obj.astimezone(kolkata_tz).strftime("%d-%m-%Y %I:%M %p")
+                    except Exception:
+                        return dt_val
+                if hasattr(dt_val, "astimezone"):
+                    try:
+                        if dt_val.tzinfo is None:
+                            dt_val = pytz.UTC.localize(dt_val)
+                        return dt_val.astimezone(kolkata_tz).strftime("%d-%m-%Y %I:%M %p")
+                    except Exception:
+                        return str(dt_val)
+                return str(dt_val)
+
+            raw_history = b.get("edit_history") or []
+            formatted_history = []
+            cancel_reason = ""
+            has_cancel_history = False
+            for h in raw_history:
+                if not isinstance(h, dict):
+                    continue
+                if h.get("is_cancelled"):
+                    has_cancel_history = True
+                    cancel_reason = str(h.get("cancel_reason") or h.get("reason") or cancel_reason).strip()
+                formatted_history.append({
+                    "date": _to_ist_fmt(h.get("date")),
+                    "user": h.get("user") or h.get("cancelled_by") or "Staff",
+                    "reason": h.get("reason") or h.get("cancel_reason") or "",
+                    "is_cancelled": bool(h.get("is_cancelled", False)),
+                    "cancel_reason": h.get("cancel_reason") or "",
+                    "cancelled_by": h.get("cancelled_by") or "",
+                    "cancelled_by_id": h.get("cancelled_by_id") or "",
+                    "cancelled_date": _to_ist_fmt(h.get("cancelled_date")),
+                    "lastmodified_by": h.get("lastmodified_by") or "",
+                    "lastmodified_date": _to_ist_fmt(h.get("lastmodified_date")),
+                    "changes": h.get("changes") or {}
+                })
+
+            is_active_flag = b.get("is_active", True) is not False
+            is_cancelled = (not is_active_flag) or (pay_status.lower() == "cancelled") or has_cancel_history
+
             tot_fees = _safe_float(b.get("total_fees") or b.get("totalAmount") or b.get("total_amount") or 0)
             reg_fee = _safe_float(b.get("registration_fee") or 0)
             cons_fee = _safe_float(b.get("consulting_fee") or (tot_fees - reg_fee))
@@ -461,7 +513,9 @@ def patient_op_visits(request, uhid):
             # Refund details
             refunds = refund_map.get(raw_b_num, []) or refund_map.get(clean_b_num, [])
             total_refunded = sum(r["refund_amount"] for r in refunds)
-            if total_refunded >= tot_fees and tot_fees > 0:
+            if is_cancelled:
+                pay_status = "Cancelled"
+            elif total_refunded >= tot_fees and tot_fees > 0:
                 pay_status = "Refunded"
 
             # Visit Type (New vs Review)
@@ -506,6 +560,10 @@ def patient_op_visits(request, uhid):
                 "totalFees": tot_fees,
                 "paymentMethod": pay_method,
                 "paymentStatus": pay_status,
+                "isActive": is_active_flag,
+                "isCancelled": is_cancelled,
+                "cancelReason": cancel_reason,
+                "editHistory": formatted_history,
                 "company_name": b.get("company_name") or patient_doc.get("company_name") or "",
                 "customerType": b.get("customer_type") or patient_doc.get("customer_type") or "GENERAL",
                 "preparedBy": b.get("created_by") or "Staff",

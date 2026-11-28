@@ -1049,6 +1049,14 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'permissions': {'Bill Type-Wise Collection Report': 'HMS-MACC-BILL-TYPE-RPT'}
             },
             {
+                'page_id': 736,
+                'name': 'Doctor Revenue Report',
+                'description': 'Date-wise detailed bills analysis grouped by Doctor and Bill Type with purchase value deduction and payment mode/company.',
+                'icon': 'Stethoscope',
+                'route': '/MasterDoctorRevenueReport',
+                'permissions': {'Doctor Revenue Report': 'HMS-MACC-DOC-REV-RPT'}
+            },
+            {
                 'page_id': 711,
                 'name': 'Advance Registration Report',
                 'description': 'Patient running advance deposits register with payment mode decomposition and IP tracking.',
@@ -1135,6 +1143,14 @@ DEFAULT_REPORT_GROUPS = [   {   'group': 'Stores Report',
                 'icon': 'FileText',
                 'route': '/MasterBillWiseReport',
                 'permissions': {'Bill Wise Detailed Report': 'HMS-MACC-BILL-WISE-RPT'}
+            },
+            {
+                'page_id': 737,
+                'name': 'All Consolidated Bill Report',
+                'description': 'Consolidated view of all bills across Paid, Pending, Cancel, Return, and Refund statuses.',
+                'icon': 'FileText',
+                'route': '/MasterAllConsolidatedBillReport',
+                'permissions': {'All Consolidated Bill Report': 'HMS-MACC-ALL-CONSOL-BILL-RPT'}
             },
             {
                 'page_id': 722,

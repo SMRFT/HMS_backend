@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from rest_framework import status
 from django.utils import timezone
 from pymongo import MongoClient
+import pytz
 from django.utils.timezone import now
 from rest_framework.parsers import MultiPartParser, FormParser
 from bson import Decimal128
@@ -781,7 +782,9 @@ def patient_registration_stats(request):
         patient_coll = hms_db['hospital_patient']
 
         bill_query = {
-            'billed_date': {'$gte': start_dt, '$lte': end_dt}
+            'billed_date': {'$gte': start_dt, '$lte': end_dt},
+            'is_active': {'$ne': False},
+            'payment_status': {'$ne': 'Cancelled'}
         }
         if doctor_id:
             d_str = str(doctor_id).strip()
@@ -847,6 +850,29 @@ def patient_registration_stats(request):
         return Response({"error": str(e)}, status=500)
 
 
+def _to_utc_aware(dt):
+    """Ensure a naive MongoDB datetime (stored in UTC) or ISO string is UTC-aware."""
+    if not dt:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+        except Exception:
+            return None
+    if timezone.is_naive(dt):
+        return pytz.UTC.localize(dt)
+    return dt
+
+
+def _format_ist_str(dt, fmt="%d-%m-%Y %I:%M %p"):
+    """Convert a MongoDB UTC datetime/string to IST string."""
+    aware_dt = _to_utc_aware(dt)
+    if not aware_dt:
+        return ""
+    ist_tz = pytz.timezone("Asia/Kolkata")
+    return aware_dt.astimezone(ist_tz).strftime(fmt)
+
+
 @api_view(['GET'])
 @csrf_exempt
 @permission_classes([HasRoleAndDataPermission])
@@ -857,7 +883,8 @@ def patient_visit_list(request):
         to_date_str = request.GET.get('toDate')
         doctor_id = request.GET.get('doctorId')
 
-        today = timezone.localdate()
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        today = timezone.now().astimezone(ist_tz).date()
 
         if from_date_str:
             from_date = datetime.strptime(from_date_str, '%Y-%m-%d').date()
@@ -869,18 +896,8 @@ def patient_visit_list(request):
         else:
             to_date = today
 
-        start_naive = datetime.combine(from_date, time.min)
-        end_naive = datetime.combine(to_date, time.max)
-
-        if timezone.is_naive(start_naive):
-            start_dt = timezone.make_aware(start_naive)
-        else:
-            start_dt = start_naive
-
-        if timezone.is_naive(end_naive):
-            end_dt = timezone.make_aware(end_naive)
-        else:
-            end_dt = end_naive
+        start_dt = ist_tz.localize(datetime.combine(from_date, time.min)).astimezone(pytz.UTC)
+        end_dt = ist_tz.localize(datetime.combine(to_date, time.max)).astimezone(pytz.UTC)
 
         mongo_host = os.getenv("GLOBAL_DB_HOST")
         if not mongo_host:
@@ -993,16 +1010,7 @@ def patient_visit_list(request):
             if not p:
                 continue
 
-            p_created = p.get('created_date')
-            if p_created and hasattr(p_created, 'tzinfo') and timezone.is_naive(p_created):
-                p_created = timezone.make_aware(p_created)
-            elif p_created and isinstance(p_created, str):
-                try:
-                    p_created = datetime.fromisoformat(p_created)
-                    if timezone.is_naive(p_created):
-                        p_created = timezone.make_aware(p_created)
-                except Exception:
-                    pass
+            p_created = _to_utc_aware(p.get('created_date'))
 
             if p_created and start_dt:
                 visit_type = "New" if p_created >= start_dt else "Review"
@@ -1035,12 +1043,7 @@ def patient_visit_list(request):
                 except Exception:
                     pass
 
-                ref_dt_str = ''
-                ref_dt = r.get('refund_date')
-                if ref_dt:
-                    if hasattr(ref_dt, 'tzinfo') and timezone.is_naive(ref_dt):
-                        ref_dt = timezone.make_aware(ref_dt)
-                    ref_dt_str = timezone.localtime(ref_dt).strftime("%d-%m-%Y %I:%M %p")
+                ref_dt_str = _format_ist_str(r.get('refund_date'))
 
                 refund_data.append({
                     "refund_bill_no": r.get('refund_bill_no'),
@@ -1051,7 +1054,11 @@ def patient_visit_list(request):
                 })
 
             formatted_history = []
+            cancel_reason = ""
+            has_cancel_history = False
             for h in (bill.get('edit_history') or []):
+                if not isinstance(h, dict):
+                    continue
                 raw_user = str(h.get('user', '')).strip()
                 resolved_user = emp_map.get(raw_user, raw_user)
 
@@ -1070,19 +1077,27 @@ def patient_visit_list(request):
                             formatted_changes[f_key] = f_val
 
                 h_date = h.get('date')
-                if isinstance(h_date, datetime):
-                    if timezone.is_naive(h_date):
-                        h_date = timezone.make_aware(h_date)
-                    h_date = timezone.localtime(h_date).strftime("%d-%m-%Y %I:%M %p")
+                if isinstance(h_date, (datetime, str)):
+                    formatted_h_dt = _format_ist_str(h_date)
+                    if formatted_h_dt:
+                        h_date = formatted_h_dt
 
-                reason_val = h.get('reason', '') or ''
+                reason_val = h.get('reason', '') or h.get('cancel_reason', '') or ''
                 if not reason_val and isinstance(h.get('changes'), dict):
                     reason_val = h.get('changes', {}).get('refund', {}).get('reason', '')
+
+                if h.get('is_cancelled'):
+                    has_cancel_history = True
+                    cancel_reason = str(h.get('cancel_reason') or reason_val or cancel_reason).strip()
 
                 formatted_history.append({
                     'date': h_date,
                     'user': resolved_user,
                     'reason': reason_val,
+                    'is_cancelled': bool(h.get('is_cancelled', False)),
+                    'cancel_reason': h.get('cancel_reason', ''),
+                    'cancelled_by': h.get('cancelled_by', ''),
+                    'cancelled_date': _format_ist_str(h.get('cancelled_date')) if h.get('cancelled_date') else '',
                     'changes': formatted_changes
                 })
 
@@ -1098,12 +1113,11 @@ def patient_visit_list(request):
             city_val = p.get('city') or ''
             dist_val = p.get('district') or ''
 
-            billed_dt_str = ''
-            b_dt = bill.get('billed_date')
-            if b_dt:
-                if hasattr(b_dt, 'tzinfo') and timezone.is_naive(b_dt):
-                    b_dt = timezone.make_aware(b_dt)
-                billed_dt_str = timezone.localtime(b_dt).strftime("%d-%m-%Y %I:%M %p")
+            billed_dt_str = _format_ist_str(bill.get('billed_date'))
+
+            is_active_flag = bill.get('is_active', True) is not False
+            pay_stat = bill.get('payment_status')
+            is_cancelled_flag = (not is_active_flag) or (str(pay_stat or '').lower() == 'cancelled') or has_cancel_history
 
             data.append({
                 "uhid": p.get('uhid'),
@@ -1126,8 +1140,11 @@ def patient_visit_list(request):
                 "registrationFee": str(bill.get('registration_fee') or 0),
                 "consultingFee": str(bill.get('consulting_fee') or 0),
                 "billAmount": str(bill.get('total_fees') or 0),
-                "paymentStatus": bill.get('payment_status'),
+                "paymentStatus": "Cancelled" if is_cancelled_flag else pay_stat,
                 "paymentMethod": bill.get('payment_method') or 'Cash',
+                "isActive": is_active_flag,
+                "isCancelled": is_cancelled_flag,
+                "cancelReason": cancel_reason,
                 "date": billed_dt_str,
                 "created_by": str(bill.get('created_by') or ''),
                 "preparedBy": emp_map.get(str(bill.get('created_by') or '').strip()) or str(bill.get('created_by') or 'Staff'),
