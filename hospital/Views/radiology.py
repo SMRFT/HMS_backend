@@ -24,6 +24,7 @@ def get_hard_bill_types(request):
         {"label": "MRI",   "value": "MRI01"},
         {"label": "USG",   "value": "USG01"},
         {"label": "X-RAY", "value": "XRAY01"},
+        {"label": "CAR", "value": "CAR01"},
     ]
     return JsonResponse(BILL_TYPES, safe=False)
 
@@ -1444,14 +1445,14 @@ def dispatch_report(request, investBillNo, item_id):
             )
 
         # Bill-level status becomes Dispatched only when every item is dispatched
-        invest_billing_collection.update_one(
-            {
-                'investBillNo': investBillNo,
-                'is_active': True,
-                'item': {'$not': {'$elemMatch': {'status': {'$ne': 'Dispatched'}}}},
-            },
-            {'$set': {'status': 'Dispatched', 'lastmodified_date': now_dt}},
-        )
+        # invest_billing_collection.update_one(
+        #     {
+        #         'investBillNo': investBillNo,
+        #         'is_active': True,
+        #         'item': {'$not': {'$elemMatch': {'status': {'$ne': 'Dispatched'}}}},
+        #     },
+        #     {'$set': {'status': 'Dispatched', 'lastmodified_date': now_dt}},
+        # )
         updated = collection.find_one({"_id": report["_id"]})
         serialized = _serialize_report(updated)
 
